@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -46,7 +47,9 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
+    P2PDestInfo,
     P2PSecondaryTierManager,
+    P2PSourceInfo,
     _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
@@ -73,7 +76,7 @@ def _remote_prefiller_kv_params(
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Decoder-side kv_transfer_params: ``remote_prefiller`` sub-dict carries
+    """Decoder-side kv_transfer_params: `remote_prefiller` sub-dict carries
     kv_request_id + remote_host + remote_port."""
     return {
         "remote_prefiller": {
@@ -89,8 +92,8 @@ def _remote_kv_source_kv_params(
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_source`` sub-dict has
-    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
+    """Symmetric-P2P consumer kv_transfer_params: `remote_kv_source` sub-dict has
+    the same shape as `remote_prefiller` (kv_request_id + remote_host + port)."""
     return {
         "remote_kv_source": {
             "kv_request_id": kv_request_id,
@@ -101,7 +104,7 @@ def _remote_kv_source_kv_params(
 
 
 def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
-    """Prefiller-side kv_transfer_params: ``remote_decoder`` sub-dict carries
+    """Prefiller-side kv_transfer_params: `remote_decoder` sub-dict carries
     kv_request_id only."""
     return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
@@ -337,9 +340,9 @@ class TestLookup:
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
-        """No ``remote_prefiller`` sub-dict means the request was not routed for
+        """No `remote_prefiller` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns MISS even when a stale ``remote_decoder`` block is present."""
+        returns MISS even when a stale `remote_decoder` block is present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
@@ -365,6 +368,50 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     mgr = _make_manager()
     monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
     assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
+
+
+@pytest.mark.parametrize(
+    "kv_params,expect_p2p_store",
+    [
+        (None, False),
+        (_remote_prefiller_kv_params(), False),
+        (_remote_decoder_kv_params(), True),
+    ],
+    ids=["local", "consumer", "producer"],
+)
+def test_primary_store_only_cascades_to_p2p_for_producers(
+    monkeypatch, kv_params, expect_p2p_store
+):
+    p2p = _make_manager()
+    p2p.locality = None
+    _attach_fake_transports(p2p)
+    monkeypatch.setattr(p2p, "_get_or_create_session", lambda peer_id: None)
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(primary, [p2p, example], tier_poll_interval_s=0)
+    ctx = ReqContext(req_id="req", kv_transfer_params=kv_params)
+    keys = [OffloadKey(b"new-chunk")]
+    try:
+        tiering.on_new_request(ctx)
+        assert (
+            tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        # No P2P submission also means no primary read/pin or job accounting.
+        assert {job.tier_idx for job in tiering._jobs.values()} == (
+            {0, 1} if expect_p2p_store else {1}
+        )
+        assert example.lookup(keys[0], ctx) is LookupResult.HIT
+        assert bool(p2p._unbound_stores) is expect_p2p_store
+    finally:
+        tiering.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -443,15 +490,16 @@ class TestServeExternalRequests:
 
 
 class TestSubmitStore:
-    def test_no_decode_succeeds_immediately(self):
-        """Without a ``remote_decoder`` block, job succeeds immediately."""
+    @pytest.mark.parametrize("params", [{}, {"remote_decoder": None}])
+    def test_no_decode_succeeds_immediately(self, params):
+        """An absent or null `remote_decoder` permits a local store."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params={})
+        job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
     def test_missing_kv_request_id_fails(self):
-        """Missing kv_request_id inside ``remote_decoder`` fails the job."""
+        """Missing kv_request_id inside `remote_decoder` fails the job."""
         mgr = _make_manager()
         params: dict = {"remote_decoder": {}}
         job = _job_metadata(job_id=1, kv_params=params)
@@ -511,7 +559,7 @@ class TestSubmitStore:
     def test_extra_top_level_keys_are_ignored(self):
         """Producer-side kv_transfer_params should not pre-create a
         session even when a stale caller still passes a top-level
-        ``remote_host``/``remote_port`` next to ``remote_decoder``."""
+        `remote_host`/`remote_port` next to `remote_decoder`."""
         mgr = _make_manager()
         params = _remote_decoder_kv_params()
         params["remote_host"] = "stale"
@@ -571,6 +619,43 @@ class TestSubmitLoad:
         assert existing.requests == [(42, "req-42")]
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
+
+    @pytest.mark.parametrize("symmetric", [False, True])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_pd_lookup_misses_after_first_fetch(self, monkeypatch, symmetric, empty):
+        """Only a nonempty PD fetch consumes the request's one-time supply."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        if symmetric:
+            monkeypatch.setattr(
+                session, "register_lookup", lambda *_: True, raising=False
+            )
+        mgr._sessions[peer_id] = session
+        params = (
+            _remote_kv_source_kv_params()
+            if symmetric
+            else _remote_prefiller_kv_params()
+        )
+        job = _job_metadata(
+            job_id=1,
+            keys=[] if empty else [OffloadKey(b"prompt")],
+            chunk_ids=[] if empty else [0],
+            kv_params=params,
+        )
+        ctx = job.req_context
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is LookupResult.HIT
+
+        mgr.submit_load(job)
+
+        expected = (
+            LookupResult.MISS if not symmetric and not empty else LookupResult.HIT
+        )
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is expected
+        assert mgr.lookup(OffloadKey(b"generated"), ctx) is expected
+        # A fresh request has its own handoff, even with the same transfer ID.
+        fresh = _req_context(kv_params=params)
+        assert mgr.lookup(OffloadKey(b"prompt"), fresh) is LookupResult.HIT
 
     def test_missing_consumer_flag_fails(self):
         """Peer fields present but neither do_remote_prefill nor
@@ -645,6 +730,76 @@ class TestPromotionLatency:
         assert stats is not None
         observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
         assert len(observations[("1:p2p", "success")]) == 1
+
+
+def test_pd_partial_promotion_does_not_refetch_tail():
+    """A full primary must not turn a deferred PD tail into a second fetch."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import FetchMsg
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier.locality = None
+    _attach_fake_transports(p2p_tier)
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=3, mmap_region=_mock_mmap_region(3)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    # An in-flight write leaves only two chunks available for the PD prompt.
+    other = ReqContext(req_id="other", kv_transfer_params=None)
+    filler = OffloadKey(b"filler")
+    assert primary.prepare_write([filler], other) is not None
+    ctx = ReqContext(req_id="pd", kv_transfer_params=_remote_prefiller_kv_params())
+    tiering.on_new_request(ctx)
+    prompt = [OffloadKey(f"prompt-{i}".encode()) for i in range(3)]
+
+    def prefix_lookup():
+        results = []
+        for key in prompt:
+            results.append(tiering.lookup(key, ctx))
+            if results[-1] is LookupResult.MISS:
+                break
+        return results
+
+    def sent_fetch_rounds():
+        return [
+            msg[FetchMsg.ROUND_SEQ]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ]
+
+    expected = [LookupResult.HIT_PENDING, LookupResult.HIT_PENDING, LookupResult.MISS]
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
+
+    # Free space before the deferred rescan: the tail must still MISS.
+    primary.complete_write([filler], other, success=False)
+    assert primary._get_num_free_chunks() == 1
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
 
 
 def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
@@ -763,7 +918,7 @@ class TestOnRequestFinished:
         assert "req-1" in mgr._failed_req_ids
 
     def test_decoder_side_calls_session_finish_request(self):
-        """Decoder-side finish (``remote_prefiller`` set) still routes via peer_id
+        """Decoder-side finish (`remote_prefiller` set) still routes via peer_id
         because the consumer addresses the producer it loaded from. The
         session's finish_request cancels the client-role load."""
         mgr = _make_manager()
@@ -775,7 +930,7 @@ class TestOnRequestFinished:
         assert session.finishes == ["req-1"]
 
     def test_p2p_consumer_side_calls_session_finish_request(self):
-        """Symmetric-P2P consumer finish (``remote_kv_source`` set) routes via peer_id
+        """Symmetric-P2P consumer finish (`remote_kv_source` set) routes via peer_id
         so the session drops any pending lookups (cancel_lookups) and
         cancels any inbound load."""
         mgr = _make_manager()
@@ -796,6 +951,40 @@ class TestOnRequestFinished:
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
+
+    @pytest.mark.parametrize("shared_session", [False, True])
+    @pytest.mark.parametrize("shared_request_id", [False, True])
+    def test_dual_role_finish_cleans_both_sessions(
+        self, shared_session, shared_request_id
+    ):
+        """Finish each distinct session/request pair exactly once."""
+        mgr = _make_manager()
+        source = _FakeSession(peer_id="source:1", connected=True)
+        decoder = (
+            source
+            if shared_session
+            else _FakeSession(peer_id="decoder:2", connected=True)
+        )
+        source_id = "req-1"
+        dest_id = source_id if shared_request_id else "req-2"
+        mgr._sessions[source.peer_id] = source
+        mgr._sessions[decoder.peer_id] = decoder
+        mgr._kv_to_session[dest_id] = decoder
+        params = _remote_kv_source_kv_params(
+            remote_host="source", remote_port=1, kv_request_id=source_id
+        )
+        params["remote_decoder"] = {"kv_request_id": dest_id}
+
+        mgr.on_request_finished(_req_context(kv_params=params))
+
+        if shared_session:
+            assert source.finishes == (
+                [source_id] if shared_request_id else [source_id, dest_id]
+            )
+        else:
+            assert source.finishes == [source_id]
+            assert decoder.finishes == [dest_id]
+        assert dest_id not in mgr._kv_to_session
 
     def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
@@ -917,6 +1106,9 @@ class _FakeSession:
 
     def finish_request(self, kv_request_id):
         self.finishes.append(kv_request_id)
+
+    def abort_loads(self):
+        pass
 
     def close(self):
         return SessionCloseResult(
@@ -1149,7 +1341,7 @@ class TestHasPendingWork:
         try:
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -1158,7 +1350,9 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -1206,7 +1400,7 @@ class TestHasPendingWork:
             assert manager._tier_poll_thread is None
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -1215,7 +1409,9 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -1410,7 +1606,7 @@ class _LoopbackControl:
         # Peer is calling our poll → return all messages we've sent toward
         # peer_local_id (which is the peer's own local_id).
         out: list[tuple[str, dict]] = []
-        for pid, conn in list(self._inbound_outbound.items()):
+        for conn in list(self._inbound_outbound.values()):
             # Each outgoing message goes to peer_local_id and is tagged
             # with the sender's local_id (i.e., self._local_id).
             for msg in conn._outbox:
@@ -1538,6 +1734,29 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_retired_unsent_fetch_releases_parked_producer_blocks(
+        self, lookup_clock, monkeypatch
+    ):
+        from vllm.v1.kv_offload.tiering.p2p.session.client import _PD_LOAD_TIMEOUT_S
+
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
+        consumer, producer = _build_paired_managers()
+        producer.submit_store(
+            _job_metadata(9, kv_params=_remote_decoder_kv_params("retired"))
+        )
+        params = _remote_prefiller_kv_params("B", 2, kv_request_id="retired")
+        consumer.on_new_request(_req_context(params))
+        consumer.submit_load(_job_metadata(7, kv_params=params))
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        failed = list(consumer.get_finished_jobs())
+        assert len(failed) == 1 and failed[0].job_id == 7 and not failed[0].success
+        producer_results: list[JobResult] = []
+        for _ in range(10):
+            producer_results.extend(producer.get_finished_jobs())
+            list(consumer.get_finished_jobs())
+        assert "retired" not in producer._unbound_stores
+        assert [r.job_id for r in producer_results] == [9]
 
     def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
         mgr_a, mgr_b = _build_paired_managers()
@@ -2383,8 +2602,8 @@ class TestBindHostPortDefaults:
         """Build a manager with the transports/file-mapper stubbed out.
 
         The host is used verbatim (no resolution). The transport constructor
-        args are recorded into ``calls`` (when given) so tests can assert the
-        ZMQ identity (``host:port``) stays decoupled from the NIXL agent name
+        args are recorded into `calls` (when given) so tests can assert the
+        ZMQ identity (`host:port`) stays decoupled from the NIXL agent name
         (a uuid).
         """
         monkeypatch.setenv("PYTHONHASHSEED", "0")
@@ -2922,6 +3141,84 @@ class TestRetainedTransfers:
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
 
 
+def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
+    """A decoder's reset must not wait out the load timeout of a fetch its
+    prefiller never serves: the drain aborts the load, fails it at once, and
+    returns as soon as the AbortAck releases the chunk."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+        AbortAckMsg,
+        AbortFetchMsg,
+    )
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = _DrainCtrl()  # type: ignore[assignment]
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+
+    sleeps = [0]
+
+    def ack_after_abort(_s):
+        # The silent prefiller answers only the drain's AbortFetch; without
+        # one the drain would spin until the load timeout.
+        sleeps[0] += 1
+        assert sleeps[0] < 5, "drain_jobs waited on a load no peer will write"
+        if any(m[TYPE_KEY] == AbortFetchMsg.TYPE for m in conn._sent):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.KV_REQUEST_ID: "req-1",
+                    AbortAckMsg.ROUND_SEQ: 0,
+                }
+            )
+
+    monkeypatch.setattr(manager_module.time, "sleep", ack_after_abort)
+    tiering.reset_cache()
+
+    assert 7 not in tiering._jobs
+    assert session.alive
+    assert primary.num_deferred_release_chunks == 0
+
+
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
     first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
@@ -3117,8 +3414,15 @@ def _producer_with_cpu_hit(
     )
     seed_ctx = ReqContext(req_id="seed")
     with tiering.lock:
-        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
-        tiering.primary_tier.complete_store([key], seed_ctx)
+        assert (
+            tiering.primary_tier.prepare_store(
+                [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+            )
+            is not None
+        )
+        tiering.primary_tier.complete_store(
+            [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
     return consumer, tiering
 
 
@@ -3319,15 +3623,19 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
     keys = [OffloadKey(b"one"), OffloadKey(b"two")]
     try:
         tiering.on_new_request(ctx)
-        store = tiering.prepare_store(keys, ctx)
+        store = tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
         assert store is not None
-        tiering.complete_store(store.keys_to_store, ctx)
+        tiering.complete_store(
+            store.keys_to_store, ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         tiering.on_schedule_end(ScheduleEndContext([], ()))
         tiering.reset_cache()
         tiering.on_reset_flushed()
         assert all(tiering.lookup(key, ctx) is LookupResult.MISS for key in keys)
         replacement = tiering.prepare_store(
-            [OffloadKey(str(i).encode()) for i in range(8)], ctx
+            [OffloadKey(str(i).encode()) for i in range(8)],
+            ctx,
+            trigger=StoreTrigger.ON_COMPUTE,
         )
         assert replacement is not None
         assert len(replacement.keys_to_store) == 8
@@ -3401,9 +3709,13 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     step = ScheduleEndContext([], ())
 
     def store():
-        output = tiering.prepare_store([key], local_ctx)
+        output = tiering.prepare_store(
+            [key], local_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert output is not None
-        tiering.complete_store(output.keys_to_store, local_ctx)
+        tiering.complete_store(
+            output.keys_to_store, local_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         tiering.on_schedule_end(step)
 
     def lookup():
@@ -3437,3 +3749,120 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     finally:
         tiering.shutdown()
         region.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Tests for non-dict role params rejection
+# ---------------------------------------------------------------------------
+
+
+class TestNonDictRoleParamsRejected:
+    """Non-dict role values must not crash EngineCore.
+
+    Consumer roles (remote_prefiller / remote_kv_source) are treated as
+    absent. A present but malformed remote_decoder is a remote-decode
+    signal and must fail closed.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_prefiller": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_decoder_fails_closed(self, bad_value):
+        ctx = _req_context(kv_params={"remote_decoder": bad_value})
+        dest = ctx.get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_kv_source": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_params",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_kv_params_treated_as_absent(self, bad_params):
+        ctx = _req_context(kv_params=bad_params)
+        assert ctx.get_state(P2PSourceInfo) is None
+        assert ctx.get_state(P2PDestInfo) is None
+
+    @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
+    def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
+        source = _req_context(
+            kv_params={
+                "remote_prefiller": {
+                    "remote_host": "host",
+                    "remote_port": 8000,
+                    "kv_request_id": request_id,
+                }
+            }
+        )
+        assert source.get_state(P2PSourceInfo) is None
+
+        dest = _req_context(
+            kv_params={"remote_decoder": {"kv_request_id": request_id}}
+        ).get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    def test_manager_survives_malformed_prefiller_role(self):
+        """Full manager flow: malformed remote_prefiller does not crash
+        on_new_request or lookup — the request is handled locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_prefiller": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+    def test_malformed_decoder_role_fails_store(self):
+        """Malformed remote_decoder does not crash; submit_store fails
+        closed instead of succeeding as a local store."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_decoder": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        job = _job_metadata(job_id=1, kv_params={"remote_decoder": "not-a-dict"})
+        mgr.submit_store(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_manager_survives_malformed_kv_source_role(self):
+        """Malformed remote_kv_source does not crash — request handled
+        locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_kv_source": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS

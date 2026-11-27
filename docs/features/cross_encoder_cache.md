@@ -10,7 +10,7 @@ use the existing `ECMooncakeConnector` P2P delivery to Prefill.
 - A working [disaggregated Encoder](disagg_encoder.md) deployment using
   `ECMooncakeConnector`. See the [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
   for the base E/PD configuration.
-- Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`), Encoder TP=1, and no dynamic LoRA.
+- Encoder TP=1 and no dynamic LoRA.
 - `--mm-processor-cache-gb` greater than zero to preserve content identifiers.
 - Mooncake 0.3.12 or later with a running RAM Store. Disk offloading
   (`enable_offload: true`) is not supported.

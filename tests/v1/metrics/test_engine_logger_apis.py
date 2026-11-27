@@ -4,17 +4,19 @@ import copy
 import logging
 
 import pytest
+
 from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logger import (  # noqa E501
     DummyStatLogger,
 )
 from tests.utils import wait_for_memory_to_settle
+from vllm import SamplingParams
 from vllm.config import CacheConfig
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
-
-from vllm import SamplingParams
+from vllm.v1.metrics.iteration_workload import QueuedWorkload, ScheduledWorkload
 from vllm.v1.metrics.loggers import PerEngineStatLoggerAdapter
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+from vllm.v1.metrics.stats import SchedulerStats
 
 
 def _required_utilization(engine_args: AsyncEngineArgs) -> float:
@@ -91,14 +93,52 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
         )
 
 
+@pytest.mark.asyncio
+async def test_iteration_workload_reaches_custom_stat_loggers(
+    log_stats_enabled_engine_args,
+):
+    """--enable-logging-iteration-details reports every iteration to stat
+    loggers with its workload, and the queued workload with the stats.
+    """
+    engine_args = copy.deepcopy(log_stats_enabled_engine_args)
+    engine_args.enable_logging_iteration_details = True
+    all_stats: list[SchedulerStats] = []
+
+    class RecordingStatLogger(DummyStatLogger):
+        def record(self, scheduler_stats, *args, **kwargs):
+            if scheduler_stats is not None:
+                all_stats.append(scheduler_stats)
+
+    engine = AsyncLLM.from_engine_args(engine_args, stat_loggers=[RecordingStatLogger])
+    try:
+        sampling_params = SamplingParams(max_tokens=8, ignore_eos=True)
+        async for _ in engine.generate("Hello, my name is", sampling_params, "0"):
+            pass
+
+        records = [record for stats in all_stats for record in stats.iteration_records]
+        prefill, decode = records[:2]
+        timed = engine.vllm_config.gpu_iteration_timing
+        assert all((record.elapsed_ms is not None) == timed for record in records)
+        assert prefill.scheduled_workload == ScheduledWorkload()
+        # The first decode attends to the prompt that the prefill computed.
+        assert decode.scheduled_workload == ScheduledWorkload(
+            sum_decode_kv_tokens=prefill.num_ctx_tokens
+        )
+        assert all(stats.queued_workload == QueuedWorkload() for stats in all_stats)
+    finally:
+        engine.shutdown()
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - _required_utilization(engine_args)
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
 @pytest.mark.parametrize("cudagraph_metrics", [False, True])
 @pytest.mark.asyncio
 async def test_async_llm_cudagraph_runtime_metrics(
     monkeypatch, caplog_vllm, cudagraph_metrics
 ):
-    """MRV2 runtime graph statistics must reach the frontend logging table."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    """Runtime graph statistics must reach the frontend logging table."""
     engine_args = AsyncEngineArgs(
         model="Qwen/Qwen3-0.6B",
         dtype="half",
@@ -152,5 +192,5 @@ async def test_async_llm_cudagraph_runtime_metrics(
     finally:
         engine.shutdown()
         wait_for_memory_to_settle(
-            threshold_ratio=1.0 - engine_args.gpu_memory_utilization
+            threshold_ratio=1.0 - _required_utilization(engine_args)
         )

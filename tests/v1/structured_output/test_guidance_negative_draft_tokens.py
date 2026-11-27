@@ -3,8 +3,8 @@
 """Guidance backend must not choke on speculative -1 padding.
 
 Speculative drafters (e.g. ngram_gpu) pad unfilled draft slots with a -1
-sentinel. llguidance raises ``OverflowError`` on a negative id, so
-``GuidanceGrammar.validate_tokens`` must stop at the first sentinel. The mock
+sentinel. llguidance raises `OverflowError` on a negative id, so
+`GuidanceGrammar.validate_tokens` must stop at the first sentinel. The mock
 matcher below emulates that raise, so each test fails on the unpatched backend
 and passes with the guard.
 """
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _Matcher:
-    """Stand-in for ``llguidance.LLMatcher`` that rejects negative ids."""
+    """Stand-in for `llguidance.LLMatcher` that rejects negative ids."""
 
     def __init__(self) -> None:
         self.tokens: list[int] | None = None

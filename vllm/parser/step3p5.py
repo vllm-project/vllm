@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Step-3.5 / Step-3.7 parser for tool calls and reasoning.
 
-Both models use the Qwen3 XML tool-call grammar and ``<think>`` reasoning
-unchanged. Two things differ from :class:`Qwen3Parser`:
+Both models use the Qwen3 XML tool-call grammar and `<think>` reasoning
+unchanged. Two things differ from `Qwen3Parser`:
 
-* The chat template always prefills ``<think>\\n`` and has no switch to turn
-  thinking off, so ``enable_thinking`` is ignored.
-* The model closes reasoning with ``\\n</think>\\n``, so trailing reasoning
+* The chat template always prefills `<think>\\n` and has no switch to turn
+  thinking off, so `enable_thinking` is ignored.
+* The model closes reasoning with `\\n</think>\\n`, so trailing reasoning
   whitespace is stripped.
 """
 

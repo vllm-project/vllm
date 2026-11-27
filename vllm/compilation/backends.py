@@ -3,7 +3,6 @@
 
 import ast
 import dataclasses
-import hashlib
 import json
 import operator
 import os
@@ -13,7 +12,6 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import partial
 from typing import Any
 
 import torch
@@ -29,14 +27,19 @@ from vllm.compilation.codegen import (
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import Range, hash_factors
+from vllm.config.utils import CompileFactors, Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from .caching import (
+    VllmSerializableFunction,
+    compute_env_and_config_hashes,
+    get_code_factors,
+    read_code_files,
+)
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -56,44 +59,6 @@ from .passes.pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
-def make_copy_and_call(
-    sym_tensor_indices: list[int],
-    input_buffers: list[torch.Tensor | None],
-    callable_fn: Callable[..., Any],
-) -> Callable[..., Any]:
-    """Create a wrapper that copies inputs to static buffers before calling.
-
-    This is used for cudagraph input copying where we need to copy dynamic
-    tensors to static buffers before invoking the compiled graph.
-
-    Args:
-        sym_tensor_indices: Indices of tensors with symbolic shapes
-        input_buffers: List of static buffers (can contain None for lazy init)
-        callable_fn: The compiled function to call
-
-    Returns:
-        A wrapper function that copies inputs and calls the compiled function
-
-    """
-
-    def copy_and_call(*args: Any) -> Any:
-        list_args = list(args)
-        for i, index in enumerate(sym_tensor_indices):
-            runtime_tensor = list_args[index]
-            runtime_shape = runtime_tensor.shape[0]
-
-            # lazy initialization of buffer on first call
-            if input_buffers[i] is None:
-                input_buffers[i] = runtime_tensor.clone()
-
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
-            static_tensor.copy_(runtime_tensor)
-            list_args[index] = static_tensor
-        return callable_fn(*list_args)
-
-    return copy_and_call
-
-
 def make_compiler(
     compilation_config: CompilationConfig, *, use_aot_compile: bool
 ) -> CompilerInterface:
@@ -103,11 +68,7 @@ def make_compiler(
     ), "VLLM_USE_MEGA_AOT_ARTIFACT=1 requires VLLM_USE_STANDALONE_COMPILE=1"
 
     if compilation_config.backend == "inductor":
-        # Use standalone compile only if requested, version is new enough,
-        # and the symbol actually exists in this PyTorch build.
-        if envs.VLLM_USE_STANDALONE_COMPILE and hasattr(
-            torch._inductor, "standalone_compile"
-        ):
+        if envs.VLLM_USE_STANDALONE_COMPILE:
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
                 compilation_config.compile_cache_save_format,
@@ -156,8 +117,8 @@ class CompilerManager:
     def _log_prefix(self) -> str:
         return f"[{self.prefix}] " if self.prefix else ""
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compute_hash(vllm_config)
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
     def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
@@ -428,7 +389,7 @@ class StopCompiling(BaseException):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SplitItem:
     submod_name: str
     graph_id: int
@@ -620,14 +581,12 @@ def split_graph(
     # the semantics of the graph will change when we
     # have mutations in the graph
     with _use_lazy_graph_module(True):
-        has_tuple_return = is_torch_equal_or_newer("2.12.0.dev")
-        tuple_return_kwarg = {"tuple_return": True} if has_tuple_return else {}
         split_gm = torch.fx.passes.split_module.split_module(
             graph,
             None,
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True,
-            **tuple_return_kwarg,
+            tuple_return=True,
         )
 
     outputs = []
@@ -1046,41 +1005,33 @@ class VllmBackend:
 
     @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
-        from .caching import (
-            VllmSerializableFunction,
-        )
-
         vllm_config = self.vllm_config
 
         self._log_compilation_config()
 
         # Minimal hashing here with existing utilities, reused below.
 
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
-        # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
-        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
-
+        (
+            env_hash,
+            config_hash,
+            env_factors,
+            config_factors,
+        ) = compute_env_and_config_hashes(vllm_config)
+        compiler_factors = self.compiler_manager.compile_factors(vllm_config)
+        compiler_hash = hash_factors(compiler_factors)
+        traced_files = self.compilation_config.traced_files
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
+            lazy(lambda: "\n".join(sorted(map(str, traced_files)))),
         )
-        hash_content = []
-        for filepath in forward_code_files:
-            if filepath == "<string>":
-                # This means the function was dynamically generated, with
-                # e.g. exec(). We can't actually check these.
-                continue
-            hash_content.append(filepath)
-            try:
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            except (OSError, UnicodeDecodeError):
-                logger.warning("Failed to read file %s", filepath)
-                continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        code_factors = get_code_factors(read_code_files(traced_files))
+        code_hash = hash_factors({"files": code_factors})
+        all_factors: dict[str, object] = {
+            "env": env_factors,
+            "config": config_factors,
+            "code": {"files": code_factors},
+            "compiler": compiler_factors,
+        }
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -1088,10 +1039,9 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [env_hash, config_hash, code_hash, compiler_hash]
             # Use SHA-256 for cache key hashing to be consistent across
-            # compute_hash functions. Truncate for a short cache dir name.
-            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
+            # compile_factors functions. Truncate for a short cache dir name.
+            hash_key = hash_factors(all_factors)[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
@@ -1108,16 +1058,6 @@ class VllmBackend:
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
-
-        # TODO(patchy): the V1 torch.compile ngram-gpu kernel causes vllm
-        # torch compile cache errors. The V2 implementation is pure Triton and
-        # does not need the cache disabled.
-        is_v1_ngram_gpu_enabled = (
-            vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.use_ngram_gpu()
-            and not vllm_config.use_v2_model_runner
-        )
-        disable_cache = disable_cache or is_v1_ngram_gpu_enabled
 
         if disable_cache:
             logger.info("%svLLM's torch.compile cache is disabled.", self._log_prefix())
@@ -1143,19 +1083,14 @@ class VllmBackend:
             local_cache_dir,
         )
 
-        # Persist and log only hash-relevant factors together.
+        # Persist cache key factors for debugging/repro.
         try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
-            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
                 with open(meta_path, "w") as f:
                     json.dump(
                         {
-                            "env": env_factors,  # raw factors used for env_hash
+                            **all_factors,
                             "config_hash": config_hash,
                             "code_hash": code_hash,
                             "compiler_hash": compiler_hash,
@@ -1320,51 +1255,13 @@ class VllmBackend:
             execution_code, submod_callables, submod_names, consts
         )
 
-        if (
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            or not self.compilation_config.cudagraph_copy_inputs
-        ):
-            return VllmSerializableFunction(
-                graph_to_serialize,
-                example_inputs,
-                self.prefix,
-                runtime_callable,
-                is_encoder=self.is_encoder,
-                vllm_backend=self,
-                execution_code=execution_code,
-                submod_names=submod_names,
-                consts=consts,
-            )
-
-        # index of tensors that have symbolic shapes (batch size)
-        # for weights and static buffers, they will have concrete shapes.
-        # symbolic shape only happens for input tensors.
-        from torch.fx.experimental.symbolic_shapes import is_symbolic
-
-        sym_tensor_indices = [
-            i
-            for i, x in enumerate(fake_args)
-            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-            and any(is_symbolic(d) for d in x.size())
-        ]
-
-        # compiler managed cudagraph input buffers
-        # we assume the first run with symbolic shapes
-        # has the maximum size among all the tensors
-        copy_and_call = make_copy_and_call(
-            sym_tensor_indices,
-            [example_inputs[x].clone() for x in sym_tensor_indices],
-            runtime_callable,
-        )
-
         return VllmSerializableFunction(
             graph_to_serialize,
             example_inputs,
             self.prefix,
-            copy_and_call,
+            runtime_callable,
             is_encoder=self.is_encoder,
             vllm_backend=self,
-            sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
             consts=consts,

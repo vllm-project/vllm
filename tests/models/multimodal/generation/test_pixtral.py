@@ -12,7 +12,12 @@ from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.model_executor.models.pixtral import (
     _apply_rotary_emb_vit_complex,
     _apply_rotary_emb_vit_real,
+    _make_merge_indices,
     _make_packed_sequence_metadata,
+    _merge_patches_by_index,
+    _patch_grid_positions,
+    get_sub_grids,
+    pack_image_patches,
     precompute_freqs_cis_2d,
 )
 from vllm.platforms import current_platform
@@ -100,6 +105,109 @@ def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
         assert max_seqlen.item() == expected_max_seqlen
         assert cu_seqlens.tolist() == [0, 4, 10]
         assert sequence_lengths is None
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLASHINFER,
+    ],
+)
+def test_packed_sequence_metadata_zero_length_padding(
+    backend: AttentionBackendEnum,
+) -> None:
+    """Padding to a fixed sequence count keeps encoder CUDA graph buffer shapes
+    independent of the number of images."""
+
+    def make(lengths: list[int]):
+        return _make_packed_sequence_metadata(
+            lengths,
+            backend,
+            hidden_size=64,
+            tp_size=1,
+            device=torch.device("cpu"),
+            num_sequences=4,
+        )
+
+    capture = make([64])
+    replay = make([4, 6])
+    assert replay[0].shape == capture[0].shape
+    if backend == AttentionBackendEnum.FLASHINFER:
+        assert replay[2] is not None and capture[2] is not None
+        assert replay[2].shape == capture[2].shape
+    else:
+        assert replay[0].tolist() == [0, 4, 10, 10, 10]
+        assert replay[1].item() == 6
+
+
+def test_packed_sequence_metadata_fp8_layout() -> None:
+    backend = AttentionBackendEnum.FLASHINFER
+    bf16, _, _ = _make_packed_sequence_metadata(
+        [4, 6], backend, hidden_size=64, tp_size=1, device=torch.device("cpu")
+    )
+    fp8, _, _ = _make_packed_sequence_metadata(
+        [4, 6],
+        backend,
+        hidden_size=64,
+        tp_size=1,
+        device=torch.device("cpu"),
+        fp8_padded_hidden_size=80,
+    )
+    # FP8 Q/K/V are separate contiguous tensors with padded strides.
+    assert fp8.max().item() == 10 * 80
+    assert bf16.max().item() == 10 * 64 * 3
+
+
+def test_patch_grid_positions() -> None:
+    positions = _patch_grid_positions([(2, 3), (1, 2)], torch.device("cpu"))
+    assert positions.tolist() == [
+        [0, 0],
+        [0, 1],
+        [0, 2],
+        [1, 0],
+        [1, 1],
+        [1, 2],
+        [0, 0],
+        [0, 1],
+    ]
+
+
+@pytest.mark.parametrize("spatial_merge_size", [1, 2])
+def test_merge_indices_match_unfold(spatial_merge_size: int) -> None:
+    m = spatial_merge_size
+    grid_sizes = [(2 * m, 3 * m), (m, m), (4 * m, 2 * m)]
+    features = torch.randn(sum(h * w for h, w in grid_sizes), 8)
+
+    expected = torch.cat(
+        [
+            grid.view(-1, grid.shape[-1]).t()
+            for grid in get_sub_grids(features, grid_sizes, m)
+        ]
+    )
+    merge_indices = _make_merge_indices(grid_sizes, m, torch.device("cpu"))
+    torch.testing.assert_close(
+        _merge_patches_by_index(features, merge_indices), expected
+    )
+
+
+def test_pack_image_patches_matches_conv() -> None:
+    patch_size = 4
+    images = [torch.randn(3, 8, 12), torch.randn(3, 4, 4)]
+    weight = torch.randn(16, 3, patch_size, patch_size)
+
+    patches, grid_sizes = pack_image_patches(images, (patch_size, patch_size))
+
+    assert grid_sizes == [(2, 3), (1, 1)]
+    expected = torch.cat(
+        [
+            torch.nn.functional.conv2d(image[None], weight, stride=patch_size)
+            .flatten(2)[0]
+            .t()
+            for image in images
+        ]
+    )
+    torch.testing.assert_close(patches @ weight.reshape(16, -1).t(), expected)
 
 
 def test_real_rotary_emb_vit_matches_complex() -> None:

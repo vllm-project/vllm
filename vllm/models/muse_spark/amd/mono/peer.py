@@ -14,12 +14,12 @@ from vllm.distributed.device_communicators.cuda_wrapper import (
 
 
 class PeerBuffer:
-    """One zeroed ``cudaMalloc`` buffer a rank, mapped by every rank of a group.
+    """One zeroed `cudaMalloc` buffer a rank, mapped by every rank of a group.
 
     The monokernel polls these mailboxes with system-scope loads, so they come
     from a plain device allocation: not torch's caching allocator (pool
     offsets) and not the uncached custom all-reduce buffers. Freed by
-    ``close()`` or when the object is collected (like ``CustomAllreduce``).
+    `close()` or when the object is collected (like `CustomAllreduce`).
     """
 
     def __init__(self, nbytes: int, group: ProcessGroup) -> None:

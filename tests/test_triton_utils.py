@@ -11,10 +11,10 @@ from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceho
 
 
 def _has_triton_for_backends(*, vllm_version: str = "0.0.0", **drivers: bool) -> bool:
-    """Re-evaluate ``HAS_TRITON`` against a synthetic ``triton.backends`` map.
+    """Re-evaluate `HAS_TRITON` against a synthetic `triton.backends` map.
 
-    ``drivers`` maps backend name to whether its driver reports itself active.
-    ``vllm_version`` selects the build type: importing.py takes its Triton-CPU
+    `drivers` maps backend name to whether its driver reports itself active.
+    `vllm_version` selects the build type: importing.py takes its Triton-CPU
     branch only when "cpu" is in the installed vLLM version, so pin it rather
     than depending on the real install (the CPU CI image is a "+cpu" build).
     """

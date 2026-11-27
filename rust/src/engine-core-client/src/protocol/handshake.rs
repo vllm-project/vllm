@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::dtype::ModelDtype;
@@ -132,6 +134,50 @@ pub struct EngineCoreReadyResponse {
     /// hashes from the frontend.
     #[serde(default)]
     pub prefix_hash_config: Option<PrefixHashConfig>,
+    /// `CacheConfig.metrics_info()` after initialization: the labels of
+    /// `vllm:cache_config_info`.
+    #[serde(default)]
+    pub cache_config_info: Option<BTreeMap<String, String>>,
+    /// `hash_config()` of the engine's initialized `VllmConfig`, the last part
+    /// of `system_fingerprint`; `None` if hashing failed.
+    #[serde(default)]
+    pub config_hash: Option<String>,
+    /// Whether expert parallelism is enabled.
+    #[serde(default)]
+    pub enable_expert_parallel: bool,
+    /// Whether the engine computes prompt logprobs. `false` under
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
+    #[serde(default = "supports_prompt_logprobs_default")]
+    pub supports_prompt_logprobs: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    #[serde(default)]
+    pub allow_missing_mm_embeddings: bool,
+    /// Encoder cache tokens a request's distinct multimodal items may need in
+    /// total. Set without chunked prefill, when they are all encoded in one
+    /// step, so a request needing more could never be scheduled.
+    #[serde(default)]
+    pub max_mm_embeds_per_request: Option<u64>,
+    /// `DeviceConfig.device_type` of this engine, e.g. `cuda` or `cpu`;
+    /// `None` from engines that predate the field.
+    #[serde(default)]
+    pub device_type: Option<String>,
+}
+
+impl EngineCoreReadyResponse {
+    /// The device name the stat log lines print before `KV cache usage`, as
+    /// Python's `LoggingStatLogger` derives it from the device type: `GPU` for
+    /// CUDA (and for engines that do not report a device), otherwise the device
+    /// type in upper case.
+    pub fn kv_cache_device(&self) -> String {
+        match self.device_type.as_deref() {
+            None | Some("cuda") => "GPU".to_string(),
+            Some(device_type) => device_type.to_uppercase(),
+        }
+    }
+}
+
+fn supports_prompt_logprobs_default() -> bool {
+    true
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

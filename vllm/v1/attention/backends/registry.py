@@ -56,6 +56,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_SEGMENTED_ATTN = (
         "vllm.v1.attention.backends.rocm_segmented_attn.RocmSegmentedAttentionBackend"
     )
+    ROCM_RDNA_ATTN = (
+        "vllm.v1.attention.backends.rocm_rdna_attn.RocmRdnaAttentionBackend"
+    )
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
@@ -145,6 +148,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "MiniMaxM3SparseTritonBackend"
     )
     STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
+    NEMOTRON_SHORTCUT_SDSA = (
+        "vllm.models.nemotron_shortcut.nvidia.sdsa.backend.SdsaAttentionBackend"
+    )
     KIMI_K3_KV_BALANCED_MLA = (
         "vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend.KimiK3KvBalancedMLABackend"
     )
@@ -292,7 +298,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         logger.info("Registered new attention backend: %s -> %s", name, value)
         return member
 
-    MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
     MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
     SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
     LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"

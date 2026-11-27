@@ -38,10 +38,13 @@ class _VirtualBuffer:
     granules are skipped, so ranges may abut or overlap.
     """
 
-    def __init__(self, max_bytes: int, device_index: int) -> None:
+    def __init__(
+        self, max_bytes: int, device_index: int, export_handle_types: int = 0
+    ) -> None:
         self._driver = get_vmm_driver()
         self._driver.ensure_context(device_index)
         self.device_index = device_index
+        self.export_handle_types = export_handle_types
 
         self.granularity: int = granule_size(device_index)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
@@ -113,12 +116,12 @@ class _VirtualBuffer:
         driver = self._driver
         driver.ensure_context(self.device_index)
         try:
-            handle = driver.create(size, self.device_index)
+            handle = driver.create(size, self.device_index, self.export_handle_types)
         except RuntimeError:
             # The VMM allocator cannot reuse memory idling in torch's
             # caching allocator; return it to the driver and retry once.
             torch.accelerator.empty_cache()
-            handle = driver.create(size, self.device_index)
+            handle = driver.create(size, self.device_index, self.export_handle_types)
 
         addr = self.base_ptr + offset
         try:
@@ -201,9 +204,11 @@ _DLManagedTensor._fields_ = [
     ("deleter", _DLDeleter),
 ]
 
-_PyCapsule_New = ctypes.pythonapi.PyCapsule_New
-_PyCapsule_New.restype = ctypes.py_object
-_PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+# A private prototype: ctypes.pythonapi.PyCapsule_New is shared, and other
+# libraries (e.g. FlashInfer's MNNVL buffers) reset its restype.
+_PyCapsule_New = ctypes.PYFUNCTYPE(
+    ctypes.py_object, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p
+)(("PyCapsule_New", ctypes.pythonapi))
 _malloc = ctypes.CDLL(None).malloc
 _malloc.restype = ctypes.c_void_p
 _malloc.argtypes = [ctypes.c_size_t]
@@ -242,6 +247,8 @@ class ExtensibleTensor:
     The reservation is divided into contiguous segments whose committed bytes
     form a prefix of each; num_segments equal segments by default, or the
     explicit segment_capacities (in bytes, summing to max_num_bytes).
+    Other processes can import the memory through `export_handle_types` (see
+    `VmmDriver.create`).
     """
 
     def __init__(
@@ -250,6 +257,7 @@ class ExtensibleTensor:
         device: torch.device | str | int | None = None,
         num_segments: int = 1,
         segment_capacities: Sequence[int] | None = None,
+        export_handle_types: int = 0,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
@@ -287,7 +295,9 @@ class ExtensibleTensor:
             itertools.accumulate([0, *self._segment_capacities[:-1]])
         )
         self._committed: list[int] = [0] * len(self._segment_capacities)
-        self._buffer: _VirtualBuffer = _VirtualBuffer(max_num_bytes, self._device_index)
+        self._buffer: _VirtualBuffer = _VirtualBuffer(
+            max_num_bytes, self._device_index, export_handle_types
+        )
 
     def full_view(self) -> torch.Tensor:
         """Uint8 view spanning the whole reservation."""

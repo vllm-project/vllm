@@ -485,9 +485,28 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
+        self.disabled_embedding_modules: set[str] = set()
+        if (
+            self.lora_config.target_modules is None
+            and not self.lora_config.enable_embedding_modules
+        ):
+            # Use model declarations so every pipeline rank can check adapter
+            # weights, even when the corresponding layer is on another rank.
+            for module in self.model.modules():
+                self.disabled_embedding_modules.update(
+                    getattr(module, "embedding_modules", None) or ()
+                )
 
-        for module_name, module in self.model.named_modules(remove_duplicate=False):
+        named_modules = list(self.model.named_modules(remove_duplicate=False))
+        runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
+        # MoERunner aliases block modules. Visit them last so that the block path,
+        # which is what adapters target, is the one tracked in `self.modules`.
+        named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
+
+        for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
+                continue
+            if module_name.rsplit(".", 1)[-1] in self.disabled_embedding_modules:
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -1192,17 +1211,17 @@ class LoRAModelManager:
     ) -> list[str]:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
-        ``new_module_names`` is produced by
-        ``fused_moe_make_expert_params_mapping`` and is ordered
-        ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
+        `new_module_names` is produced by
+        `fused_moe_make_expert_params_mapping` and is ordered
+        `[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
-        ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
+        `FusedMoEWithLoRA` with EP enabled, we slice the list to the
         contiguous block of experts owned by this rank so the downstream
-        ``pack_moe`` call only consumes local weights and produces a
-        tensor sized to ``local_num_experts`` directly.
+        `pack_moe` call only consumes local weights and produces a
+        tensor sized to `local_num_experts` directly.
 
         Returns the original list unchanged for non-MoE modules, the 3D
-        MoE path (handled separately by ``_stack_moe_lora_weights``),
+        MoE path (handled separately by `_stack_moe_lora_weights`),
         modules without EP, or layouts we cannot cleanly partition.
         """
         module = self.modules.get(module_name)
@@ -1262,6 +1281,20 @@ class LoRAModelManager:
             if text_name is not None:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def warn_disabled_embedding_modules(self, lora_model: LoRAModel) -> None:
+        if not self.disabled_embedding_modules:
+            return
+        disabled = self.disabled_embedding_modules.intersection(
+            name.rsplit(".", 1)[-1] for name in lora_model.loras
+        )
+        if disabled:
+            logger.warning_once(
+                "Ignoring weights for disabled embedding modules in LoRA adapter "
+                "ID %d: %s. Enable them with --enable-lora-embedding-modules.",
+                lora_model.id,
+                ", ".join(sorted(disabled)),
+            )
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
         for module in module_names:

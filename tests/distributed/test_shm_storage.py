@@ -118,8 +118,8 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
 
         # Verify that some items are still accessible
         accessible_count = 0
-        for key, original_value, address, monotonic_id in stored_items:
-            for i in range(self.storage.n_readers):
+        for _, original_value, address, monotonic_id in stored_items:
+            for _ in range(self.storage.n_readers):
                 retrieved = self.storage.get(address, monotonic_id)
             if retrieved == original_value:
                 accessible_count += 1
@@ -138,7 +138,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         # Verify that some items are still accessibles
         for key, original_value, address, monotonic_id in stored_items:
             try:
-                for i in range(self.storage.n_readers):
+                for _ in range(self.storage.n_readers):
                     retrieved = self.storage.get(address, monotonic_id)
                 if retrieved == original_value:
                     accessible_count += 1
@@ -165,8 +165,8 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         # read all items except the first one
         # to simulate a blocking situation
         accessible_count = 0
-        for key, original_value, address, monotonic_id in stored_items[1:]:
-            for i in range(self.storage.n_readers):
+        for _, original_value, address, monotonic_id in stored_items[1:]:
+            for _ in range(self.storage.n_readers):
                 retrieved = self.storage.get(address, monotonic_id)
             if retrieved == original_value:
                 accessible_count += 1
@@ -181,7 +181,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
             print(f"Buffer filled after {len(stored_items)} items")
 
         # read the first item
-        for i in range(self.storage.n_readers):
+        for _ in range(self.storage.n_readers):
             key, original_value, address, monotonic_id = stored_items[0]
             retrieved = self.storage.get(address, monotonic_id)
             self.assertEqual(retrieved, original_value)
@@ -289,6 +289,33 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
             reader.get(address, monotonic_id, signature, "key")
         with self.assertRaisesRegex(ValueError, "modified or is invalid"):
             reader.touch("key", address, monotonic_id, signature)
+
+
+class TestMsgpackSerdeMarkerFormat(unittest.TestCase):
+    """Format-marker payloads written by the Rust frontend's shm cache."""
+
+    def test_deserialize_marker_prefixed_msgpack_body(self):
+        """A payload starting with 0x01 decodes as a raw msgpack body."""
+        serde = MsgpackSerde()
+        value = _dummy_item({"field1": 10, "field2": 20})
+
+        # All tensors are small, so they stay inline as ext type 3 raw views.
+        (body,) = serde.encoder.encode(value)
+        payload = b"\x01" + bytes(body)
+
+        result = serde.deserialize(memoryview(payload))
+        self.assertEqual(result, value)
+
+    def test_deserialize_legacy_pickle_format_unchanged(self):
+        """Legacy payloads start with \\x80 (pickle PROTO), not the marker."""
+        serde = MsgpackSerde()
+        value = _dummy_item({"field1": 10})
+        frames, _, metadata, _ = serde.serialize(value)
+        payload = metadata + b"".join(bytes(frame) for frame in frames)
+        self.assertEqual(payload[0], 0x80)
+
+        result = serde.deserialize(memoryview(payload))
+        self.assertEqual(result, value)
 
 
 class TestShmObjectStorageReferenceCounting(unittest.TestCase):

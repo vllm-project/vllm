@@ -1,7 +1,7 @@
 # auto (from_token_zero)
 sequence
   tag `` text `</think>`
-  triggered_tags [`<｜DSML｜ calls>`] excluding [`<think>`, `</think>`]
+  triggered_tags [`<｜DSML｜ calls>`] excluding [`<think>`, `</think>`] stop_after_first
     tag `<｜DSML｜ calls>\n` .. `</｜DSML｜ calls>`
       tags_with_separator `` at_least_one
         tag `<｜DSML｜ invoke name="get_weather">\n` deepseek_v4_1_xml({ location: string }) `</｜DSML｜ invoke>\n`

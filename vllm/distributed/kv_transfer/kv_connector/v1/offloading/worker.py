@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     group_kernel_blocks,
 )
 from vllm.v1.kv_offload.base import (
@@ -34,6 +33,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 logger = init_logger(__name__)
 
@@ -51,11 +51,17 @@ class OffloadingConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
-        # Non-writers still ack: pending_count waits for world_size per job.
+        # In the direct replicated layout the first mp rank on each host writes
+        # its shared copy. Other ranks still ack since pending_count is world_size.
+        parallel = self.spec.config.parallel
         self._is_store_writer = (
             not self.spec.replicated_layout
             or self.spec.config.canonical_layout
-            or self.spec.config.parallel.rank == 0
+            or parallel.rank == 0
+            or (
+                self.spec.config.replicated_layout
+                and parallel.rank % parallel.local_world_size == 0
+            )
         )
 
         # job_id -> req_id for in-flight loads (None for sync loads).
@@ -65,9 +71,13 @@ class OffloadingConnectorWorker:
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
+        # Under async_init, report readiness once.
+        self._report_ready = self.spec.async_init
 
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
+        self._kv_caches = kv_caches
         self.worker = self.spec.get_worker(kv_caches)
+        self.worker.start_deferred_setup()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
@@ -88,18 +98,22 @@ class OffloadingConnectorWorker:
         for kv_cache_group in selected_groups:
             assert not kv_cache_group.host_resident
             num_blocks = kv_cache_config.num_blocks
-            group_layer_names = kv_cache_group.layer_names
-            group_kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs = group_kv_cache_spec.kv_cache_specs
-            else:
-                per_layer_specs = {}
-            for layer_name in group_layer_names:
-                layer_kv_cache_spec = per_layer_specs.get(
-                    layer_name, group_kv_cache_spec
-                )
+            per_layer_specs = kv_cache_group.kv_cache_specs
+            for layer_name, layer_kv_cache_spec in per_layer_specs.items():
                 ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
+                # A padded page split into kernel blocks spreads its padding
+                # over them, but offloading copies the payload from page start.
+                if (
+                    isinstance(layer_kv_cache_spec, AttentionSpec)
+                    and page > layer_kv_cache_spec.unpadded_page_size_bytes
+                    and kv_caches[layer_name].shape[0] != num_blocks
+                ):
+                    raise NotImplementedError(
+                        "KV offloading does not support padded KV pages split "
+                        f"into kernel blocks (layer {layer_name}). Use an "
+                        "attention backend that takes the full block size."
+                    )
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
                 # Packed layouts (e.g. DSv4) interleave layers per block, so the
@@ -237,7 +251,8 @@ class OffloadingConnectorWorker:
         # Submit deferred stores from previous step (and jobs_to_flush above).
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             assert isinstance(src_spec, GPULoadStoreSpec)
-            success = self.worker.submit_store(job_id, src_spec, dst_spec)
+            device_ptrs = resolve_device_pointers(src_spec, self._kv_caches)
+            success = self.worker.submit_store(job_id, device_ptrs, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
@@ -246,26 +261,29 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+        if not metadata.offloading_enabled:
+            assert not metadata.store_jobs and not metadata.load_jobs
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
-            success = self.worker.submit_store(job_id, src_spec, dst_spec)
+            assert isinstance(src_spec, GPULoadStoreSpec)
+            device_ptrs = resolve_device_pointers(src_spec, self._kv_caches)
+            success = self.worker.submit_store(job_id, device_ptrs, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
         sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            device_ptrs = resolve_device_pointers(entry.dst_spec, self._kv_caches)
             if entry.sync:
                 # Its request already runs this step: no finished_recving.
                 sync_job_ids.add(job_id)
                 self._load_jobs[job_id] = None
                 success = self.worker.submit_load(
-                    job_id, entry.src_spec, entry.dst_spec, expedited=True
+                    job_id, entry.src_spec, device_ptrs, expedited=True
                 )
             else:
                 self._load_jobs[job_id] = entry.req_id
-                success = self.worker.submit_load(
-                    job_id, entry.src_spec, entry.dst_spec
-                )
+                success = self.worker.submit_load(job_id, entry.src_spec, device_ptrs)
             assert success
         if sync_job_ids:
             self.worker.wait(sync_job_ids)
@@ -336,8 +354,15 @@ class OffloadingConnectorWorker:
         return failed_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
-        """Return completed transfer job IDs since the last call."""
-        if not self._connector_worker_meta.completed_jobs:
+        """Return job completions, and readiness under async_init, since the
+        last call."""
+        if self._report_ready and self.worker is not None and self.worker.is_ready():
+            self._connector_worker_meta.ready_ranks = {self.spec.config.parallel.rank}
+            self._report_ready = False
+        if (
+            not self._connector_worker_meta.completed_jobs
+            and not self._connector_worker_meta.ready_ranks
+        ):
             return None
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()
