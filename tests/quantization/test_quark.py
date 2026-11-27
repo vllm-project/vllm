@@ -26,6 +26,9 @@ from vllm.config.cache import CacheConfig, CacheDType
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
+from vllm.model_executor.kernels.linear.mxfp6.emulation import (
+    EmulationMxfp6LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
@@ -2217,16 +2220,50 @@ class AccuracyTestConfig:
         return model_args
 
 
+MXFP6_E3M2_MODEL = "vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2"
+
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
         model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
         excepted_value=11.3,
     ),
     AccuracyTestConfig(
-        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        model_name=MXFP6_E3M2_MODEL,
         excepted_value=10.6,
     ),
 ]
+
+
+def test_quark_mxfp6_linear_activation_overrides(vllm_runner):
+    """Apply an activation-only target when Quark builds the linear kernel."""
+    with vllm_runner(
+        MXFP6_E3M2_MODEL,
+        enforce_eager=True,
+        load_format="auto",
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=64 << 20,
+        linear_backend="emulation",
+        quantization_config={
+            "targets": {"*layers.0.self_attn.o_proj": {"activation": None}},
+        },
+    ) as llm:
+
+        def check_model(model):
+            activation_matches = []
+            for index, expected in enumerate((None, kMxfp6E3M2Dynamic)):
+                scheme = model.model.layers[index].self_attn.o_proj.scheme
+                assert isinstance(scheme, QuarkOCP_MX)
+                kernel = scheme.ocp_mx_linear
+                assert isinstance(kernel, EmulationMxfp6LinearKernel)
+                config = kernel.config
+                assert config.weight_quant_key == kMxfp6E3M2Static
+                activation_matches.append(config.activation_quant_key == expected)
+            return activation_matches
+
+        activation_matches = llm.apply_model(check_model)
+    assert activation_matches == [[True, True]]
 
 
 @pytest.mark.skipif(

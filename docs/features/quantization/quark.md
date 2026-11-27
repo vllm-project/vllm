@@ -296,6 +296,24 @@ python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
 
 The current integration supports [all combination of FP4, FP6_E3M2, FP6_E2M3](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/ocp_mx_utils.py) used for either weights or activations.
 
+For MXFP6 linear weights, use `quantization_config.linear.activation` to override
+the checkpoint's activation format. Supported formats depend on the selected
+linear backend. The emulation backend supports MXFP4 activations.
+
+```bash
+vllm serve <mxfp6-model> --linear-backend emulation \
+    --quantization-config.linear.activation mxfp4
+```
+
+For a per-layer override, use `targets` in place of `linear`. A target that
+specifies only `activation` keeps the checkpoint weights. This example runs
+the first attention output projection with unquantized activations.
+
+```bash
+vllm serve <mxfp6-model> --linear-backend emulation \
+    --quantization-config '{"targets":{"*layers.0.self_attn.o_proj":{"activation":null}}}'
+```
+
 ## Using Quark Quantized layerwise Auto Mixed Precision (AMP) Models
 
 vLLM also supports loading layerwise mixed precision model quantized using AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including

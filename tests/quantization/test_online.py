@@ -1766,19 +1766,36 @@ def test_activation_only_override_applies_to_checkpoint_method(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         _resolve_activation_key,
     )
-    from vllm.model_executor.layers.quantization import resolve_quant_method
-
-    # The activation key the checkpoint method resolves while it is built; a
-    # `targets` override only applies to the layers it matches.
-    keys = []
-    monkeypatch.setattr(
-        result,
-        "get_quant_method",
-        lambda *_: keys.append(_resolve_activation_key(None)),
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+        resolve_quant_method,
     )
-    for prefix in ("model.layers.0.mlp.experts", "model.layers.1.mlp.experts"):
-        resolve_quant_method(result, _TestRoutedExperts(), prefix)
-    assert keys == [kMxfp8Dynamic, None if targets else kMxfp8Dynamic]
+
+    class CheckpointMethod(QuantizeMethodBase):
+        def __init__(self):
+            self.selection_key = _resolve_activation_key(None)
+
+        def create_weights(self, layer, *args, **kwargs):
+            self.creation_key = _resolve_activation_key(None)
+
+        def process_weights_after_loading(self, layer):
+            self.post_load_key = _resolve_activation_key(None)
+
+        def apply(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+    monkeypatch.setattr(result, "get_quant_method", lambda *_: CheckpointMethod())
+    for index, key in enumerate([kMxfp8Dynamic, None if targets else kMxfp8Dynamic]):
+        layer = _TestRoutedExperts()
+        method = resolve_quant_method(
+            result, layer, f"model.layers.{index}.mlp.experts"
+        )
+        assert isinstance(method, CheckpointMethod)
+        method.create_weights(layer)
+        method.process_weights_after_loading(layer)
+        assert (
+            method.selection_key == method.creation_key == method.post_load_key == key
+        )
 
 
 def test_online_overlay_requires_normalized_quantization_config(tmp_path) -> None:
