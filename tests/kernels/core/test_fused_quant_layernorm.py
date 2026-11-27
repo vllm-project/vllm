@@ -31,7 +31,7 @@ VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
     *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
-    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
+    *[(2048, i) for i in [1, 8, 64, *VEC_HIDDEN_SIZES, 1028, 4100, 5120, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
 ]
 
