@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -963,6 +964,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        parallel_config = vllm_config.parallel_config
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.gather_pcp_input_ids = (
+            self.use_pcp and not parallel_config.enable_expert_parallel
+        )
+        if self.use_pcp and parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "DeepSeek V4 XPU currently does not support enabling "
+                "PCP and DCP together."
+            )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -1089,6 +1100,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
+
+        # EP routes local tokens before dispatch; expert TP routes gathered tokens.
+        if self.gather_pcp_input_ids:
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
 
         residual, post_mix, res_mix = None, None, None
         aux_hidden_states: list[torch.Tensor] = []
@@ -1294,6 +1309,8 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
 
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     model_cls = DeepseekV4Model
+    # Hash MoE routing needs token IDs even on non-first pipeline stages.
+    requires_raw_input_tokens = True
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
