@@ -338,6 +338,15 @@ class SchedulerOutput:
     encoder_cache_events: "list[ECCacheEvent] | None" = None
     encoder_cache_epoch: int = 0
 
+    # Absolute export positions for this step. An omitted request skips export.
+    mamba_ckpt_positions: dict[str, int] = field(default_factory=dict)
+
+    def get_mamba_ckpt_positions(self, req_ids: list[str]) -> list[int] | None:
+        """Project scheduler positions onto the worker's reordered, unpadded rows."""
+        if not self.mamba_ckpt_positions:
+            return None
+        return [self.mamba_ckpt_positions.get(req_id, 0) for req_id in req_ids]
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

@@ -18,6 +18,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -38,7 +39,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.mamba.checkpoint import (
-    compute_mamba_prefill_checkpoints,
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
 )
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -3150,14 +3152,14 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
         block_size=block_size,
-        cache_config=SimpleNamespace(block_size=block_size),
+        mamba_block_size=block_size,
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         num_hash_lookahead_tokens=0,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
-        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
@@ -4895,6 +4897,32 @@ def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     assert reconstructed_hashes == request.block_hashes
 
 
+def build_worker_checkpoint(
+    config: VllmConfig, manager: KVCacheManager, request: Request, query_end: int
+) -> MambaPrefillCheckpointMetadata | None:
+    """Build worker metadata from the allocated blocks and scheduled position."""
+    (mamba_manager,) = manager.mamba_managers
+    group_id = mamba_manager.kv_cache_group_id
+    (spec,) = manager.kv_cache_config.kv_cache_groups[group_id].distinct_specs
+    assert isinstance(spec, MambaSpec)
+    config.cache_config.hash_block_size = manager.block_pool.hash_block_size
+    builder = MambaPrefillCheckpointBuilder(
+        config, spec, mamba_manager.prefill_checkpoint_alignment
+    )
+    req_id = request.request_id
+    positions = manager.get_mamba_ckpt_positions([req_id])
+    common = create_common_attn_metadata(
+        BatchSpec([query_end], [query_end - request.num_computed_tokens]),
+        spec.block_size,
+        torch.device("cpu"),
+        arange_block_indices=True,
+    ).replace(
+        mamba_ckpt_positions=[positions.get(req_id, 0)],
+        block_table_tensor=torch.tensor([manager.get_block_ids(req_id)[group_id]]),
+    )
+    return builder.build(common, [0])
+
+
 @pytest.mark.parametrize(
     "lookahead,prompt_len,expected_boundary",
     [
@@ -4906,7 +4934,12 @@ def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
 @pytest.mark.parametrize("checkpoint_blocks", [0, 1])
 @pytest.mark.parametrize("full_block_size", [64, 128])
 def test_lookahead_checkpoint_has_available_hash(
-    lookahead, prompt_len, expected_boundary, checkpoint_blocks, full_block_size
+    lookahead,
+    prompt_len,
+    expected_boundary,
+    checkpoint_blocks,
+    full_block_size,
+    default_vllm_config,
 ):
     """Prefill checkpoints must be reusable at the boundary their hash proves."""
     config = _make_hybrid_kv_cache_config(64, 100, ["full", "mamba", "full"])
@@ -4933,25 +4966,21 @@ def test_lookahead_checkpoint_has_available_hash(
         assert manager.allocate_slots(request, expected_boundary) is not None
         request.num_computed_tokens = expected_boundary
         manager.new_step_starts()
-    assert manager.allocate_slots(request, len(tokens) - request.num_computed_tokens)
+    allocated = manager.allocate_slots(
+        request, len(tokens) - request.num_computed_tokens
+    )
+    assert allocated is not None
     checkpoint_hash = request.block_hashes[expected_boundary // 64 - 1]
     blocks = manager.block_pool.get_cached_block(checkpoint_hash, [1])
     assert blocks is not None
     assert blocks[0].block_hash_num_tokens == expected_boundary
     if checkpoint_blocks:
-        offsets, cols = compute_mamba_prefill_checkpoints(
-            [prompt_len],
-            [prompt_len],
-            hash_block_size=64,
-            mamba_block_size=512,
-            checkpoint_alignment=64,
-            cache_hit_alignment_tokens=64,
-            num_hash_lookahead_tokens=lookahead,
+        checkpoint = build_worker_checkpoint(
+            default_vllm_config, manager, request, prompt_len
         )
-        assert offsets == [expected_boundary]
-        assert (
-            blocks[0].block_id == manager.get_block_ids(request.request_id)[1][cols[0]]
-        )
+        assert checkpoint is not None
+        assert checkpoint.offsets == [expected_boundary]
+        assert checkpoint.state_indices.item() == blocks[0].block_id
 
     request.num_computed_tokens = len(tokens)
     manager.free(request)

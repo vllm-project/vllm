@@ -16,6 +16,14 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
+When all Mamba groups support internal prefill checkpoints, a non-final chunk can cross a block boundary and export one state within the same forward. With shared-prefix checkpointing enabled, a known junction takes priority when its offset satisfies the backend alignment. Other chunks can export at the last reusable Mamba block boundary. The usual prefix-cache retention policy determines which exported states remain available to later requests.
+
+If the remaining step budget cannot reach the next backend-aligned position, the scheduler can defer a text-only request when both the configured budget and the remaining prefill have more than one alignment unit available after accounting for lookahead. Multimodal requests use the available tokens. When multimodal chunking is enabled, the encoder can process an image one step before the decoder reaches it.
+
+With `--disable-chunked-mm-input`, a checkpoint-capable backend keeps the image whole even when that leaves the chunk end unaligned. The scheduler resumes alignment at the next eligible chunk end.
+
+The final prefill chunk runs to completion and uses its internal checkpoint for the last reusable prefix position. If the backend cannot export that state, the chunk finishes without an internal checkpoint. A shared-prefix junction in the final chunk does not add a scheduling step.
+
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled

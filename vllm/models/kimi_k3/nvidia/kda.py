@@ -612,6 +612,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
+        self.min_prefill_checkpoint_offset = self.conv_size - 1
         self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
         if self.gate_lower_bound is not None:
             assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (

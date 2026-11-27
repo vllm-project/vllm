@@ -4656,7 +4656,8 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
-def test_validate_mamba_align_subblock_prefill():
+@pytest.mark.parametrize("disable_chunked_mm_input", [False, True])
+def test_validate_mamba_align_subblock_prefill(disable_chunked_mm_input):
     """Mamba prefix caching permits prefill chunks smaller than a block."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -4670,7 +4671,7 @@ def test_validate_mamba_align_subblock_prefill():
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=8192,
             long_prefill_token_threshold=4096,
-            disable_chunked_mm_input=False,
+            disable_chunked_mm_input=disable_chunked_mm_input,
         ),
         kv_transfer_config=None,
     )

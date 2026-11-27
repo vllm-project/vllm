@@ -105,6 +105,10 @@ class InputBatch:
     # existing context and so compute exactly like decodes.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    # [num_reqs] absolute Mamba checkpoint positions in batch order.
+    # 0 skips export for that request. None skips export for the entire batch.
+    mamba_ckpt_positions: list[int] | None = None
+
     @classmethod
     def make_dummy(
         cls,

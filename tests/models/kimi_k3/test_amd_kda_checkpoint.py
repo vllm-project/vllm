@@ -100,11 +100,13 @@ def _builder(
     return builder
 
 
-def _build(batch: BatchSpec, block_size: int = BLOCK_SIZE, **kw):
+def _build(batch: BatchSpec, block_size: int = BLOCK_SIZE, positions=None, **kw):
     common = create_common_attn_metadata(
         batch, block_size, torch.device("cuda"), arange_block_indices=True
     )
-    return _builder(block_size=block_size, **kw).build(0, common)
+    return _builder(block_size=block_size, **kw).build(
+        0, common.replace(mamba_ckpt_positions=positions)
+    )
 
 
 def _i32(values: list[int]) -> torch.Tensor:
@@ -115,7 +117,9 @@ def test_checkpoint_metadata_targets_last_aligned_boundary() -> None:
     # Slot p holds the state after (p + 1) * block_size tokens, so a 200-token
     # prompt checkpoints at 192 into slot 2 and a 128-token one at 64 into slot
     # 0. The block table is an arange, so request 1 owns blocks 4..7.
-    md = _build(BatchSpec(seq_lens=[200, 128], query_lens=[200, 128]))
+    md = _build(
+        BatchSpec(seq_lens=[200, 128], query_lens=[200, 128]), positions=[192, 64]
+    )
 
     assert md.checkpoint is not None
     torch.testing.assert_close(md.checkpoint.checkpoint_offsets, _i32([192, 64]))
@@ -125,7 +129,7 @@ def test_checkpoint_metadata_targets_last_aligned_boundary() -> None:
 def test_checkpoint_offset_is_relative_to_query_start() -> None:
     # 256 tokens computed, 144 more this step: the boundary at 384 lands 128
     # tokens into the chunk, and cdiv(400, 64) - 2 = 5 is its slot.
-    md = _build(BatchSpec(seq_lens=[400, 64], query_lens=[144, 64]))
+    md = _build(BatchSpec(seq_lens=[400, 64], query_lens=[144, 64]), positions=[384, 0])
 
     assert md.checkpoint is not None
     torch.testing.assert_close(md.checkpoint.checkpoint_offsets, _i32([128, 0]))
@@ -134,7 +138,9 @@ def test_checkpoint_offset_is_relative_to_query_start() -> None:
 
 def test_checkpoint_metadata_avoids_live_state_row() -> None:
     # Writing the row the walk itself owns would race it.
-    md = _build(BatchSpec(seq_lens=[200, 130], query_lens=[200, 130]))
+    md = _build(
+        BatchSpec(seq_lens=[200, 130], query_lens=[200, 130]), positions=[192, 128]
+    )
 
     assert md.checkpoint is not None
     # `mamba_get_block_table_tensor` hands the walk block (seq_len - 1) // bs.
@@ -151,9 +157,7 @@ def test_checkpoint_metadata_skips_chunk_without_boundary() -> None:
 
 
 def test_checkpoint_metadata_skips_null_reservation() -> None:
-    # Only the chunk that finishes a prompt gets a block reserved; every
-    # earlier one leaves the shared null block, which nothing hashes and
-    # writing it would corrupt every other request's scratch row.
+    # A null destination must remain masked by the exporter.
     batch = BatchSpec(seq_lens=[200], query_lens=[200])
     common = create_common_attn_metadata(
         batch, BLOCK_SIZE, torch.device("cuda"), arange_block_indices=True
@@ -161,7 +165,7 @@ def test_checkpoint_metadata_skips_null_reservation() -> None:
     # cdiv(200, 64) - 2 = 2 is the checkpoint slot.
     common.block_table_tensor[0, 2] = NULL_BLOCK_ID
 
-    md = _builder().build(0, common)
+    md = _builder().build(0, common.replace(mamba_ckpt_positions=[192]))
 
     assert md.checkpoint is not None
     torch.testing.assert_close(md.checkpoint.state_indices, _i32([NULL_BLOCK_ID]))
@@ -171,6 +175,7 @@ def test_checkpoint_metadata_absent_without_reserved_block() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),
         num_prefill_checkpoint_blocks=0,
+        positions=[192],
     )
     assert getattr(md, "checkpoint", None) is None
 
@@ -196,7 +201,7 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
 
     md = _builder(num_spec=num_spec).build(
         0,
-        common,
+        common.replace(mamba_ckpt_positions=[0, 192, 0, 0, 64]),
         num_accepted_tokens=torch.ones(rows, dtype=torch.int32, device="cuda"),
         num_decode_draft_tokens_cpu=torch.tensor(
             [num_spec, -1, num_spec, -1, -1], dtype=torch.int32
@@ -219,6 +224,7 @@ def test_checkpoint_metadata_absent_without_prefix_caching() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),
         enable_prefix_caching=False,
+        positions=[192],
     )
     assert getattr(md, "checkpoint", None) is None
 
@@ -385,7 +391,7 @@ def test_conv_checkpoint_honours_transposed_cache_view() -> None:
 def test_checkpoint_metadata_indexes_prefill_rows_after_decodes() -> None:
     # The chunk kernel receives the prefill tail alone, so the metadata has to
     # be indexed the same way or it snapshots the wrong request's boundary.
-    md = _build(BatchSpec(seq_lens=[64, 200], query_lens=[1, 200]))
+    md = _build(BatchSpec(seq_lens=[64, 200], query_lens=[1, 200]), positions=[0, 192])
 
     assert md.num_decodes == 1 and md.num_prefills == 1
     assert md.checkpoint is not None
@@ -447,6 +453,7 @@ def test_finer_prefix_match_unit_moves_checkpoint_to_hash_grid() -> None:
         BatchSpec(seq_lens=[700], query_lens=[700]),
         block_size=256,
         prefix_match_unit=128,
+        positions=[640],
     )
 
     assert md.checkpoint is not None

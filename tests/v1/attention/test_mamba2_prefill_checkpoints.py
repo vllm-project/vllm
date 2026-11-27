@@ -105,7 +105,7 @@ def _create_mamba2_builder(
     return builder
 
 
-def _build(builder, seq_lens, query_lens):
+def _build(builder, seq_lens, query_lens, positions=None):
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
         MAMBA_BLOCK_SIZE,
@@ -114,7 +114,10 @@ def _build(builder, seq_lens, query_lens):
     )
     # create_common_attn_metadata leaves is_prefilling unset; the builder
     # asserts on it. Every row here is a full prefill.
-    common = common.replace(is_prefilling=torch.ones(len(seq_lens), dtype=torch.bool))
+    common = common.replace(
+        is_prefilling=torch.ones(len(seq_lens), dtype=torch.bool),
+        mamba_ckpt_positions=positions,
+    )
     return builder.build(common_prefix_len=0, common_attn_metadata=common)
 
 
@@ -123,7 +126,9 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     builder = _create_mamba2_builder()
     # Row 0 (seq_len 900) checkpoints at 768; row 1 (seq_len 100) is too short
     # for a checkpoint at all.
-    meta = _build(builder, seq_lens=[900, 100], query_lens=[900, 100])
+    meta = _build(
+        builder, seq_lens=[900, 100], query_lens=[900, 100], positions=[768, 0]
+    )
 
     assert meta.checkpoint_chunk_idx is not None
     assert meta.checkpoint_meta is not None
@@ -147,7 +152,9 @@ def test_update_block_table_regathers_checkpoint_blocks():
     first group's indices writes every group's checkpoint into its blocks.
     """
     builder = _create_mamba2_builder()
-    meta = _build(builder, seq_lens=[900, 100], query_lens=[900, 100])
+    meta = _build(
+        builder, seq_lens=[900, 100], query_lens=[900, 100], positions=[768, 0]
+    )
     assert meta.checkpoint_meta is not None
 
     # A second group's table: same shape as the first, disjoint block ids.
@@ -166,6 +173,6 @@ def test_update_block_table_regathers_checkpoint_blocks():
 
 def test_builder_emits_nothing_without_prefix_caching():
     builder = _create_mamba2_builder(enable_prefix_caching=False)
-    meta = _build(builder, seq_lens=[900], query_lens=[900])
+    meta = _build(builder, seq_lens=[900], query_lens=[900], positions=[768])
 
     assert meta.checkpoint_chunk_idx is None

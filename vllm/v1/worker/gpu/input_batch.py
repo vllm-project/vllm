@@ -127,6 +127,10 @@ class InputBatch:
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    # [num_reqs] absolute Mamba checkpoint positions in batch order.
+    # 0 skips export for that request. None skips export for the entire batch.
+    mamba_ckpt_positions: list[int] | None = None
+
     # [num_reqs] admitted draft counts in flight to the host. Set only under
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None

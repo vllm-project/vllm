@@ -54,6 +54,7 @@ class ShortConv(MambaBase, PluggableLayer):
         self.conv_dim = dim
         self.L_cache = config.conv_L_cache
         self.bias = config.conv_bias
+        self.min_prefill_checkpoint_offset = self.L_cache - 1
         self._checkpoint_exporter = MambaPrefillCheckpointExporter(
             state_len=self.L_cache - 1
         )

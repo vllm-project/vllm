@@ -331,6 +331,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         self.ssm_state_size = ssm_state_size
         self.conv_kernel_size = conv_kernel_size
+        self.min_prefill_checkpoint_offset = conv_kernel_size - 1
         self._checkpoint_exporter = MambaPrefillCheckpointExporter(
             state_len=conv_kernel_size - 1
         )

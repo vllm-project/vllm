@@ -206,14 +206,20 @@ def test_mamba_checkpoint_admission_matches_allocation(
     computed_tokens = 23040
 
     def estimate(num_tokens, total_computed_tokens, apply_admission_cap):
+        checkpoint = (num_tokens - 1) // block_size * block_size
+        if not apply_admission_cap:
+            manager.record_chunk_and_checkpoint(
+                request_id, total_computed_tokens, num_tokens, checkpoint
+            )
         return manager.get_num_blocks_to_allocate(
-            request_id=request_id,
-            num_tokens=num_tokens,
-            new_computed_blocks=[],
-            total_computed_tokens=total_computed_tokens,
-            num_local_computed_tokens=total_computed_tokens,
-            num_tokens_main_model=num_tokens,
+            request_id,
+            num_tokens,
+            [],
+            total_computed_tokens,
+            total_computed_tokens,
+            num_tokens,
             apply_admission_cap=apply_admission_cap,
+            mamba_ckpt_position=checkpoint,
         )
 
     estimate(computed_tokens, 0, False)
@@ -266,7 +272,11 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
     )
 
     def step(start, end):
-        estimate = manager.get_num_blocks_to_allocate("r", end, [], start, start, end)
+        checkpoint = (end - 1) // block_size * block_size
+        manager.record_chunk_and_checkpoint("r", start, end, checkpoint)
+        estimate = manager.get_num_blocks_to_allocate(
+            "r", end, [], start, start, end, mamba_ckpt_position=checkpoint
+        )
         free_before = pool.get_num_free_blocks()
         manager.allocate_new_blocks("r", end, end)
         assert free_before - pool.get_num_free_blocks() == estimate

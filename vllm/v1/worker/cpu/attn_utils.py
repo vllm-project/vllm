@@ -263,6 +263,7 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     causal: bool | torch.Tensor = True,
     rswa_prefix_lens: torch.Tensor | None = None,
+    mamba_ckpt_positions: list[int] | None = None,
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
@@ -311,6 +312,7 @@ def build_attn_metadata(
             causal=causal,
             positions=positions,
             is_prefilling=group_is_prefilling,
+            mamba_ckpt_positions=mamba_ckpt_positions,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,

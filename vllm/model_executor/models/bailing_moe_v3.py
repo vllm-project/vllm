@@ -688,6 +688,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         self.num_heads = config.num_attention_heads
         self.local_num_heads = self.num_heads // self.tp_size
         self.conv_size = config.short_conv_kernel_size
+        self.min_prefill_checkpoint_offset = self.conv_size - 1
         self.layer_id = layer_id
         self.prefix = prefix
         self.model_config = model_config

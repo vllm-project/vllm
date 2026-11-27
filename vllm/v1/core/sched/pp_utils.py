@@ -33,7 +33,10 @@ class PPMicrobatchCap:
             or not config.pp_microbatch_min_tokens
             or not config.enable_chunked_prefill
             or config.disable_chunked_mm_input
-            or scheduler.need_mamba_block_aligned_split
+            or (
+                scheduler.has_mamba_layers
+                and scheduler.cache_config.enable_prefix_caching
+            )
         ):
             return None
         return cls(scheduler, pp_size, config.pp_microbatch_min_tokens)

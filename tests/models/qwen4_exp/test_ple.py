@@ -92,6 +92,34 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
+@pytest.mark.parametrize(
+    "layer_cls", [Qwen4ExpPLELayer, Qwen4ExpPLELayerAMD], ids=["nvidia", "amd"]
+)
+def test_ple_checkpoint_alignment_and_window(layer_cls, tmp_path, dist_init):
+    """The dilated conv needs six inputs but can export at any token offset."""
+    text_config = Qwen4ExpTextConfig(
+        hidden_size=64,
+        vocab_size=64,
+        ngram_size=3,
+        ple_conv_kernel_size=3,
+        ple_embed_dim=8,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        eos_token_id=0,
+    )
+    Qwen4ExpConfig(
+        text_config=text_config, architectures=["Qwen4ExpForConditionalGeneration"]
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(model_config=ModelConfig(model=str(tmp_path)))
+    config.cache_config.mamba_block_size = 32
+    with set_current_vllm_config(config):
+        layer = layer_cls(text_config, config, prefix="model.layers.0.ple")
+        params = layer.get_kv_cache_config(config).manager_config.params
+    assert params.prefill_checkpoint_alignment == 1
+    assert params.min_prefill_checkpoint_offset == 6
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("full_graph", [False, True])
 @pytest.mark.parametrize(

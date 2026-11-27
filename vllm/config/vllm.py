@@ -3755,7 +3755,7 @@ class VllmConfig:
             )
 
     def validate_block_size(self) -> None:
-        """Validate block_size against DCP and mamba constraints.
+        """Validate block_size against DCP constraints.
 
         Called after Platform.update_block_size_for_backend() has
         finalised block_size.
@@ -3772,17 +3772,6 @@ class VllmConfig:
                 f"Block_size({block_size}) should be greater "
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
-            )
-        # Mamba prefix caching constraints
-        if (
-            self.cache_config.enable_prefix_caching
-            and self.model_config is not None
-            and self.model_config.is_hybrid
-        ):
-            assert not self.scheduler_config.disable_chunked_mm_input, (
-                "Chunked MM input is required because we need the flexibility "
-                "to schedule a multiple of block_size tokens even if they are "
-                "in the middle of a mm input"
             )
 
     @model_validator(mode="after")

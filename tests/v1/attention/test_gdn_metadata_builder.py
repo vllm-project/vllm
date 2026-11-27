@@ -504,7 +504,10 @@ def _create_checkpoint_builder_and_batch(
     table = common.block_table_tensor + 1
     if num_spec:
         table = torch.cat([table, torch.zeros(3, num_spec, dtype=table.dtype)], dim=1)
-    common = common.replace(block_table_tensor=table)
+    common = common.replace(
+        block_table_tensor=table,
+        mamba_ckpt_positions=[0, 96 if prefix_match_unit else 64, 0],
+    )
     kwargs = {}
     if num_spec:
         kwargs = dict(
@@ -714,7 +717,9 @@ def test_build_packs_flashinfer_checkpoint_plan(num_spec):
             ),
             num_accepted_tokens=torch.ones(4, dtype=torch.int32),
         )
-    common = common.replace(block_table_tensor=table)
+    common = common.replace(
+        block_table_tensor=table, mamba_ckpt_positions=[0, 192, 256, 0]
+    )
 
     plan = builder.build(0, common, **kwargs).flashinfer_checkpoint_plan
 

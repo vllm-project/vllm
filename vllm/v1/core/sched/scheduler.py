@@ -38,7 +38,7 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -72,7 +72,6 @@ from vllm.v1.engine import (
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_reusable_prefix_length,
-    is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.metrics.iteration_workload import (
     QueuedWorkloadTally,
@@ -445,31 +444,27 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-        self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.enable_prefix_caching
-        )
         self.pp_microbatch_cap = PPMicrobatchCap.create(
             self, self.parallel_config.pipeline_parallel_size
         )
-        # TODO: Support models with multiple Mamba specs that require different
-        # prefill checkpoint alignments instead of selecting the first one.
-        self.mamba_prefill_checkpoint_alignment = next(
-            (
-                group.manager_config.params.prefill_checkpoint_alignment
-                for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.manager_config.params, MambaManager.Params)
-            ),
-            None,
+        mamba_prefix_caching = (
+            self.has_mamba_layers and self.cache_config.enable_prefix_caching
         )
-        self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.manager_config.params, MambaManager.Params)
-            or group.manager_config.params.num_prefill_checkpoint_blocks > 0
-            for group in kv_cache_config.kv_cache_groups
+        self.mamba_prefill_checkpoint_alignment = (
+            self.kv_cache_manager.mamba_checkpoint_alignment
         )
-        # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
-        # Split there only if the backend cannot save it within the final chunk.
+        self.need_mamba_block_aligned_split = (
+            mamba_prefix_caching and self.mamba_prefill_checkpoint_alignment is None
+        )
+        if self.need_mamba_block_aligned_split and supports_mm_inputs:
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Mamba backends without internal checkpoints require chunked MM "
+                "input to stop at block boundaries inside a multimodal item."
+            )
+        self.mamba_block_size = self.kv_cache_manager.mamba_block_size
+        # Running-state-only backends stop at the prompt's last reusable hash.
         self.mamba_partial_cache_hit = (
-            self.need_mamba_block_aligned_split
+            mamba_prefix_caching
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
@@ -601,10 +596,7 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
-        ckpt_block_size = (
-            self.hash_block_size if self.mamba_partial_cache_hit else self.block_size
-        )
+        block_size = self.mamba_block_size
         last_cache_position = get_reusable_prefix_length(
             request.num_tokens,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
@@ -612,25 +604,6 @@ class Scheduler(SchedulerInterface):
         )
 
         end = start + num_new_tokens
-        checkpoint_position = get_reusable_prefix_length(
-            prefill_end,
-            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
-            alignment_tokens=ckpt_block_size,
-        )
-        use_internal_checkpoint = (
-            self.mamba_has_prefill_checkpoint_blocks
-            and end >= prefill_end
-            and is_mamba_prefill_checkpoint_valid(
-                query_start=start,
-                query_end=end,
-                checkpoint_position=checkpoint_position,
-                hash_block_size=self.hash_block_size,
-                mamba_block_size=block_size,
-                checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
-            )
-        )
-        if use_internal_checkpoint:
-            last_cache_position = 0
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances
@@ -652,7 +625,7 @@ class Scheduler(SchedulerInterface):
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
                 alignment_tokens=self.hash_block_size,
             )
-            if self.mamba_partial_cache_hit and not use_internal_checkpoint
+            if self.mamba_partial_cache_hit
             else 0
         )
         junction = request.shared_prefix_boundary
@@ -672,9 +645,7 @@ class Scheduler(SchedulerInterface):
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
-            next_block_boundary
-            if start % block_size != 0 and not use_internal_checkpoint
-            else 0,
+            next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Stop at the prompt checkpoint unless the backend saves it internally.
@@ -688,6 +659,48 @@ class Scheduler(SchedulerInterface):
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
+
+    def _mamba_checkpoint_aligned_split(
+        self, request: Request, start: int, num_new_tokens: int
+    ) -> int:
+        """Align a non-final prefill chunk for the next checkpoint-capable forward."""
+        alignment = self.mamba_prefill_checkpoint_alignment
+        if alignment is None or num_new_tokens == 0:
+            return num_new_tokens
+
+        end = start + num_new_tokens
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if end >= prefill_end:
+            # The final prefill chunk has no next prefill chunk to align.
+            return num_new_tokens
+
+        chunk_end = round_down(end, alignment)
+        if chunk_end == end:
+            # The planned end already gives the next chunk an aligned start.
+            return num_new_tokens
+        scheduler_config = self.scheduler_config
+        if chunk_end <= start:
+            can_defer = not request.has_encoder_inputs and alignment < min(
+                # A full step is capped by the scheduler limit, the batch capacity
+                # after draft lookahead, and the optional per-request prefill limit.
+                self.max_num_scheduled_tokens,
+                scheduler_config.max_num_batched_tokens - self.num_lookahead_tokens,
+                scheduler_config.long_prefill_token_threshold
+                or self.max_num_scheduled_tokens,
+                # Remaining prefill tokens after reserving the drafter's lookahead.
+                prefill_end - start - self.num_prefill_lookahead,
+            )
+            # Wait if a text request has more than one alignment unit of both
+            # budget and remaining input. Otherwise run the available tokens now.
+            return 0 if can_defer else num_new_tokens
+        if scheduler_config.disable_chunked_mm_input and request.has_encoder_inputs:
+            lo, hi = get_mm_features_in_window(
+                request.mm_features, chunk_end, end + self.num_prefill_lookahead
+            )
+            if lo < hi:
+                # Keep the encoder's cut when rounding would trim an indivisible input.
+                return num_new_tokens
+        return chunk_end - start
 
     def _get_local_prefix_cache_hit(
         self, request: Request, max_cache_hit_length: int | None = None
@@ -883,6 +896,9 @@ class Scheduler(SchedulerInterface):
             # Multi-module MTP: avoid ending a prefill chunk within
             # num_prefill_lookahead of the prefill end.
             num_new_tokens = self._reserve_prefill_lookahead(
+                request, request.num_computed_tokens, num_new_tokens
+            )
+            num_new_tokens = self._mamba_checkpoint_aligned_split(
                 request, request.num_computed_tokens, num_new_tokens
             )
 
@@ -1456,6 +1472,9 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = self._reserve_prefill_lookahead(
                         request, num_computed_tokens, num_new_tokens
                     )
+                    num_new_tokens = self._mamba_checkpoint_aligned_split(
+                        request, num_computed_tokens, num_new_tokens
+                    )
 
                     if (
                         request.has_encoder_inputs
@@ -1785,6 +1804,9 @@ class Scheduler(SchedulerInterface):
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
+            mamba_ckpt_positions=self.kv_cache_manager.get_mamba_ckpt_positions(
+                num_scheduled_tokens
+            ),
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
@@ -3726,7 +3748,9 @@ class Scheduler(SchedulerInterface):
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
-            prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
+            mamba_ckpt_position=self.kv_cache_manager.compute_mamba_checkpoint_position(
+                request, request.num_computed_tokens, full_num_tokens
+            ),
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:

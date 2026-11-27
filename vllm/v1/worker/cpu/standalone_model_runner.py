@@ -859,6 +859,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
         return InputBatch(
             req_ids=req_ids,
+            mamba_ckpt_positions=scheduler_output.get_mamba_ckpt_positions(req_ids),
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs,
             idx_mapping=idx_mapping,

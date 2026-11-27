@@ -38,7 +38,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
-    get_mamba_prefill_checkpoint_grid,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
@@ -762,6 +761,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
         self.conv_kernel_size = config.linear_conv_kernel_dim
+        self.min_prefill_checkpoint_offset = self.conv_kernel_size - 1
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
@@ -1013,22 +1013,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return self._checkpoint_alignment
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
-        if not self._exports_checkpoints:
+        if self._checkpoint_alignment is None:
             return None
-        # FlashInfer emits states at one stride for the whole batch, the gcd of
-        # the offsets; keeping every offset on the prefix-cache grid keeps that
-        # stride a multiple of the grid, which bounds the states emitted.
-        return get_mamba_prefill_checkpoint_grid(vllm_config)
+        return get_mamba_prefill_checkpoint_alignment(vllm_config)
 
     @functools.cached_property
     def _exports_checkpoints(self) -> bool:
-        # Known only once every layer is built: a Mamba layer that cannot
-        # checkpoint (e.g. Qwen4Exp's PLE short conv) keeps the scheduler
-        # splitting the prefill instead.
-        return (
-            self._checkpoint_alignment is not None
-            and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
-        )
+        # Check support after every Mamba layer has registered its backend.
+        return self.get_kv_cache_checkpoint_alignment(self.vllm_config) is not None
 
     @functools.cached_property
     def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
@@ -1043,16 +1035,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 (self.vllm_config.scheduler_config.max_num_seqs, *state_shape),
                 self.get_state_dtype()[1],
             )
-        # Offsets on the grid emit at most one state per grid step of a batch.
-        # Read lazily: the block size is final only after the model is built.
+        # Each exported state requires at least one aligned stride of inputs.
+        alignment = self.get_kv_cache_checkpoint_alignment(self.vllm_config)
+        assert alignment is not None
         return (
-            (
-                cdiv(
-                    self._max_num_batched_tokens,
-                    get_mamba_prefill_checkpoint_grid(self.vllm_config),
-                ),
-                *state_shape,
-            ),
+            (cdiv(self._max_num_batched_tokens, alignment), *state_shape),
             torch.float32,
         )
 

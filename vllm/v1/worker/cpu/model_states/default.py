@@ -158,6 +158,7 @@ class DefaultModelState(ModelState):
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=input_batch.prompt_lens,
+            mamba_ckpt_positions=input_batch.mamba_ckpt_positions,
             req_idx=input_batch.idx_mapping_np,
             fast_prefill=input_batch.fast_prefill,
             model_specific_attn_metadata=model_specific_attn_metadata,

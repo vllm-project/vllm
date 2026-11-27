@@ -245,7 +245,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         BLOCK_SIZE,
         DEVICE,
         arange_block_indices=True,
-    ).replace(is_prefilling=torch.tensor([True]))
+    ).replace(is_prefilling=torch.tensor([True]), mamba_ckpt_positions=[48])
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         prefill_common.block_table_tensor,
         prefill_common.seq_lens,
@@ -308,13 +308,14 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 
 @requires_gpu
 @pytest.mark.parametrize(
-    "batch,prefix_match_unit,hit_alignment,expected_offsets,expected_states",
+    "batch,prefix_match_unit,hit_alignment,positions,expected_offsets,expected_states",
     [
         (
             BatchSpec(seq_lens=[50, 32], query_lens=[50, 16]),
             None,
             16,
             [48, 0],
+            [48, 0],
             [2, NULL_BLOCK_ID],
         ),
         (
@@ -322,21 +323,30 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             16,
             16,
             [48, 0],
+            [48, 0],
             [2, NULL_BLOCK_ID],
         ),
-        (BatchSpec(seq_lens=[530], query_lens=[530]), None, 128, [512], [32]),
-        (BatchSpec(seq_lens=[530], query_lens=[50]), None, 128, [32], [32]),
-        (BatchSpec(seq_lens=[530], query_lens=[530]), 16, 16, [528], [32]),
-        (BatchSpec(seq_lens=[530], query_lens=[50]), 16, 16, [48], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[530]), None, 128, [512], [512], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[50]), None, 128, [512], [32], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[530]), 16, 16, [528], [528], [32]),
+        (BatchSpec(seq_lens=[530], query_lens=[50]), 16, 16, [528], [48], [32]),
     ],
 )
 def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
-    batch, prefix_match_unit, hit_alignment, expected_offsets, expected_states
+    batch,
+    prefix_match_unit,
+    hit_alignment,
+    positions,
+    expected_offsets,
+    expected_states,
 ):
     device = GPU_DEVICE
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
-    ).replace(is_prefilling=torch.tensor([True] * len(batch.seq_lens)))
+    ).replace(
+        is_prefilling=torch.tensor([True] * len(batch.seq_lens)),
+        mamba_ckpt_positions=positions,
+    )
     builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
@@ -399,6 +409,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     common_attn_metadata = common_attn_metadata.replace(
         is_prefilling=torch.tensor([True]),
         block_table_tensor=common_attn_metadata.block_table_tensor + 1,
+        mamba_ckpt_positions=[expected_offset or 0],
     )
     builder = _make_builder(
         KimiK3KDAMetadataBuilder,

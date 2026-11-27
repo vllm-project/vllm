@@ -56,12 +56,12 @@ def _stub(manager, block_size, hash_block_size):
         hash_block_size < block_size and manager.coordinator.enable_partial_hash_hits
     )
     return SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size),
+        mamba_block_size=block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         max_num_scheduled_tokens=1 << 20,
         num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
         hash_block_size=hash_block_size,
-        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=(
             partial_hit and manager.mamba_shared_prefix_checkpoint
@@ -327,14 +327,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     running = request.num_computed_tokens
     assert not mamba.req_to_blocks["r"][running // block_size].is_null
     request.shared_prefix_boundary = running
-    assert (
-        mamba._cache_partial_tail_block(
-            request,
-            running,
-            retention_interval=manager.coordinator.retention_interval,
-        )
-        is None
-    )
+    assert mamba._cache_partial_tail_block(request, running) is None
 
 
 @pytest.mark.parametrize("lookahead", [0, 1])

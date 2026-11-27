@@ -184,6 +184,11 @@ def _slice_input_batch(
     return replace(
         input_batch,
         req_ids=input_batch.req_ids[req_start : min(req_stop, input_batch.num_reqs)],
+        mamba_ckpt_positions=(
+            input_batch.mamba_ckpt_positions[req_start:req_stop]
+            if input_batch.mamba_ckpt_positions
+            else None
+        ),
         num_reqs=num_reqs,
         num_reqs_after_padding=num_reqs_padded,
         idx_mapping=input_batch.idx_mapping[req_start:req_stop],

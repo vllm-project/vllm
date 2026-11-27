@@ -75,6 +75,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         prefill_runs_as_decode_np=None,
         dcp_local_seq_lens=None,
         positions=positions,
+        mamba_ckpt_positions=None,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
     )
     expected_metadata = {"layer": object()}
@@ -151,6 +152,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         prefill_runs_as_decode_np=np.array([False, True, False]),
         dcp_local_seq_lens=None,
         positions=torch.zeros(12, dtype=torch.int64),
+        mamba_ckpt_positions=None,
         prompt_lens=None,
     )
     build_attn_metadata = Mock(return_value={})
@@ -229,6 +231,7 @@ def _input_batch(
         seq_lens=seq_lens,
         dcp_local_seq_lens=None,
         positions=torch.zeros(num_tokens, dtype=torch.int64),
+        mamba_ckpt_positions=None,
         prompt_lens=None,
     )
 

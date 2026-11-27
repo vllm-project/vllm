@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -29,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .utils import create_requests, new_kv_cache_group
+from .utils import create_requests, create_scheduler, new_kv_cache_group
 
 pytestmark = pytest.mark.cpu_test
 
@@ -57,10 +58,12 @@ MAMBA_GROUP_ID = 1
         (0, 100, 96, 8, 64, 16, True),
         (0, 100, 96, 8, 64, None, False),
         (8, 100, 96, 8, 64, 16, False),
+        (448, 665, 512, 256, 256, 64, True),
         (15360, 16896, 16768, 128, 1536, 16, False),
         (15360, 16960, 16896, 128, 1536, 16, True),
         (15360, 16960, 16768, 128, 1536, 16, True),
-        (16064, 18433, 18432, 128, 1536, 16, False),
+        (16064, 18433, 18432, 128, 1536, 16, True),
+        (8, 100, 88, 16, 64, 16, False),
     ],
 )
 def test_mamba_prefill_checkpoint_valid(
@@ -138,33 +141,44 @@ def _split(
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
 ) -> int:
-    """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
+    """Exercise the chunk sizing policy for this backend."""
     stub = SimpleNamespace(
         block_size=MAMBA_BLOCK_SIZE,
-        cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
+        mamba_block_size=MAMBA_BLOCK_SIZE,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
-        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        scheduler_config=SimpleNamespace(
+            long_prefill_token_threshold=0,
+            disable_chunked_mm_input=False,
+            max_num_batched_tokens=max_num_scheduled_tokens,
+        ),
+        num_lookahead_tokens=0,
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=False,
-        hash_block_size=ATTN_BLOCK_SIZE,
-        mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
         mamba_prefill_checkpoint_alignment=(
-            16 if num_prefill_checkpoint_blocks > 0 else None
+            16 if num_prefill_checkpoint_blocks else None
         ),
+        hash_block_size=ATTN_BLOCK_SIZE,
+        num_prefill_lookahead=0,
     )
-    return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+    if not num_prefill_checkpoint_blocks:
+        num_new_tokens = Scheduler._mamba_block_aligned_split(
+            stub, request, num_new_tokens
+        )
+    return Scheduler._mamba_checkpoint_aligned_split(
+        stub, request, request.num_computed_tokens, num_new_tokens
+    )
 
 
 @pytest.mark.parametrize(
     ("prompt_len", "num_new_tokens", "lookahead", "expected"),
     [
         (2002, 2002, 0, 2002),
-        (3602, 2000, 0, MAMBA_BLOCK_SIZE),
+        (3602, 2000, 0, 2000),
         (3602, 3602, 1, 3602),
-        (3602, 512, 1, 0),
-        (3602, 1700, 1, MAMBA_BLOCK_SIZE),
+        (3602, 512, 1, 512),
+        (3602, 1700, 1, 1696),
     ],
 )
 def test_internal_checkpoint_split(
@@ -180,6 +194,160 @@ def test_internal_checkpoint_split(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    "budget, other_tokens, prompt_len, threshold, lookahead, mm, steps",
+    [
+        (256, 226, 600, 0, 0, None, (0, 256)),  # Retry with the full step budget.
+        (48, 18, 42, 0, 0, None, (30, 12)),  # Use the short budget near the tail.
+        (256, 226, 42, 0, 0, None, (30, 12)),  # Large budget, short prompt.
+        (64, 34, 160, 0, 0, None, (30, 34)),  # Budget is exactly one alignment unit.
+        (32, 0, 160, 0, 0, None, (32, 32)),  # A full step cannot reach 64.
+        (256, 1, 160, 32, 0, None, (32, 32)),  # Per-request chunk limit.
+        (64, 0, 66, 0, 4, None, (62, 4)),  # MTP needs four trailing tokens.
+        # MM requests advance even when the first image is in a later chunk.
+        (256, 226, 600, 0, 0, (False, [(400, 16)]), (30, 226)),
+        (256, 226, 600, 0, 0, (True, [(400, 16)]), (30, 226)),
+        (576, 0, 880, 0, 0, (True, [(20, 576)]), (20, 576)),  # Indivisible image.
+        # Both images fit separately. Deferring at 30 would retry the same pair.
+        (576, 0, 880, 0, 0, (False, [(0, 20), (30, 576)]), (30, 546)),
+    ],
+)
+def test_checkpoint_chunk_defers_only_with_alignment_headroom(
+    budget, other_tokens, prompt_len, threshold, lookahead, mm, steps
+):
+    """Deferral requires a text-only request with room in the budget and the prompt."""
+    disable_chunked_mm_input, images = mm or (False, [])
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf" if images else "facebook/opt-125m",
+        max_num_batched_tokens=max(576 if images else 64, budget),
+        max_model_len=1024,
+        long_prefill_token_threshold=threshold,
+        block_size=256,
+        enable_prefix_caching=True,
+        skip_tokenizer_init=not images,
+        disable_chunked_mm_input=disable_chunked_mm_input,
+        mamba_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=256, shapes=((1, 1),), dtypes=(torch.float32,)),
+            enable_prefix_caching=True,
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=64,
+        ),
+    )
+    scheduler.max_num_scheduled_tokens = budget
+    scheduler.num_prefill_lookahead = lookahead
+    if other_tokens:
+        (other,) = create_requests(
+            1, num_tokens=other_tokens, req_ids=["other"], block_size=256
+        )
+        scheduler.add_request(other)
+    (request,) = create_requests(
+        1,
+        num_tokens=prompt_len,
+        block_size=256,
+        mm_positions=[
+            [PlaceholderRange(offset=start, length=length) for start, length in images]
+        ],
+    )
+    scheduler.add_request(request)
+    for expected in steps:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
+
+
+def test_scheduler_sends_only_committed_checkpoint_positions():
+    """Only requests scheduled in this step contribute checkpoint positions."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=670,
+        max_model_len=2048,
+        block_size=256,
+        enable_prefix_caching=True,
+        skip_tokenizer_init=True,
+        mamba_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=256, shapes=((1, 1),), dtypes=(torch.float32,)),
+            enable_prefix_caching=True,
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=64,
+        ),
+    )
+    (request,) = create_requests(1, num_tokens=1160, block_size=256)
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {request.request_id: 640}
+    assert first.mamba_ckpt_positions == {request.request_id: 512}
+    assert first.get_mamba_ckpt_positions(["decode", request.request_id]) == [0, 512]
+    request.shared_prefix_boundary = 768
+    last = scheduler.schedule()
+    assert last.num_scheduled_tokens == {request.request_id: 520}
+    assert last.mamba_ckpt_positions == {request.request_id: 1024}
+
+    # The first request still holds its checkpoint while only the short one runs.
+    (short,) = create_requests(1, num_tokens=16, req_ids=["short"], block_size=256)
+    scheduler.add_request(short)
+    following = scheduler.schedule()
+    assert following.num_scheduled_tokens == {"short": 16}
+    assert following.mamba_ckpt_positions == {}
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert not scheduler.kv_cache_manager.get_mamba_ckpt_positions([request.request_id])
+    assert first.mamba_ckpt_positions == {request.request_id: 512}
+
+
+@pytest.mark.parametrize(
+    ("disable_chunked_mm_input", "image_start", "first_end", "second_end"),
+    [(True, 580, 690, 1344), (False, 580, 640, 1280), (False, 646, 640, 1280)],
+)
+def test_checkpoint_alignment_respects_mm_chunking(
+    disable_chunked_mm_input, image_start, first_end, second_end
+):
+    """Align splittable images and reuse any image encoded ahead of the decoder."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=690,
+        max_model_len=2048,
+        block_size=128,
+        disable_chunked_mm_input=disable_chunked_mm_input,
+        enable_prefix_caching=True,
+        mamba_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=128, shapes=((1, 1),), dtypes=(torch.float32,)),
+            enable_prefix_caching=True,
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=64,
+        ),
+    )
+    (request,) = create_requests(
+        1,
+        num_tokens=1590,
+        block_size=128,
+        mm_positions=[[PlaceholderRange(offset=image_start, length=690 - image_start)]],
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {request.request_id: first_end}
+    assert first.scheduled_encoder_inputs == {request.request_id: [0]}
+    second = scheduler.schedule()
+    assert not second.scheduled_encoder_inputs
+    assert second.num_scheduled_tokens == {request.request_id: second_end - first_end}
+    assert second.mamba_ckpt_positions == (
+        {request.request_id: 1152} if first_end == 640 else {}
+    )
+    last = scheduler.schedule()
+    assert last.num_scheduled_tokens == {request.request_id: 1590 - second_end}
+    assert last.mamba_ckpt_positions == {request.request_id: 1536}
+
+
+def test_block_aligned_split_requires_chunked_mm_input():
+    with pytest.raises(AssertionError, match="require chunked MM input"):
+        create_scheduler(
+            model="llava-hf/llava-1.5-7b-hf",
+            disable_chunked_mm_input=True,
+            enable_prefix_caching=True,
+            mamba_layer_config=MambaManager.layer_config(
+                MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
+                enable_prefix_caching=True,
+            ),
+        )
 
 
 def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
@@ -365,18 +533,13 @@ def test_poisoning_is_block_size_independent(
     ("num_prefill_checkpoint_blocks", "lookahead"),
     [(0, 1), (1, 0)],
 )
-def test_unaligned_resume_never_runs_past_its_block(
+def test_unaligned_resume_final_chunk_with_and_without_checkpoint_support(
     partial_hit: bool,
     resume_at: int,
     num_prefill_checkpoint_blocks: int,
     lookahead: int,
 ) -> None:
-    """A prefill resuming mid-block must re-align before crossing a boundary.
-
-    Reachable with a finer `prefix_match_unit` (its partial-tail stop ends a
-    chunk off-grid by design) and with unaligned external tokens from a KV
-    connector.
-    """
+    """Backends without checkpoint export stop at a block boundary on resume."""
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
     # The trailing hash boundary has finalized lookahead in this prompt.
@@ -393,7 +556,9 @@ def test_unaligned_resume_never_runs_past_its_block(
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         )
         assert num_new > 0, f"no progress at {pos}"
-        if pos % MAMBA_BLOCK_SIZE != 0:
+        if num_prefill_checkpoint_blocks:
+            assert pos + num_new == prompt_len
+        elif pos % MAMBA_BLOCK_SIZE != 0:
             block_end = (pos // MAMBA_BLOCK_SIZE + 1) * MAMBA_BLOCK_SIZE
             assert pos + num_new <= block_end, (
                 f"chunk [{pos}, {pos + num_new}) starts mid-block and runs past "
@@ -412,9 +577,11 @@ def test_unaligned_resume_never_runs_past_its_block(
 
 
 @pytest.mark.parametrize("resume_at", [400, 1200, 1216])
-def test_junction_stop_is_floored_to_the_block_grid(resume_at: int) -> None:
-    """A mid-block resume whose chunk an internal checkpoint lets cross the
-    boundary must still stop at the block holding the junction's state."""
+@pytest.mark.parametrize("checkpoint_blocks", [0, 1])
+def test_final_chunk_with_block_floored_junction(
+    resume_at: int, checkpoint_blocks: int
+) -> None:
+    """A final chunk with export support runs through the junction."""
     prompt_len = 3602
     junction = MAMBA_BLOCK_SIZE + 1200
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
@@ -424,6 +591,11 @@ def test_junction_stop_is_floored_to_the_block_grid(resume_at: int) -> None:
         request,
         prompt_len - resume_at,
         num_hash_lookahead_tokens=1,
-        num_prefill_checkpoint_blocks=1,
+        num_prefill_checkpoint_blocks=checkpoint_blocks,
     )
-    assert resume_at + num_new == junction // MAMBA_BLOCK_SIZE * MAMBA_BLOCK_SIZE
+    expected = (
+        prompt_len
+        if checkpoint_blocks
+        else junction // MAMBA_BLOCK_SIZE * MAMBA_BLOCK_SIZE
+    )
+    assert resume_at + num_new == expected

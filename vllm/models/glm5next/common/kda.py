@@ -453,6 +453,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
         self.conv_size = config.linear_conv_kernel_dim
+        self.min_prefill_checkpoint_offset = self.conv_size - 1
         assert self.num_heads % self.tp_size == 0
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 

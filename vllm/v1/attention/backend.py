@@ -491,6 +491,9 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
+    # Absolute Mamba export positions in batch order, excluding padding rows.
+    mamba_ckpt_positions: list[int] | None = None
+
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
@@ -556,6 +559,7 @@ class CommonAttentionMetadata:
             ),
             seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            mamba_ckpt_positions=maybe_slice_reqs(self.mamba_ckpt_positions),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )

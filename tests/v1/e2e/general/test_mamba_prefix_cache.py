@@ -17,7 +17,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -79,32 +79,10 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         self: KVCacheManager,
         request: Request,
         num_new_tokens: int,
-        num_new_computed_tokens: int = 0,
-        new_computed_blocks: KVCacheBlocks | None = None,
-        num_lookahead_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-        delay_cache_blocks: bool = False,
-        num_encoder_tokens: int = 0,
-        full_sequence_must_fit: bool = False,
-        reserved_blocks: int = 0,
-        has_scheduled_reqs: bool = True,
-        skip_zeroing_group_ids: tuple[int, ...] = (),
+        *args,
+        **kwargs,
     ):
-        ret = original_allocate_slots_fn(
-            self,
-            request,
-            num_new_tokens,
-            num_new_computed_tokens,
-            new_computed_blocks,
-            num_lookahead_tokens,
-            num_external_computed_tokens,
-            delay_cache_blocks,
-            num_encoder_tokens,
-            full_sequence_must_fit,
-            reserved_blocks,
-            has_scheduled_reqs,
-            skip_zeroing_group_ids,
-        )
+        ret = original_allocate_slots_fn(self, request, num_new_tokens, *args, **kwargs)
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
                 request.request_id
@@ -515,18 +493,18 @@ def get_internal_checkpoint_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, 3072, [0, 0, 0, 0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    B * 5,
-                    B * 5,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1],
-                    (4, 9),
+                    3072,
+                    B * 10 - 3072,
+                    [0, 0, 0, 0, int(async_scheduling), 1, 0, 0, 1, 1, 1, 1, 1],
+                    (5, 9),
                     (-1, -1),
                 ),
                 StepAction(
                     B * 10,
                     4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    [0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1]
                     if async_scheduling
                     else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
@@ -539,12 +517,12 @@ def get_internal_checkpoint_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, 3072, [0, 0, 0, 0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    B * 5,
-                    B * 5 + 10,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1],
-                    (4, 10),
+                    3072,
+                    B * 10 + 10 - 3072,
+                    [0, 0, 0, 0, int(async_scheduling), 1, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (5, 10),
                     (-1, -1),
                 ),
             ],

@@ -200,6 +200,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
+        self.min_prefill_checkpoint_offset = self.conv_size - 1
         self.use_full_rank_gate = kda_config.get("use_full_rank_gate", False)
 
         if self.use_full_rank_gate:

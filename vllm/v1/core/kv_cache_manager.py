@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from math import lcm
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
@@ -24,6 +25,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    get_reusable_prefix_length,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -180,10 +182,31 @@ class KVCacheManager:
             enable_mamba_shared_prefix_checkpoint
             and self.coordinator.enable_partial_hash_hits
         )
-        if self.mamba_shared_prefix_checkpoint:
-            for manager in self.coordinator.single_type_managers:
-                if isinstance(manager, MambaManager):
-                    manager.shared_prefix_checkpoint = True
+        self.mamba_managers = tuple(
+            manager
+            for manager in self.coordinator.single_type_managers
+            if isinstance(manager, MambaManager) and manager.prefix_caching
+        )
+        self.mamba_block_size = (
+            self.mamba_managers[0].block_size
+            if self.mamba_managers
+            else scheduler_block_size
+        )
+        for manager in self.mamba_managers:
+            manager.shared_prefix_checkpoint = self.mamba_shared_prefix_checkpoint
+        alignments = [
+            manager.prefill_checkpoint_alignment
+            for manager in self.mamba_managers
+            if manager.has_prefill_checkpoint_blocks
+            and manager.prefill_checkpoint_alignment
+        ]
+        self.mamba_checkpoint_alignment = (
+            lcm(*alignments)
+            if enable_caching
+            and alignments
+            and len(alignments) == len(self.mamba_managers)
+            else None
+        )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         # Called when an allocation is short; returns True only if it can now proceed.
@@ -415,6 +438,54 @@ class KVCacheManager:
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
+    def compute_mamba_checkpoint_position(
+        self, request: Request, query_start: int, query_end: int
+    ) -> int:
+        """Choose a writable internal checkpoint for this forward, or zero."""
+        if self.mamba_checkpoint_alignment is None:
+            return 0
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if query_start + 1 >= prefill_end:
+            return 0
+        num_lookahead_tokens = self.block_pool.num_hash_lookahead_tokens
+        checkpoint_limit = get_reusable_prefix_length(
+            min(query_end, request.num_tokens), num_lookahead_tokens
+        )
+        candidate_positions: list[int] = []
+        if query_end >= prefill_end:
+            tail_checkpoint = round_down(
+                checkpoint_limit, self.mamba_managers[0].cache_hit_alignment_tokens
+            )
+        else:
+            # Shared-prefix junction takes priority for non-final chunks.
+            junction = request.shared_prefix_boundary
+            if self.mamba_shared_prefix_checkpoint and query_start < junction <= min(
+                checkpoint_limit, request.num_prompt_tokens
+            ):
+                candidate_positions.append(junction)
+            hash_block_size = self.block_pool.hash_block_size
+            prompt_tail = get_reusable_prefix_length(
+                request.num_prompt_tokens, num_lookahead_tokens, hash_block_size
+            )
+            # Prefer the prompt tail if it is the last reachable hash boundary.
+            if (
+                self.coordinator.enable_partial_hash_hits
+                and prompt_tail <= checkpoint_limit < prompt_tail + hash_block_size
+            ):
+                tail_checkpoint = prompt_tail
+            else:
+                tail_checkpoint = round_down(checkpoint_limit, self.mamba_block_size)
+        candidate_positions.append(tail_checkpoint)
+        for position in candidate_positions:
+            if all(
+                manager.can_write_checkpoint(
+                    request.request_id, query_start, query_end, position
+                )
+                for manager in self.mamba_managers
+            ):
+                return position
+        return 0
+
     def allocate_slots(
         self,
         request: Request,
@@ -562,10 +633,6 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
-        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
-        # extends it to resumed requests replaying their output tokens.
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
-
         full_sequence_shortfall = 0
         if full_sequence_must_fit:
             # First check whether the full request sequence fits.
@@ -580,7 +647,9 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
-                prefill_end=prefill_end,
+                mamba_ckpt_position=self.compute_mamba_checkpoint_position(
+                    request, total_computed_tokens, full_num_tokens
+                ),
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             full_sequence_shortfall = (
@@ -609,6 +678,15 @@ class KVCacheManager:
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
+        # An async load does not execute a forward and cannot produce a checkpoint.
+        start = total_computed_tokens
+        end = num_tokens_main_model
+        ckpt_position = (
+            self.compute_mamba_checkpoint_position(request, start, end)
+            if not delay_cache_blocks and num_new_tokens > 0
+            else 0
+        )
+
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
@@ -618,7 +696,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
-            prefill_end=prefill_end,
+            mamba_ckpt_position=ckpt_position,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -655,6 +733,10 @@ class KVCacheManager:
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
+        for manager in self.mamba_managers:
+            manager.record_chunk_and_checkpoint(
+                request.request_id, start, end, ckpt_position
+            )
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,
@@ -781,6 +863,13 @@ class KVCacheManager:
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
         return self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
+
+    def get_mamba_ckpt_positions(self, request_ids: Iterable[str]) -> dict[str, int]:
+        """Return committed checkpoint positions for the scheduled requests."""
+        if self.mamba_checkpoint_alignment is None:
+            return {}
+        # Allocation records the same token position in every Mamba group.
+        return self.mamba_managers[0].get_checkpoint_positions(request_ids)
 
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""

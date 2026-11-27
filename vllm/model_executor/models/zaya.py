@@ -75,6 +75,7 @@ class ZayaCCA(MambaBase, nn.Module):
         self.head_dim = config.head_dim
         self.kv_groups = self.num_q_heads // self.num_kv_heads
         self.history_len = config.cca_time0 + config.cca_time1 - 2
+        self.min_prefill_checkpoint_offset = self.history_len
         self.q_dim = self.num_q_heads * self.head_dim
         kv_dim = self.num_kv_heads * self.head_dim
 

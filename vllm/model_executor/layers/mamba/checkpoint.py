@@ -11,53 +11,29 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    get_reusable_prefix_length,
-    is_mamba_prefill_checkpoint_valid,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def compute_mamba_prefill_checkpoints(
     seq_lens: list[int],
     query_lens: list[int],
-    hash_block_size: int,
     mamba_block_size: int,
-    checkpoint_alignment: int | None,
-    cache_hit_alignment_tokens: int,
-    num_hash_lookahead_tokens: int,
+    positions: list[int],
+    request_rows: list[int],
 ) -> tuple[list[int], list[int]]:
-    """Per-row internal prefill checkpoint offsets and cache block columns.
-
-    Backends call this instead of re-deriving the rules, so they decline in
-    lockstep with the scheduler and `MambaManager`: allocating a checkpoint
-    block without writing it leaves the prefix cache serving uninitialized
-    state.
-
-    Returns:
-        `(offsets, cols)`: the checkpoint's offset into each row's query and
-        its block-table column. `0` and `-1` mean the row has none.
-
-    """
-    offsets: list[int] = []
-    cols: list[int] = []
-    for seq_len, query_len in zip(seq_lens, query_lens):
-        query_start = seq_len - query_len
-        position = get_reusable_prefix_length(
-            seq_len,
-            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
-            alignment_tokens=cache_hit_alignment_tokens,
-        )
-        valid = is_mamba_prefill_checkpoint_valid(
-            query_start=query_start,
-            query_end=seq_len,
-            checkpoint_position=position,
-            hash_block_size=hash_block_size,
-            mamba_block_size=mamba_block_size,
-            checkpoint_alignment=checkpoint_alignment,
-        )
-        offsets.append(position - query_start if valid else 0)
-        cols.append(cdiv(seq_len, mamba_block_size) - 2 if valid else -1)
+    """Translate scheduled positions to query offsets and block columns in row order."""
+    offsets = [0] * len(request_rows)
+    cols = [-1] * len(request_rows)
+    for i, row in enumerate(request_rows):
+        # Scheduler positions exclude graph padding. Zero marks a row without export.
+        if row >= len(positions) or not positions[row]:
+            continue
+        query_start = seq_lens[row] - query_lens[row]
+        offsets[i] = positions[row] - query_start
+        # The checkpoint occupies the column just before the running state.
+        cols[i] = cdiv(seq_lens[row], mamba_block_size) - 2
+        assert 0 < offsets[i] < query_lens[row]
+        assert cols[i] >= query_start // mamba_block_size
     return offsets, cols
 
 
@@ -118,24 +94,18 @@ class MambaPrefillCheckpointBuilder:
         if self.checkpoint_alignment is None:
             return None
         cache_config = self.vllm_config.cache_config
-        hash_block_size = cache_config.hash_block_size
-        cache_hit_alignment_tokens = cache_config.cache_hit_alignment_tokens
-        if hash_block_size is None or cache_hit_alignment_tokens is None:
-            # Unresolved only for the minimal KV cache built for profiling.
+        positions = m.mamba_ckpt_positions
+        if not positions or cache_config.hash_block_size is None:
             return None
         assert m.seq_lens_cpu_upper_bound is not None
         all_query_lens = m.query_start_loc_cpu.diff().tolist()
         query_lens = [all_query_lens[row] for row in request_rows]
-        seq_lens = m.seq_lens_cpu_upper_bound.tolist()
-        block_size = self.kv_cache_spec.block_size
         checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
-            [seq_lens[row] for row in request_rows],
-            query_lens,
-            hash_block_size=hash_block_size,
-            mamba_block_size=block_size,
-            checkpoint_alignment=self.checkpoint_alignment,
-            cache_hit_alignment_tokens=cache_hit_alignment_tokens,
-            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
+            m.seq_lens_cpu_upper_bound.tolist(),
+            all_query_lens,
+            mamba_block_size=self.kv_cache_spec.block_size,
+            positions=positions,
+            request_rows=request_rows,
         )
         if not any(checkpoint_offsets):
             return None
