@@ -367,7 +367,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         o = torch.zeros(
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+        # The DCP combine weights each rank's output by exp(lse_r - lse); keep it fp32.
+        lse = torch.zeros(B, q_num_heads, dtype=torch.float32, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         if envs.VLLM_BATCH_INVARIANT:

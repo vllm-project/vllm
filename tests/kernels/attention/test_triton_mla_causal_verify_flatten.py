@@ -9,8 +9,9 @@ has to be expressed through the per-row sequence lengths -- row `t` gets
 `seq_len - (query_len - 1) + t`, i.e. the committed prefix plus block tokens
 `0..t`. A non-causal draft block instead gives every row the same full extent.
 
-The kernel is replaced by a spy, so these tests assert on the `block_table`
-and `seq_lens` the backend actually submits and need no GPU or Triton runtime.
+The kernel is replaced by a spy, so these tests assert on the `block_table`,
+`seq_lens` and `lse` the backend actually submits and need no GPU or Triton
+runtime.
 """
 
 from types import SimpleNamespace
@@ -84,13 +85,15 @@ def _run_forward_mqa(
 ):
     """Drive forward_mqa with the decode kernel spied out.
 
-    Returns the `(block_table, seq_lens)` handed to `decode_attention_fwd`.
+    Returns the `block_table`, `seq_lens` and `lse` handed to
+    `decode_attention_fwd`.
     """
     captured: dict = {}
 
     def spy(q, kv_cache, kv_c_cache, o, lse, block_table, b_seq_len, *args, **kwargs):
         captured["block_table"] = block_table.detach().clone()
         captured["seq_lens"] = b_seq_len.detach().clone()
+        captured["lse"] = lse.detach().clone()
 
     metadata = _make_metadata(seq_lens, query_len, causal)
     rows = metadata.num_decode_tokens if q_rows is None else q_rows
@@ -219,6 +222,26 @@ def test_causal_multi_token_decode_is_rejected_under_dcp():
 
     # Non-causal rows all take the same extent, which stays correct when local.
     _run_forward_mqa(_seq_lens(4), query_len=4, causal=False, dcp_world_size=2)
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_decode_lse_is_fp32_for_bf16_query(dcp_world_size):
+    """The stage-2 kernel computes the decode LSE in fp32, and the DCP
+    combine weights each rank's output by exp(lse_r - lse), so a bf16 LSE
+    rounds the exponent and the error reaches ~2.5% of the output.
+
+    Regression guard for #70420: the LSE used to be allocated in the query
+    dtype, so a bf16 model stored a rounded LSE. Fails pre-fix, where the
+    kernel receives a bf16 LSE.
+    """
+    captured = _run_forward_mqa(
+        _seq_lens(1), query_len=1, causal=False, dcp_world_size=dcp_world_size
+    )
+
+    assert captured["lse"].dtype == torch.float32, (
+        f"decode LSE must be fp32 for a bf16 query, got {captured['lse'].dtype}"
+    )
+    assert captured["lse"].shape == (len(CONTEXT_LENS), NUM_HEADS)
 
 
 def test_workspace_reservation_is_sized_by_the_sliding_window():
