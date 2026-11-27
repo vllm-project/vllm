@@ -712,13 +712,8 @@ class KimiK3DSAAttention(nn.Module):
         # attention softmax, independent of rotary application); nvidia/dsa.py
         # applies it identically.
         rope_parameters: dict = dict(getattr(config, "rope_parameters", None) or {})
-        rope_scaling = (
-            rope_parameters
-            if rope_parameters.get("rope_type") not in (None, "default")
-            else None
-        )
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+        if rope_parameters.get("rope_type") not in (None, "default"):
+            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
             scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale

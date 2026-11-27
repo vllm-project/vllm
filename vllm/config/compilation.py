@@ -6,14 +6,13 @@ import enum
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import field, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     CompileFactors,
     Range,
@@ -23,7 +22,6 @@ from vllm.config.utils import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -126,6 +124,42 @@ def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
     return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
 
 
+@dataclass(frozen=True)
+class CUDAGraphCaptureDefaults:
+    """Default capture limits, separate from explicit compilation settings.
+
+    Leaving both split limits unset preserves the shared token grid. Platforms
+    opting into independent grids supply both prefill and decode limits.
+    """
+
+    legacy_max_tokens: int = 512
+    max_prefill_tokens: int | None = None
+    max_decode_requests: int | None = None
+    max_decode_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.max_prefill_tokens is None) != (self.max_decode_requests is None):
+            raise ValueError("Set both prefill and decode defaults, or neither.")
+        for name, minimum in (
+            ("legacy_max_tokens", 1),
+            ("max_prefill_tokens", 0),
+            ("max_decode_requests", 0),
+            ("max_decode_tokens", 1),
+        ):
+            value = getattr(self, name)
+            if value is None and name != "legacy_max_tokens":
+                continue
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}.")
+
+
+def validate_cudagraph_capture_grid(sizes: list[int], limit: int) -> list[int]:
+    """Normalize a platform grid, rejecting sizes outside its resolved limit."""
+    if any(type(size) is not int or not 1 <= size <= limit for size in sizes):
+        raise ValueError(f"Platform CUDA graph sizes must be integers in [1, {limit}].")
+    return sorted(set(sizes))
+
+
 class CUDAGraphMode(enum.Enum):
     """Constants for the cudagraph mode in CompilationConfig.
     Meanwhile, the subset enum `NONE`, `PIECEWISE` and `FULL` are also
@@ -186,6 +220,38 @@ class CUDAGraphMode(enum.Enum):
         return self != CUDAGraphMode.NONE
 
 
+# Max size of the input tensor per world size per device capability
+# to use flashinfer fused allreduce.  Kept here rather than in
+# allreduce_rms_fusion.py (which never reads it back) so that config
+# resolution can look up the table without importing the fusion pass
+# module — importing it eagerly drags in flashinfer, whose import
+# initializes CUDA as a side effect.
+FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
+    90: {
+        2: 64,  # 64MB
+        4: 2,  # 2MB
+        8: 0.5,  # 0.5MB
+    },
+    100: {
+        2: 64,  # 64MB
+        4: 32,  # 32MB
+        8: 1,  # 1MB
+        16: 64,  # 64MB (mnnvl multi-node)
+    },
+    103: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 4,  # 4MB
+        16: 64,  # 64MB (mnnvl multi-node)
+    },
+    107: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 2,  # 2MB
+    },
+}
+
+
 @config
 class PassConfig:
     """Configuration for custom Inductor passes.
@@ -241,18 +307,8 @@ class PassConfig:
     float in MB.
     Unspecified will fallback to default values
     which are compute capability and world size dependent.
-        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
-            90: {
-                2: 64,  # 64MB
-                4: 2,  # 2MB
-                8: 1,  # 1MB
-            },
-            100: {
-                2: 64,  # 64MB
-                4: 32,  # 32MB
-                8: 1,  # 1MB
-            },
-        }, where key is the device capability"""
+    See `FI_ALLREDUCE_FUSION_MAX_SIZE_MB`, keyed by device
+    capability."""
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
@@ -272,9 +328,6 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
-            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
-        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():
@@ -444,7 +497,6 @@ class DynamicShapesConfig:
     assume_32_bit_indexing: bool = False
     """
     whether all tensor sizes can use 32 bit indexing.
-    `True` requires PyTorch 2.10+
     """
 
     def compile_factors(self) -> CompileFactors:
@@ -487,8 +539,6 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_copy_inputs`]
-        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
         - [`compile_ranges_endpoints`]
@@ -564,8 +614,8 @@ class CompilationConfig:
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
     Examples:
 
-    - 'all,-op1' to enable all except op1
-    - 'none,+op1,+op2' to enable only op1 and op2
+    - ['all', '-op1'] to enable all except op1
+    - ['none', '+op1', '+op2'] to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>CompilationMode.NONE and
@@ -806,13 +856,8 @@ class CompilationConfig:
     token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
-    """Whether to copy input tensors for
-    cudagraph. If the caller can guarantee that the same input buffers
-    are always used, it can set this to False. Otherwise, it should
-    set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False.
-    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
-    """
+    """Deprecated: has no effect and will be removed in v0.37.0. The model runner
+    already passes persistent input buffers to CUDA graphs."""
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
     LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
@@ -927,7 +972,6 @@ class CompilationConfig:
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention_with_output",
         "vllm::mamba_mixer2",
-        "vllm::mamba_mixer",
         "vllm::short_conv",
         "vllm::zaya_cca",
         # Qwen4Exp's AMD backend still uses these splitting ops.
@@ -938,8 +982,11 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::qwen_gdn_attention_core_fused_norm_rocm",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
+        "vllm::nemotron_shortcut_gdp",
+        "vllm::nemotron_shortcut_sdsa_indexer",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
@@ -968,6 +1015,7 @@ class CompilationConfig:
             "enabled_custom_ops",
             "disabled_custom_ops",
             "static_forward_context",
+            "cudagraph_copy_inputs",
         }
 
         return get_compile_factors(self, ignored_factors)
@@ -1064,6 +1112,12 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
+        if self.cudagraph_copy_inputs:
+            logger.warning_once(
+                "`cudagraph_copy_inputs` is deprecated, has no effect and will be "
+                "removed in v0.37.0."
+            )
+
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -1076,25 +1130,11 @@ class CompilationConfig:
         if KEY not in self.inductor_compile_config:
             self.inductor_compile_config[KEY] = False
 
-        # Tie inductor runtime assertions to debug logging mode.
-        # These assertions add ~2ms overhead per forward pass on large
-        # models (e.g., DeepSeek-R1 671B: ~340 assert_size_stride + ~60
-        # assert_alignment calls per forward). PyTorch >= 2.12 has a
-        # native fix (assert-once), so we only apply this workaround on
-        # older versions. On torch < 2.12, enable asserts only when
-        # VLLM_LOGGING_LEVEL=DEBUG. Users can still override explicitly
-        # via --compilation-config '{"inductor_compile_config":
-        # {"size_asserts": true, ...}}'.
-        # See: https://github.com/pytorch/pytorch/issues/177719
-        if not is_torch_equal_or_newer("2.12.0.dev"):
-            enable_asserts = envs.VLLM_LOGGING_LEVEL == "DEBUG"
-            for key in (
-                "size_asserts",
-                "alignment_asserts",
-                "scalar_asserts",
-            ):
-                self.inductor_compile_config.setdefault(key, enable_asserts)
-
+        if self.inductor_passes:
+            from vllm.compilation.passes.inductor_pass import (
+                CallableInductorPass,
+                InductorPass,
+            )
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), f"pass {k} should be callable or a qualified name"
@@ -1113,30 +1153,14 @@ class CompilationConfig:
             )
 
         if (
-            self.pass_config.enable_qk_norm_rope_fusion
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(zhuhaoran): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
-            self.pass_config.fuse_rope_kvcache
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(Rohan138): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
             self.pass_config.fuse_qk_norm_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
         ):
+            # MRoPE is not an IR op yet; its fusion still matches the custom op.
             self.custom_ops.append("+rotary_embedding")
 
         if (
-            is_torch_equal_or_newer("2.9.0.dev")
-            and "combo_kernels" not in self.inductor_compile_config
+            "combo_kernels" not in self.inductor_compile_config
             and "benchmark_combo_kernel" not in self.inductor_compile_config
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
@@ -1151,15 +1175,6 @@ class CompilationConfig:
                 "deterministic", getattr(inductor_config, "deterministic", False)
             )
             self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
-
-        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
-            "2.9.0.dev"
-        ):
-            raise ValueError(
-                "use_inductor_graph_partition is only "
-                "supported with torch>=2.9.0.dev. Set "
-                "use_inductor_graph_partition=False instead."
-            )
 
         for op in self.custom_ops:
             if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
@@ -1532,6 +1547,34 @@ class CompilationConfig:
             return f"-{op}" not in self.custom_ops
 
         return f"+{op}" in self.custom_ops
+
+    def uses_rope_kernel(self) -> bool:
+        """Whether RoPE should lower to a kernel instead of Inductor codegen.
+
+        True when the RoPE custom op is enabled or a RoPE fusion pass is on, so
+        RoPE left unfused keeps the kernel. Safe before custom_ops resolution.
+        """
+        pass_config = self.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            or pass_config.fuse_rope_kvcache
+            or pass_config.fuse_qk_norm_rope_kvcache
+        ):
+            return True
+        if self.custom_ops.count("all") + self.custom_ops.count("none") != 1:
+            # custom_ops is resolved in VllmConfig; a bare CompilationConfig
+            # (e.g. platform priority defaults in tests) only has explicit ops.
+            return "+rotary_embedding" in self.custom_ops
+        return self.is_custom_op_enabled("rotary_embedding")
+
+    def enable_custom_op_by_default(self, op: str) -> None:
+        """Enable `op` unless `custom_ops` already enables or disables it.
+
+        Idempotent, because `VllmConfig.__post_init__` runs again on every
+        `replace()` and shares this config with the original.
+        """
+        if f"+{op}" not in self.custom_ops and f"-{op}" not in self.custom_ops:
+            self.custom_ops.append(f"+{op}")
 
     def resolve_cudagraph_mode_and_sizes(
         self,

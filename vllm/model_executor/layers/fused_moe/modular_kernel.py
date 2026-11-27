@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    check_activation_quant_fallback,
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
@@ -140,7 +141,17 @@ class FusedMoEActivationFormat(Enum):
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
-@dataclass
+class RouterWeightApplication(Enum):
+    """Stage applying per-token topk weights for input-side router weighting.
+
+    RoutedScaleMode separately controls the layer's routed_scaling_factor.
+    """
+
+    PREPARE = "prepare"
+    GEMM1 = "gemm1"
+
+
+@dataclass(slots=True)
 class ExpertTokensMetadata:
     """Metadata regarding expert-token routing."""
 
@@ -303,7 +314,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         return False
 
     def supports_dbo(self) -> bool:
-        """Indicates whether or not this class can run under DBO.
+        """Indicates whether or not this class can run under the
+        `dispatch-combine-overlap` DBO schedule.
 
         Defaults to supports_async(). A class whose synchronous prepare and
         finalize do their own DBO compute/comm handoff can return True here
@@ -493,6 +505,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> PrepareMonolithicResultType:
         """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
@@ -502,6 +515,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
             defer input quantization to the FusedMoEExpertsModular
+        - a1_scale: The scales of `a1` when the caller already quantized it.
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -639,6 +653,9 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    def router_weight_application(self) -> RouterWeightApplication:
+        return RouterWeightApplication.PREPARE
+
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
@@ -664,15 +681,16 @@ class FusedMoEExperts(ABC):
         def _make_reason(reason: str) -> str:
             return f"kernel does not support {reason}"
 
+        executed_key = cls.executed_activation_key(weight_key, activation_key)
         if not cls._supports_current_device():
             return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
-        elif not cls._supports_quant_scheme(weight_key, activation_key):
+        elif not cls._supports_quant_scheme(weight_key, executed_key):
             return False, _make_reason(
-                f"quantization scheme {weight_key}x{activation_key}"
+                f"quantization scheme {weight_key}x{executed_key}"
             )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason(
@@ -687,7 +705,7 @@ class FusedMoEExperts(ABC):
         elif moe_config.require_decomposed_backend and cls.is_monolithic():
             return False, _make_reason("routes adjusted after routing")
         elif not cls._supports_routing_method(
-            moe_config.routing_method, weight_key, activation_key
+            moe_config.routing_method, weight_key, executed_key
         ):
             return False, _make_reason(f"routing method {moe_config.routing_method}")
         elif not cls._supports_router_logits_dtype(
@@ -707,6 +725,10 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif reason := check_activation_quant_fallback(
+            cls.__name__, activation_key, executed_key
+        ):
+            return False, reason
         return True, None
 
     @staticmethod
@@ -724,6 +746,17 @@ class FusedMoEExperts(ABC):
         non-gated MoE models like Nemotron-Nano.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_key`. Weight-only kernels return None; `is_supported_config`
+        then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids, the
+        fallback."""
+        return activation_key
 
     @staticmethod
     @abstractmethod
@@ -1198,6 +1231,8 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self.router_weight_application = fused_experts.router_weight_application()
+
         # Experts that globalize recv_topk_idx themselves let a capable prepare
         # stage skip its standalone launch.
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -1210,6 +1245,7 @@ class FusedMoEKernelModularImpl:
             and hasattr(prepare_finalize, "defer_globalize")
         ):
             prepare_finalize.defer_globalize = True
+
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1354,7 +1390,10 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
+            assert (
+                not dbo_enabled("dispatch-combine-overlap")
+                or self.prepare_finalize.supports_dbo()
+            )
 
             (
                 a1q,
@@ -1539,7 +1578,10 @@ class FusedMoEKernelModularImpl:
 
         """
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
+            assert (
+                not dbo_enabled("dispatch-combine-overlap")
+                or self.prepare_finalize.supports_dbo()
+            )
 
             self.prepare_finalize.finalize(
                 output,
@@ -1614,9 +1656,9 @@ class FusedMoEKernelModularImpl:
             expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
                 from the global expert space to the local expert space of the
                 expert parallel shard.
-            apply_router_weight_on_input (bool): When true, the topk weights are
-                applied directly on the inputs. This is only applicable when
-                topk is 1.
+            apply_router_weight_on_input (bool): Apply router weights before
+                activation. The expert selects whether prepare or GEMM1 applies
+                them; GEMM2 and finalize must not apply them again.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
@@ -1639,13 +1681,17 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        apply_router_weight_in_prepare = (
+            apply_router_weight_on_input
+            and self.router_weight_application == RouterWeightApplication.PREPARE
+        )
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,
             topk_ids,
             global_num_experts,
             expert_map,
-            apply_router_weight_on_input,
+            apply_router_weight_in_prepare,
         )
 
         # Stash the original unquantized hidden states on the LoRA context
@@ -1727,10 +1773,12 @@ class FusedMoEKernelMonolithicImpl:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
+        `a1q_scale` is given when the caller already quantized `hidden_states`.
         """
         # Only experts with _supports_hash_routing() accept these.
         hash_kwargs: dict[str, Any] = {}
@@ -1744,6 +1792,7 @@ class FusedMoEKernelMonolithicImpl:
             router_logits=router_logits,
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+            a1_scale=a1q_scale,
         )
 
         routing_replay_out = None
@@ -1929,6 +1978,7 @@ class FusedMoEKernel:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1947,6 +1997,7 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            a1q_scale=a1q_scale,
         )
 
     def supports_precomputed_routing(self) -> bool:

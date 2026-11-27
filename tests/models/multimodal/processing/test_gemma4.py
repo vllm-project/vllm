@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -15,6 +16,10 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.gemma3n_mm import (
+    Gemma3nForConditionalGeneration,
+    batch_audio_features,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -34,6 +39,37 @@ from ...utils import build_model_context
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
+
+
+@pytest.mark.parametrize(
+    "sample_counts", [(161,), (320,), (321,), (161, 320), (161, 321)]
+)
+def test_audio_batching_preserves_single_frame(sample_counts):
+    """Single-frame clips retain the batch and time axes consumed by the tower."""
+    extractor = Gemma4AudioFeatureExtractor()
+    extracted = extractor(
+        [np.zeros(n, dtype=np.float32) for n in sample_counts],
+        sampling_rate=16000,
+        return_tensors="pt",
+    )
+    masks = extracted["input_features_mask"].bool()
+    features = [f[m] for f, m in zip(extracted["input_features"], masks)]
+    masks = [m[m] for m in masks]
+    field = MultiModalFieldConfig.batched("audio").field
+    batched_features, batched_masks = batch_audio_features(
+        field.reduce_data(list(field.build_elems("audio", "input_features", features))),
+        field.reduce_data(
+            list(field.build_elems("audio", "input_features_mask", masks))
+        ),
+    )
+
+    max_frames = max(f.shape[0] for f in features)
+    assert batched_features.shape == (len(sample_counts), max_frames, 128)
+    assert batched_masks.shape == (len(sample_counts), max_frames)
+    for i, (feature, mask) in enumerate(zip(features, masks)):
+        torch.testing.assert_close(batched_features[i, : len(feature)], feature)
+        assert torch.equal(batched_masks[i, : len(mask)], mask)
+        assert not batched_masks[i, len(mask) :].any()
 
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
@@ -257,7 +293,8 @@ def test_placeholder_str_is_replaced(model_id: str, modality: str):
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 @pytest.mark.parametrize(
-    "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
+    "image_kwargs",
+    [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}, {"do_resize": False}],
 )
 @pytest.mark.parametrize("video_uuid", [None, "same-video"])
 def test_video_cache_is_independent_of_image_kwargs(
@@ -543,3 +580,97 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 
     config = model.get_encoder_cudagraph_config()
     assert config.capture_axes == ((70, 140, 280, 560),)
+
+
+@pytest.mark.parametrize(
+    "model_cls", [Gemma4ForConditionalGeneration, Gemma3nForConditionalGeneration]
+)
+def test_ple_cache_follows_inputs_device(model_cls):
+    """A model built on meta (or moved after init) gets one zeroed cache on the
+    inputs' device, which later steps reuse."""
+    model = object.__new__(model_cls)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.per_layer_embeddings = torch.zeros(8, 2, 4, device="meta")
+    model._full_attn_layer_idxs = ()
+    seen = []
+
+    def backbone(*args, per_layer_inputs, **kwargs):
+        seen.append(per_layer_inputs)
+
+    model.language_model = SimpleNamespace(model=backbone)
+    inputs_embeds = torch.zeros(3, 1)
+    model(None, None, inputs_embeds=inputs_embeds)
+    first = seen[0]
+    assert first.device.type == "cpu"
+    assert first.shape == (3, 2, 4)
+    assert not first.any()
+
+    model.per_layer_embeddings[:3] = 1.0
+    model(None, None, inputs_embeds=inputs_embeds)
+    assert seen[1].data_ptr() == first.data_ptr()
+    assert bool((seen[1] == 1).all())
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize(
+    "size,kwargs,expected",
+    [
+        ((528, 1104), {"do_resize": False}, 253),
+        ((17, 4760), {}, 280),
+        (
+            (960, 960),
+            {"images_kwargs": {"do_resize": False, "max_soft_tokens": 560}},
+            400,
+        ),
+    ],
+)
+def test_image_placeholder_count(model_id, size, kwargs, expected):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    result = processor(
+        processor.info.get_hf_processor().image_token,
+        mm_items=processor.info.parse_mm_data({"image": PILImage.new("RGB", size)}),
+        hf_processor_mm_kwargs=kwargs,
+    )
+    assert result["mm_placeholders"]["image"][0].get_num_embeds() == expected
+
+
+@pytest.mark.parametrize(
+    "size,error",
+    [
+        ((47, 48), "divisible by 48"),
+        ((48, 13488), "max_soft_tokens=280"),
+    ],
+)
+def test_invalid_unresized_image(size, error):
+    ctx = build_model_context(GEMMA4_MODEL_ID, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match=error):
+        processor(
+            processor.info.get_hf_processor().image_token,
+            mm_items=processor.info.parse_mm_data({"image": PILImage.new("RGB", size)}),
+            hf_processor_mm_kwargs={"do_resize": False},
+        )
+
+
+@pytest.mark.parametrize("width,valid", [(480, True), (528, False)])
+def test_unresized_video_frame_budget(width, valid):
+    ctx = build_model_context(GEMMA4_MODEL_ID, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    frames = np.zeros((2, 336, width, 3), dtype=np.uint8)
+    items = processor.info.parse_mm_data(
+        {"video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+
+    def process():
+        return processor(
+            processor.info.get_hf_processor().video_token,
+            mm_items=items,
+            hf_processor_mm_kwargs={"do_resize": False, "max_soft_tokens": 1120},
+        )
+
+    if valid:
+        assert process()["mm_placeholders"]["video"][0].get_num_embeds() == 140
+    else:
+        with pytest.raises(ValueError, match="fixed video frame limit: 70"):
+            process()

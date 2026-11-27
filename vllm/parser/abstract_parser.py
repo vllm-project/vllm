@@ -64,7 +64,7 @@ from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamState:
     """Mutable state for `Parser.parse_delta()`. One per stream."""
 
@@ -966,7 +966,7 @@ class DelegatingParser(Parser):
                 )
             )
 
-            if reasoning_from_this_batch:
+            if reasoning_from_this_batch is not None:
                 if delta_message is None:
                     delta_message = DeltaMessage(reasoning=reasoning_from_this_batch)
                 elif not delta_message.reasoning:

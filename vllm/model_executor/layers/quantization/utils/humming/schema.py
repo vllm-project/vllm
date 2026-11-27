@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -267,12 +268,27 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     )
 
 
+def _warn_input_fallback(
+    requested: "humming_dtypes.DataType | None",
+    executed: "humming_dtypes.DataType | None",
+) -> None:
+    if requested is None or requested.num_bits >= 16 or executed == requested:
+        return
+    logger.warning_once(
+        "Humming runs %s activations as %s. Set VLLM_STRICT_QUANT_SCHEME=1 "
+        "to forbid this fallback.",
+        requested,
+        "unquantized" if executed is None or executed.num_bits >= 16 else executed,
+    )
+
+
 def check_and_fallback_input_schema(
     weight_schema: "BaseWeightSchema",
     input_schema: "BaseInputSchema",
     param_dtype: torch.dtype | None = None,
     allow_fallback: bool = True,
     allow_fp8_sm100: bool = True,
+    warn: bool = True,
 ) -> "HummingInputSchema":
     """Resolve *input_schema* against *weight_schema*, falling back if needed.
 
@@ -285,11 +301,13 @@ def check_and_fallback_input_schema(
             SM100-SM119. Humming's dense FP8 UMMA path is fast there, but the
             MoE grouped-GEMM path is not (the tuner can emit invalid two-CTA
             configs), so the MoE call sites pass False.
+        warn: whether to log fallbacks; False when only probing the result.
 
     """
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
     from vllm.utils.humming import dtypes as humming_dtypes
 
+    allow_fallback = allow_fallback and not envs.VLLM_STRICT_QUANT_SCHEME
     capability = current_platform.get_device_capability()
     assert capability is not None
     sm_version = capability.to_int()
@@ -369,7 +387,7 @@ def check_and_fallback_input_schema(
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
-            if is_deprecated(a_dtype):
+            if warn and is_deprecated(a_dtype):
                 msg = f"Humming {a_dtype} activation is slow on SM{sm_version} now."
                 logger.warning_once(msg)
             return input_schema
@@ -388,6 +406,8 @@ def check_and_fallback_input_schema(
             is_groupwise = input_group_size > 0 or weight_group_size > 0
             if input_bits == 8 and is_groupwise and not is_mxfp8:
                 # prefer wna16 for groupwise weight or groupwise input
+                if warn:
+                    _warn_input_fallback(a_dtype, None)
                 return HummingInputSchema()
 
             return input_schema
@@ -425,6 +445,8 @@ def check_and_fallback_input_schema(
                 input_quant_mode=quant_mode,
             )
             if candidate.is_compatible_with(weight_schema, param_dtype):
+                if warn:
+                    _warn_input_fallback(a_dtype, dtype)
                 return candidate
 
     raise ValueError(
@@ -432,6 +454,30 @@ def check_and_fallback_input_schema(
         f"weight schema {weight_schema} on SM{sm_version} "
         f"({allow_fallback=})"
     )
+
+
+def humming_executed_input_quant_key(
+    weight_quant_config: dict[str, Any],
+    activation_key: QuantKey | None,
+    allow_fallback: bool = True,
+) -> QuantKey | None:
+    """The activation quantization Humming runs on this device for weights
+    described by `weight_quant_config` when `activation_key` is requested.
+    None if it runs unquantized activations or rejects the request."""
+    from vllm.utils.humming import BaseWeightSchema
+
+    if activation_key is None:
+        return None
+    try:
+        executed = check_and_fallback_input_schema(
+            BaseWeightSchema.from_config(weight_quant_config),
+            quant_key_to_input_schema(activation_key),
+            allow_fallback=allow_fallback,
+            warn=False,
+        )
+    except ValueError:
+        return None
+    return input_schema_to_quant_key(executed)
 
 
 def resolve_humming_layer_config(config: dict[str, Any], prefix: str) -> dict[str, Any]:

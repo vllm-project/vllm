@@ -1,18 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
+from vllm.config.load import LoadConfig
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
@@ -21,7 +33,14 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheSpec, get_block_table_width
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayerConfig,
+    KVCacheSpec,
+    get_block_table_width,
+)
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -91,9 +110,12 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
-def _mock_backend(supported: list, *, exact: bool = False):
+def _mock_backend(
+    supported: list, *, exact: bool = False, preferred: int | None = None
+):
     """Backend accepting multiples of `supported`, or only those exact sizes
-    when `exact` (as CPU_MLA does)."""
+    when `exact` (as CPU_MLA does). `preferred` overrides the size the
+    backend asks for."""
     from vllm.v1.attention.backend import AttentionBackend
 
     class _MockBackendCls(AttentionBackend):
@@ -113,6 +135,12 @@ def _mock_backend(supported: list, *, exact: bool = False):
             def supports_block_size(cls, block_size: int | None) -> bool:
                 return block_size is None or block_size in supported
 
+        if preferred is not None:
+
+            @classmethod
+            def get_preferred_block_size(cls, default_block_size: int) -> int:
+                return preferred
+
     return _MockBackendCls
 
 
@@ -129,11 +157,43 @@ def _mock_backend(supported: list, *, exact: bool = False):
         ([[32, 64]], 32),
         # Neither divides the other, so only the LCM satisfies both.
         ([[32], [48]], 96),
+        # Both accept the default 16 and prefer 64, so the shared preference
+        # wins over 16.
+        ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
+        # A backend that rejects 16 stays on the LCM path. Preferring 256
+        # must not replace lcm(64, 32).
+        ([[64], ([MultipleOf(32)], 256)], 64),
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
-    classes = [_mock_backend(s) for s in backends]
+    classes = []
+    for spec in backends:
+        if isinstance(spec, tuple):
+            supported, preferred = spec
+            classes.append(_mock_backend(supported, preferred=preferred))
+        else:
+            classes.append(_mock_backend(spec))
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # ROCm: both backends prefer 16 while the default is 64.
+        ([([MultipleOf(16)], 16), ([MultipleOf(16)], 16)], 16),
+        # HPU: full attention and its chunked-local subclass both prefer 128.
+        ([([16, 128], 128), ([16, 128], 128)], 128),
+        # DeepSeek-V4.1 on SM90: SWA prefers 256, the indexer stays at 64.
+        # 256 is legal for both, and must not replace the default.
+        ([([64], 64), ([MultipleOf(32)], 256)], 64),
+    ],
+)
+def test_preferred_block_size_requires_a_unanimous_preference(backends, expected):
+    classes = [
+        _mock_backend(supported, preferred=preferred)
+        for supported, preferred in backends
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 64, None) == expected
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
@@ -196,12 +256,12 @@ def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
+    cache_config.enable_prefix_caching = True
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
         forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
-    return cache_config
+    return vllm_config
 
 
 @pytest.mark.parametrize(
@@ -217,9 +277,69 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
     stops the scheduler from taking any, so the block stays.
     """
-    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
+    vllm_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
 
-    assert cache_config.block_size == block_size
+    assert vllm_config.cache_config.block_size == block_size
+
+
+@pytest.mark.parametrize(
+    ("attn_block_sizes", "mamba_block_size"), [((576,), 576), ((128, 768), 384)]
+)
+def test_mamba_blocks_divide_resized_attention_blocks(
+    attn_block_sizes, mamba_block_size
+):
+    """Mamba blocks of the hybrid block (576) would grow the scheduler block of
+    attention specs resized to 128 and 768 tokens from 768 to 2304, so they
+    shrink to the largest 128-multiple of at most 576 that divides 768."""
+    vllm_config = _align_qwen3_5_blocks(64)
+    layers = vllm_config.compilation_config.static_forward_context
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        "mamba.0": layers["mamba.0"].get_kv_cache_config(vllm_config)
+    }
+    for i, block_size in enumerate(attn_block_sizes):
+        layer_configs[f"attn.{i}"] = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16
+            )
+        )
+
+    layer_configs = fit_mamba_blocks_to_attention(vllm_config, layer_configs, layers)
+
+    assert vllm_config.cache_config.mamba_block_size == mamba_block_size
+    assert layer_configs["mamba.0"].spec.block_size == mamba_block_size
+
+
+@pytest.mark.parametrize("draft_kv_heads", [2, 16])
+def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
+    """An EAGLE drafter with more KV per token than the target sets the largest
+    attention page. Sized for the target alone, the block makes that page several
+    Mamba pages, and the planner pads every Mamba page up to it."""
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    draft = SimpleNamespace(
+        use_mla=False,
+        get_num_kv_heads=lambda parallel_config: draft_kv_heads,
+        get_head_size=lambda: 128,
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=draft, draft_parallel_config=None, num_speculative_tokens=3
+    )
+    cache_config = vllm_config.cache_config
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+
+    model_config = vllm_config.model_config
+    target_page = (
+        cache_config.block_size
+        * AttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=model_config.dtype,
+        ).page_size_bytes
+    )
+    draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
+    assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
@@ -245,7 +365,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     cache_config = SimpleNamespace(
         block_size=16,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         user_specified_block_size=True,
         kv_cache_dtype_skip_layers=None,
@@ -273,13 +393,13 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -287,7 +407,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -346,7 +466,7 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
         encoder_cache.mm_features[req_id] = [
             MultiModalFeatureSpec(
-                data=None,
+                data=MultiModalKwargsItem.dummy(),
                 modality=modality,
                 identifier=f"{req_id}-0",
                 mm_position=PlaceholderRange(offset=0, length=length),
@@ -378,6 +498,7 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # silently re-streams the original checkpoint.
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
+    loader.reload_model.side_effect = partial(BaseModelLoader.reload_model, loader)
     monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
     monkeypatch.setattr(reload_inplace_module, "start_reload", Mock())
     monkeypatch.setattr(reload_inplace_module, "finish_reload", Mock())
@@ -393,9 +514,12 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
             quantization=None,
         ),
     )
-    model = Mock()
-    model.named_parameters.return_value = []
-    model.load_weights.return_value = None
+
+    class EmptyModel(torch.nn.Module):
+        def load_weights(self, weights):
+            return {name for name, _ in weights}
+
+    model = EmptyModel()
 
     reload_inplace_module.reload_weights(
         vllm_config,
@@ -408,6 +532,26 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     loader.get_all_weights.assert_called_once_with(vllm_config.model_config, model)
     cfg = vllm_config.model_config
     assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
+
+
+def test_reload_weights_uses_fresh_generic_loader(monkeypatch):
+    """A loader without its own `reload_model` keeps per-load state (e.g. EP
+    expert filters) that must not leak into a reload."""
+    load_config = LoadConfig(load_format="auto")
+    model = nn.Module()
+    bind_model_loader(model, DefaultModelLoader(load_config))
+    fresh = Mock()
+    monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: fresh)
+
+    reload_inplace_module.reload_weights(
+        SimpleNamespace(load_config=load_config, model_config=SimpleNamespace()),
+        model,
+        weights_iterator=None,
+        weights_path=None,
+        is_checkpoint_format=True,
+    )
+
+    fresh.reload_model.assert_called_once()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):

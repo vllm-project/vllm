@@ -193,7 +193,7 @@ def _issue_weight_tile(
             )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class WarpSplitKTactic:
     output_tile: int
     token_tile: int

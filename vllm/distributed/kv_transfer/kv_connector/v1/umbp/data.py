@@ -28,22 +28,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-
-
-def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    """Map each layer of a cache group to the spec describing its own pages."""
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return {name: spec.kv_cache_specs[name] for name in group.layer_names}
-    return dict.fromkeys(group.layer_names, spec)
 
 
 def _page_segments(
@@ -101,7 +91,7 @@ def tp_replicated_group_ids(
         and group.layer_names
         and all(
             isinstance(spec, AttentionSpec) and spec.max_tp_shards == 1
-            for spec in _layer_specs(group).values()
+            for spec in group.kv_cache_specs.values()
         )
     )
 
@@ -133,7 +123,7 @@ def _model_fingerprint(model_config: Any) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankTopology:
     """Model-parallel ranks that participate in one KV object."""
 
@@ -230,7 +220,7 @@ def _engine_may_load_foreign_kv(vllm_config: Any) -> bool:
     return kv_connector_may_load_foreign_kv(engine_config)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UMBPNamespace:
     """Compatibility namespace for objects stored outside the engine."""
 
@@ -255,8 +245,8 @@ class UMBPNamespace:
     ) -> UMBPNamespace:
         """Derive the namespace from a worker's per-layer KV cache config.
 
-        The scheduler's config flattens UniformTypeKVCacheSpecs groups, so the
-        scheduler adopts the namespace its workers report instead.
+        The scheduler holds a single worker's config, so it adopts the
+        namespace its workers report instead.
         """
         if (configured := cls.configured(vllm_config)) is not None:
             return configured
@@ -285,10 +275,11 @@ class UMBPNamespace:
             "groups": [
                 {
                     "layers": group.layer_names,
-                    "block_size": group.kv_cache_spec.block_size,
+                    "block_size": group.block_size,
+                    "kind": repr(group.manager_config),
                     "layer_specs": {
                         name: _spec_fingerprint(spec)
-                        for name, spec in _layer_specs(group).items()
+                        for name, spec in group.kv_cache_specs.items()
                     },
                 }
                 for group in kv_cache_config.kv_cache_groups
@@ -321,7 +312,7 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
     replicated_groups: tuple[int, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlockIdentityCodec:
     """Build stable rank-local keys from vLLM block hashes.
 
@@ -385,7 +376,7 @@ class BlockIdentityCodec:
         return topology.rank_count
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KVRegion:
     """One deterministic region in a rank-local KV object."""
 
@@ -415,7 +406,7 @@ class KVRegion:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KVLayoutDescriptor:
     """Backend-neutral description of one rank-local KV object layout."""
 
@@ -453,7 +444,7 @@ class KVLayoutPlanner:
             layer: (group_id, spec)
             for group_id, group in enumerate(config.kv_cache_groups)
             if group.enable_kv_transfer
-            for layer, spec in _layer_specs(group).items()
+            for layer, spec in group.kv_cache_specs.items()
         }
         layout = config.kv_cache_layout
         regions: list[KVRegion] = []
@@ -689,7 +680,7 @@ class KVRange(NamedTuple):
     object_offset: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlockTransferPlan:
     """One complete logical block transfer."""
 
@@ -797,7 +788,7 @@ class BlockStoreBatch(Sequence[BlockTransferPlan]):
         return replace(self, keys=keys)
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadSpec:
     """Scheduler decision for one externally loaded prefix."""
 
@@ -811,7 +802,7 @@ class LoadSpec:
         return max(self.external_tokens - self.local_tokens, 0)
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestTracker:
     """Core request state shared by every runtime mode."""
 
@@ -864,7 +855,7 @@ class TransferJobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferJobState:
     """Per-key completion state; one failed key does not fail its siblings."""
 
@@ -962,7 +953,7 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
         yield from self.store_requests.values()
 
 
-@dataclass
+@dataclass(slots=True)
 class StoreEventResult:
     """Number of workers that finished one store event."""
 

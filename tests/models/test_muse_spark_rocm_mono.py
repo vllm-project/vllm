@@ -356,7 +356,7 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TinyModel:
     lm: Any
     vllm_config: VllmConfig
@@ -385,7 +385,7 @@ def tiny_model(checkpoints):
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.muse_spark.amd.multimodal import MuseSparkForConditionalGeneration
     from vllm.utils.torch_utils import set_default_torch_dtype
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
 
     with pytest.MonkeyPatch.context() as env:
@@ -428,8 +428,8 @@ def tiny_model(checkpoints):
                 dtype=torch.bfloat16,
             )
             specs = {
-                "full": FullAttentionSpec(**kv),
-                "swa": SlidingWindowSpec(**kv, sliding_window=2048),
+                "full": AttentionSpec(**kv),
+                "swa": AttentionSpec(**kv),
             }
             yield TinyModel(lm, vllm_config, dims, before, specs)
         cleanup_dist_env_and_memory()
@@ -447,6 +447,19 @@ def test_layer_guards_follow_the_weight_finalize(tiny_model) -> None:
     ):
         assert reason in before
     assert layer_refusals(tiny_model.model, tiny_model.dims) == []
+
+
+@requires_gfx950
+def test_pooler_uses_the_default_gemm_dispatch_on_the_tiny_model(tiny_model) -> None:
+    """The model as built on this GPU (CDNA4) keeps no PyTorch-linear pin."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.models.muse_spark.amd.model import MuseSparkTorchLinearMethod
+
+    moe = tiny_model.layers[1].feed_forward
+    # MuseSparkTorchLinearMethod subclasses UnquantizedLinearMethod, so rule it out.
+    for projection in (moe.pooler, moe.unpooler):
+        assert isinstance(projection.quant_method, UnquantizedLinearMethod)
+        assert not isinstance(projection.quant_method, MuseSparkTorchLinearMethod)
 
 
 @requires_gfx950
@@ -624,7 +637,7 @@ class StockLaunches:
                 _device_view(b[name], t.shape, t.dtype).copy_(t)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _Key:
     S: int
     W: int

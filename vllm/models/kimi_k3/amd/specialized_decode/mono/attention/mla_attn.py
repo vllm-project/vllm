@@ -140,7 +140,7 @@ _STREAM = fx.Stream(None)
 _SOURCES = source_digest(".")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MlaAttnBuild:
     tokens: int  # S = requests x qlen
     qlen: int  # 4 or 8
@@ -785,27 +785,6 @@ def run(c):
             lse = empty.select(fx.Float32(float("-inf")), lse * fx.Float32(LN2))
             bo.buffer_store(lse, rsrc(a["part_lse"]), th, cache_modifier=c["cm"])
     stamp(c, 63)
-
-
-def chunk_dma(c, src, imm, dst):
-    """One chunk DMA (`k_dma`'s): `src` + `imm` (an offset off the pool,
-    or `wide` an address) -> LDS byte `dst` (uniform; lane i its 16 B at
-    + 16 i)."""
-    if const_expr(c["wide"]):
-        lds_dma(src + imm, dst)
-    else:
-        llvm.inline_asm(
-            None,
-            [
-                as_ir_value(src),
-                as_ir_value(fx.Int64(c["args"]["kv"])),
-                as_ir_value(uniform(dst - imm)),
-            ],
-            "s_mov_b32 m0, $2\n\ts_nop 0\n\t"
-            f"global_load_lds_dwordx4 $0, $1 offset:{imm}",
-            "v,s,s,~{m0},~{memory}",
-            has_side_effects=True,
-        )
 
 
 def ws_offs(c, b, t):

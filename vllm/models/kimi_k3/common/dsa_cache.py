@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import (
     DS_MLA_STATE_CONTENT_BYTES,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MLAAttentionSpec,
     get_kv_quant_mode,
@@ -159,8 +160,11 @@ class SelfAddressedMLASpec(MLAAttentionSpec):
 
 
 class KimiK3IndexerCache(DeepseekV32IndexerCache):
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SelfAddressedMLASpec:
-        return SelfAddressedMLASpec.from_spec(super().get_kv_cache_spec(vllm_config))
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        return replace(
+            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
+        )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3IndexerBackend

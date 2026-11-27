@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
@@ -76,14 +77,18 @@ def _single_group_reference(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA/ROCm platform.",
 )
+@pytest.mark.parametrize("skip_env", ["0", "1"])
 @pytest.mark.parametrize("skip_padding", [False, True])
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_kimi_grouped_topk_masks_padding_when_enabled(
-    skip_padding: bool, use_fused: bool, monkeypatch
+def test_grouped_topk_masks_padding(
+    skip_env: str, skip_padding: bool, use_fused: bool, monkeypatch
 ):
+    """Grouped top-k gives padding rows expert id -1 whenever
+    VLLM_MOE_SKIP_PADDING is on, like fused top-k; on ROCm AITER only when the
+    model opts in."""
     set_random_seed(0)
     monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", str(int(use_fused)))
-    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", skip_env)
     hidden_states = torch.randn((2, 16), device="cuda")
     gating_output = torch.randn((2, 896), device="cuda")
     is_padding = torch.tensor([False, True], device="cuda")
@@ -110,13 +115,45 @@ def test_kimi_grouped_topk_masks_padding_when_enabled(
     torch.testing.assert_close(
         topk_weights[0][order], baseline_weights[0][baseline_order]
     )
-    assert router.masks_padding is skip_padding
-    if skip_padding:
+    masks = skip_padding or not rocm_aiter_ops.is_fused_moe_enabled()
+    assert router.masks_padding is masks
+    if masks and skip_env == "1":
         assert torch.all(topk_ids[1] == -1)
         assert torch.all(topk_weights[1] == 0)
     else:
         assert torch.all(topk_ids[1] >= 0)
         assert torch.all(topk_weights[1] > 0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
+)
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_grouped_topk_skips_mask_for_rows_gathered_before_routing(
+    use_fused: bool, monkeypatch
+):
+    """Under naive DP dispatch the router sees every rank's rows, which the
+    local padding mask does not describe; route them all instead of failing
+    the kernel's mask size check."""
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", str(int(use_fused)))
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    router = GroupedTopKRouter(
+        top_k=16,
+        global_num_experts=896,
+        num_expert_group=1,
+        topk_group=1,
+        skip_padding=True,
+        e_score_correction_bias=torch.randn((896,), device="cuda"),
+    )
+    is_padding = torch.tensor([False, True], device="cuda")
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        _, topk_ids = router._compute_routing(
+            torch.randn((4, 16), device="cuda"),
+            torch.randn((4, 896), device="cuda"),
+            torch.int32,
+        )
+    assert torch.all(topk_ids >= 0)
 
 
 @pytest.mark.skipif(

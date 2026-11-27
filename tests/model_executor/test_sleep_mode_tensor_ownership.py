@@ -17,7 +17,7 @@ from ..models.utils import dummy_hf_overrides
 from ..utils import create_new_process_for_each_test
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SleepModelCase:
     name: str
     architecture: str
@@ -35,7 +35,6 @@ SLEEP_MODEL_CASES = (
         architecture="FireRedASR2ForConditionalGeneration",
         model="vllm-project/FireRedASR2-LLM-vllm",
         tensor_names=("pe",),
-        trust_remote_code=True,
     ),
     SleepModelCase(
         name="gemma3n",

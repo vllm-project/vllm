@@ -145,17 +145,22 @@ def fp4_tile_major(w: torch.Tensor) -> torch.Tensor:
     each line with two loads. On MI325X a CTA's ug GEMV takes 23.2 us in this
     order and 32.5 us in the `fp4_lane_major` order (6 rows, all 4 waves),
     with the same results bit for bit.
-    A last 32-byte step (two K blocks, the 576-wide w2 rows) is stored the
-    same way with 8 bytes a lane, 512 contiguous bytes."""
+    A last 32-byte step (two K blocks, the 576-wide w2 rows at TP4) is stored
+    the same way with 8 bytes a lane, 512 contiguous bytes. A last 16-byte
+    step (one K block, the 288-wide w2 rows at TP8) is stored with 4 bytes a
+    lane, 256 contiguous bytes."""
     kb = w.shape[-1]
     full = kb // 64 * 64
-    assert kb - full in (0, 32) and w.shape[-2] % 16 == 0, w.shape
+    rest = kb - full
+    assert rest in (0, 16, 32) and w.shape[-2] % 16 == 0, w.shape
     lm = fp4_lane_major(w).reshape(-1, 16, kb)  # [tile, r, byte]
     head = lm[..., :full].reshape(-1, 16, full // 64, 4, 16)  # [tile, r, step, j, byte]
     parts = [head.permute(0, 2, 3, 1, 4).reshape(-1, 16 * full)]
-    if kb > full:
-        tail = lm[..., full:].reshape(-1, 16, 4, 8)  # [tile, r, j, byte]
-        parts.append(tail.permute(0, 2, 1, 3).reshape(-1, 16 * 32))
+    if rest:
+        # [tile, r, j, byte] -> [tile, j, r, byte]: lane 16 j + r's bytes at
+        # lane * rest / 4.
+        tail = lm[..., full:].reshape(-1, 16, 4, rest // 4)
+        parts.append(tail.permute(0, 2, 1, 3).reshape(-1, 16 * rest))
     return torch.cat(parts, dim=-1).contiguous().view(w.shape)
 
 
@@ -180,17 +185,21 @@ def fp4_lane_major(w: torch.Tensor) -> torch.Tensor:
     Within each 64-byte step (four K blocks) the copy stores lane group j's
     four dwords together at bytes 16 j .. 16 j + 15, so one 16-byte load a
     lane reads them, and the 4 lane groups of a row read 64 contiguous bytes.
-    A last 32-byte step (two K blocks, the 576-wide w2 rows) stores lane
-    group j's two dwords at bytes 8 j .. 8 j + 7. The scale codes keep their
+    A last 32-byte step (two K blocks, the 576-wide w2 rows at TP4) stores
+    lane group j's two dwords at bytes 8 j .. 8 j + 7. A last 16-byte step
+    (one K block, the 288-wide w2 rows at TP8) is already in that order,
+    lane group j's dword at bytes 4 j .. 4 j + 3. The scale codes keep their
     order, because each K block keeps its code."""
     *lead, kb = w.shape
     full = kb // 64 * 64
     head = w[..., :full].reshape(*lead, kb // 64, 4, 4, 4).transpose(-3, -2)
     parts = [head.reshape(*lead, full)]
-    if kb > full:
-        assert kb - full == 32, w.shape
+    if kb - full == 32:
         tail = w[..., full:].reshape(*lead, 2, 4, 4).transpose(-3, -2)
         parts.append(tail.reshape(*lead, 32))
+    elif kb > full:
+        assert kb - full == 16, w.shape
+        parts.append(w[..., full:])
     return torch.cat(parts, dim=-1).contiguous()
 
 

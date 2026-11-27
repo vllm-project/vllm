@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::future::Future;
+#[cfg(test)]
+use std::io::{Read as _, Write as _};
+#[cfg(test)]
+use std::net::TcpStream;
 use std::path::Path;
 use std::pin::Pin;
+#[cfg(test)]
+use std::time::Duration;
 
 use bytes::Bytes;
 use tempfile::TempDir;
@@ -19,15 +25,67 @@ use crate::mock_engine::{
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
 use crate::protocol::request::EngineCoreRequest;
 
+#[cfg(test)]
+fn zmtp_greeting() -> [u8; 64] {
+    let mut greeting = [0_u8; 64];
+    greeting[0] = 0xff;
+    greeting[9] = 0x7f;
+    greeting[10] = 3;
+    greeting[12..16].copy_from_slice(b"NULL");
+    greeting
+}
+
+#[cfg(test)]
+fn zmtp_ready(socket_type: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"\x05READY\x0bSocket-Type");
+    body.extend_from_slice(&(socket_type.len() as u32).to_be_bytes());
+    body.extend_from_slice(socket_type);
+
+    let mut frame = vec![0x04, body.len() as u8];
+    frame.extend_from_slice(&body);
+    frame
+}
+
+#[cfg(test)]
+pub(crate) fn read_zmtp_frame(stream: &mut TcpStream) -> Vec<u8> {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).unwrap();
+    let length = if header[0] & 0x02 == 0 {
+        header[1] as usize
+    } else {
+        let mut length = [0_u8; 8];
+        length[0] = header[1];
+        stream.read_exact(&mut length[1..]).unwrap();
+        u64::from_be_bytes(length) as usize
+    };
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).unwrap();
+    body
+}
+
+#[cfg(test)]
+pub(crate) fn zmtp_handshake(stream: &mut TcpStream, socket_type: &[u8]) {
+    let timeout = Some(Duration::from_secs(5));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    stream.write_all(&zmtp_greeting()).unwrap();
+    let mut peer_greeting = [0_u8; 64];
+    stream.read_exact(&mut peer_greeting).unwrap();
+    stream.write_all(&zmtp_ready(socket_type)).unwrap();
+    read_zmtp_frame(stream);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_zmtp_stream(stream: TcpStream) {
+    socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO)).unwrap();
+    drop(stream);
+}
+
 /// Decode the `[request type, payload, aux frames...]` of an add request,
-/// resolving its prompt token ids if they were sent in an auxiliary frame.
+/// resolving the arrays sent in auxiliary frames.
 pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
-    let mut request: EngineCoreRequest =
-        rmp_serde::from_slice(&frames[1]).expect("decode add request");
-    if let Some(ids) = &mut request.prompt_token_ids {
-        ids.resolve_aux_frame(&frames[1..]).expect("resolve prompt token ids");
-    }
-    request
+    EngineCoreRequest::from_frames(&frames[1..]).expect("decode add request")
 }
 
 /// The prompt token ids of a request, which must be inline or resolved by

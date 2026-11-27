@@ -5,6 +5,7 @@
 This file owns the ROCm backend contract and the ROCm-specific execution paths
 wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 - backend contract and env gating
+- extend-kernel warmup registration
 - representative prefill, multi-batch, decode, and FP8-KV execution
 - direct kernel stress for large block tables and sliding-window masking
 """
@@ -320,19 +321,17 @@ def test_aiter_mha_backend_validates_kv_cache_block_size():
     """The backend should reject KV cache specs that cannot be gathered
     correctly by the ROCm kernel."""
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     with pytest.raises(ValueError, match="Block size must be a multiple of 16"):
         AiterFlashAttentionBackend.customize_spec(
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=15, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
             )
         )
     # block_size == 1 is the per-token page-size probe and must pass through.
     AiterFlashAttentionBackend.customize_spec(
-        FullAttentionSpec(
-            block_size=1, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
-        )
+        AttentionSpec(block_size=1, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
     )
 
 
@@ -387,6 +386,95 @@ def test_aiter_mha_platform_gate_matches_install_and_arch():
     assert is_aiter_found_and_supported() is (
         current_platform.is_rocm() and on_mi3xx() and IS_AITER_FOUND
     )
+
+
+# Extend warmup -----------------------------------------------------------
+def test_extend_warmup_skips_sliding_window_layers():
+    """A windowed extend uses the same call as a fresh prompt, so nothing is warmed."""
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionExtendKernel
+
+    keys = AiterFlashAttentionExtendKernel().get_warmup_keys(
+        dtype=torch.bfloat16,
+        head_dim=64,
+        num_qo_heads=8,
+        num_kv_heads=2,
+        sliding_window=(1023, 0),
+        has_alibi=False,
+        has_sinks=False,
+    )
+    assert keys == []
+
+
+def test_extend_warmup_compiles_the_varlen_function(monkeypatch):
+    """Each non-window key reaches AITER's varlen entry. The arguments are AITER's."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.attention.backends import rocm_aiter_fa
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionExtendKernel
+
+    ops = MagicMock()
+    monkeypatch.setattr(rocm_aiter_fa, "rocm_aiter_ops", ops)
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    kernel = AiterFlashAttentionExtendKernel()
+    keys = kernel.get_warmup_keys(
+        dtype=torch.bfloat16,
+        head_dim=64,
+        num_qo_heads=8,
+        num_kv_heads=2,
+        sliding_window=(-1, -1),
+        has_alibi=True,
+        has_sinks=True,
+    )
+    kernel.compile_many(keys)
+
+    assert keys
+    assert ops.flash_attn_varlen_func.call_count == len(keys)
+
+
+@pytest.mark.parametrize("enable_jit_warmup", [True, False])
+def test_extend_warmup_registers_when_enabled(monkeypatch, enable_jit_warmup):
+    """Selecting the backend registers a compile when JIT warmup is on."""
+    from unittest.mock import MagicMock
+
+    from tests.v1.attention.utils import (
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    config = create_vllm_config(dtype="bfloat16")
+    config.kernel_config.enable_jit_warmup = enable_jit_warmup
+    model_config = config.model_config
+    head_size = model_config.get_head_size()
+    registry = JitWarmupRegistry(config)
+    with set_current_vllm_config(config):
+        Attention(
+            model_config.get_num_attention_heads(config.parallel_config),
+            head_size,
+            head_size**-0.5,
+            model_config.get_num_kv_heads(config.parallel_config),
+            cache_config=config.cache_config,
+            prefix="layer",
+            attn_backend=rocm_aiter_fa.AiterFlashAttentionBackend,
+        )
+        with registry.activate():
+            rocm_aiter_fa.AiterFlashAttentionMetadataBuilder(
+                create_standard_kv_cache_spec(config),
+                ["layer"],
+                config,
+                torch.device(current_platform.device_type),
+            )
+
+    ops = MagicMock()
+    monkeypatch.setattr(rocm_aiter_fa, "rocm_aiter_ops", ops)
+    registry.warmup()
+
+    assert ops.flash_attn_varlen_func.called is enable_jit_warmup
 
 
 # Kernel path tests -------------------------------------------------------
