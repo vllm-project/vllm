@@ -1548,20 +1548,29 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         with gpu_sync_allowed():
             get_modality_features = self._get_modality_embeddings(modality)
             features = get_modality_features(pixel_values, return_dict=True, **kwargs)
+            # The flat `get_*_embeddings` give each item's row count, which the
+            # patch counts we split by otherwise aren't (LlavaOnevision's anyres)
+            split_sizes = getattr(features, "split_sizes", None)
+            if split_sizes is not None:
+                split_sizes = torch.as_tensor(split_sizes).tolist()
         embeddings = features.pooler_output
-        if not self.deepstack_num_levels:
-            return embeddings
         # Carried alongside the embeddings so the encoder cache keeps them together
-        if not (deepstack := getattr(features, "deepstack_features", None)):
+        deepstack = getattr(features, "deepstack_features", None)
+        if self.deepstack_num_levels and not deepstack:
             logger.warning_once(
                 "The %s encoder returned no `deepstack_features`, so DeepStack "
                 "features will be ignored and outputs may be degraded.",
                 modality,
             )
-            return embeddings
-        if isinstance(embeddings, torch.Tensor):
-            return torch.cat([embeddings, *deepstack], dim=-1)
-        return [torch.cat(item, dim=-1) for item in zip(embeddings, *deepstack)]
+        elif self.deepstack_num_levels and isinstance(embeddings, torch.Tensor):
+            embeddings = torch.cat([embeddings, *deepstack], dim=-1)
+        elif self.deepstack_num_levels:
+            embeddings = [
+                torch.cat(item, dim=-1) for item in zip(embeddings, *deepstack)
+            ]
+        if split_sizes is not None and isinstance(embeddings, torch.Tensor):
+            return list(torch.split(embeddings, split_sizes))
+        return embeddings
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         # Each helper detects its own inputs. We are called once per modality, so the
