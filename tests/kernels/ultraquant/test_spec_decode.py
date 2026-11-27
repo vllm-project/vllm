@@ -253,3 +253,39 @@ def test_mixed_verify_slice_keeps_real_width(monkeypatch):
 
     base = TurboQuantAttentionImpl.__new__(TurboQuantAttentionImpl)
     assert base._decode_slice_max_query_len(meta, meta.num_decodes) == 1
+
+
+def _pool_cfg(max_seqs, max_tokens, capture, nspec, query_len):
+    spec = None if nspec is None else SimpleNamespace(num_speculative_tokens=nspec)
+    return SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=capture),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=max_seqs,
+            max_num_batched_tokens=max_tokens,
+        ),
+        speculative_config=spec,
+        uniform_decode_query_len=query_len,
+    )
+
+
+def test_partial_output_pool_covers_verify_rows(monkeypatch):
+    """The first pool allocation covers a verify step, not just one row per request."""
+    from vllm.v1.attention.ops import flydsl_ultraquant_decode as mod
+
+    def install(cfg):
+        monkeypatch.setattr("vllm.config.get_current_vllm_config", lambda: cfg)
+
+    install(_pool_cfg(256, 8192, [1, 2, 512], None, 1))
+    assert mod._detect_max_capture_B() == 512
+
+    # k=5 is width 6, and the kernel also accepts widths up to 8.
+    install(_pool_cfg(256, 8192, [1, 2, 512], 5, 6))
+    assert mod._detect_max_capture_B() == 256 * 8
+
+    # max_num_batched_tokens is a hard cap on rows in one step.
+    install(_pool_cfg(256, 1000, [1, 2, 512], 5, 6))
+    assert mod._detect_max_capture_B() == 1000
+
+    # Wider than the kernel's verify range still has one row per token.
+    install(_pool_cfg(256, 8192, [512], 16, 17))
+    assert mod._detect_max_capture_B() == 256 * 17

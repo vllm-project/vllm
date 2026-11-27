@@ -229,9 +229,8 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         )
         # Static part of MTP verify eligibility. The per-batch check is only
         # the verify width (2..8).
-        self._verify_decode_eligible = (
-            self._flydsl_decode_eligible and int(self.num_kv_groups) == 6
-        )
+        verify_gqa_ok = int(self.num_kv_groups) in (6, 8, 16)
+        self._verify_decode_eligible = self._flydsl_decode_eligible and verify_gqa_ok
 
     def _decode_slice_max_query_len(self, attn_metadata, num_decodes: int) -> int:
         """Longest query in the verify half of a mixed step.
