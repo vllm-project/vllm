@@ -14,7 +14,7 @@
 #include <cuda_runtime.h>
 
 // Most tokens per request (MTP draft length + 1); checked by the host entry.
-constexpr int kMaxMtpTokens = 9;
+constexpr int kMaxMtpTokens = 16;
 
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
