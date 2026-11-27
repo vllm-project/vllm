@@ -8,6 +8,7 @@ Complements the strict Flex/FP32 invariance checks in test_async_scheduling.py.
 import copy
 import functools
 import os
+from contextlib import ExitStack
 from dataclasses import replace
 from typing import Any
 
@@ -241,11 +242,13 @@ def run_tests(
     # Per-request budgets also reject systematic errors below the scalar bounds.
     tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
     # These short CPU reductions cost more to distribute across a thread pool.
-    with set_default_torch_num_threads(1), hf_runner(model) as hf:
+    with set_default_torch_num_threads(1), hf_runner(model) as hf, ExitStack() as stack:
         hf.model.eval()
         # The reference rounds in the model dtype too. An FP32 copy, built on
         # first use, rescores the requests the reference rejects.
         exact = functools.cache(lambda: copy.deepcopy(hf.model).float())
+        # Pass or fail, drop it before the runner releases its GPU memory.
+        stack.callback(exact.cache_clear)
         for config, batches, _ in outputs:
             assert len(batches) == len(test_sampling_params)
             for baseline_batch, batch, overrides in zip(
@@ -275,8 +278,6 @@ def run_tests(
                         exact,
                     )
                 print(f"ACCURACY PASSED: config=[{config}], params={overrides}")
-        # Drop the FP32 copy before the runner releases its GPU memory.
-        exact.cache_clear()
 
     baseline_acceptances = next((o[2] for o in outputs if o[2] is not None), None)
     if baseline_acceptances is not None:

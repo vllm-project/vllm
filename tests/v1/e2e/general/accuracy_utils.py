@@ -312,7 +312,7 @@ def check_request_accuracy(
     except AssertionError as rejected:
         if exact is None:
             raise
-        _check_request_accuracy(hf, request, params, tolerance, context, exact())
+        _check_request_accuracy(hf, request, params, tolerance, context, exact)
         print(f"REFERENCE ROUNDING ALLOWED: {rejected}")
 
 
@@ -322,7 +322,7 @@ def _check_request_accuracy(
     params: SamplingParams,
     tolerance: AccuracyTolerance,
     context: str,
-    exact: torch.nn.Module | None,
+    exact: Callable[[], torch.nn.Module] | None,
 ) -> None:
     assert request.finished and len(request.outputs) == 1, context
     (completion,) = request.outputs
@@ -349,7 +349,7 @@ def _check_request_accuracy(
     logits = hf.model(input_ids=inputs, use_cache=False).logits[0].float()
     witnesses = None
     if exact is not None:
-        witnesses = reference_witnesses(hf.model, exact, inputs)
+        witnesses = reference_witnesses(hf.model, exact(), inputs)
     # Use the existing byte-fallback handling with an independent request
     # history; numerical scores always come from the HF model above.
     decoder = LogprobsProcessor(
