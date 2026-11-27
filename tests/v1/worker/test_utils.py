@@ -1839,3 +1839,25 @@ def test_request_memory_charges_external_weights():
         request_memory(
             _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
         )
+
+
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 0])
+def test_request_memory_auto_kv_cache_keeps_utilization_check(kv_cache_memory_bytes):
+    """Unset and zero KV cache sizes use automatic sizing and its startup check."""
+    cache_config = CacheConfig(
+        gpu_memory_utilization=0.9, kv_cache_memory_bytes=kv_cache_memory_bytes
+    )
+    with pytest.raises(ValueError, match="less than desired"):
+        request_memory(_memory_snapshot(total_gib=100, free_gib=30), cache_config)
+
+
+def test_request_memory_fixed_kv_cache_skips_utilization_check():
+    """A fixed KV cache size replaces the utilization budget, including the
+    share charged to externally held weights."""
+    cache_config = CacheConfig(
+        gpu_memory_utilization=0.9, kv_cache_memory_bytes=GiB_bytes
+    )
+    snapshot = _memory_snapshot(total_gib=100, free_gib=30)
+
+    assert request_memory(snapshot, cache_config) == 30 * GiB_bytes
+    assert request_memory(snapshot, cache_config, 95 * GiB_bytes) == 30 * GiB_bytes
