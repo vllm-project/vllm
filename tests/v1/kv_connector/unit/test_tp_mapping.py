@@ -323,6 +323,50 @@ class TestMambaPlanSplitHandles:
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
 
+    def test_mamba_only_splits_without_attention_group(self):
+        """A Mamba-only model has no attention group: FA descs pass through
+        whole and SSM descs are split across the P_TP > D_TP sources."""
+        plan = _compute_mapping(
+            remote_tp_size=2, num_kv_heads=0, group_spec_types=(MambaSpec,)
+        )
+
+        worker = _make_mock_worker_for_splits((MambaSpec,))
+        src_blocks_data = np.array(
+            [(1000, 400, 0, 400, 1), (3000, 400, 0, 400, 1)], dtype=np.uint64
+        )
+
+        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 1))
+
+        assert len(splits) == 2
+        assert splits[0].tolist() == [[1000, 400, 0, 400, 1], [3000, 200, 0, 400, 1]]
+        assert splits[1].tolist() == [[1000, 400, 0, 400, 1], [3200, 200, 0, 400, 1]]
+
+
+@pytest.mark.parametrize("remote_tp_size", [1, 2])
+def test_mamba_only_remote_fa_descs_fit_remote_blocks(remote_tp_size):
+    """Without an attention group, remote FA descs still cover each region's
+    blocks (SSM desc ids are offset past them), one remote block each."""
+    plan = _compute_mapping(
+        remote_tp_size=remote_tp_size, num_kv_heads=0, group_spec_types=(MambaSpec,)
+    )
+    worker = _make_mock_worker_for_splits((MambaSpec,))
+    worker.block_len_per_layer = [256 * remote_tp_size] * 2
+    worker._region_is_mla = [False, False]
+    worker._transfer_layer_region_indices = ()
+    worker._head_sharded_draft_regions = set()
+    meta = SimpleNamespace(
+        kv_caches_base_addr=[0x1000, 0x9000],
+        region_num_blocks=None,
+        num_blocks=4,
+        device_id=0,
+        block_strides=[256, 256],
+    )
+
+    assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+        [0x1000, 256, 0, 256, 4],
+        [0x9000, 256, 0, 256, 4],
+    ]
+
 
 @pytest.mark.parametrize(
     ("total_kv_heads", "local_tp", "remote_tp", "compatible"),
