@@ -136,6 +136,45 @@ class DeviceCapability(NamedTuple):
         return self.major * 10 + self.minor
 
 
+def _largest_common_kernel_block_size(backends, desired: int) -> int:
+    """Largest block size <= `desired` that every backend can execute.
+
+    A backend reports its supported kernel block sizes as a mix of `MultipleOf`
+    (any multiple of that value, so unbounded) and plain ints (exactly that
+    size). The usable sizes are therefore the intersection of the concrete
+    values of every backend that reports any, keeping only values that are also
+    a multiple of every `MultipleOf` entry. Returns `desired` unchanged when no
+    backend constrains it.
+    """
+    concrete_sets: list[set[int]] = []
+    multiples: list[int] = []
+    # Imported here like the other users of MultipleOf in this module, to keep
+    # the attention backends out of the platform import cycle.
+    from vllm.v1.attention.backend import MultipleOf
+
+    for backend in backends:
+        sizes = backend.get_supported_kernel_block_sizes()
+        if not sizes:
+            continue
+        concrete = {s for s in sizes if isinstance(s, int) and s > 0}
+        if concrete:
+            concrete_sets.append(concrete)
+        multiples.extend(s.base for s in sizes if isinstance(s, MultipleOf))
+
+    candidates: set[int] | None = None
+    for concrete in concrete_sets:
+        candidates = concrete if candidates is None else candidates & concrete
+    if candidates is None:
+        candidates = {desired}
+
+    usable = [
+        c for c in candidates if c <= desired and all(c % m == 0 for m in multiples)
+    ]
+    if not usable:
+        return desired
+    return max(usable)
+
+
 class Platform:
     _enum: PlatformEnum
     device_name: str
@@ -1185,8 +1224,43 @@ class Platform:
                 mamba_page_size,
                 lcm(backend_block_alignment, checkpoint_alignment),
             )
+        # Diagnostic for the hybrid alignment inputs. These must be identical on
+        # every worker: the packed-vs-generic decision changes both the block
+        # size and the mamba page padding, so a rank that decides differently
+        # makes the KV cache specs of one layer differ across workers.
+        _text_config = vllm_config.model_config.hf_text_config
+        logger.info_once(
+            "hybrid block size: model_cls=%s.%s packed=%s mamba_page=%d "
+            "attn_page_1tok=%d align=%d dsa_config=%s linear_attn_config=%s",
+            model_cls.__module__,
+            model_cls.__name__,
+            packed_block_size,
+            mamba_page_size,
+            attn_page_size_1_token,
+            lcm(backend_block_alignment, checkpoint_alignment),
+            getattr(_text_config, "dsa_config", None) is not None,
+            getattr(_text_config, "linear_attn_config", None) is not None,
+        )
         if packed_block_size is not None:
             attn_block_size = packed_block_size
+            # The packed row sizes itself to fit the per-block mamba states, so
+            # it is free to pick a size that every backend can execute. It must
+            # do so: a packed block no backend can execute fails at KV-cache
+            # init ("no kernel for this shape", or a block that cannot be split
+            # into kernel blocks), and the failure happens while sizing the cache
+            # so it cannot be recovered at runtime.
+            clamped = _largest_common_kernel_block_size(
+                cls._find_non_ssm_backends(vllm_config), packed_block_size
+            )
+            if clamped < packed_block_size:
+                logger.info(
+                    "Capping the packed hybrid block size from %d to %d tokens "
+                    "to match the block sizes every attention backend can "
+                    "execute.",
+                    packed_block_size,
+                    clamped,
+                )
+                attn_block_size = clamped
         else:
             # Use minimum block size that satisfies both backend alignment and
             # mamba page size compatibility
