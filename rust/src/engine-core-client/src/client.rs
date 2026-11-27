@@ -849,10 +849,7 @@ impl EngineCoreClient {
         // Finalize the consumer streams first, before the engine round-trip.
         self.inner.abort_requests_locally(&all_request_ids);
 
-        for (engine_id, requests) in abortable {
-            self.inner.abort_requests_after_add(&engine_id, requests).await?;
-        }
-        Ok(())
+        self.inner.abort_requests_after_add(abortable).await
     }
 
     /// Call a typed utility method on all connected engines, returning one

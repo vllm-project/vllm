@@ -462,17 +462,25 @@ impl ClientInner {
         self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
     }
 
-    /// Submit Abort only after each request's Add send has completed.
+    /// Submit Abort only after each request's Add send has completed. The work
+    /// continues if the caller stops waiting for it.
     pub async fn abort_requests_after_add(
-        &self,
-        engine_id: &EngineId,
-        requests: Vec<AbortableRequest>,
+        self: &Arc<Self>,
+        abortable: BTreeMap<EngineId, Vec<AbortableRequest>>,
     ) -> Result<()> {
-        let mut request_ids = Vec::with_capacity(requests.len());
-        for request in requests {
-            request_ids.push(request.wait_until_add_sent().await);
-        }
-        self.do_abort_requests(engine_id, &request_ids).await
+        let inner = Arc::clone(self);
+        self.handle
+            .spawn(async move {
+                for (engine_id, requests) in abortable {
+                    let mut request_ids = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        request_ids.push(request.wait_until_add_sent().await);
+                    }
+                    inner.do_abort_requests(&engine_id, &request_ids).await?;
+                }
+                Ok(())
+            })
+            .await?
     }
 
     /// Shut down by closing all active request streams and utility calls with a
@@ -790,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_abort_waits_for_add_send() {
+    fn cancelled_explicit_abort_still_follows_add() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let send_runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -826,21 +834,11 @@ mod tests {
                 ..Default::default()
             };
 
-            let mut abortable =
-                inner.abortable_requests(std::slice::from_ref(&request_id)).unwrap();
+            let abortable = inner.abortable_requests(std::slice::from_ref(&request_id)).unwrap();
             inner.abort_requests_locally([&request_id]);
-            let abort_inner = Arc::clone(&inner);
-            let abort_engine = engine_id.clone();
-            let abort = tokio::spawn(async move {
-                abort_inner
-                    .abort_requests_after_add(
-                        &abort_engine,
-                        abortable.remove(&abort_engine).unwrap(),
-                    )
-                    .await
-            });
-            tokio::task::yield_now().await;
-            assert!(!abort.is_finished());
+            let mut abort = Box::pin(inner.abort_requests_after_add(abortable));
+            assert!(futures::poll!(abort.as_mut()).is_pending());
+            drop(abort);
 
             let add_inner = Arc::clone(&inner);
             let add_engine = engine_id.clone();
@@ -879,7 +877,6 @@ mod tests {
             assert_eq!(aborted_ids, vec![request_id]);
 
             drop(add.await.unwrap().unwrap());
-            abort.await.unwrap().unwrap();
             shutdown_tx.send(()).unwrap();
             send_thread.join().unwrap();
         });
