@@ -120,10 +120,13 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     PHYSICAL_BLOCK_STRIDE: tl.constexpr,
+    launch_pdl: tl.constexpr = False,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
     split_id = tl.program_id(2)
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
 
@@ -133,6 +136,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     dim_offsets = tl.arange(0, HEAD_DIM)
     column_offsets = tl.arange(0, BLOCK_N)
     first_head = kv_head * GROUP_SIZE
+
     query = tl.load(
         q_ptr
         + row * stride_q_row
@@ -277,6 +281,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             partial_lse,
             mask=head_offsets < GROUP_SIZE,
         )
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit(do_not_specialize=["num_rows"])
@@ -294,14 +300,18 @@ def _qsa_merge_splitk_kernel(
     NUM_QUERY_HEADS: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
     BLOCK_SPLITS: tl.constexpr,
+    launch_pdl: tl.constexpr = False,
 ) -> None:
     row = tl.program_id(0)
     head = tl.program_id(1)
     split_offsets = tl.arange(0, BLOCK_SPLITS)
     dim_offsets = tl.arange(0, HEAD_DIM)
     split_mask = split_offsets < NUM_SPLITS
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+    split_rows = split_offsets.to(tl.int64) * num_rows + row
     lse = tl.load(
-        partial_lse_ptr + (split_offsets * num_rows + row) * NUM_QUERY_HEADS + head,
+        partial_lse_ptr + split_rows * NUM_QUERY_HEADS + head,
         mask=split_mask,
         other=-float("inf"),
     )
@@ -310,7 +320,6 @@ def _qsa_merge_splitk_kernel(
     shifted = tl.where(split_mask & has_values, lse - lse_max, -float("inf"))
     weights = tl.math.exp2(shifted)
     denominator = tl.sum(weights, axis=0)
-    split_rows = split_offsets.to(tl.int64) * num_rows + row
     partial_output = tl.load(
         partial_output_ptr
         + (split_rows[:, None] * NUM_QUERY_HEADS + head) * HEAD_DIM
@@ -334,6 +343,8 @@ def _qsa_merge_splitk_kernel(
         output_ptr + row * stride_output_row + head * stride_output_head + dim_offsets,
         merged,
     )
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -593,8 +604,8 @@ def _select_sm100_config(
     base_programs: int, use_prefill_config: bool, is_fp8: bool
 ) -> tuple[int, int, int]:
     """(block_n, target_splits, num_warps) for sm_100 (B200/GB200). Tuned on B200
-    up to 64 programs; above that the entries are the GB300 table's values. fp8
-    above 64 programs takes the qsa_fp8 kernel.
+    up to 64 programs; above that the entries are the GB300 table's values.
+    Logical-index fp8 batches take the qsa_fp8 kernel.
     """
     if base_programs > 2048:
         return (32, 1, 1) if use_prefill_config else (64, 1, 2)
@@ -700,10 +711,10 @@ def qsa_sparse_paged_attention(
     `[rows, selection_width + 1]` with the trailing column holding each row's
     valid-entry count (written by the expand kernel; never a token index). The
     kernel reads it as the tile-loop bound. use_prefill_config steers the top
-    of the config table (see _select_config). Large Blackwell FP8 batches use
-    the kernel in qsa_fp8. With `valid_counts`, `indices` instead holds
-    `[rows, selection_width]` resolved physical rows of the supplied cache
-    view, which split-K reads without the block table.
+    of the config table (see _select_config). Blackwell FP8 logical-index
+    batches use the kernel in qsa_fp8. With `valid_counts` (e.g. HiSparse),
+    `indices` instead holds `[rows, selection_width]` resolved physical rows of
+    the supplied cache view, which split-K reads without the block table.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -839,6 +850,8 @@ def _qsa_sparse_paged_splitk(
             device=q.device,
         )
 
+    # Only overlap when a merge kernel follows; single-pass has no consumer to chain.
+    use_pdl = num_splits > 1 and current_platform.is_arch_support_pdl()
     partial_grid = (q.shape[0], k_cache.shape[2], num_splits)
     _qsa_sparse_paged_gqa_splitk_kernel[partial_grid](
         q,
@@ -887,6 +900,7 @@ def _qsa_sparse_paged_splitk(
         else 0,
         num_warps=partial_warps,
         num_stages=2,
+        launch_pdl=use_pdl,
     )
     if num_splits == 1:
         return out
@@ -907,6 +921,7 @@ def _qsa_sparse_paged_splitk(
         BLOCK_SPLITS=triton.next_power_of_2(num_splits),
         num_warps=2,
         num_stages=1,
+        launch_pdl=use_pdl,
     )
     return out
 
@@ -931,6 +946,14 @@ def warmup_qsa_sparse_paged_attention(
         else torch.uint8
     )
     cache_dtype = fp8_dtype if is_fp8 else key_cache.dtype
+    # physical_indices=True (HiSparse) bypasses block_table and stays on split-K.
+    if not physical_indices and qsa_fp8.use_fp8_decode_kernel(1, cache_dtype):
+        return qsa_fp8.warmup_qsa_fp8_decode(
+            kv_cache,
+            block_table,
+            num_query_heads=num_query_heads,
+            selection_width=selection_width,
+        )
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
@@ -1002,6 +1025,7 @@ def warmup_qsa_sparse_paged_attention(
             partial_lse_ptr = TritonWarmupTensor(
                 torch.float32, shape=(num_splits, num_rows, num_query_heads)
             )
+        use_pdl = num_splits > 1 and current_platform.is_arch_support_pdl()
         _qsa_sparse_paged_gqa_splitk_kernel.warmup(
             q_ptr,
             k_cache_ptr,
@@ -1049,6 +1073,7 @@ def warmup_qsa_sparse_paged_attention(
             else 0,
             num_warps=warps,
             num_stages=2,
+            launch_pdl=use_pdl,
             grid=(num_rows, num_kv_heads, num_splits),
         )
         if num_splits > 1:
@@ -1068,17 +1093,10 @@ def warmup_qsa_sparse_paged_attention(
                 BLOCK_SPLITS=triton.next_power_of_2(num_splits),
                 num_warps=2,
                 num_stages=1,
+                launch_pdl=use_pdl,
                 grid=(num_rows, num_query_heads),
             )
         warmed.append((block_n, num_splits, warps))
-
-    if not physical_indices:
-        warmed += qsa_fp8.warmup_qsa_fp8_decode(
-            kv_cache,
-            block_table,
-            num_query_heads=num_query_heads,
-            selection_width=selection_width,
-        )
     return tuple(warmed)
 
 
