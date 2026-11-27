@@ -130,6 +130,36 @@ def test_invalid_profile_controls_rejected_before_engine_core_dispatch(kwargs):
     engine.engine_core.profile.assert_not_called()
 
 
+def test_do_log_stats_respects_the_configured_interval(monkeypatch):
+    """`do_log_stats_with_interval` logs only once the interval elapses."""
+
+    class RecordingLoggerManager:
+        def __init__(self):
+            self.logged = 0
+
+        def log(self):
+            self.logged += 1
+
+    now = 1000.0
+    monkeypatch.setattr("vllm.v1.engine.llm_engine.time.time", lambda: now)
+
+    engine = object.__new__(LLMEngine)
+    engine._log_stats_interval = 5.0
+    logger_manager = RecordingLoggerManager()
+    engine.logger_manager = logger_manager
+
+    engine.do_log_stats_with_interval()
+    assert logger_manager.logged == 0
+
+    now = 1002.0
+    engine.do_log_stats_with_interval()
+    assert logger_manager.logged == 0
+
+    now = 1006.0
+    engine.do_log_stats_with_interval()
+    assert logger_manager.logged == 1
+
+
 def _vllm_model(
     apc: bool,
     vllm_runner: type[VllmRunner],

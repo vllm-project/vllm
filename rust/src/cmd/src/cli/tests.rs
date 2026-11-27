@@ -1243,7 +1243,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     // `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
     // `VLLM_SERVER_DEV_MODE`, `VLLM_ALLOW_RUNTIME_LORA_UPDATING`, and
-    // `VLLM_MAX_N_SEQUENCES`, which bind these hidden flags.
+    // `VLLM_MAX_N_SEQUENCES`, which bind these flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",

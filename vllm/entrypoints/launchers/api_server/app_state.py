@@ -62,6 +62,7 @@ async def init_app_state(
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
+    state.log_stats_interval = args.log_stats_interval
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)

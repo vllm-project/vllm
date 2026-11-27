@@ -849,6 +849,12 @@ def test_rust_frontend_receives_resolved_logging_config(
             {"VLLM_API_KEY": "env-key", "VLLM_MAX_TOKENIZE_TOKENS": "4096"},
             {"api_key": ["cli-key"], "max_tokenize_tokens": 10},
         ),
+        # Same for the log stats interval, which also has a real flag.
+        (
+            ["--log-stats-interval", "5"],
+            {"VLLM_LOG_STATS_INTERVAL": "inf"},
+            {"log_stats_interval": 5.0},
+        ),
     ],
 )
 def test_rust_frontend_receives_resolved_env_settings(

@@ -64,6 +64,7 @@ class LLMEngine:
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         multiprocess_mode: bool = False,
+        log_stats_interval: float = 10.0,
     ) -> None:
         configure_logging_if_needed(vllm_config.logging_config)
         self.vllm_config = vllm_config
@@ -75,6 +76,7 @@ class LLMEngine:
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_stats = log_stats
+        self._log_stats_interval = log_stats_interval
         # Tracing reads the collected stats without enabling stat logging.
         self.collect_stats = log_stats or tracing_endpoint is not None
 
@@ -164,6 +166,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         disable_log_stats: bool = False,
+        log_stats_interval: float = 10.0,
     ) -> "LLMEngine":
         return cls(
             vllm_config=vllm_config,
@@ -172,6 +175,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING,
+            log_stats_interval=log_stats_interval,
         )
 
     @classmethod
@@ -199,6 +203,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             multiprocess_mode=enable_multiprocessing,
+            log_stats_interval=engine_args.log_stats_interval,
         )
 
     def get_num_unfinished_requests(self) -> int:
@@ -490,7 +495,7 @@ class LLMEngine:
         now = time.time()
         if not hasattr(self, "_last_log_time"):
             self._last_log_time = now
-        if now - self._last_log_time >= envs.VLLM_LOG_STATS_INTERVAL:
+        if now - self._last_log_time >= self._log_stats_interval:
             self.do_log_stats()
             self._last_log_time = now
 

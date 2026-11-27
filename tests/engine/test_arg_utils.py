@@ -135,6 +135,37 @@ def test_memory_utilization_cli_aliases(option):
     assert args.gpu_memory_utilization == 0.8
 
 
+def test_log_stats_interval_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(["--log-stats-interval", "5"]))
+
+    assert args.log_stats_interval == 5.0
+
+
+def test_log_stats_interval_env_fallback(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "30")
+
+    args = EngineArgs(model="dummy")
+
+    assert args.log_stats_interval == 30.0
+    assert any("VLLM_LOG_STATS_INTERVAL" in message for message in caplog_vllm.messages)
+
+
+def test_log_stats_interval_flag_wins_over_deprecated_env(monkeypatch):
+    monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "30")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(["--log-stats-interval", "5"]))
+
+    assert args.log_stats_interval == 5.0
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan")])
+def test_log_stats_interval_non_positive_falls_back_to_default(value):
+    args = EngineArgs(model="dummy", log_stats_interval=value)
+
+    assert args.log_stats_interval == 10.0
+
+
 def test_device_memory_utilization_property():
     config = CacheConfig(gpu_memory_utilization=0.8)
 
