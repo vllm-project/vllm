@@ -42,7 +42,7 @@ use self::types::{
     ResponsesResponse,
 };
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, chat_submit_error, engine_error, server_error};
+use crate::error::{ApiError, chat_request_error, engine_error, server_error};
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::state::AppState;
 use crate::utils::{EventExt as _, resolve_request_context, sse_response, unix_timestamp};
@@ -75,7 +75,7 @@ pub async fn create_responses(
         .chat(prepared.chat_request)
         .instrument(request_span.clone())
         .await
-        .map_err(|error| chat_submit_error("failed to submit responses request", error))?;
+        .map_err(|error| chat_request_error("failed to submit responses request", error))?;
     // Echo the values the engine uses, as Python does, rather than the request's.
     let response = build_response(
         prepared.meta,
@@ -148,7 +148,7 @@ async fn collect_responses(
             ));
         };
         let event = event
-            .map_err(|error| chat_submit_error("failed to collect responses result", error))?;
+            .map_err(|error| chat_request_error("failed to collect responses result", error))?;
         // Only the final output matters here; the item events are discarded.
         items.on_event(&event);
         if let Some(terminal) = TerminalOutput::from_event(event, false) {

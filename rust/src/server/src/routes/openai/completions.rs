@@ -36,7 +36,7 @@ use super::utils::logprobs::{
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
+use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_request_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderContext;
 use crate::routes::openai::completions::types::{
@@ -100,7 +100,7 @@ pub async fn completions(
             .return_tokens_as_token_ids
             .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
     {
-        return Err(text_submit_error(
+        return Err(text_request_error(
             "invalid completion request",
             vllm_text::Error::TokenizerUnavailable,
         ));
@@ -124,7 +124,7 @@ pub async fn completions(
             .generate_n(text_request, prepared.n)
             .instrument(request_span.clone())
             .await
-            .map_err(|error| text_submit_error("failed to submit completion request", error))?;
+            .map_err(|error| text_request_error("failed to submit completion request", error))?;
         streams_by_prompt.push((echo, text_streams));
     }
 
@@ -255,7 +255,7 @@ async fn collect_completion(
     let collected = stream
         .collect_output()
         .await
-        .map_err(|error| text_submit_error("completion stream failed", error))?;
+        .map_err(|error| text_request_error("completion stream failed", error))?;
     let finish_reason = collected.finish_reason.clone();
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
@@ -670,7 +670,7 @@ async fn completion_chunk_stream(
                     error = %error.as_report(),
                     "completion stream failed"
                 );
-                return Err(text_submit_error("completion stream failed", error));
+                return Err(text_request_error("completion stream failed", error));
             }
         }
     }

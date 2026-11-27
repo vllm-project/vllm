@@ -8,7 +8,7 @@ use vllm_chat::ChatRequestProcessor;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
 
 use super::types::CompletionRequest;
-use crate::error::{ApiError, bail_invalid_request, invalid_request, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, invalid_request, text_request_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderContext;
 use crate::routes::openai::completions::validate;
@@ -96,7 +96,7 @@ pub(super) fn prepare_completion_request(
         request.truncate_prompt_tokens,
         request.truncation_side,
     )
-    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
+    .map_err(|error| text_request_error("invalid prompt truncation", error))?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
     let response_model = lora_resolution.response_model();
@@ -299,7 +299,7 @@ fn completion_echo_text(
     // now and echo the text of the tokens that remain, like Python's renderer.
     let token_ids = processor
         .tokenize_in_place(request)
-        .map_err(|error| text_submit_error("failed to prepare the echoed prompt", error))?;
+        .map_err(|error| text_request_error("failed to prepare the echoed prompt", error))?;
     processor.tokenizer().decode(token_ids, false).map(Some).map_err(|error| {
         ApiError::invalid_request(
             format!(

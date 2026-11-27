@@ -18,7 +18,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, chat_submit_error, text_submit_error};
+use crate::error::{ApiError, chat_request_error, text_request_error};
 use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
@@ -94,7 +94,7 @@ fn lower_render_request(
     let prepared = state
         .text_processor()
         .prepare(text_request)
-        .map_err(|error| text_submit_error("failed to prepare render request", error))?;
+        .map_err(|error| text_request_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
     let features = (prepared.generate_request.mm_features)
         .filter(|features| !features.is_empty())
@@ -219,7 +219,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
+        .map_err(|error| chat_request_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),

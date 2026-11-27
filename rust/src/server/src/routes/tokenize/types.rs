@@ -127,7 +127,7 @@ impl TokenizeChatRequest {
 
         let tool_context =
             ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
-                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
+                |error| crate::error::chat_request_error("failed to resolve request tools", error),
             )?;
 
         Ok(ChatRequest {

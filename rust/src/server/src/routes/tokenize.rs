@@ -15,7 +15,7 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 
-use crate::error::{ApiError, chat_submit_error, text_submit_error};
+use crate::error::{ApiError, chat_request_error, text_request_error};
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
     TokenizeRequest, TokenizeResponse,
@@ -72,7 +72,7 @@ fn tokenize_completion(
         .text()
         .request_processor()
         .tokenize(req.into_text_request(request_id.to_string()))
-        .map_err(|error| text_submit_error("tokenize failed", error))?;
+        .map_err(|error| text_request_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
 
@@ -94,13 +94,13 @@ async fn tokenize_chat(
         .request_processor()
         .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
-        .map_err(|error| chat_submit_error("tokenize failed", error))?;
+        .map_err(|error| chat_request_error("tokenize failed", error))?;
     let tokens = state
         .chat
         .text()
         .request_processor()
         .tokenize(text_request)
-        .map_err(|error| text_submit_error("tokenize failed", error))?;
+        .map_err(|error| text_request_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
 
@@ -113,7 +113,7 @@ pub async fn detokenize(
     let tokenizer = state.chat.text().tokenizer();
     let prompt = tokenizer
         .decode(&body.tokens, /* skip_special_tokens = */ false)
-        .map_err(|error| text_submit_error("detokenize failed", error.into()))?;
+        .map_err(|error| text_request_error("detokenize failed", error.into()))?;
     Ok(Json(DetokenizeResponse { prompt }))
 }
 

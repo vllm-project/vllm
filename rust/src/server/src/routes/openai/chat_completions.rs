@@ -30,7 +30,7 @@ use vllm_text::DecodedLogprobs;
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
-use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error};
+use crate::error::{ApiError, bail_server_error, chat_request_error, engine_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
@@ -106,7 +106,7 @@ pub async fn chat_completions(
         .chat_n(prepared.chat_request, n)
         .instrument(request_span.clone())
         .await
-        .map_err(|error| chat_submit_error("failed to submit chat request", error))?;
+        .map_err(|error| chat_request_error("failed to submit chat request", error))?;
 
     if stream {
         let chunk_streams = chat_streams
@@ -225,7 +225,7 @@ async fn collect_chat_completion(
     let collected = stream
         .collect_message()
         .await
-        .map_err(|error| chat_submit_error("failed to collect chat completion response", error))?;
+        .map_err(|error| chat_request_error("failed to collect chat completion response", error))?;
     let CollectedAssistantMessage {
         message,
         prompt_token_ids,
@@ -682,7 +682,7 @@ async fn chat_completion_chunk_stream(
                     error = %error.as_report(),
                     "chat stream failed"
                 );
-                return Err(chat_submit_error("chat stream failed", error));
+                return Err(chat_request_error("chat stream failed", error));
             }
         }
     }
