@@ -193,15 +193,18 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
     return index_head_dim + index_head_dim // 128 * 4
 
 
-# Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
-# DeepSeek's V4.1 record -- all 512 dims (RoPE included) as fp8 e4m3 with one
-# UE8M0 scale per 32 dims, each token's 512 data bytes followed by its 16 scale
-# bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
-# V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
-# pad byte (584 B, 576 B pages). The Ampere kernels decode the V4.1 records
-# too (nvidia/specialized_decode/ampere).
+# Which packed fp8_ds_mla record a V4.1 layer writes. DeepSeek's V4.1 record
+# -- all 512 dims (RoPE included) as fp8 e4m3 with one UE8M0 scale per 32 dims,
+# each token's 512 data bytes followed by its 16 scale bytes -- is decoded by
+# FlashMLA's SM100 sparse-decode kernels, by FlashInfer's SM120 sparse MLA (its
+# fp8_dsv41_inline cache format) and by the Ampere kernels
+# (nvidia/specialized_decode/ampere). Every other arch keeps the V4 record:
+# 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a pad byte
+# (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
-    if current_platform.is_device_capability_family(100):
+    if current_platform.is_device_capability_family(
+        100
+    ) or current_platform.is_device_capability_family(120):
         return True
     if not current_platform.is_cuda():
         return False
@@ -620,8 +623,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
         if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
             raise ValueError(
-                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
-                "decodes only on SM100."
+                "nvfp4_ds_mla needs the V4.1 KV records, which only FlashMLA "
+                "on SM100 and FlashInfer on SM120 decode."
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay

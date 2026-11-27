@@ -506,6 +506,24 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_dsv41_inline() -> bool:
+    """Return whether FlashInfer's SM120 sparse MLA reads inline V4.1 records.
+
+    vLLM writes DeepSeek-V4.1 KV records inline (each token's scales follow its
+    own data); FlashInfer reads them through the `fp8_dsv41_inline` cache
+    formats.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+
+    param = inspect.signature(trtllm_batch_decode_sparse_mla_dsv4).parameters.get(
+        "kv_cache_format"
+    )
+    return param is not None and "fp8_dsv41_inline" in str(param.annotation)
+
+
+@functools.cache
 def has_flashinfer_prims_ts_sparse_mla() -> bool:
     """Return `True` if FlashInfer ships the task-scheduled (prims_ts) sparse
     MLA decode wrapper with the plan API vLLM calls. Its quantized formats are

@@ -735,6 +735,8 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    *,
+    block_span: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -742,7 +744,13 @@ def compute_global_topk_indices_and_lens(
     1. Block-table lookup (local index → global slot id)
     2. Valid-entry counting (topk_lens per token)
     3. Masking padding tokens to length 0
+
+    `block_span` is the number of rows one block spans in the cache (the
+    block size unless the block packs several layers' pages); with it the
+    result indexes rows of the whole cache instead of paged slots.
     """
+    if block_span is None:
+        block_span = block_size
     num_tokens = topk_indices.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
@@ -757,6 +765,7 @@ def compute_global_topk_indices_and_lens(
         block_table,
         block_table.stride(0),
         block_size,
+        block_span,
         is_valid_token,
         TRITON_BLOCK_SIZE=1024,
     )
@@ -775,6 +784,7 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_table_ptr,
     block_table_stride: tl.constexpr,
     block_size: tl.constexpr,
+    block_span: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -801,7 +811,7 @@ def _compute_global_topk_indices_and_lens_kernel(
         )
         block_offsets = local_idx % block_size
 
-        slot_ids = block_numbers * block_size + block_offsets
+        slot_ids = block_numbers * block_span + block_offsets
         slot_ids = tl.where(is_valid, slot_ids, -1)
         tl.store(
             global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
