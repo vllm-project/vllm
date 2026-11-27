@@ -103,13 +103,7 @@ def direct_reload_enabled() -> bool:
         config = get_current_vllm_config_or_none()
         if config is None or config.weight_transfer_config is None:
             return False
-        reason: str | None
-        if config.lora_config is not None:
-            # a LoRA model's lm_head is not loaded again by every update
-            reason = "LoRA"
-        else:
-            reason = direct_reload_refusal(config)
-        if reason:
+        if reason := direct_reload_refusal(config):
             _log_layerwise(reason)
             return False
     return True
@@ -185,11 +179,14 @@ def mark_loaded(model: torch.nn.Module, name: str) -> None:
         names.add(name)
 
 
+def _unwrapped(name: str) -> str:
+    """`name` as cold start knew it: LoRA wraps layers after, as `x.base_layer`."""
+    return name.replace(".base_layer.", ".")
+
+
 def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
     """Raise unless the update loaded every parameter cold start loaded, except
-    those level 2 sleep preserves because the update does not rewrite them.
-    `load_weights` reports parameter names, whatever checkpoint names fed
-    them (fused or per-expert); a tied parameter counts under either name."""
+    those level 2 sleep preserves; names match modulo LoRA wrapping and ties."""
     loaded = model.__dict__.pop("_loaded_params", None)
     required = model.__dict__.get("_required_params")
     if loaded is None or required is None:  # the model does not report loads
@@ -198,13 +195,15 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         model._required_params = loaded
         return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
-    params = dict(model.named_parameters(remove_duplicate=False))
-    delivered = {params.get(n, n) for n in loaded}
+    named = model.named_parameters(remove_duplicate=False)
+    params = {_unwrapped(n): (n, p) for n, p in named}
+    delivered = {params.get(n, (n, n))[1] for n in map(_unwrapped, loaded)}
+    # sleep matches preserve patterns against live (LoRA-wrapped) names
+    live = (params.get(n, (n, n)) for n in map(_unwrapped, required))
     missing = sorted(
-        n
-        for n in required
-        if params.get(n, n) not in delivered
-        and not any(fnmatchcase(n, p) for p in preserved)
+        name
+        for name, p in live
+        if p not in delivered and not any(fnmatchcase(name, g) for g in preserved)
     )
     if missing:
         raise RuntimeError(
@@ -289,7 +288,7 @@ def _check_params_kept(model: torch.nn.Module) -> None:
     replaced = [
         name
         for name, p in model.named_parameters(remove_duplicate=False)
-        if name in model._ckpt_param_names and not hasattr(p, "_ckpt")
+        if _unwrapped(name) in model._ckpt_param_names and not hasattr(p, "_ckpt")
     ]
     if replaced:
         raise RuntimeError(

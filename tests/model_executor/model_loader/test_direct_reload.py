@@ -764,9 +764,8 @@ _IPC = SimpleNamespace(backend="ipc")
     [
         ({"weight_transfer_config": _IPC}, True),
         ({}, False),
-        ({"weight_transfer_config": _IPC, "lora_config": object()}, False),
     ],
-    ids=["updates", "no-updates", "lora"],
+    ids=["updates", "no-updates"],
 )
 def test_direct_reload_enabled(monkeypatch, overrides, expected):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
