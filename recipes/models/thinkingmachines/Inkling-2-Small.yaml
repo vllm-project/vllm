@@ -90,6 +90,7 @@ strategy_overrides:
           - "262144"
           - "--max-num-seqs"
           - "256"
+          - "--enable-batch-sharded-sampling"
       # 4x H200: 43.5 GiB KV per GPU. 262144 fits (297K-token cache), but a
       # 255K-token request looped in one of two runs, so cap at 131072.
       hopper:
@@ -98,6 +99,7 @@ strategy_overrides:
           - "131072"
           - "--max-num-seqs"
           - "256"
+          - "--enable-batch-sharded-sampling"
   # Two trays (TP8) serve the full 1M context. --no-numa-bind works around a
   # headless-node startup crash with vLLM's default NUMA binding.
   multi_node_tp:
