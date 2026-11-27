@@ -107,6 +107,9 @@ class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
+    # Stable session identity the caller set on the request, if any. Keyword
+    # only: a positional field here would shift `load_tier_filter`.
+    session_id: str | None = field(default=None, kw_only=True)
     load_tier_filter: TierFilter = TierFilter.ALL
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params and kv_hints once (in on_new_request) and read the

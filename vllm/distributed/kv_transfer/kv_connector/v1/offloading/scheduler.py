@@ -170,6 +170,7 @@ def _create_req_context(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
+        session_id=req.session_id,
         load_tier_filter=load_filter,
         _scheduler=scheduler,
     )
