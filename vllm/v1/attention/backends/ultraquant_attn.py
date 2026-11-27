@@ -10,6 +10,7 @@ seams:
 
   * store         -> ultraquant_store (rotate K, pack FP4 + UE8M0 scales)
   * decode        -> FlyDSL D=256 scaled-MFMA kernel, Triton unified fallback
+  * spec verify   -> same decode path; PDV 1.1 hoist_k is opt-in
   * continuation  -> small chunk: Triton unified; large chunk: dequant + FA
 
 `UltraQuantAttentionBackend` is a standalone backend with its own identity
@@ -19,6 +20,7 @@ carry no UltraQuant knowledge.
 
 import contextlib
 import math
+import os
 from dataclasses import replace
 from typing import Any, ClassVar
 
@@ -28,7 +30,7 @@ import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, max_decode_query_len
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.turboquant_attn import (
     _CONTINUATION_DECODE_THRESHOLD,
@@ -36,6 +38,7 @@ from vllm.v1.attention.backends.turboquant_attn import (
     TurboQuantAttentionBackend,
     TurboQuantAttentionImpl,
     TurboQuantMetadata,
+    TurboQuantMetadataBuilder,
     _build_hadamard,
 )
 from vllm.v1.attention.ops.flydsl_ultraquant_decode import (
@@ -58,6 +61,46 @@ logger = init_logger(__name__)
 # CK FlashAttention on ROCm has no compiled kernel above head_dim 256 and no
 # sinks argument; those cases route through the Triton unified kernel instead.
 _CK_MAX_HEAD_DIM = 256
+
+
+class UltraQuantMetadataBuilder(TurboQuantMetadataBuilder):
+    """Keep MTP verify requests on the UltraQuant decode path.
+
+    The TurboQuant builder opts out of spec-as-decode. UltraQuant re-enables
+    it so a k-token verification stays a decode instead of a prefill.
+    """
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+
+def _split_multi_query_decode(
+    num_rows: int, attn_metadata: TurboQuantMetadata
+) -> TurboQuantMetadata:
+    """Rewrite a multi-token verify as one causal decode row per token.
+
+    The shipping kernel scores one query per request. Row ``j`` of a request
+    with ``q`` verify tokens attends to the first ``seq_len - q + 1 + j``
+    cached tokens. Rows past the last request are CUDA-graph padding.
+    """
+    query_start_loc = attn_metadata.query_start_loc
+    seq_lens = attn_metadata.seq_lens
+    query_ends = query_start_loc[1:]
+    rows = torch.arange(num_rows, device=seq_lens.device, dtype=query_ends.dtype)
+    req = torch.searchsorted(query_ends, rows, right=True).clamp_(
+        max=seq_lens.shape[0] - 1
+    )
+    rows_after = (query_ends[req] - 1 - rows).clamp_(min=0)
+    return replace(
+        attn_metadata,
+        seq_lens=(seq_lens[req] - rows_after).clamp_(min=1),
+        block_table=attn_metadata.block_table[req],
+        query_start_loc=torch.arange(
+            num_rows + 1, device=seq_lens.device, dtype=query_start_loc.dtype
+        ),
+        max_query_len=1,
+    )
 
 
 class UltraQuantAttentionBackend(TurboQuantAttentionBackend):
@@ -93,6 +136,10 @@ class UltraQuantAttentionBackend(TurboQuantAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["UltraQuantAttentionImpl"]:
         return UltraQuantAttentionImpl
+
+    @staticmethod
+    def get_builder_cls() -> type[UltraQuantMetadataBuilder]:
+        return UltraQuantMetadataBuilder
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -148,6 +195,7 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         self.sliding_window = sliding_window
         self.sinks = kwargs.get("sinks")
         self._max_model_len = vllm_config.model_config.max_model_len
+        self._spec_decode = vllm_config.speculative_config is not None
 
         self._use_ultraquant_flydsl = is_ultraquant_flydsl_available()
         # FlyDSL decode eligibility is static per layer config; compute once.
@@ -186,6 +234,8 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
                 and not current_workspace_manager().is_locked()
             ):
                 B_max = self._max_capture_batch_size()
+                if self._spec_decode:
+                    B_max *= max_decode_query_len(get_current_vllm_config())
                 D = self.head_size
                 Hq = self.num_heads
                 S = self.max_num_kv_splits
@@ -245,6 +295,21 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         # Acquire shared decode scratch from the WorkspaceManager (UltraQuant
         # only needs the output buffer; the mid_o/lse slots keep the triple
         # allocation identical to the base decode for buffer reuse).
+        num_rows = query.shape[0]
+        num_reqs = int(attn_metadata.seq_lens.shape[0])
+        uniform = num_reqs > 0 and num_rows % num_reqs == 0
+        qlen = num_rows // num_reqs if uniform else 1
+        hoist = (
+            uniform
+            and os.environ.get("VLLM_ULTRAQUANT_PDV_EXPERIMENT", "").strip()
+            == "hoist_k"
+            and self._flydsl_decode_eligible
+            and int(self.num_kv_groups) == 6
+            and os.environ.get("VLLM_ULTRAQUANT_V3", "0") != "1"
+            and 2 <= qlen <= 8
+        )
+        if self._spec_decode and num_rows != num_reqs and not hoist:
+            attn_metadata = _split_multi_query_decode(num_rows, attn_metadata)
         B = query.shape[0]
         D = self.head_size
         S = self.max_num_kv_splits
@@ -258,6 +323,12 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
             )
 
         if self._flydsl_decode_eligible:
+            if hoist:
+                logger.info_once(
+                    "PDV hoist_k verify is enabled: one cache read scores "
+                    "%d verify tokens.",
+                    qlen,
+                )
             return flydsl_ultraquant_decode_attention(
                 query=query,
                 kv_cache=kv_cache,
@@ -270,6 +341,10 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
                 buf_holder=layer,
                 max_num_kv_splits=self.max_num_kv_splits,
                 sinks=self.sinks,
+                shared_queries=qlen if hoist else 1,
+                query_start_loc=attn_metadata.query_start_loc if hoist else None,
+                pair_num_reqs=num_reqs if hoist else 0,
+                pdv_verify=hoist,
             )
 
         logger.info_once(
