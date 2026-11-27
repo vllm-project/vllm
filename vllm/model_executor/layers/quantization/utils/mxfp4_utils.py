@@ -615,7 +615,10 @@ def repack_mxfp4_fnuz_checkpoint_blocks(
             # The published converter uses the source E8M0 scale maximum,
             # including groups whose payload is entirely zero.
             max_exp = src_scale.view(rows // 128, 128, cols // 128, 4).amax((1, 3))
-            factor = torch.exp2(max_exp.double() - (127 + 6))
+            factor = torch.ldexp(
+                torch.ones_like(max_exp, dtype=torch.float64),
+                max_exp.int() - (127 + 6),
+            )
             expanded = factor[:, None, :, None]
             codes = (ref / expanded).to(torch.float8_e4m3fn)
             if not torch.equal(codes.double() * expanded, ref):
