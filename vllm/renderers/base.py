@@ -1337,6 +1337,7 @@ class BaseRenderer(ABC, Generic[_T]):
             return
 
         for target in self._iter_media_io_targets(prompts):
+            # Merge media_io_kwargs only when the target has multimodal data or UUIDs.
             if "multi_modal_data" in target or "multi_modal_uuids" in target:
                 media_io_kwargs = merge_media_io_kwargs(
                     default_media_io_kwargs,
