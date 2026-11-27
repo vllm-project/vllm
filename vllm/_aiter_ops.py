@@ -3406,11 +3406,10 @@ class rocm_aiter_ops:
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx950
-
-            # This op has self-contained Triton/C++ implementations on gfx950.
-            # Only its optional top-k fast path comes from aiter.
-            if on_gfx950() and not _OPS_REGISTERED:
+            # This op has self-contained local Triton/PyTorch/C++ fallbacks
+            # across ROCm architectures (cache insert, MQA logits, and top-k);
+            # only its optional fast paths come from aiter.
+            if not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,

@@ -13,7 +13,10 @@ from torch import nn
 import vllm.envs as envs
 from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+
+# Import ensures ROCm custom ops (including rocm_aiter_sparse_attn_indexer) are
+# registered before SparseAttnIndexer.forward_hip dispatches to them.
+from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CUDAGraphMode,
@@ -1576,45 +1579,34 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx950
-
-        if (
-            rocm_aiter_ops.is_enabled()
-            or rocm_aiter_ops.is_rdna_aiter_enabled()
-            # The so-called AITER sparse indexer op has a native gfx950 path:
-            # its cache insert, MQA logits, and top-k fallbacks are implemented
-            # by local Triton/C++ kernels and do not require the aiter package.
-            or on_gfx950()
-        ):
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
-                hidden_states,
-                _encode_layer_name(self.k_cache.prefix),
-                self.k_cache.kv_cache,
-                q_quant,
-                k,
-                weights,
-                self.quant_block_size,
-                self.scale_fmt,
-                self.topk_tokens,
-                self.head_dim,
-                self.max_model_len,
-                self.max_total_seq_len,
-                self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
-                compress_ratio=self.compress_ratio,
-                candidate_blocks=self.candidate_blocks,
-                candidate_block_size=self.candidate_block_size,
-                candidate_write=self.candidate_write,
-                use_pcp=self.use_pcp,
-                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
-                cache_layout=self.cache_layout,
-                dcp_rank=self.dcp_rank,
-                dcp_world_size=self.dcp_world_size,
-                cp_interleave=self._parallel_config.cp_kv_cache_interleave_size,
-            )
-        raise RuntimeError(
-            "Sparse attention indexer ROCm path requires AITER or a supported "
-            "native architecture (gfx950)."
+        # rocm_aiter_sparse_attn_indexer uses AITER fast paths when enabled and
+        # self-contained local Triton/PyTorch/C++ fallbacks otherwise (cache
+        # insert, MQA logits, and top-k), so it works on ROCm without AITER.
+        return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            hidden_states,
+            _encode_layer_name(self.k_cache.prefix),
+            self.k_cache.kv_cache,
+            q_quant,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+            skip_k_cache_insert=self.skip_k_cache_insert,
+            compress_ratio=self.compress_ratio,
+            candidate_blocks=self.candidate_blocks,
+            candidate_block_size=self.candidate_block_size,
+            candidate_write=self.candidate_write,
+            use_pcp=self.use_pcp,
+            pcp_shard_decode_requests=self.pcp_shard_decode_requests,
+            cache_layout=self.cache_layout,
+            dcp_rank=self.dcp_rank,
+            dcp_world_size=self.dcp_world_size,
+            cp_interleave=self._parallel_config.cp_kv_cache_interleave_size,
         )
 
     def forward_cpu(
