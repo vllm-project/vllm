@@ -1061,7 +1061,7 @@ class Base(
         """The modules a converter splits `module_name`'s weight into (e.g. Molmo2's
         fused `att_proj`), with their rows, `None` for one not on this rank. The LoRA
         rename mapper has already applied the renamings to `module_name`."""
-        weight_names = self._split_weights(f"{module_name}.weight", [])
+        weight_names = self._split_weight_names(f"{module_name}.weight", [])
         if weight_names is None:
             return None
         return {
@@ -1071,7 +1071,7 @@ class Base(
             for weight in weight_names
         }
 
-    def _split_weights(
+    def _split_weight_names(
         self, weight: str, renamings: list[WeightRenaming]
     ) -> list[str] | None:
         """The weights a converter splits `weight` into, after `renamings`. `None`
@@ -1139,7 +1139,7 @@ class Base(
             module, _, param = name.rpartition(".")
             if param == "weight":
                 return None
-            weight_names = self._split_weights(f"{module}.weight", renamings)
+            weight_names = self._split_weight_names(f"{module}.weight", renamings)
             if not weight_names or not self._loaded_by(weight_names[0]):
                 return None
             rows = [self._output_size(w) for w in weight_names]
@@ -1158,12 +1158,13 @@ class Base(
                 for w, piece in zip(weight_names, pieces)
             }
 
+        def get_parameter(name: str) -> torch.Tensor:
+            """A tensor with the full output size of the linear that loads `name`,
+            which `Split` reads."""
+            return torch.empty(self._output_size(name), device="meta")
+
         # Stands in for the model whose parameters `Split` reads the sizes of
-        unfused = SimpleNamespace(
-            get_parameter=lambda name: torch.empty(
-                self._output_size(name), device="meta"
-            )
-        )
+        unfused = SimpleNamespace(get_parameter=get_parameter)
         # Each target collects its sources in its own converter copy, as in Transformers
         pending: dict[str, WeightConverter] = {}
         for name, tensor in weights:

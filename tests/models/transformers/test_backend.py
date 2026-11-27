@@ -1093,7 +1093,7 @@ class _LoadPathStub(nn.Module):
 
     _apply_conversion_mapping = Base._apply_conversion_mapping
     _drop_ignored_unexpected = Base._drop_ignored_unexpected
-    _split_weights = Base._split_weights
+    _split_weight_names = Base._split_weight_names
     _loaded_by = Base._loaded_by
     _output_size = Base._output_size
     lora_split_rows = Base.lora_split_rows
