@@ -21,9 +21,7 @@ from .question_types import (
     StructuredDecisionError,
     argmax,
     build_question,
-)
-from .question_types import (
-    ChoiceQuestion as LabelQuestion,
+    get_question_type,
 )
 
 
@@ -45,17 +43,19 @@ def make_read_question(
         ]
     else:
         options = [Option(level.label, level.description) for level in question.levels]
-    limit = min(max_options, len(LABELS)) if labeled else max_options
+    qtype = get_question_type(question.type)
+    limit = min(max_options, len(qtype.label_set)) if labeled else max_options
     if len(options) > limit:
+        kind = "choices" if isinstance(question, ChoiceQuestion) else "score levels"
         raise StructuredDecisionError(
-            f"This model supports at most {limit} choices per question"
+            f"This model supports at most {limit} {kind} per question"
         )
     return Question(
         id=str(index),
-        type=LabelQuestion(),
+        type=qtype,
         instructions=question.instructions,
         options=tuple(options),
-        labels=LABELS[: len(options)],
+        labels=qtype.label_set[: len(options)],
     )
 
 

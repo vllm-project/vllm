@@ -210,10 +210,16 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
 ```
 
 Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
-`Render.RenderChat` renders a chat request into prompt token IDs plus the
-settings rendering decides (structured-output constraint, reasoning gate,
-preprocessed media), which the client copies into its `vllm.GenerateRequest`
-for `Inference.Generate`. See [`render.proto`](proto/render.proto).
+`Render.RenderChat` accepts a typed chat request; `Render.Render` accepts a raw
+JSON body with `API_CHAT`. The raw RPC's `mm_payload` enum alone controls media
+output: unspecified and `MM_PAYLOAD_TENSORS` include inline tensors;
+`MM_PAYLOAD_NONE` retains hashes and placeholder ranges only. JSON
+`mm_payload` and `return_mm_kwargs` do not select the gRPC output mode.
+
+The response includes prompt token IDs, the structured-output constraint,
+reasoning gate, and preprocessed media.
+See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
+and [`render.proto`](proto/render.proto) for the contract.
 
 ### Example Request
 
