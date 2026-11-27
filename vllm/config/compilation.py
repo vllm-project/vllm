@@ -295,6 +295,12 @@ class PassConfig:
     for layers that support it. Auto-enabled at O2+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
+    # AMD Zen CPU (zentorch) specific fusions
+    fuse_zentorch_gated_act: bool = None  # type: ignore[assignment]
+    """Fuse a zentorch gate/up linear with SiluAndMul into
+    zentorch_linear_gated_act. Auto-enabled at O1+ on Zen CPUs whose zentorch
+    provides the op."""
+
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
@@ -355,6 +361,7 @@ class PassConfig:
         "fuse_qk_norm_rope_kvcache",
         "enable_qk_norm_rope_fusion",
         "fuse_rope_kvcache_cat_mla",
+        "fuse_zentorch_gated_act",
         mode="wrap",
     )
     @classmethod
@@ -426,6 +433,12 @@ class PassConfig:
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache_cat_mla = False
+        if self.fuse_zentorch_gated_act and not current_platform.is_zen_cpu():
+            logger.warning_once(
+                "zentorch gated-activation fusion requires an AMD Zen CPU with "
+                "zentorch. The fusion will be disabled."
+            )
+            self.fuse_zentorch_gated_act = False
 
     def log_enabled_passes(self) -> None:
         """Log the enabled custom fusion passes.

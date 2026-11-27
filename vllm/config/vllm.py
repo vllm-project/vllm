@@ -301,6 +301,13 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     return cc.uses_rope_kernel() and "-rotary_embedding" not in cc.custom_ops
 
 
+def enable_zentorch_gated_act_fusion(cfg: "VllmConfig") -> bool:
+    """Enable on AMD Zen CPUs whose zentorch provides zentorch_linear_gated_act."""
+    from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+
+    return has_zentorch_op(["zentorch_linear_gated_act"])
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -314,6 +321,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_qk_norm_rope_kvcache": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
+            "fuse_zentorch_gated_act": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -335,6 +343,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_qk_norm_rope_kvcache": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
+            "fuse_zentorch_gated_act": enable_zentorch_gated_act_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -356,6 +365,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_zentorch_gated_act": enable_zentorch_gated_act_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -377,6 +387,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_zentorch_gated_act": enable_zentorch_gated_act_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
