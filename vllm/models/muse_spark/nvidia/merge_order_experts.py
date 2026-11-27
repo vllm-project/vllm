@@ -25,7 +25,9 @@ def _muse_weight_tile_kernel(
     SORTED,
     GROUPS,
     PADDED,
+    EXPERT_MAP,
     ROUTES,
+    GLOBAL_E: tl.constexpr,
     E: tl.constexpr,
     N: tl.constexpr,
     K: tl.constexpr,
@@ -39,8 +41,13 @@ def _muse_weight_tile_kernel(
     if block * BM >= tl.load(PADDED):
         return
     group = tl.load(GROUPS + block)
-    expert = group % E
-    slot = group // E - 1
+    expert = group % GLOBAL_E
+    slot = group // GLOBAL_E - 1
+    if EXPERT_MAP is not None:
+        # Routes are global, but both weights and LoRA factors are rank-local.
+        expert = tl.load(EXPERT_MAP + expert)
+        if expert < 0:
+            return
     rows = tl.load(SORTED + block * BM + tl.arange(0, BM)).to(tl.int64)
     cols = (tl.program_id(1) * BN + tl.arange(0, BN)).to(tl.int64)
     # Expert offsets can exceed 32 bits for large checkpoint tensors.
@@ -74,7 +81,7 @@ def _muse_weight_tile_kernel(
 
 
 def _muse_tile_projection(
-    x, w, factors_a, factors_b, out, schedule, routes, input_group
+    x, w, factors_a, factors_b, out, schedule, routes, input_group, expert_map=None
 ):
     (a,) = factors_a
     (b,) = factors_b
@@ -92,7 +99,9 @@ def _muse_tile_projection(
         sorted_ids,
         groups,
         padded,
+        expert_map,
         routes,
+        e if expert_map is None else expert_map.numel(),
         e,
         n,
         k,
@@ -145,15 +154,16 @@ class MuseSparkMergeOrderExperts(TritonExperts):
                 apply_router_weight_on_input,
             )
         assert self._uses_post_gemm2_hook(hidden_states.size(0))
-        assert expert_map is None and ctx.tp_size in (1, 2) and not ctx.fully_sharded
+        assert ctx.tp_size in (1, 2) and not ctx.fully_sharded
         assert self.quant_dtype is None and not apply_router_weight_on_input
         assert self.w1_bias is None and self.w2_bias is None
         assert hidden_states.dtype == w1.dtype == w2.dtype == torch.bfloat16
         m, top_k = topk_ids.shape
         slots = ctx.punica_wrapper.token_lora_indices[:m]
         assert slots.shape == (m,)
-        groups = topk_ids + (slots + 1).to(topk_ids.dtype)[:, None] * w1.size(0)
-        schedule = moe_align_block_size(groups, 16, (ctx.max_loras + 1) * w1.size(0))
+        num_experts = global_num_experts if expert_map is not None else w1.size(0)
+        groups = topk_ids + (slots + 1).to(topk_ids.dtype)[:, None] * num_experts
+        schedule = moe_align_block_size(groups, 16, (ctx.max_loras + 1) * num_experts)
         gu = _resize_cache(workspace2, (m, top_k, w1.size(1)))
         _muse_tile_projection(
             hidden_states,
@@ -164,6 +174,7 @@ class MuseSparkMergeOrderExperts(TritonExperts):
             schedule,
             groups.numel(),
             top_k,
+            expert_map,
         )
         act = _resize_cache(workspace13, (m * top_k, w2.size(2)))
         self.activation(activation, act, gu.view(m * top_k, -1))
@@ -177,6 +188,7 @@ class MuseSparkMergeOrderExperts(TritonExperts):
             schedule,
             groups.numel(),
             1,
+            expert_map,
         )
         self._run_post_gemm2_hook(
             route_major_moe_output(down, topk_weights, topk_ids, expert_map), output

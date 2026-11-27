@@ -722,11 +722,18 @@ class RoutedExperts(PluggableLayer):
                 copy_weight_(param.data[:, :dim1, :dim2], loaded_weight)
             return True if return_success else None
 
+        from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+            FusedMoEModularMethod,
+        )
         from vllm.model_executor.layers.quantization.online.moe_base import (
             OnlineMoEMethodBase,
         )
 
         base_quant_method = self.quant_method
+        # Expert LoRA replaces the execution method after loading. A reload
+        # must still interpret checkpoint scales using the original method.
+        if isinstance(base_quant_method, FusedMoEModularMethod):
+            base_quant_method = base_quant_method.old_quant_method
 
         # In case online MOE re-quantization is used, loading is handled
         # by the original quant method.

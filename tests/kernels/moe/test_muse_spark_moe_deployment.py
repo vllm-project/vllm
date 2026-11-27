@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseSparkMoEConfig,
+    _validate_quantized_route_major_deployment,
     _validate_route_major_deployment,
     needs_pre_norm_all_reduce,
     validate_deployment,
@@ -149,7 +150,25 @@ def test_muse_spark_attention_only_lora(targets, expert_lora):
     assert moe.is_lora_enabled == expert_lora
     _validate_route_major_deployment(moe, supports_lora=True)
     if expert_lora:
-        with pytest.raises(NotImplementedError, match="MoE LoRA"):
+        with pytest.raises(NotImplementedError, match="expert LoRA"):
             _validate_route_major_deployment(moe)
     else:
         _validate_route_major_deployment(moe)
+
+
+@pytest.mark.parametrize("factor_dtype", [torch.bfloat16, torch.float32])
+def test_quantized_expert_lora_dtype(factor_dtype, monkeypatch):
+    from vllm.platforms import current_platform
+
+    moe = _moe_config(is_lora_enabled=True)
+    config = VllmConfig()
+    config.lora_config = LoRAConfig(lora_dtype=factor_dtype)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda cap: cap == 90
+    )
+    with set_current_vllm_config(config):
+        if factor_dtype == torch.bfloat16:
+            _validate_quantized_route_major_deployment(moe)
+        else:
+            with pytest.raises(NotImplementedError, match="requires BF16 adapters"):
+                _validate_quantized_route_major_deployment(moe)
