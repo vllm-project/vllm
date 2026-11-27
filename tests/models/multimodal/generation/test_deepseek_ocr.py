@@ -28,7 +28,12 @@ from vllm.model_executor.models.deepencoder import (
 from vllm.model_executor.models.deepseek_ocr import DeepseekOCRForCausalLM
 from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
 from vllm.model_executor.models.step3_vl import Step3VisionEmbeddings
-from vllm.model_executor.models.vision import interpolate_cls_abs_pos
+from vllm.model_executor.models.step3_vl import get_abs_pos as step3_get_abs_pos
+from vllm.model_executor.models.vision import (
+    get_unallocated_pos_embed_cache_bytes,
+    interpolate_cls_abs_pos,
+)
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
 
 
@@ -226,12 +231,63 @@ class TestAbsPosEmbedCache:
             assert torch.equal(out3, expected_new)
             assert out3.data_ptr() == cached_ptr
 
-            # Verify full forward matches uncached interpolation.
+            # Compare full cached forward against an uncached reference forward
+            # using the original get_abs_pos path on the exact same weights.
             pixel_values = torch.randn(2, 3, 24, 24)
             with torch.inference_mode():
-                y1 = module(pixel_values)
-                y2 = module(pixel_values)
-            assert torch.equal(y1, y2)
+                cached_out = module(pixel_values)
+                patch_embeds = module.patch_embedding(pixel_values)
+                patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
+                class_embeds = module.class_embedding.expand(
+                    pixel_values.shape[0], 1, -1
+                )
+                ref_embeds = torch.cat([class_embeds, patch_embeds], dim=1)
+                pos_full = module.position_embedding(module.position_ids)
+                if isinstance(module, DeepCLIPVisionEmbeddings):
+                    ref_out = ref_embeds + module.get_abs_pos(
+                        pos_full, ref_embeds.size(1)
+                    )
+                else:
+                    ref_out = ref_embeds + step3_get_abs_pos(
+                        pos_full, patch_embeds.size(1)
+                    )
+                    ref_out = torch.cat(
+                        [
+                            ref_out[:, 0, :]
+                            .unsqueeze(1)
+                            .repeat(1, module.pad_tp_size - 1, 1),
+                            ref_out,
+                        ],
+                        dim=1,
+                    )
+            assert torch.equal(cached_out, ref_out)
+
+    def test_cold_cache_capture_does_not_populate_cache(self, monkeypatch):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+        expected = ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+
+        monkeypatch.setattr(
+            current_platform, "is_current_stream_capturing", lambda: True
+        )
+        with torch.inference_mode():
+            out = sam.get_abs_pos(sam.pos_embed, 6)
+
+        assert torch.equal(out, expected)
+        assert len(sam._abs_pos_cache._entries) == 0
+        assert sam._abs_pos_cache._cached_bytes == 0
+
+    def test_unallocated_cache_bytes_accounting(self):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+        max_bytes = sam._abs_pos_cache._max_bytes
+        assert get_unallocated_pos_embed_cache_bytes(sam) == max_bytes
+
+        with torch.inference_mode():
+            out = sam.get_abs_pos(sam.pos_embed, 6)
+
+        assert get_unallocated_pos_embed_cache_bytes(sam) == max_bytes - out.nbytes
+        assert get_unallocated_pos_embed_cache_bytes(None) == 0
 
     def test_torch_compile_bypasses_cache(self):
         sam = _make_small_sam()

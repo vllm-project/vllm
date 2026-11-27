@@ -840,10 +840,19 @@ class Worker(WorkerBase):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
+        from vllm.model_executor.models.vision import (
+            get_unallocated_pos_embed_cache_bytes,
+        )
+
+        pos_embed_cache_reserve = get_unallocated_pos_embed_cache_bytes(
+            getattr(self.model_runner, "model", None)
+        )
+
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate
+            - pos_embed_cache_reserve
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory

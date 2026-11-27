@@ -649,6 +649,10 @@ class InterpolatedPosEmbedCache:
             tuple[torch.Tensor, int, int],
         ] = {}
 
+    @property
+    def remaining_bytes(self) -> int:
+        return max(0, self._max_bytes - self._cached_bytes)
+
     def get_or_compute(
         self,
         weight: torch.Tensor,
@@ -725,3 +729,18 @@ class InterpolatedPosEmbedCache:
                     else:
                         del self._entries[key]
                         self._cached_bytes -= cached.nbytes
+
+
+def get_unallocated_pos_embed_cache_bytes(model: object) -> int:
+    """Return remaining byte budget across `InterpolatedPosEmbedCache`
+    instances on `model` not yet allocated during memory profiling."""
+    if not isinstance(model, torch.nn.Module):
+        return 0
+    seen: set[int] = set()
+    total = 0
+    for module in model.modules():
+        for value in module.__dict__.values():
+            if isinstance(value, InterpolatedPosEmbedCache) and id(value) not in seen:
+                seen.add(id(value))
+                total += value.remaining_bytes
+    return total
