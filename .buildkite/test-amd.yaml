@@ -109,7 +109,7 @@ steps:
   agent_pool: mi355_dpx
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py
+  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py kernels/test_zz_dpx_gemm_probe.py kernels/test_zz_dpx_vllm_dispatch_probe.py kernels/test_zz_dpx_aiter_probe.py
 
 - label: ":amd: (MI355) GEMM diagnostics" # TEMPORARY
   timeout_in_minutes: 30
@@ -118,7 +118,7 @@ steps:
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py
+  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py kernels/test_zz_dpx_gemm_probe.py kernels/test_zz_dpx_vllm_dispatch_probe.py kernels/test_zz_dpx_aiter_probe.py
 
 - label: ":amd: (MI300 DPX) GEMM diagnostics" # TEMPORARY
   timeout_in_minutes: 30
@@ -127,7 +127,7 @@ steps:
   agent_pool: mi300_dpx
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py
+  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py kernels/test_zz_dpx_gemm_probe.py kernels/test_zz_dpx_vllm_dispatch_probe.py kernels/test_zz_dpx_aiter_probe.py
 
 - label: ":amd: (MI300) GEMM diagnostics" # TEMPORARY
   timeout_in_minutes: 30
@@ -136,4 +136,4 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py
+  - pytest -v -s kernels/test_zz_dpx_gemm_diag.py kernels/test_zz_dpx_gemm_probe.py kernels/test_zz_dpx_vllm_dispatch_probe.py kernels/test_zz_dpx_aiter_probe.py

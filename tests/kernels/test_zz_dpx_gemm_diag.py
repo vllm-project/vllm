@@ -1,3 +1,4 @@
+# ruff: noqa
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TEMPORARY diagnostic, not for merge: which BF16 GEMM kernel serves each
@@ -167,3 +168,56 @@ def test_dpx_gemm_diag(monkeypatch):
             out("gemm", **row)
         del weight, acts
         torch.cuda.empty_cache()
+
+
+def test_dispatch_overhead():
+    """Host cost of vLLM's GEMM dispatch against calling the kernel directly."""
+    from vllm.model_executor.layers import utils as layer_utils
+
+    cu = torch.cuda.get_device_properties(0).multi_processor_count
+    gen = torch.Generator().manual_seed(7)
+    for label, (m, k) in (("1b_qkv", (3072, 2048)), ("70b_o", (8192, 8192))):
+        weight = (torch.randn(m, k, generator=gen) * 0.02).to(torch.bfloat16).cuda()
+        for n in (1, 9, 12, 64):
+            x = torch.randn(n, k, generator=gen).to(torch.bfloat16).cuda()
+            row = {
+                "shape": label,
+                "n": n,
+                "us_torch_direct": round(
+                    timed(lambda x=x, w=weight: F.linear(x, w)), 1
+                ),
+                "us_impl": round(
+                    timed(
+                        lambda x=x, w=weight: layer_utils.rocm_unquantized_gemm_impl(
+                            x, w
+                        )
+                    ),
+                    1,
+                ),
+                "us_custom_op": round(
+                    timed(
+                        lambda x=x, w=weight: torch.ops.vllm.rocm_unquantized_gemm(
+                            x, w, None
+                        )
+                    ),
+                    1,
+                ),
+            }
+            if 10 <= n <= 128:
+                for grid in sorted({cu, 256}):
+                    try:
+                        y = ops.wvSplitKrc(x, weight, grid, None)
+                        row[f"sha_krc_{grid}"] = sha(y)
+                        row[f"us_krc_{grid}"] = round(
+                            timed(
+                                lambda x=x, w=weight, g=grid: ops.wvSplitKrc(
+                                    x, w, g, None
+                                )
+                            ),
+                            1,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        row[f"krc_{grid}_error"] = f"{type(e).__name__}: {e}"[:200]
+                row["sha_torch"] = sha(F.linear(x, weight))
+            out("overhead", **row)
+        del weight
