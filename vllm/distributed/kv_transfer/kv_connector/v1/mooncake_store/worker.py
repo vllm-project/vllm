@@ -12,6 +12,7 @@ and MooncakeDistributedStore integration.
 
 import dataclasses
 import functools
+import itertools
 import math
 import os
 import queue
@@ -28,7 +29,7 @@ import torch
 import zmq
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import hash_config, hash_factors
 from vllm.distributed import (
     get_dcp_group,
@@ -64,6 +65,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     ATTENTION_STORE_LAYOUTS,
     AttentionStoreLayout,
     KeyMetadata,
+    LayerRangeObjects,
+    LayerRangeStoreLayout,
     MambaStoreLayout,
     PoolKey,
     RankLocalStoreLayout,
@@ -87,7 +90,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.store_service i
     MooncakeStoreService,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
+from vllm.distributed.utils import get_default_pp_partition, get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
@@ -142,6 +148,104 @@ def _store_spec_family(spec: KVCacheSpec) -> Literal["attention", "mamba"] | Non
 
 def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
     return tuple(group.kv_cache_specs[name] for name in group.layer_names)
+
+
+def _draft_layer_names(vllm_config: VllmConfig) -> frozenset[str]:
+    """Layers of the speculative decoding draft model."""
+    if vllm_config.speculative_config is None:
+        return frozenset()
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+    )
+    return frozenset(name for name, layer in layers.items() if layer.is_draft_layer)
+
+
+def _decoder_layer_index(layer_name: str) -> int:
+    """Decoder layer index of `layer_name`, e.g. 7 for LongCat-Flash's
+    `model.layers.7.self_attn.1.attn`."""
+    parts = layer_name.split(".")
+    for part, index in zip(parts, parts[1:]):
+        if part == "layers" and index.isdigit():
+            return int(index)
+    return extract_layer_index(layer_name)
+
+
+def _layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
+    """Index of the range holding `layer`."""
+    for index, (start, end) in enumerate(layer_ranges):
+        if start <= layer < end:
+            return index
+    raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
+
+
+def _group_range_objects(
+    metadata: KeyMetadata,
+    group: KVCacheGroup,
+    layer_ranges: tuple[tuple[int, int], ...] | None,
+    draft_layers: frozenset[str],
+    range_namespace: Callable[[Sequence[KVCacheSpec]], str] | None = None,
+) -> LayerRangeObjects | None:
+    """One Store object per layer range holding some of the group's layers
+    (none if the group has no layers on this stage), or None without layer
+    ranges.
+
+    Draft layers belong to the last range. Within an object, layers are
+    ordered by KV cache spec in order of first appearance, then in group
+    order. `range_namespace` maps a range's layer specs to its namespace; by
+    default every range uses `metadata`'s.
+    """
+    if layer_ranges is None:
+        return None
+    specs = group.kv_cache_specs
+    last_range = len(layer_ranges) - 1
+    range_layers: dict[int, dict[KVCacheSpec, list[str]]] = {}
+    for name in group.layer_names:
+        range_index = (
+            last_range
+            if last_range == 0 or name in draft_layers
+            else _layer_range_index(layer_ranges, _decoder_layer_index(name))
+        )
+        spec_layers = range_layers.setdefault(range_index, {})
+        spec_layers.setdefault(specs[name], []).append(name)
+    range_metadata: list[KeyMetadata] = []
+    layers: dict[str, tuple[int, int]] = {}
+    for range_index in sorted(range_layers):
+        names = list(itertools.chain.from_iterable(range_layers[range_index].values()))
+        for name in names:
+            layers[name] = (len(range_metadata), len(layers))
+        range_metadata.append(
+            replace(
+                metadata,
+                layer_range=layer_ranges[range_index],
+                store_namespace=(
+                    range_namespace([specs[name] for name in names])
+                    if range_namespace is not None
+                    else metadata.store_namespace
+                ),
+            )
+        )
+    return LayerRangeObjects(tuple(range_metadata), layers)
+
+
+def _store_pp_partition(store_pp_size: object, num_layers: int) -> list[int]:
+    """Layer count of each Store layer range: a PP size uses its default
+    partition, a list gives the count of each range."""
+    partition: list[int] = []
+    if type(store_pp_size) is int and store_pp_size > 0:
+        partition = get_default_pp_partition(num_layers, store_pp_size)
+    elif isinstance(store_pp_size, list):
+        partition = store_pp_size
+    if not (
+        all(type(count) is int and count > 0 for count in partition)
+        and sum(partition) == num_layers
+    ):
+        raise ValueError(
+            f"store_pp_size must be a PP size of at most {num_layers} or a list "
+            f"of per-stage layer counts summing to {num_layers}, got "
+            f"{store_pp_size!r}"
+        )
+    return partition
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -1768,8 +1872,11 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors = (
             self._compute_group_tp_replication_factors()
         )
-        self.store_tp_size, store_namespace, store_group_plans = (
+        self.store_tp_size, rank_local_format, store_group_plans = (
             self._select_store_layout(extra_config)
+        )
+        store_layer_ranges = self._resolve_store_layer_ranges(
+            extra_config, model_config.get_total_num_hidden_layers(), store_group_plans
         )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
@@ -1778,9 +1885,29 @@ class MooncakeStoreWorker:
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
             cache_prefix=cache_prefix,
-            store_namespace=store_namespace,
+            store_namespace=(
+                self._store_namespace(
+                    rank_local_format, pp_shared=store_layer_ranges is not None
+                )
+                if rank_local_format
+                else ""
+            ),
         )
-        self.token_dbs = self._build_token_databases(metadata, store_group_plans)
+        self.token_dbs = self._build_token_databases(
+            metadata,
+            store_group_plans,
+            store_layer_ranges,
+            _draft_layer_names(vllm_config),
+        )
+        if store_layer_ranges is not None:
+            # Every object costs a Store operation per save, load and lookup.
+            logger.info(
+                "Mooncake store writes %d objects per block on this rank for "
+                "layer ranges %s (store_pp_size=%s)",
+                sum(len(db.store_layout.local_shard_ids) for db in self.token_dbs),
+                store_layer_ranges,
+                extra_config.get("store_pp_size"),
+            )
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
@@ -1885,10 +2012,7 @@ class MooncakeStoreWorker:
                 )
             return requested_store_tp_size, "", tuple(plans)
 
-        store_namespace = (
-            f"@store_pp:{self.pp_size}@store_format:"
-            f"rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
-        )
+        rank_local_format = f"rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
         requested_topology = (
             extra_config.get("prefill_tp_sizes")
             if lcm_store_tp_enabled
@@ -1896,18 +2020,108 @@ class MooncakeStoreWorker:
         )
         logger.warning(
             "Store TP configuration %r with KV layout %s falls back because %s; "
-            "using namespace %s",
+            "using Store format %s",
             requested_topology,
             cache_layout,
             fallback_reason,
-            store_namespace,
+            rank_local_format,
         )
-        return None, store_namespace, None
+        return None, rank_local_format, None
+
+    def _store_namespace(
+        self,
+        store_format: str,
+        *,
+        pp_shared: bool,
+        store_tp_size: int | None = None,
+        schema: str | None = None,
+    ) -> str:
+        """Namespace of keys with an opt-in Store payload format. Keys shared
+        across PP sizes name their layer range and leave the PP size out."""
+        return (
+            (f"@store_tp:{store_tp_size}" if store_tp_size is not None else "")
+            + ("" if pp_shared else f"@store_pp:{self.pp_size}")
+            + f"@store_format:{store_format}"
+            + (f"@store_schema:{schema}" if schema is not None else "")
+        )
+
+    def _store_tp_range_namespace(
+        self, plan: _StoreGroupPlan, specs: Sequence[KVCacheSpec]
+    ) -> str:
+        """Namespace of Store TP keys that name a layer range. It fingerprints
+        the specs of the layers the range's object holds."""
+        assert plan.store_chunk_size is not None
+        return self._store_namespace(
+            plan.layout_cls.store_format,
+            pp_shared=True,
+            store_tp_size=self.store_tp_size,
+            schema=AttentionStoreLayout.schema_fingerprint(
+                cast(tuple[AttentionSpec, ...], tuple(specs)),
+                plan.logical_tp_size,
+                plan.store_shard_count,
+                plan.store_chunk_size,
+            ),
+        )
+
+    def _resolve_store_layer_ranges(
+        self,
+        extra_config: dict[str, Any],
+        num_layers: int,
+        plans: tuple[_StoreGroupPlan | None, ...] | None,
+    ) -> tuple[tuple[int, int], ...] | None:
+        """Layer ranges of `store_pp_size` that this PP stage stores as
+        separate objects. None when `store_pp_size` is unset or ignored."""
+        store_pp_size = extra_config.get("store_pp_size")
+        if store_pp_size is None:
+            return None
+        boundaries = [
+            0,
+            *itertools.accumulate(_store_pp_partition(store_pp_size, num_layers)),
+        ]
+        plan = plans[0] if plans else None
+        fallback_reason: str | None = None
+        if self._kv_cache_config.hisparse_host_num_blocks is not None:
+            fallback_reason = "HiSparse host cache registration is per group"
+        elif plans is not None and len(self._kv_cache_groups) != 1:
+            fallback_reason = "Store TP sharing has several KV cache groups"
+        elif plan is not None and not issubclass(plan.layout_cls, AttentionStoreLayout):
+            fallback_reason = "the Store TP layout is not an attention layout"
+        elif plan is not None and any(
+            spec != plan.layer_specs[0] for spec in plan.layer_specs
+        ):
+            fallback_reason = "the Store TP layout has layers with different specs"
+        if fallback_reason is not None:
+            logger.warning(
+                "Mooncake store ignores store_pp_size=%s because %s",
+                store_pp_size,
+                fallback_reason,
+            )
+            return None
+        # Every stage checks every stage boundary, so all stages fail together.
+        stages = [
+            get_pp_indices(num_layers, rank, self.pp_size)
+            for rank in range(self.pp_size)
+        ]
+        misaligned = [start for start, _ in stages if start not in boundaries]
+        if misaligned:
+            raise ValueError(
+                f"PP stage boundaries {misaligned} are not layer range boundaries "
+                f"{boundaries} of store_pp_size={store_pp_size!r}; align "
+                "VLLM_PP_LAYER_PARTITION or store_pp_size"
+            )
+        start, end = stages[self.pp_rank]
+        return tuple(
+            layer_range
+            for layer_range in itertools.pairwise(boundaries)
+            if start <= layer_range[0] < end
+        )
 
     def _build_token_databases(
         self,
         metadata: KeyMetadata,
         plans: tuple[_StoreGroupPlan | None, ...] | None,
+        layer_ranges: tuple[tuple[int, int], ...] | None = None,
+        draft_layers: frozenset[str] = frozenset(),
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
         token_dbs: list[ChunkedTokenDatabase] = []
@@ -1917,27 +2131,49 @@ class MooncakeStoreWorker:
             )
             plan = plans[group_idx] if plans is not None else None
             if plan is None:
+                group_metadata = dataclasses.replace(
+                    metadata,
+                    group_id=group_idx,
+                    tp_rank=(
+                        self.tp_rank // self._group_tp_replication_factors[group_idx]
+                    ),
+                )
+                range_objects = _group_range_objects(
+                    group_metadata, group, layer_ranges, draft_layers
+                )
                 token_dbs.append(
                     ChunkedTokenDatabase(
-                        dataclasses.replace(
-                            metadata,
-                            group_id=group_idx,
-                            tp_rank=(
-                                self.tp_rank
-                                // self._group_tp_replication_factors[group_idx]
-                            ),
-                        ),
+                        group_metadata,
                         group.block_size,
                         hash_block_size=hash_block_size,
+                        store_layout=(
+                            LayerRangeStoreLayout(
+                                group_metadata,
+                                group.block_size,
+                                hash_block_size,
+                                range_objects,
+                            )
+                            if range_objects is not None
+                            else None
+                        ),
                     )
                 )
                 continue
             assert self.store_tp_size is not None
-            group_namespace = (
-                f"@store_tp:{self.store_tp_size}@store_pp:{self.pp_size}"
-                f"@store_format:{plan.layout_cls.store_format}"
-                f"@store_schema:{plan.schema_fingerprint}"
-            )
+            if layer_ranges is None:
+                group_namespace = self._store_namespace(
+                    plan.layout_cls.store_format,
+                    pp_shared=False,
+                    store_tp_size=self.store_tp_size,
+                    schema=plan.schema_fingerprint,
+                )
+            else:
+                # Mooncake group ids use this namespace: the schema of one
+                # layer, which every range shares at every PP size. Each
+                # range's keys use the schema of the layers they hold.
+                group_namespace = self._store_tp_range_namespace(
+                    plan, plan.layer_specs[:1]
+                )
             group_metadata = dataclasses.replace(
                 metadata,
                 group_id=group_idx,
@@ -1955,6 +2191,13 @@ class MooncakeStoreWorker:
                     tp_rank=plan.tp_rank,
                     layer_specs=cast(tuple[AttentionSpec, ...], plan.layer_specs),
                     store_chunk_size=plan.store_chunk_size,
+                    range_objects=_group_range_objects(
+                        group_metadata,
+                        group,
+                        layer_ranges,
+                        draft_layers,
+                        functools.partial(self._store_tp_range_namespace, plan),
+                    ),
                 )
             else:
                 store_layout = MambaStoreLayout(
@@ -2164,27 +2407,31 @@ class MooncakeStoreWorker:
             for group_id, (group, db) in enumerate(
                 zip(self._kv_cache_groups, self.token_dbs, strict=True)
             ):
+                tp_shared = self.store_tp_size is not None
                 group_views = [
-                    cache_by_layer[name]
+                    (name, views[:1] if tp_shared else views)
                     for name in group.layer_names
-                    if name in cache_by_layer
+                    if (views := cache_by_layer.get(name)) is not None
                 ]
-                if self.store_tp_size is not None:
-                    if len(group_views) != len(group.layer_names):
-                        raise ValueError(
-                            "Missing KV cache tensors for TP-shared cache group "
-                            f"{group_id}"
-                        )
-                    group_tensors = [views[0] for views in group_views]
-                else:
-                    group_tensors = [cache for views in group_views for cache in views]
-                group_tensors = group_tensors or cache_tensors
+                if tp_shared and len(group_views) != len(group.layer_names):
+                    raise ValueError(
+                        f"Missing KV cache tensors for TP-shared cache group {group_id}"
+                    )
+                group_tensors = [cache for _, views in group_views for cache in views]
+                if not group_tensors and not isinstance(
+                    db.store_layout, LayerRangeStoreLayout
+                ):
+                    group_tensors = cache_tensors
                 if not isinstance(db.store_layout, RankLocalStoreLayout):
                     group_tensors = [
                         group_kernel_blocks(cache, self.num_blocks)
                         for cache in group_tensors
                     ]
-                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
+                db.store_layout.register_kv_caches(
+                    group_tensors,
+                    self.num_blocks,
+                    layer_names=[name for name, views in group_views for _ in views],
+                )
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0

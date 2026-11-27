@@ -7,6 +7,7 @@ import ctypes
 import sys
 import threading
 import types
+import zlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     circular_buffer_layer,
     make_kv_cache_group,
+    make_kv_cache_group_from_specs,
     mamba_layer,
     sliding_window_layer,
 )
@@ -46,8 +48,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import (
+    _project_kv_cache_groups_to_worker,
+    get_kv_cache_config_from_groups,
+)
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -122,6 +128,13 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         patch.dict(sys.modules, {"mooncake.store": fake_mooncake_store}),
         patch.object(mooncake_store_worker, "MooncakeStoreConfig") as MCfg,
         patch.object(mooncake_store_worker, "LookupKeyServer"),
+        patch.object(mooncake_store_worker, "get_pp_group"),
+        patch(
+            "torch.distributed.all_gather_object",
+            side_effect=lambda output, local, **_: output.__setitem__(
+                slice(None), [local] * len(output)
+            ),
+        ),
     ):
         sc = MCfg.load_from_config.return_value
         sc.metadata_server = ""
@@ -467,6 +480,22 @@ def _span_mask(spans, nbytes: int) -> torch.Tensor:
     return mask
 
 
+def _plan_kv_caches(groups, layout: KVCacheLayout, num_blocks: int, model: str):
+    """KV cache config and tensors of `groups` in the planner's real layout."""
+    planner_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: layout,
+            prefix_cache_retention_interval=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    try:
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, num_blocks)
+        return cfg, allocate_kv_cache(cfg, torch.device("cpu"), layout)
+    except (ValueError, AssertionError):
+        pytest.skip(f"{layout.name} cannot express {model}")
+
+
 @pytest.mark.parametrize("layout", list(KVCacheLayout), ids=lambda x: x.name)
 @pytest.mark.parametrize("model", list(_MODELS))
 def test_store_values_round_trip_every_layout(request, model, layout):
@@ -487,18 +516,7 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         )
     num_blocks, block = 4, 2
     groups = [make_kv_cache_group(names, spec) for names, spec in _MODELS[model]]
-    planner_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: layout,
-            prefix_cache_retention_interval=None,
-        ),
-        attention_config=SimpleNamespace(hisparse_config=None),
-    )
-    try:
-        cfg = get_kv_cache_config_from_groups(planner_config, groups, num_blocks)
-        kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
-    except (ValueError, AssertionError):
-        pytest.skip(f"{layout.name} cannot express {model}")
+    cfg, kv_caches = _plan_kv_caches(groups, layout, num_blocks, model)
     worker = _build_worker_with_dict_store(
         _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
     )
@@ -557,6 +575,205 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         assert torch.equal(raw[owned], before[owned])
         assert torch.equal(raw[other_blocks], before[other_blocks])
         raw.copy_(before)
+
+
+_PP_NUM_LAYERS = 4
+_INDEXER = AttentionSpec(
+    block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+)
+_PP_MODELS = ["dense", "two_specs", "attn_mamba", "longcat"]
+
+
+def _pp_groups(model: str, layers: range) -> list:
+    """KV cache groups of `model` on the PP stage holding `layers`. Groups are
+    formed over the whole model, so every stage has each of them."""
+    if model == "attn_last":
+        # Like Nemotron-H at a large PP size: the attention group has no layers
+        # on the stages that hold only Mamba layers.
+        last = _PP_NUM_LAYERS - 1
+        whole = [
+            make_kv_cache_group([f"layers.{last}.attn"], _ATTN),
+            make_kv_cache_group([f"layers.{i}.mamba" for i in range(last)], _MAMBA),
+        ]
+        stage = {
+            name: KVCacheLayerConfig(group.manager_config, spec)
+            for group in whole
+            for name, spec in group.kv_cache_specs.items()
+            if int(name.split(".")[1]) in layers
+        }
+        return _project_kv_cache_groups_to_worker(whole, stage)
+    if model == "dense":
+        return [make_kv_cache_group([f"layers.{i}.attn" for i in layers], _ATTN)]
+    if model == "longcat":
+        # Like LongCat-Flash: two MLA attention modules per decoder layer.
+        mla = MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=40, dtype=torch.float16
+        )
+        names = [
+            f"model.layers.{i}.self_attn.{j}.attn" for i in layers for j in range(2)
+        ]
+        return [make_kv_cache_group(names, mla)]
+    if model == "two_specs":
+        # Like MLA with an indexer cache: two KV cache specs per layer.
+        return [
+            make_kv_cache_group_from_specs(
+                {
+                    f"layers.{i}.{module}": spec
+                    for i in layers
+                    for module, spec in (("attn", _ATTN), ("indexer", _INDEXER))
+                }
+            )
+        ]
+    return [
+        make_kv_cache_group([f"layers.{i}.attn" for i in layers if i % 2], _ATTN),
+        make_kv_cache_group([f"layers.{i}.mamba" for i in layers if not i % 2], _MAMBA),
+    ]
+
+
+def _pp_stage(
+    model: str,
+    layout: KVCacheLayout,
+    pp_size: int,
+    rank: int,
+    store: _DictStore | None = None,
+    num_blocks: int = 4,
+):
+    """Worker and KV caches of one PP stage of a `store_pp_size=2` instance,
+    through the planner's real layout."""
+    groups = _pp_groups(model, range(*get_pp_indices(_PP_NUM_LAYERS, rank, pp_size)))
+    cfg, kv_caches = _plan_kv_caches(groups, layout, num_blocks, model)
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    vllm_config.parallel_config.rank = rank
+    vllm_config.model_config.get_total_num_hidden_layers.return_value = _PP_NUM_LAYERS
+    vllm_config.kv_transfer_config.kv_connector_extra_config = {"store_pp_size": 2}
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store or _DictStore())
+    _register_with_fake_threads(worker, kv_caches)
+    return worker, kv_caches
+
+
+def _stored_objects(stage, block: int) -> dict[str, list[bytes]]:
+    """Key and segments of every object a stage stores for `block`, with each
+    layer holding the same KV at every PP size."""
+    worker, kv_caches = stage
+    objects = {}
+    for group, db in zip(worker._kv_cache_groups, worker.token_dbs, strict=True):
+        # Groups share memory, so fill one group's layers at a time.
+        for name in group.layer_names:
+            views = kv_caches[name]
+            for index, view in enumerate(views if isinstance(views, list) else [views]):
+                generator = torch.Generator().manual_seed(
+                    zlib.crc32(f"{name}/{index}".encode())
+                )
+                view.copy_(
+                    torch.randint(0, 100, view.shape, generator=generator).to(
+                        view.dtype
+                    )
+                )
+        layout = db.store_layout
+        shards = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, 16)] * len(shards), [block], shards
+        )
+        for shard, shard_addrs, shard_sizes in zip(shards, addrs, sizes, strict=True):
+            objects[layout.key_for(shard, BlockHash(b"h"))] = [
+                ctypes.string_at(addr, size)
+                for addr, size in zip(shard_addrs, shard_sizes, strict=True)
+            ]
+    return objects
+
+
+@pytest.mark.parametrize(
+    ("stage_layout", "whole_layout"),
+    [(layout, layout) for layout in KVCacheLayout]
+    + [
+        (KVCacheLayout.BLHNC, KVCacheLayout.LBHNC),
+        (KVCacheLayout.BLNHC, KVCacheLayout.LBNHC),
+    ],
+    ids=lambda x: x.name,
+)
+@pytest.mark.parametrize("model", _PP_MODELS)
+def test_store_pp_size_objects_hold_the_same_bytes_at_every_pp_size(
+    model, stage_layout, whole_layout
+):
+    """Through the planner's real layout, a PP=1 instance and the stages of a
+    PP=2 instance with the same `store_pp_size` store a block as the same
+    objects: the same keys holding the same bytes, also across KV cache
+    layouts that order a layer's block the same way."""
+    block = 2
+    whole = _stored_objects(_pp_stage(model, whole_layout, 1, 0), block)
+    stages: dict[str, list[bytes]] = {}
+    for rank in range(2):
+        stages |= _stored_objects(_pp_stage(model, stage_layout, 2, rank), block)
+
+    assert len(whole) == 2 * len(_pp_groups(model, range(_PP_NUM_LAYERS)))
+    assert {key: b"".join(value) for key, value in whole.items()} == {
+        key: b"".join(value) for key, value in stages.items()
+    }
+    block_outermost = (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+    if whole_layout in block_outermost:
+        # A block-outermost buffer places the layers of one KV cache spec side
+        # by side, so they move as one segment.
+        num_specs = 2 if model == "two_specs" else 1
+        assert all(len(segments) <= num_specs for segments in whole.values())
+    if stage_layout in block_outermost:
+        # A stage stored as one range moves each group's block as one segment.
+        assert all(len(segments) == 1 for segments in stages.values())
+
+
+def test_store_pp_size_stage_without_a_group_stores_no_object_for_it():
+    """A stage can hold no layer of a KV cache group, like a Mamba-only stage of
+    Nemotron-H, which holds no attention layer. That stage stores no object for
+    the group, and the PP=2 stages together still store the PP=1 objects."""
+    block = 2
+    whole, stage0, stage1 = (
+        _stored_objects(_pp_stage("attn_last", KVCacheLayout.LBHNC, pp, rank), block)
+        for pp, rank in ((1, 0), (2, 0), (2, 1))
+    )
+
+    assert not any("@group:0@" in key for key in stage0)
+    assert {key: b"".join(value) for key, value in whole.items()} == {
+        key: b"".join(value) for key, value in (stage0 | stage1).items()
+    }
+
+
+def test_store_pp_size_lookup_hits_only_with_every_layer_range():
+    """A PP=1 instance stores a block as one object per PP=2 stage, so it
+    reuses a block a PP=2 instance wrote only once both stages stored it."""
+    store = _DictStore()
+    hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    reader, _ = _pp_stage("dense", KVCacheLayout.LBHNC, 1, 0, store, num_blocks=8)
+    reader.store = store
+
+    for rank, hit_length in ((0, 0), (1, 64)):
+        writer, _ = _pp_stage(
+            "dense", KVCacheLayout.LBHNC, 2, rank, store, num_blocks=8
+        )
+        send_thread = KVCacheStoreSendingThread(
+            store_service=MooncakeStoreService(store),
+            token_databases=writer.token_dbs,
+            block_size=writer.block_size,
+            coord=writer.coord,
+            tp_rank=writer.tp_rank,
+            group_put_steps=writer._group_tp_replication_factors,
+            kv_role=writer.kv_role,
+            ready_event=threading.Event(),
+            enable_kv_event=False,
+        )
+        send_thread.add_request(
+            ReqMeta(
+                req_id=f"r{rank}",
+                token_len_chunk=64,
+                block_ids=([1, 2, 3, 4],),
+                block_hashes=hashes,
+                can_save=True,
+                store_job_id=rank + 1,
+            )
+        )
+        send_thread._handle_request(send_thread.request_queue.get())
+        assert reader.lookup(num_tokens=65, block_hashes=hashes).hit_length == (
+            hit_length
+        )
 
 
 def test_recv_skips_swa_blocks_before_window():
