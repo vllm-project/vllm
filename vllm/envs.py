@@ -368,6 +368,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_FLYDSL_PTPC_GEMM: bool = True
     VLLM_ROCM_FLYDSL_MX_MLP: bool = True
     VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
+    VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS: int = 136
 
 
 def get_default_cache_root():
@@ -2481,6 +2482,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Smallest token count that takes the fused MX MLP path.
     "VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS", "1024")
+    ),
+    # Smallest token count (up to 256) that takes the decode-size fused MX MLP (128 x 160-hidden
+    # gate_up tiles with the GeLU*up + MX quant epilogue, MX down); 0 disables it and its extra
+    # weight copy.
+    "VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS", "136")
     ),
 }
 

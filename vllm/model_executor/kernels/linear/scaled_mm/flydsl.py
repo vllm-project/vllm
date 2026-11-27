@@ -191,6 +191,7 @@ _MX_DOWN = (2560, 10240)
 _MX_UNIT_SCALES: dict[tuple, torch.Tensor] = {}
 
 
+
 def _mx_unit_scale(device: torch.device, n: int, k: int) -> torch.Tensor:
     key = (device, n, k)
     t = _MX_UNIT_SCALES.get(key)
@@ -210,6 +211,8 @@ def _flydsl_gelu_mlp_mx_impl(
     w1_s: torch.Tensor,
     w1_il: torch.Tensor,
     w1_s_il: torch.Tensor,
+    w1_il_dec: torch.Tensor,
+    w1_s_il_dec: torch.Tensor,
     w2: torch.Tensor,
     w2_shuffled: torch.Tensor,
     w2_s: torch.Tensor,
@@ -217,6 +220,17 @@ def _flydsl_gelu_mlp_mx_impl(
 ) -> torch.Tensor:
     m = x_q.shape[0]
     inter = w2_shuffled.shape[1]
+    dec_min = envs.VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS
+    if dec_min and dec_min <= m <= 256 and w1_il_dec.numel() > 0:
+        from aiter.ops.flydsl.gemm_a8w8_gelu_mx import flydsl_gate_up_gelu_mx_dec
+        from aiter.ops.flydsl.gemm_mxfp8_down_ws import flydsl_mx_down_ws
+
+        act = torch.empty((-(-m // 16) * 16 * inter,), dtype=x_q.dtype, device=x_q.device)
+        act_sc = torch.empty(-(-m // 256) * 256 * (inter // 32), dtype=torch.uint8, device=x_q.device)
+        flydsl_gate_up_gelu_mx_dec(x_q, w1_il_dec, x_s, w1_s_il_dec, act, act_sc)
+        out = torch.empty((m, w2_shuffled.shape[0]), dtype=torch.bfloat16, device=x_q.device)
+        flydsl_mx_down_ws(act, act_sc, w2_shuffled, w2_s.reshape(-1), out)
+        return out
     if m >= envs.VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS:
         from aiter.ops.flydsl.gemm_a8w8_gelu_mx import (
             flydsl_gate_up_gelu_mx,
@@ -248,6 +262,8 @@ def _flydsl_gelu_mlp_mx_fake(
     w1_s: torch.Tensor,
     w1_il: torch.Tensor,
     w1_s_il: torch.Tensor,
+    w1_il_dec: torch.Tensor,
+    w1_s_il_dec: torch.Tensor,
     w2: torch.Tensor,
     w2_shuffled: torch.Tensor,
     w2_s: torch.Tensor,
@@ -337,6 +353,21 @@ class FlyDSLPerTokenFp8ScaledMMLinearKernel(RowWiseTorchFP8ScaledMMLinearKernel)
             layer.register_parameter(
                 f"{w_name}_scale_il", torch.nn.Parameter(w_s_il, requires_grad=False)
             )
+            if envs.VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS:
+                from aiter.ops.flydsl.gemm_a8w8_gelu_mx import prepare_gate_up_weight_dec
+
+                w_il_dec, w_s_il_dec = prepare_gate_up_weight_dec(
+                    w.t().contiguous(), getattr(layer, w_s_name).reshape(-1)
+                )
+            else:
+                w_il_dec = torch.empty(0, dtype=w.dtype, device=w.device)
+                w_s_il_dec = torch.empty(0, dtype=torch.float32, device=w.device)
+            layer.register_parameter(
+                f"{w_name}_il_dec", torch.nn.Parameter(w_il_dec, requires_grad=False)
+            )
+            layer.register_parameter(
+                f"{w_name}_scale_il_dec", torch.nn.Parameter(w_s_il_dec, requires_grad=False)
+            )
 
     def apply_weights(
         self,
@@ -423,6 +454,8 @@ def maybe_fused_gelu_mlp_mx(gate_up_proj, down_proj, act_fn, x: torch.Tensor):
         w1_s,
         w1_il,
         getattr(gate_up_proj, f"{w1_name}_scale_il"),
+        getattr(gate_up_proj, f"{w1_name}_il_dec"),
+        getattr(gate_up_proj, f"{w1_name}_scale_il_dec"),
         w2,
         w2_sh,
         w2_s,
