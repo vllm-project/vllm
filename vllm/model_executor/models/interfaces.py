@@ -782,6 +782,8 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
+    # Module prefixes LoRA does not wrap, so that adapters targeting them are refused
+    lora_unsupported_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None" = None
 
 

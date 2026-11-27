@@ -298,13 +298,15 @@ class Base(
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
         # Remove layers not on this pipeline parallel rank
         self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
         # Skip the device sync of rope updates where `inv_freq` can be fixed
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
-        self.recursive_replace()
+        self.replace_modules()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
 
@@ -463,7 +465,6 @@ class Base(
         - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
-        - Any quantization config specific mappings
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
@@ -518,9 +519,6 @@ class Base(
             SplitWeights(c, mapper, self) for c in weight_converters
         ]
         self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=split_weights)
-
-        # Apply mapping to quantization config if needed
-        self._maybe_apply_model_mapping()
 
     def _weight_conversions(self) -> list[WeightTransform]:
         """The Transformers weight conversions that apply to `self.model`."""
@@ -678,8 +676,12 @@ class Base(
         )
         return embeddings
 
-    def recursive_replace(self):
-        """Recursively replace modules in the model as needed.
+    def replace_modules(self):
+        """Replace modules in `self.model` as needed (see `recursive_replace`)."""
+        self.recursive_replace(self.model, prefix="model")
+
+    def recursive_replace(self, root: nn.Module, prefix: str):
+        """Recursively replace modules in `root`, at `prefix`, as needed.
 
         Currently, this replaces:
 
@@ -746,7 +748,7 @@ class Base(
                 type(self.model).__name__,
             )
         # Decoder layers are detected as they are built, after their pre-replace hook
-        fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
+        fusers = Fusers(root, self.vllm_config, skip=decoder_layers)
 
         def _materialise(module: nn.Module, prefix: str) -> nn.Module:
             """Initialise `module` as `__init__` would, so it can be offloaded early."""
@@ -838,7 +840,7 @@ class Base(
                 setattr(module, child_name, new_module)
                 log_replacement(qual_name, child_module, new_module)
 
-        _recursive_replace(self.model, prefix="model")
+        _recursive_replace(root, prefix=prefix)
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 

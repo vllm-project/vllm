@@ -243,7 +243,7 @@ class MoEMixin(MixtureOfExperts, Base):
     mlp_layers: list[nn.Module]
     """MoE blocks whose experts were replaced, for the `MixtureOfExperts` methods."""
 
-    # Redeclared because `recursive_replace` assigns it below the first read
+    # Redeclared because `replace_modules` assigns it below the first read
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -311,7 +311,7 @@ class MoEMixin(MixtureOfExperts, Base):
             shared_expert_gate=fuser.shared_expert_gate(moe_block, prefix),
         )
 
-    def recursive_replace(self):
+    def replace_modules(self):
         """Initialize the MoE layers."""
         experts_name = "experts"
         text_config = self.text_config
@@ -558,7 +558,7 @@ class MoEMixin(MixtureOfExperts, Base):
         _recursive_replace(self.model, prefix="model")
         self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
-        super().recursive_replace()
+        super().replace_modules()
         self.num_moe_layers = len(self.moe_layers)
         # Validates and logs the per-layer shared expert fusion
         moe_classes = tuple({type(moe_block) for moe_block in self.mlp_layers})

@@ -494,6 +494,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `Kolibri1ForCausalLM` | Kolibri 1 | `Aleph-Alpha/Kolibri-1`, `Aleph-Alpha/Kolibri-1-BF16`, etc. | ✅︎ | ✅︎ |
 | `LlamaForCausalLM` | Llama 3.1, Llama 3, Llama 2, LLaMA, Yi | `meta-llama/Meta-Llama-3.1-405B-Instruct`, `meta-llama/Meta-Llama-3.1-70B`, `meta-llama/Meta-Llama-3-70B-Instruct`, `meta-llama/Llama-2-70b-hf`, `01-ai/Yi-34B`, etc. | ✅︎ | ✅︎ |
 | `MellumForCausalLM` | Mellum 2 | `JetBrains/Mellum2-12B-A2.5B-Base`, etc. | ✅︎ | ✅︎ |
+| `ModernBertDecoderForCausalLM` | Ettin (decoder) | `jhu-clsp/ettin-decoder-17m`, `jhu-clsp/ettin-decoder-1b`, etc. | ✅︎ | ✅︎ |
 | `NanbeigeForCausalLM` | Nanbeige4.2 | `Nanbeige/Nanbeige4.2-3B`, etc. | ✅︎ | ✅︎ |
 | `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |

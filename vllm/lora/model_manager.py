@@ -503,8 +503,12 @@ class LoRAModelManager:
         # which is what adapters target, is the one tracked in `self.modules`.
         named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
 
+        unsupported = tuple(getattr(self.model, "lora_unsupported_prefixes", ()))
         for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
+                continue
+            if module_name.startswith(unsupported):
+                self.unsupported_lora_modules.add(module_name)
                 continue
             if module_name.rsplit(".", 1)[-1] in self.disabled_embedding_modules:
                 continue
