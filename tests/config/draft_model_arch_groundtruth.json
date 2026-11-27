@@ -1,5 +1,5 @@
 {
-    "vllm-project/deepseek_mtp_draft_random": {
+    "vllm/deepseek_mtp_draft_random": {
         "architectures": [
             "DeepSeekMTPModel"
         ],
@@ -16,7 +16,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "vllm-project/eagle-deepseek-v3-random": {
+    "vllm/eagle-deepseek-v3-random": {
         "architectures": [
             "EagleDeepSeekMTPModel"
         ],
@@ -33,7 +33,7 @@
         "is_multimodal_model": false,
         "dtype": "bfloat16"
     },
-    "vllm-project/EAGLE-LLaMA3-Instruct-8B": {
+    "vllm/EAGLE-LLaMA3-Instruct-8B": {
         "architectures": [
             "EagleLlamaForCausalLM"
         ],
@@ -50,7 +50,7 @@
         "is_multimodal_model": false,
         "dtype": "float16"
     },
-    "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B": {
+    "vllm/EAGLE3-LLaMA3.1-Instruct-8B": {
         "architectures": [
             "Eagle3LlamaForCausalLM"
         ],

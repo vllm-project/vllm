@@ -401,6 +401,8 @@ The following rerank api parameters are supported:
 
 Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
 Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
+By default, each result includes the original document. Set `return_documents` to `false`
+to return only the document index and relevance score in each result.
 
 ??? console "Request"
 
