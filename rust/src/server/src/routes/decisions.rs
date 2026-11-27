@@ -41,7 +41,7 @@ pub async fn decisions(
 ) -> Result<Response, ApiError> {
     let Json(request) = request?;
     let reads = (state.decisions()).expect("the route is registered only with a read strategy");
-    let ctx = resolve_request_context(&headers, None)?;
+    let ctx = resolve_request_context(&headers, "decision-", None)?;
     let lora_resolution = state.resolve_model_with_loras(Some(&request.model)).await;
     lora_resolution.model_names.check(Some(&request.model))?;
     request.check_limits()?;
@@ -55,7 +55,7 @@ pub async fn decisions(
         );
     }
 
-    let request_id = format!("decision-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let span = tracing::info_span!("decisions", request_id = %request_id);
     let options = ReadOptions {
         request_id,

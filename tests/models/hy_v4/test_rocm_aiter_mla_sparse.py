@@ -8,11 +8,18 @@ The real AITER kernels must then match sink-softmax attention over each row's
 live keys, and the ROCm attention layer must bind a sink-capable backend.
 """
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import (
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -21,11 +28,98 @@ if not current_platform.is_rocm():
 from vllm.models.hy_v4.amd import aiter_mla_sparse
 from vllm.models.hy_v4.amd.model import HYV4DecoderLayer
 from vllm.models.hy_v4.amd.model import HYV4ForCausalLM as AMDHYV4ForCausalLM
+from vllm.transformers_utils.configs.hy_v4 import HYV4Config
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseImpl,
+    ROCMAiterMLASparseMetadata,
 )
 
 DEVICE = "cuda"
+KV_LORA_RANK, ROPE_DIM = 512, 64
+HEAD_DIM = KV_LORA_RANK + ROPE_DIM
+BLOCK_SIZE = 64
+
+
+@pytest.fixture
+def hyv4_vllm_config(tmp_path, dist_init, workspace_init):
+    """The current `VllmConfig` of a one-layer sparse HY4 checkpoint."""
+    config = HYV4Config(
+        hidden_size=256,
+        num_hidden_layers=1,
+        q_lora_rank=128,
+        max_position_embeddings=4096,
+        layer_types=["deepseek_sparse_attention"],
+    )
+    config.architectures = ["HYV4ForCausalLM"]
+    config.save_pretrained(tmp_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=4096,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=64,
+            max_num_seqs=8,
+        ),
+    )
+    with set_current_vllm_config(vllm_config):
+        yield vllm_config
+
+
+def _impl(num_heads, topk_indices_buffer, sinks=None):
+    """The DFly draft impl: its rows come from DFly, so it owns no indexer."""
+    extra = {} if sinks is None else {"sinks": sinks}
+    return aiter_mla_sparse.HYV4AiterMLASparseImpl(
+        num_heads=num_heads,
+        head_size=HEAD_DIM,
+        scale=HEAD_DIM**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        topk_indices_buffer=topk_indices_buffer,
+        q_lora_rank=None,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=KV_LORA_RANK,
+        qk_rope_head_dim=ROPE_DIM,
+        qk_head_dim=HEAD_DIM,
+        v_head_dim=KV_LORA_RANK,
+        kv_b_proj=None,
+        **extra,
+    )
+
+
+def _decode_metadata(req_ids, seq_lens, block_table, width):
+    """Decode-only sparse MLA metadata with one query token per row."""
+    num_tokens = len(req_ids)
+    starts = torch.arange(num_tokens + 1, dtype=torch.int32, device=DEVICE)
+    return ROCMAiterMLASparseMetadata(
+        num_reqs=num_tokens,
+        max_query_len=1,
+        max_seq_len=max(seq_lens),
+        num_actual_tokens=num_tokens,
+        query_start_loc=starts,
+        slot_mapping=torch.zeros(num_tokens, dtype=torch.int64, device=DEVICE),
+        block_table=block_table.int().to(DEVICE),
+        req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=DEVICE),
+        block_size=BLOCK_SIZE,
+        topk_tokens=width,
+        num_decodes=num_tokens,
+        num_decode_tokens=num_tokens,
+        decode_max_query_len=1,
+        qo_indptr=starts,
+        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32, device=DEVICE),
+        paged_kv_indices=torch.zeros(
+            num_tokens * width, dtype=torch.int32, device=DEVICE
+        ),
+        paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32, device=DEVICE),
+        attn_out_dtype=torch.bfloat16,
+    )
 
 
 def _assert_front_packed(rows: torch.Tensor, counts: torch.Tensor) -> None:
@@ -62,7 +156,7 @@ def test_pack_live_indices_is_stable_compaction(width):
     torch.testing.assert_close(storage[:, width:], original[:, width:], rtol=0, atol=0)
 
 
-def test_packed_impl_rebuilds_indptr_from_live_counts(monkeypatch):
+def test_packed_impl_rebuilds_indptr_from_live_counts(monkeypatch, hyv4_vllm_config):
     monkeypatch.setattr(
         ROCMAiterMLASparseImpl, "forward_mqa", lambda *args: "forwarded"
     )
@@ -72,13 +166,16 @@ def test_packed_impl_rebuilds_indptr_from_live_counts(monkeypatch):
     buffer[6:] = 7
     original = buffer.clone()
     num_tokens = 5
-    indptr = torch.full((10,), -3, dtype=torch.int32, device=DEVICE)
+    impl = _impl(16, buffer)
+    metadata = _decode_metadata(
+        [0] * 9, [256], torch.zeros(1, 4, dtype=torch.int32), width=256
+    )
+    indptr = metadata.paged_kv_indptr
+    indptr.fill_(-3)
     indptr[0] = 0
-    impl = object.__new__(aiter_mla_sparse.HYV4AiterMLASparseImpl)
-    impl.topk_indices_buffer = buffer
-    q = torch.empty(num_tokens, 16, 576, device=DEVICE)
+    q = torch.empty(num_tokens, 16, HEAD_DIM, device=DEVICE)
 
-    result = impl.forward_mqa(q, None, SimpleNamespace(paged_kv_indptr=indptr), None)
+    result = impl.forward_mqa(q, None, metadata, None)
 
     assert result == "forwarded"
     counts = (original[:num_tokens] >= 0).sum(-1).int()
@@ -99,9 +196,6 @@ def test_registered_text_model_uses_amd_attention():
     assert HYV4DecoderLayer.attention_cls is HYV4MLAAttention
 
 
-KV_LORA_RANK, ROPE_DIM = 512, 64
-HEAD_DIM = KV_LORA_RANK + ROPE_DIM
-BLOCK_SIZE = 64
 # Output is bf16; the reference accumulates in fp32. Errors stay below 6e-3.
 BF16_TOL = dict(atol=2e-2, rtol=2e-2)
 
@@ -149,8 +243,6 @@ def _sparse_mla_case(
 
     `rows` defaults to `_draft_rows`; given rows split evenly over `seq_lens`.
     """
-    from vllm._aiter_ops import rocm_aiter_ops
-
     gen = torch.Generator().manual_seed(seed)
     if rows is None:
         seq_lens = [5, 300, width + 300]
@@ -174,45 +266,12 @@ def _sparse_mla_case(
 
     # Two spare rows past this step's tokens, as in the persistent buffer.
     buffer = torch.cat([rows, torch.randint(0, 99, (2, width), generator=gen)])
-    impl = object.__new__(aiter_mla_sparse.HYV4AiterMLASparseImpl)
-    impl.num_heads = num_heads
-    impl.kv_lora_rank = KV_LORA_RANK
-    impl.qk_rope_head_dim = ROPE_DIM
-    impl.scale = scale
-    impl.sinks = sinks.to(DEVICE)
-    impl.kv_cache_dtype = "auto"
-    impl.topk_indices_buffer = buffer.int().to(DEVICE)
-    impl.owns_indexer = True
-    impl.index_epoch = 0
-    impl.dcp_world_size = 1
-    impl.use_aiter_sparse_mla = rocm_aiter_ops.is_triton_sparse_mla_enabled()
+    impl = _impl(num_heads, buffer.int().to(DEVICE), sinks.to(DEVICE))
+    # forward_mqa reads only the layer's attention-quant scales.
     layer = SimpleNamespace(
         _q_scale=torch.ones(1, device=DEVICE), _k_scale=torch.ones(1, device=DEVICE)
     )
-    metadata = SimpleNamespace(
-        num_actual_tokens=num_tokens,
-        topk_tokens=width,
-        topk_start=0,
-        req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=DEVICE),
-        block_table=block_table.int().to(DEVICE),
-        block_size=BLOCK_SIZE,
-        paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32, device=DEVICE),
-        paged_kv_indices=torch.zeros(
-            num_tokens * width, dtype=torch.int32, device=DEVICE
-        ),
-        attn_out_dtype=torch.bfloat16,
-        remapped_buf=None,
-        remapped_epoch=-1,
-        num_prefills=0,
-        num_decodes=num_tokens,
-        num_decode_tokens=num_tokens,
-        max_query_len=1,
-        max_seq_len=max(seq_lens),
-        prefill_max_seq_len=0,
-        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32, device=DEVICE),
-        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32, device=DEVICE),
-        work_meta_data=None,
-    )
+    metadata = _decode_metadata(req_ids, seq_lens, block_table, width)
 
     def reference(rows, q):
         """Softmax over each row's live keys plus the per-head sink logit."""
@@ -247,7 +306,7 @@ def _requires_gfx950():
 )
 @torch.inference_mode()
 def test_triton_sparse_mla_matches_torch_reference(
-    triton_sparse_mla, num_heads, width, block_stride
+    triton_sparse_mla, hyv4_vllm_config, num_heads, width, block_stride
 ):
     """With the recipe flag, the draft rows run through the real AITER Triton
     sparse MLA and equal sink-softmax attention over each row's live keys,
@@ -270,14 +329,17 @@ def test_triton_sparse_mla_matches_torch_reference(
 
 @pytest.mark.parametrize("triton_sparse_mla", [1], indirect=True)
 @torch.inference_mode()
-def test_triton_sparse_mla_graph_replay_follows_new_rows(triton_sparse_mla):
+def test_triton_sparse_mla_graph_replay_follows_new_rows(
+    triton_sparse_mla, hyv4_vllm_config
+):
     """Captured once, the pack, indptr rebuild and Triton read must follow
     rows whose live counts change between replays, with no host sync."""
     _requires_gfx950()
     impl, q, kv_cache, metadata, layer, reference = _sparse_mla_case(16, 256, 0)
     num_tokens = q.shape[0]
     rows = impl.topk_indices_buffer[:num_tokens]
-    impl.forward_mqa(q, kv_cache, metadata, layer)
+    # Warm up on a copy: each step's metadata starts unremapped, as built.
+    impl.forward_mqa(q, kv_cache, dataclasses.replace(metadata), layer)
     torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -300,7 +362,7 @@ def test_triton_sparse_mla_graph_replay_follows_new_rows(triton_sparse_mla):
 
 @pytest.mark.parametrize("triton_sparse_mla", [1], indirect=True)
 @torch.inference_mode()
-def test_triton_sparse_mla_reads_dfly_reuse_rows(triton_sparse_mla):
+def test_triton_sparse_mla_reads_dfly_reuse_rows(triton_sparse_mla, hyv4_vllm_config):
     """Rows from the real DFly composition (filtered target history, local
     window, causal query block; inactive requests dead) attend exactly their
     live keys once packed."""
@@ -341,7 +403,9 @@ def test_triton_sparse_mla_reads_dfly_reuse_rows(triton_sparse_mla):
 
 @pytest.mark.parametrize("triton_sparse_mla", [0], indirect=True)
 @torch.inference_mode()
-def test_default_sparse_mla_matches_torch_reference(triton_sparse_mla):
+def test_default_sparse_mla_matches_torch_reference(
+    triton_sparse_mla, hyv4_vllm_config
+):
     """Without the flag, the AITER default kernel still reads the packed rows
     correctly while the KV cache is under 4 GiB (ROCm/aiter#6277)."""
     from vllm.platforms.rocm import on_mi3xx
@@ -380,44 +444,59 @@ def test_warns_unless_triton_sparse_mla_enabled(monkeypatch, triton_sparse_mla):
         assert "ROCm/aiter#6277" in warning
 
 
-def _amd_attention(num_local_heads: int):
+def _amd_attention(vllm_config: VllmConfig, num_local_heads: int):
+    """A sparse ROCm HY4 attention layer; TP1, so all heads are local."""
     from vllm.models.hy_v4.amd.attention import HYV4MLAAttention
+    from vllm.platforms.rocm import on_mi3xx
 
-    layer = object.__new__(HYV4MLAAttention)
-    layer.kv_lora_rank = KV_LORA_RANK
-    layer.qk_rope_head_dim = ROPE_DIM
-    layer.is_sparse = True
-    layer.num_local_heads = num_local_heads
-    return layer
+    if not on_mi3xx():
+        pytest.skip("ROCm sparse MLA sinks need MI3xx")
+
+    with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+        return HYV4MLAAttention(
+            vllm_config=vllm_config,
+            config=vllm_config.model_config.hf_text_config,
+            hidden_size=256,
+            num_heads=num_local_heads,
+            q_lora_rank=128,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=ROPE_DIM,
+            v_head_dim=128,
+            cache_config=vllm_config.cache_config,
+            prefix="model.layers.0.self_attn",
+            topk_indices_buffer=torch.empty(64, 2048, dtype=torch.int32),
+        )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("num_local_heads", [8, 16, 64])
 def test_amd_sink_backend_is_rocm_sparse_mla(
-    default_vllm_config, kv_cache_dtype, num_local_heads
+    hyv4_vllm_config, kv_cache_dtype, num_local_heads
 ):
     """HY4's 64 heads at TP1..TP8 bind the sink-capable ROCm sparse MLA
     backend, never the CUDA-only FLASHMLA_SPARSE fallback."""
-    from vllm.platforms.rocm import on_mi3xx
-    from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         ROCMAiterMLASparseBackend,
     )
 
-    if not on_mi3xx():
-        pytest.skip("ROCm sparse MLA sinks need MI3xx")
+    layer = _amd_attention(hyv4_vllm_config, num_local_heads)
     with set_default_torch_dtype(torch.bfloat16):
-        backend = _amd_attention(num_local_heads)._resolve_sink_backend(kv_cache_dtype)
+        backend = layer._resolve_sink_backend(kv_cache_dtype)
 
     assert issubclass(backend, ROCMAiterMLASparseBackend)
     assert backend.supports_sink()
 
 
 @pytest.mark.parametrize("selection", ["no_sink", "raises"])
-def test_amd_sink_backend_disables_sink_without_fallback(monkeypatch, selection):
+def test_amd_sink_backend_disables_sink_without_fallback(
+    monkeypatch, hyv4_vllm_config, selection
+):
     """A selected backend that cannot apply sinks, or a failed selection,
     disables the sink bias instead of binding a CUDA-only backend."""
     from vllm.models.hy_v4.amd import attention
+
+    layer = _amd_attention(hyv4_vllm_config, 16)
 
     class NoSinkBackend:
         @staticmethod
@@ -441,6 +520,6 @@ def test_amd_sink_backend_disables_sink_without_fallback(monkeypatch, selection)
         lambda msg, *args, **kwargs: warnings.append(msg % args),
     )
 
-    assert _amd_attention(16)._resolve_sink_backend("auto") is None
+    assert layer._resolve_sink_backend("auto") is None
     (warning,) = warnings
     assert "sink bias is disabled" in warning

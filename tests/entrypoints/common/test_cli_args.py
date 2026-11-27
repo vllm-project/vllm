@@ -247,6 +247,30 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
         validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "ok"),
+    [
+        (["--no-enable-scale-out"], False),
+        (["--enable-scale-out"], True),
+        (["--no-enable-scale-out", "--tokens-only"], True),
+    ],
+)
+def test_mm_tensor_refs_config_requires_generate_endpoint(serve_parser, extra_args, ok):
+    """The config only does anything where /inference/v1/generate is served."""
+    args = serve_parser.parse_args(
+        [
+            "--mm-tensor-refs-config",
+            '{"s3_allowed_uri_prefix": "s3://bucket/prefix"}',
+            *extra_args,
+        ]
+    )
+    if ok:
+        validate_parsed_serve_args(args)
+    else:
+        with pytest.raises(ValueError, match="--mm-tensor-refs-config requires"):
+            validate_parsed_serve_args(args)
+
+
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
