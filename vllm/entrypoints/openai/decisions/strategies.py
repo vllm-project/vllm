@@ -1851,12 +1851,6 @@ KNOWLINE_ARCHITECTURES = frozenset(
 )
 
 
-class NoStrategyError(ValueError):
-    """No read strategy serves the architecture. Most models have none, so
-    this is an expected state, unlike the misconfigurations that fail the
-    same selection."""
-
-
 def has_knowline_marker(model_config: ModelConfig) -> bool:
     """Whether the checkpoint opted in to the KnowLine format by its marker."""
     hf_config = getattr(model_config, "hf_config", None)
@@ -1880,7 +1874,7 @@ def select_read_strategy(
     else:
         strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
-        raise NoStrategyError(
+        raise ValueError(
             "The structured decisions API does not support "
             f"{model_config.architecture}. Supported architectures: "
             f"{sorted(READ_STRATEGIES)}"
