@@ -8,12 +8,13 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
-|---------------------------|---------------------|------------------|-------------------|-------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
-| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
+| Architecture              | ReadStrategy               | Task             | Head              | Example HF Models       |
+|---------------------------|----------------------------|------------------|-------------------|-------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy`        | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy`        | `generate`       | N/A               | `google/gemma-4-E2B-it` |
+| `NemotronForDecision`     | `NemotronDecisionStrategy` | `generate`       | LM head           |                         |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy`        | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`           | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
 
 ### Multimodal Models
 
@@ -427,3 +428,139 @@ vllm serve baselabs/mammoth-1
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
   choice and returns 400 for score levels with the same label.
+
+### NemotronForDecision
+
+`NemotronForDecision` runs the checkpoint's bidirectional Ministral 3
+backbone using vLLM's Mistral attention. It reads each question's full prompt
+in one forward pass and scores the option tokens at the final mask. With the
+[attention layout](#attention-layout) `state_sees_no_questions` it reads the
+questions of a request in one forward pass instead. Serving such a checkpoint
+requires Transformers 5.23.0 or newer and works without
+`--trust-remote-code`. `<model>` is the checkpoint's local directory or
+Hugging Face repository, and `<tokens>` the longest prompt to serve:
+
+```bash
+vllm serve <model> --max-num-batched-tokens <tokens>
+```
+
+- The checkpoint owns the prompt: `decision_template.jinja` wraps a JSON object
+  with the state, the question and its options, and `decision.json` names the
+  option codes. Options stay in the request's order. `instructions` and
+  `chat_template_kwargs` return 400.
+- On `/v1/systemone` a JSON state, JSON instructions and JSON option meanings
+  reach the prompt as JSON.
+- A prompt cannot be split over steps, so `--max-num-batched-tokens`, or
+  `--max-num-scheduled-tokens` when that is smaller, is the longest prompt a
+  question can have, up to the checkpoint's `max_input_tokens`. A longer
+  question returns 400.
+- A request has up to the checkpoint's `max_questions` questions and a
+  question up to 256 options, the number of token logprobs a read returns.
+  `/v1/decisions` keeps its own limits: a request has up to 200 questions, a
+  choice up to 255 options and a score up to 10 levels.
+- The option codes are a question's whole answer space, so `label_mass` is 1,
+  `argmax_is_label` is true and `confidence` is the chosen option's
+  probability among the question's options.
+- `/v1/decisions` gives the model the prompt `/v1/systemone` gives it for the
+  same question: its text input is the state, a `predicate` is a `noul`
+  question with the default meanings, a choice without a description has a
+  null meaning, and a score level is read as `label: description`. A state
+  that is not text has to be sent as text and is read as a JSON string. A
+  score whose level labels are distinct and each `true`, `false` or a
+  double-quoted JSON string such as `"low"` is read as the choice between
+  those values.
+- For raw text generation requests, supply the complete prompt and set
+  `max_tokens=1`: only the first token reads the prompt. The decision
+  endpoints build the prompt and set this limit automatically. A raw prompt
+  has to fit a scheduler step, as a question's prompt does.
+
+#### Attention layout
+
+The checkpoint's `config.json` names how the state attends, in
+`decision_attention_layout`:
+
+| `decision_attention_layout` | Read |
+| --- | --- |
+| `state_sees_own_question`, also without the key | Each question is one read of its own prompt, in which the state and the question attend to each other. |
+| `state_sees_no_questions` | A packed read: the questions of a request share one state, which attends only to itself. Each question attends to the state and to itself. |
+
+`state_sees_all_questions` is named by the checkpoint format and is not
+served yet. `--hf-overrides` sets the layout for a server, in either of its
+spellings, and wins over the checkpoint:
+
+```bash
+vllm serve <model> --max-num-batched-tokens <tokens> \
+    --hf-overrides.decision_attention_layout state_sees_no_questions
+vllm serve <model> --max-num-batched-tokens <tokens> \
+    --hf-overrides '{"decision_attention_layout": "state_sees_no_questions"}'
+```
+
+The server does not start with another value, or with a key that differs
+from `decision_attention_layout` or `state_end_token_id` only by its case or a
+hyphen. Any other misspelled key is not an error and changes nothing.
+
+Give all overrides in one spelling. A `--hf-overrides.<key>` argument replaces
+a JSON `--hf-overrides` on the same command line, in either order, and the
+`hf-overrides` of a `--config` file. A second JSON `--hf-overrides` replaces
+the first. A key in the replaced one is dropped without an error. In a YAML
+`--config` file, nest the key under `hf-overrides`. A dotted
+`hf-overrides.decision_attention_layout` key does not work there:
+
+```yaml
+hf-overrides:
+  decision_attention_layout: state_sees_no_questions
+```
+
+The startup log says which read the server does and which token closes the
+state. Every process of a deployment needs the same value. An engine started
+with `--headless` reads its own command line, and with one read per question
+it reads a packed prompt from an API server that packs as one plain prompt,
+without an error.
+
+| | `state_sees_own_question` | `state_sees_no_questions` |
+| --- | --- | --- |
+| Engine requests | One per question | One per request, or more when a request does not fit one read |
+| Attention | Every token of a question's prompt attends to the whole prompt | The shared tokens attend to each other, each question to the shared tokens and itself |
+| Answers | Those of one read per question | Different, because the state does not attend to the question |
+| `usage` | `input_tokens` is the sum of the full prompts, `output_tokens` one token for each question | `input_tokens` counts the shared tokens once for each read, `output_tokens` one token for each read |
+| Attention backend | The one vLLM selects, in any dtype it takes | FlashAttention in float16 or bfloat16 |
+| Raw requests with `segment_lengths` in `vllm_xargs` | Read as a plain prompt; the lengths are ignored | Read as a packed prompt when the lengths cover it |
+
+#### The state-end token
+
+`state_end_token_id` in the checkpoint's `config.json` is the id of the token
+the prompt writes right after the state value, as the checkpoint's reference
+prompt builder writes it. Without the key the prompt is the plain JSON
+object.
+
+- With a state-end token, a control token in the request's text is read as
+  text: the first character of each is written as a JSON `\uXXXX` escape,
+  which leaves the JSON value as it is. Without one, the tokenizer's
+  sanitizing reads such a token as text.
+- A packed read shares the template header and the tokens through the
+  state-end token, for any number of questions. A request with one question
+  has the same layout, so an answer does not depend on how many questions a
+  request asks. Each question attends to the shared tokens and to its own
+  segment, at the positions it has in its own prompt.
+- Only a prompt with a state-end token is read packed. The server does not
+  start with `state_sees_no_questions` and a checkpoint without
+  `state_end_token_id`, and nothing falls back to one read per question.
+- The token has to be an added token of the tokenizer other than the mask
+  token, and `decision_template.jinja` must not write it. Otherwise the
+  server starts with `/v1/systemone` and `/v1/decisions` off, and its log
+  says why.
+- A read must fit a scheduler step, as a question's prompt must
+  (`--max-num-batched-tokens`, or `--max-num-scheduled-tokens` when that is
+  smaller), and be shorter than `--max-model-len`. It also gathers at most
+  1,048,576 key rows: the shared tokens for themselves and once more for
+  every question, and each question's own. A larger request is split into
+  several reads, each with the shared tokens.
+- Only the last question of a read can have more options than
+  `--max-logprobs` (20 by default), so a question with more ends its read.
+- `usage` counts each read once: `input_tokens` its prompt, the shared tokens
+  included, and `output_tokens` one token, not one per question.
+- A packed read runs on FlashAttention in float16 or bfloat16. The server does
+  not start with `--dtype float32` or with an `--attention-backend` other than
+  `FLASH_ATTN`. Steps with prompts do not run in full CUDA graphs. With
+  `state_sees_own_question` none of this applies: the server starts with the
+  dtype and the attention backend it would use for any encoder-only model.

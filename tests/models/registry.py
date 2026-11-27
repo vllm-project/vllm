@@ -467,6 +467,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
+    "NemotronForDecision": _HfExamplesInfo(
+        "",
+        min_transformers_version="5.23.0",
+        is_available_online=False,
+    ),
     "NemotronHForCausalLM": _HfExamplesInfo("nvidia/Nemotron-H-8B-Base-8K"),
     "NemotronHPuzzleForCausalLM": _HfExamplesInfo(
         "",

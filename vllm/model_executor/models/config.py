@@ -1377,6 +1377,101 @@ class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
             )
 
 
+class NemotronDecisionConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        from .nemotron_packed_layout import check_read_keys
+
+        config = model_config.hf_config
+        config.is_causal = False
+        # The API server's strategy and the engine's model read the layout
+        # and the state-end token from this config. A value that is not one
+        # stops the server, and so does a key that would be ignored.
+        check_read_keys(config)
+        # The Ministral3 checkpoint keeps its Llama 4 query scaling in RoPE.
+        rope = config.rope_parameters
+        if (beta := rope.get("llama_4_scaling_beta")) is not None:
+            config.llama_4_scaling = {
+                "beta": beta,
+                "original_max_position_embeddings": rope[
+                    "original_max_position_embeddings"
+                ],
+            }
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        import torch
+
+        from vllm.v1.attention.backends.fa_utils import (
+            is_flash_attn_varlen_func_available,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        from .nemotron_packed_layout import (
+            ATTENTION_LAYOUT,
+            NO_QUESTIONS,
+            OWN_QUESTION,
+            STATE_END_TOKEN_ID,
+            packed_read,
+            state_end_token_id,
+        )
+
+        hf_config = vllm_config.model_config.hf_config
+        # Every prompt token can attend to the final question and mask.
+        vllm_config.cache_config.enable_prefix_caching = False
+        vllm_config.scheduler_config.enable_chunked_prefill = False
+        if (token_id := state_end_token_id(hf_config)) is None:
+            logger.info(
+                "NemotronForDecision prompts have no state-end token (the "
+                "checkpoint has no %s).",
+                STATE_END_TOKEN_ID,
+            )
+        else:
+            logger.info(
+                "NemotronForDecision prompts close the state with token %d (%s).",
+                token_id,
+                STATE_END_TOKEN_ID,
+            )
+        if not packed_read(hf_config):
+            # The layers run on the backend the selector chooses.
+            logger.info(
+                "NemotronForDecision reads each question of a request in a "
+                "forward of its own (%s %s).",
+                ATTENTION_LAYOUT,
+                OWN_QUESTION,
+            )
+            return
+        # The model gives its own FlashAttention backend, which the backend
+        # selector does not validate. Each refusal names the way around it.
+        off = (
+            f"--hf-overrides.{ATTENTION_LAYOUT} {OWN_QUESTION} serves without "
+            "packed reads."
+        )
+        backend = vllm_config.attention_config.backend
+        if backend is not None and backend != AttentionBackendEnum.FLASH_ATTN:
+            raise ValueError(
+                "NemotronForDecision runs packed reads on FLASH_ATTN, not on "
+                f"--attention-backend {backend.name}. {off}"
+            )
+        dtype = vllm_config.model_config.dtype
+        if dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "NemotronForDecision runs packed reads on FLASH_ATTN, which takes "
+                f"float16 and bfloat16, not {dtype}. {off}"
+            )
+        if not is_flash_attn_varlen_func_available():
+            raise ValueError(
+                "NemotronForDecision needs FlashAttention for packed reads, and it "
+                f"is not available on this platform. {off}"
+            )
+        logger.info(
+            "NemotronForDecision reads the questions of a request in one forward, "
+            "the state once (%s %s).",
+            ATTENTION_LAYOUT,
+            NO_QUESTIONS,
+        )
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
@@ -1928,6 +2023,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MistralLarge4ForCausalLM": MistralLarge4ForCausalLM,
     "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
     "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
+    "NemotronForDecision": NemotronDecisionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
