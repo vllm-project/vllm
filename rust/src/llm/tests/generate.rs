@@ -26,15 +26,15 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
-use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::stats::{PrefillStats, SchedulerStats};
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
-    GenerateRequest, WeightVersionSpan, WeightVersions,
+    AdmissionLimits, EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _,
+    GeneratePromptInfo, GenerateRequest, WeightVersionSpan, WeightVersions,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -1233,11 +1233,14 @@ async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
                 || line.starts_with("vllm:prompt_tokens_total")
                 || line.starts_with("vllm:generation_tokens_total")
                 || line.starts_with("vllm:e2e_request_latency_seconds_count")
+                || line.starts_with("vllm:admission_rejections_total")
         })
         .map(|line| line.replace(&model_name, "<model>"))
         .collect();
     series.sort();
     expect_test::expect![[r#"
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_reqs"} 0
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_tokens"} 0
         vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
         vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
         vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
@@ -1297,6 +1300,24 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                                 ]),
                             )
                         }],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                // The scheduler also preempted a request that was then aborted,
+                // whose PREEMPTED event never reaches the frontend. Stats are
+                // recorded after a batch's outputs are delivered, so report
+                // them before the final output.
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        engine_index: 4,
+                        scheduler_stats: Some(Box::new(SchedulerStats {
+                            num_preempted_reqs: 2,
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     }
                     .into(),
@@ -1363,8 +1384,10 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert!(rendered.contains(&format!(
         "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
+    // The counter follows the scheduler; the event feeds only this request's
+    // histogram.
     assert!(rendered.contains(&format!(
-        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
     )));
     assert!(rendered.contains(&format!(
         "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
@@ -1703,5 +1726,98 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
         "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
     )));
 
+    llm.shutdown().await.unwrap();
+}
+
+/// The limits follow the outputs engine-core-client receives, not the reads of
+/// each request's stream: only a barrier request's stream is read, and its
+/// output comes last in each batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_limits_follow_engine_outputs_not_stream_reads() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (outputs_tx, mut outputs_rx) = tokio::sync::mpsc::unbounded_channel::<EngineCoreOutputs>();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-admission".to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                loop {
+                    tokio::select! {
+                        outputs = outputs_rx.recv() => match outputs {
+                            Some(outputs) => send_outputs(push, outputs).await,
+                            None => break,
+                        },
+                        // Adds and aborts need no reply.
+                        _ = recv_engine_message(dealer) => {}
+                    }
+                }
+            })
+        },
+    );
+    // One output per request, `true` when it finishes the request.
+    let batch = |outputs: &[(&str, bool)]| -> EngineCoreOutputs {
+        let finished: BTreeSet<String> = (outputs.iter())
+            .filter(|(_, finished)| *finished)
+            .map(|(request_id, _)| request_id.to_string())
+            .collect();
+        RequestBatchOutputs {
+            outputs: (outputs.iter())
+                .map(|(request_id, finished)| {
+                    let finish_reason = finished.then_some(EngineCoreFinishReason::Length);
+                    request_output(request_id, vec![1], finish_reason)
+                })
+                .collect(),
+            finished_requests: (!finished.is_empty()).then_some(finished),
+            ..Default::default()
+        }
+        .into()
+    };
+
+    // Each request has a two-token prompt, so one prompt in prefill fills the
+    // backlog.
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc)
+        .await
+        .with_admission_limits(AdmissionLimits {
+            max_num_queued_reqs: Some(3),
+            max_num_queued_tokens: Some(2),
+        });
+    let mut barrier = llm.generate(sample_generate_request("req-barrier", 8)).await.unwrap();
+    outputs_tx.send(batch(&[(barrier.request_id(), false)])).unwrap();
+    barrier.next().await.unwrap().unwrap();
+    let first = llm.generate(sample_generate_request("req-a", 2)).await.unwrap();
+
+    // The first prompt holds the backlog until engine-core reports it, even
+    // though nothing reads its stream.
+    let error = (llm.generate(sample_generate_request("req-b", 2)).await)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(error, Error::PrefillBacklogFull), "{error:?}");
+    let progress = batch(&[(first.request_id(), false), (barrier.request_id(), false)]);
+    outputs_tx.send(progress).unwrap();
+    barrier.next().await.unwrap().unwrap();
+    let second = llm.generate(sample_generate_request("req-b", 2)).await.unwrap();
+
+    // Three unfinished requests fill the request limit until one finishes,
+    // again with the finished request's stream unread.
+    let error = (llm.generate(sample_generate_request("req-c", 2)).await)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(error, Error::QueueFull), "{error:?}");
+    let finish = batch(&[
+        (first.request_id(), true),
+        (second.request_id(), false),
+        (barrier.request_id(), false),
+    ]);
+    outputs_tx.send(finish).unwrap();
+    barrier.next().await.unwrap().unwrap();
+    let _third = llm.generate(sample_generate_request("req-c", 2)).await.unwrap();
+
+    drop((first, second));
+    drop(outputs_tx);
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
 }

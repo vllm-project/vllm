@@ -5,10 +5,10 @@ lm_head, selected by a `quantization_config.targets` pattern naming it, and
 private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
-import math
 from abc import abstractmethod
 from collections.abc import Callable
 from itertools import chain
+from math import lcm
 from typing import ClassVar, Literal
 from weakref import WeakKeyDictionary
 
@@ -33,9 +33,11 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+    pad_vocab_size,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
@@ -222,6 +224,19 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
+def lm_head_quant_method(quantization: Literal["fp8", "nvfp4"]) -> OnlineLinearBase:
+    """The online method of a `quantization` lm_head, for a drafter that builds
+    its own head quantized (`ParallelLMHead(..., quant_method=...)`) instead of
+    sharing the target's."""
+    return _LM_HEAD_METHODS[quantization]()
+
+
+def lm_head_padding_size(tp_size: int) -> int:
+    """The vocabulary padding of a quantized lm_head sharded over `tp_size`
+    ranks: its GEMM kernels need a multiple of 16 output columns per rank."""
+    return lcm(DEFAULT_VOCAB_PADDING_SIZE, 16 * tp_size)
+
+
 def gather_org_rows(lm_head: VocabParallelEmbedding) -> torch.Tensor:
     """The `org_vocab_size` rows of an unquantized `lm_head`, gathered from the
     TP ranks that shard it."""
@@ -251,8 +266,8 @@ def _quantize_copy(
     padding_size = lm_head.padding_size
     if num_rows is not None:
         rows = org_rows = num_rows
-        # The first rows are split over the TP ranks anew, so they must divide.
-        padding_size = math.lcm(padding_size, lm_head.tp_size)
+        # Those rows are split over the TP ranks anew.
+        padding_size = lcm(padding_size, lm_head_padding_size(lm_head.tp_size))
     # Online methods take their output dtype from the default dtype, which is
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
@@ -273,8 +288,10 @@ def _quantize_copy(
     if num_rows is None:
         weight = lm_head.weight.data
     else:
+        # The same source rows at every TP size, so the global scale is too.
+        end = pad_vocab_size(num_rows, lm_head.padding_size)
         start = head.shard_indices.padded_org_vocab_start_index
-        weight = gather_org_rows(lm_head)[start:]
+        weight = gather_org_rows(lm_head)[:end][start:]
     weight = weight[: head.weight.shape[0]]
     if weight.shape[0] < head.weight.shape[0]:
         weight = F.pad(weight, (0, 0, 0, head.weight.shape[0] - weight.shape[0]))

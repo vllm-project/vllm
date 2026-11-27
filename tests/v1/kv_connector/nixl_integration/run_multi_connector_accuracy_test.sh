@@ -45,7 +45,7 @@ VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
   DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
@@ -113,7 +113,7 @@ wait_for_server() {
 }
 
 wait_for_gpu_memory_release() {
-  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+  if [[ "$SMI_BIN" == *rocm-smi || "$SMI_BIN" == *amd-smi ]]; then
     PYTHONPATH="${GIT_ROOT}" python3 -c \
       "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
   fi
@@ -169,13 +169,12 @@ trap cleanup_on_exit EXIT
 trap 'exit 130' SIGINT SIGTERM
 
 get_num_gpus() {
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    $SMI_BIN -l | grep -c GPU
-  else
-    echo "2"
-  fi
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l ;;
+    rocm-smi)   $SMI_BIN -l | grep -c GPU ;;
+    amd-smi)    $SMI_BIN list | grep -c "^GPU" ;;
+    *)          echo 2 ;;
+  esac
 }
 
 # ── Run tests for one model with a given KV config ───────────────────────

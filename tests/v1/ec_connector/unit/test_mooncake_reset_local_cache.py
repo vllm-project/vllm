@@ -241,7 +241,9 @@ def test_reset_without_transfer_record_does_not_false_hit():
     conn.update_state_after_alloc(_Req("r1", _MM_HASH), 0)
     conn.reset()
 
-    ready = conn.ensure_cache_available(_Req("r2", _MM_HASH), 0)
+    ready = conn.ensure_cache_available(
+        _Req("r2", _MM_HASH, transfer_id=_TRANSFER_ID), 0
+    )
     assert ready is False
     assert _MM_HASH not in conn._local_cache
     assert not conn.has_cache_item(_MM_HASH)

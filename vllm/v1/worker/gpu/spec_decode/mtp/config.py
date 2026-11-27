@@ -67,11 +67,6 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
             or getattr(target.hf_text_config, "num_mtp_layers", None) is None
         ):
             return None
-        if target.hf_config is not target.hf_text_config:
-            raise NotImplementedError(
-                "The Transformers modeling backend does not support MTP for "
-                "multimodal models yet."
-            )
         moe = "MoE" if target.is_moe else ""
         return {
             "architectures": [f"Transformers{moe}ForMTP"],

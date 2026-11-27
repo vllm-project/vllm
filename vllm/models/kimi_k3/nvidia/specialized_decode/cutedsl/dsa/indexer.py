@@ -2646,8 +2646,14 @@ def reserve(indexer, device, max_rows, local_topk=0, blocks=None):
     the KV cache; FusedIndexer (prepare_cache, after the KV cache is allocated)
     then takes the same buffers and allocates nothing."""
     if local_topk:
+        from vllm.model_executor.layers.sparse_attn_indexer import (
+            dcp_decode_logits_width,
+        )
+
         # A rank's keys of a context (interleave 1), in 1 KiB rows.
-        max_local_len = -(-indexer.max_model_len // indexer.dcp_world_size)
+        max_local_len = dcp_decode_logits_width(
+            indexer.max_model_len, indexer.dcp_world_size, 1
+        )
         pitch = -(-max_local_len // 512) * 512
         capacity = max_rows * pitch
         width, fill = local_topk + local_topk // 32, 0
@@ -2814,7 +2820,13 @@ class FusedIndexer:
             storage_offset=words.storage_offset() + PAGE * row // 4,
         )
         if local_topk:  # a rank's keys of a context (interleave 1)
-            self.max_local_len = -(-indexer.max_model_len // indexer.dcp_world_size)
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                dcp_decode_logits_width,
+            )
+
+            self.max_local_len = dcp_decode_logits_width(
+                indexer.max_model_len, indexer.dcp_world_size, 1
+            )
         buffers = reserve(indexer, device, max_rows, local_topk, blocks)
         self.logits, self.tops, self.out, self.valid, self.ends, self.pitch = buffers
         self.ctas = torch.cuda.get_device_properties(device).multi_processor_count

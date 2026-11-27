@@ -41,6 +41,17 @@ The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-traci
 
 8. **Keep compatibility code to real consumers.** Internal Rust APIs can change freely: migrate the callers and delete the old path in the same PR. A compatibility layer on a wire contract needs an actual consumer, such as independently versioned gRPC clients or a rolling upgrade, and stays narrow at the wire boundary.
 
+## Request validation
+
+Define each request invariant once (single source of truth), in the lowest layer that owns its semantics:
+
+- **Wire parsing (`serde`)**: JSON shape, field types, and closed wire enums. HTTP handlers take `Result<Json<T>, JsonRejection>` directly (which extracts `body.<path>` on data errors); do not add `validator` derive macros or duplicate bounds onto DTO structs.
+- **Route boundary (`vllm-server` `validate.rs` / `convert.rs`)**: protocol-only invariants that lower crates do not see (such as `stream_options` requiring `stream`, `top_logprobs` requiring `logprobs`, or route-specific `metadata` limits), lowering-time format conversions, and server-state or per-route policy checks (`model_names.check`, `VLLM_MAX_N_SEQUENCES`). Keep temporary rejections of unimplemented fields isolated in `reject_unsupported_fields`.
+- **Shared domain (`vllm-text` / `vllm-chat`)**: cross-route rules — sampling parameter bounds, `max_tokens >= 1`, `min_tokens <= max_tokens`, logprobs, stop strings (non-empty and `VLLM_MAX_STOP_STRINGS`), token IDs and vocab bounds, `cache_salt`, prompt length and truncation, chat messages, tools, templates, and multimodal limits.
+- **Fault classification and `param`**: `vllm_text::Error::kind()` and `vllm_chat::Error::kind()` classify every variant exhaustively into `ErrorKind::InvalidRequest { param }` (HTTP 400, gRPC `INVALID_ARGUMENT`), `ErrorKind::Unavailable` (a request that cannot be taken now: HTTP 503, gRPC `UNAVAILABLE`) or `ErrorKind::Internal` (HTTP 500, gRPC `INTERNAL`). Each transport maps the kind once, wherever the error surfaces: preparation, submission or the output stream. Report the shared layer's canonical `param` name without per-protocol remapping, and leave `param` as `None` only for cross-field or non-field errors.
+
+Upper stages may call the owner's check early to short-circuit before expensive work such as chat template rendering or outbound media fetches.
+
 ## Python frontend parity
 
 - Match the Python frontend's wire behavior: serialization, omitted fields versus `null`, defaults, error status codes, and SSE frame order. Check the actual output, not the Python source alone.
@@ -73,6 +84,7 @@ The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-traci
 - Although you might be asked to only implement or migrate minimal functionality at the beginning, you should still leave necessary `TODO` comments in the code for the future improvements of the lacked features, so that it's easier for the next iteration to build upon the existing codebase.
 - Reuse the vocabulary already in the codebase and the protocol. Names state roles and effects, and a rename propagates through locals, tests, comments, and docs.
 - Derive serialization with Serde attributes instead of hand-writing it; absorb schema variants with `#[serde(alias)]` instead of parallel fields. Choose `Display` or `Debug` by meaning.
+- Parse JSON files from a model checkpoint (`config.json`, `tokenizer_config.json`, processor configs, `chat_template.json`) with `parse_checkpoint_json`, which, like Python's `json`, accepts the bare `NaN` and `Infinity` some of them contain. JSON that is not a checkpoint file (request bodies, model output, CLI values) stays on `serde_json`.
 - Rust error handling:
     - Error types describe the categories their layer actually produces. Use `#[from]` and `?` for one-to-one conversions between typed errors, and an explicit `map_err` where a general type carries several meanings.
     - Never call `to_string()` directly on an error value.

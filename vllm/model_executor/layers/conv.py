@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 class ConvLayerBase(CustomOp):
@@ -200,12 +199,12 @@ class Conv3dLayer(ConvLayerBase):
             return self._forward_conv(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        # PyTorch 2.9.0+ disabled CUDNN's Conv3D, which caused a
+        # PyTorch disabled CUDNN's Conv3D, which caused a
         # significant performance regression.
         # See: https://github.com/vllm-project/vllm/issues/27406
         # and https://github.com/pytorch/pytorch/issues/166122
         # and https://github.com/huggingface/transformers/pull/45041
         # By default, we use CUDNN's convolution ops with optimization.
-        if self.enable_linear and is_torch_equal_or_newer("2.9.0"):
+        if self.enable_linear:
             return self._forward_mulmat(x)
         return self._forward_conv(x)
