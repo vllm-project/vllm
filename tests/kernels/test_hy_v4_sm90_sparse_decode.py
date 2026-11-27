@@ -239,6 +239,64 @@ def test_compile_failure_falls_back(workspace_init, monkeypatch):
     assert len(calls) == 1
 
 
+def _hy4_impl(num_heads):
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseImpl
+
+    return HYV4FlashMLASparseImpl(
+        num_heads=num_heads,
+        head_size=DIM,
+        scale=0.0625,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=64,
+        qk_head_dim=320,
+        v_head_dim=256,
+        kv_b_proj=ColumnParallelLinear(512, num_heads * 512, bias=False),
+        sinks=torch.zeros(num_heads, device="cuda"),
+    )
+
+
+def test_native_small_heads_at_every_row_count(
+    default_vllm_config, dist_init, workspace_init, monkeypatch
+):
+    """HY V4 never pads 8/16 heads on SM90; the kill switch (and batch
+    invariance) restore the generic SM-count cutoff."""
+    impl = _hy4_impl(8)
+    assert impl._should_use_bf16_small_head_kernel(1, 8)
+    assert impl._should_use_bf16_small_head_kernel(1, 16)
+    assert not impl._should_use_bf16_small_head_kernel(1, 32)
+    for name in ("VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE", "VLLM_BATCH_INVARIANT"):
+        with monkeypatch.context() as m:
+            m.setenv(name, "1")
+            off = _hy4_impl(8)
+            assert not off._should_use_bf16_small_head_kernel(1, 8)
+            assert off._should_use_bf16_small_head_kernel(1 << 20, 8)
+
+
+@pytest.mark.parametrize("heads,width", [DSA, SWA])
+@pytest.mark.parametrize("num_tokens", [1, 48, 132, 1024, 8192])
+def test_native_small_heads_match_padded(heads, width, num_tokens):
+    """The unpadded 8/16-head kernel the override selects agrees with the
+    64-head padded one from one row up to a full prefill chunk."""
+    q, kv, indices, sinks, lengths = _inputs(num_tokens, heads, width, seed=5)
+    native = _flashmla(q, kv, indices, sinks, lengths)
+    q_pad = torch.zeros(num_tokens, 64, DIM, dtype=q.dtype, device="cuda")
+    q_pad[:, :heads] = q
+    sinks_pad = sinks.new_full((64,), float("-inf"))
+    sinks_pad[:heads] = sinks
+    padded = _flashmla(q_pad, kv, indices, sinks_pad, lengths)[:, :heads]
+    torch.testing.assert_close(native, padded, atol=2e-3, rtol=2e-2)
+
+
 _TRAP_CHILD = """
 import sys, torch
 from vllm.models.hy_v4.nvidia import sparse_mla_decode as splitk

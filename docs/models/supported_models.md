@@ -678,6 +678,12 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     selected. HY4 Flash on ROCm also requires `--kv-cache-dtype` `auto`,
     `bfloat16` or `fp8_ds_mla`, and OCP FP8.
 
+    On SM90 with a BF16 KV cache, attention layers with 8 or 16 heads per rank
+    (HY4 Flash at TP4) run decode steps of up to 40 (DSA) or 16 (SWA) query rows
+    on a split-K Triton kernel, and every other call on FlashMLA's unpadded
+    8/16-head kernel. `VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE=1` restores the
+    previous FlashMLA dispatch.
+
     HY4 Flash does not support LoRA, and supports pipeline parallelism on
     NVIDIA CUDA only. Published HY4 Flash checkpoints use
     `HYV4FlashForConditionalGeneration`, which vLLM maps to

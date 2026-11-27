@@ -1797,11 +1797,13 @@ def test_flashmla_bf16_preserves_unused_output_heads(
         lse, reference_lse[:, :actual_num_heads], atol=2e-4, rtol=2e-4
     )
     if padded_query:
-        if (
-            query_waves == 3
-            and current_platform.is_device_capability_family(90)
-            and actual_num_heads in (8, 16, 32)
-        ):
+        # with_sinks selects HYV4FlashMLASparseImpl, which runs 8/16 heads
+        # natively at every row count on SM90.
+        hy_v4 = with_sinks
+        native = (query_waves == 3 and actual_num_heads in (8, 16, 32)) or (
+            hy_v4 and actual_num_heads in (8, 16)
+        )
+        if native and current_platform.is_device_capability_family(90):
             assert torch.all(out[:, actual_num_heads:] == 123)
         else:
             torch.testing.assert_close(out, reference, atol=0, rtol=0)

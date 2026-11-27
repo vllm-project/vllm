@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.models.hy_v4.common.sinks import gather_full_sinks_
@@ -128,6 +129,22 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         )
         if self._splitk_decode and vllm_config.kernel_config.enable_jit_warmup:
             splitk.sparse_mla_decode.register_warmup(heads=num_heads)
+        # FlashMLA's unpadded 8/16-head kernel is faster than the 64-head padded
+        # one at every row count on HY4 shapes, below the generic SM-count cutoff
+        # too, so calls the split-K kernel does not take never pad on SM90.
+        self._native_small_heads = (
+            current_platform.is_device_capability_family(90)
+            and not envs.VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE
+            and not envs.VLLM_BATCH_INVARIANT
+            and kv_cache_dtype not in QUANTIZED_DS_MLA_CACHE_FORMATS
+        )
+
+    def _should_use_bf16_small_head_kernel(
+        self, num_tokens: int, actual_num_heads: int
+    ) -> bool:
+        if self._native_small_heads and actual_num_heads in (8, 16):
+            return True
+        return super()._should_use_bf16_small_head_kernel(num_tokens, actual_num_heads)
 
     @staticmethod
     def _validate_sinks(sinks: torch.Tensor | None, num_heads: int) -> None:

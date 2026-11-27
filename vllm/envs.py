@@ -2263,13 +2263,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
     ),
-    # Emergency rollback for the HY4 SM90 split-K sparse MLA decode. By default,
+    # Emergency rollback for the HY4 SM90 sparse MLA decode path. By default,
     # on SM90 with a BF16 KV cache, HY V4 attention layers with 8 or 16 local
     # heads (HY4-Flash at TP4) run decode steps of up to 40 (DSA) or 16 (SWA)
     # query rows on a Triton kernel that splits each row's top-k across CTAs,
-    # instead of FlashMLA's one CTA per row. Set to 1 to use FlashMLA for every
-    # call, e.g. if the kernel's fail-loud trap (a CUDA error on misuse of its
-    # workspace counters) ever fires.
+    # and every other call on FlashMLA's unpadded 8/16-head kernel instead of
+    # padding the heads to 64. Set to 1 to restore the previous FlashMLA
+    # dispatch for every call, e.g. if the split-K kernel's fail-loud trap (a
+    # CUDA error on misuse of its workspace counters) ever fires.
     "VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE": lambda: bool(
         int(os.getenv("VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE", "0"))
     ),
