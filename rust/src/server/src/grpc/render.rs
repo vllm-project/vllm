@@ -11,7 +11,6 @@ use axum::Json;
 use axum::http::HeaderMap;
 use itertools::Itertools as _;
 use llm_multimodal::ImageDetail;
-use thiserror_ext::AsReport as _;
 use tonic::{Request, Response, Status};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
@@ -25,7 +24,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::{PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TruncationSide};
 
 use super::convert::{self, json_to_proto_struct};
-use super::inference::text_error_to_status;
+use super::inference::{chat_error_to_status, text_error_to_status};
 use super::media;
 use super::pb;
 use super::pb::render_server::{Render, RenderServer};
@@ -501,17 +500,6 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // ========================================================================================
 // Errors
 // ========================================================================================
-
-fn chat_error_to_status(error: vllm_chat::Error) -> Status {
-    let message = error.to_report_string();
-    if error.kind().is_invalid_request() {
-        Status::invalid_argument(message)
-    } else if error.is_unavailable() {
-        Status::unavailable(message)
-    } else {
-        Status::internal(message)
-    }
-}
 
 fn api_error_to_status(error: ApiError) -> Status {
     let response = error.to_error_response();
