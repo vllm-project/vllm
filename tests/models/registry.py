@@ -433,6 +433,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "MiniCPM5MoEForCausalLM": _HfExamplesInfo("", is_available_online=False),
+    "MiniCPM5MoeForCausalLM": _HfExamplesInfo("", is_available_online=False),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-M2"),
     "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",

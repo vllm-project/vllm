@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from vllm.model_executor.models.minicpm5_moe import MiniCPM5Gate
+from vllm.models.minicpm5_moe.model import MiniCPM5Gate
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.minicpm5_moe import MiniCPM5MoEConfig
 

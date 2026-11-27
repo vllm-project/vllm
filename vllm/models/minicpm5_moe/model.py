@@ -30,10 +30,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import IntermediateTensors
-
-from .deepseek_v2 import DeepseekV2MLP, DeepseekV2MoE
-from .interfaces import (
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP, DeepseekV2MoE
+from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     LocalArgmaxMixin,
     SupportsEagle,
@@ -42,7 +40,7 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -53,6 +51,7 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+from vllm.sequence import IntermediateTensors
 
 
 class MiniCPM5Attention(nn.Module):
