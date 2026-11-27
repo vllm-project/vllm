@@ -767,7 +767,7 @@ def _decode_softmax_reducev_fwd_warmup_inputs(
     sliding_window: int = 0,
 ) -> dict[str, Any]:
     # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
-    # [B, H, Lv] output and [B, H] LSE in the query dtype.
+    # [B, H, Lv] output in the query dtype and an fp32 [B, H] LSE.
     splits: Any = WarmupChoices(*num_kv_splits)
     return dict(
         logits=TritonWarmupTensor(
@@ -775,7 +775,7 @@ def _decode_softmax_reducev_fwd_warmup_inputs(
         ),
         q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
         o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
-        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        lse=TritonWarmupTensor(torch.float32, shape=(1, num_heads)),
         v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
         b_seq_len=TritonWarmupTensor(torch.int32),
         num_kv_splits=splits,
