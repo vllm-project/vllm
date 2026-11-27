@@ -198,6 +198,18 @@ def mxfp8_dequantize(x, scale):
     return x_float * scale
 
 
+def _ref_mxfp8_quantize(x: torch.Tensor):
+    """Reference MXFP8 quantize: flashinfer's kernel where it exists (CUDA),
+    vLLM's helper otherwise (ROCm), so CUDA reference results are unchanged."""
+    if TRTLLM_GEN_MXFP8_AVAILABLE:
+        return mxfp8_quantize(x, is_sf_swizzled_layout=False)
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    return mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
+
+
 def mxfp4_quant_dequant(x: torch.Tensor) -> torch.Tensor:
     shape = x.shape
     quantized, scale = dynamic_mxfp4_quant(x.to(torch.bfloat16).flatten(0, -2))
@@ -256,9 +268,7 @@ def reference_moe(
         raise ValueError(f"Unknown activation: {activation}")
 
     if act_type == "mxfp8":
-        t_quantized, t_scale = mxfp8_quantize(
-            t.to(torch.bfloat16), is_sf_swizzled_layout=False
-        )
+        t_quantized, t_scale = _ref_mxfp8_quantize(t.to(torch.bfloat16))
         t = mxfp8_dequantize(t_quantized, t_scale)
     elif act_type == "mxfp4":
         t = mxfp4_quant_dequant(t)
@@ -1763,6 +1773,14 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_MXFP4_MXFP8": {
+        "activation": "SWIGLUOAI",
+        "act_type": "mxfp8",
+        "rtol": 0.1,
+        "percent": 0.9,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
     "AITER_MXFP4_MXFP4": {
         "activation": "SILU",
         "act_type": "mxfp4",
@@ -2039,11 +2057,18 @@ def test_rocm_mxfp4_moe_oracle(
     else:
         act_name = "relu2"
 
+    act_type = str(config.get("act_type", "bf16"))
+    x_ref = x.to(torch.float32)
+    if act_type == "mxfp8":
+        # Dynamic MXFP8 activations: the kernel quantizes the input, so the
+        # reference must see the same rounding.
+        x_ref = mxfp8_dequantize(*_ref_mxfp8_quantize(x)).float()
+
     ref = reference_moe(
         router_logits,
         topk,
         num_experts,
-        x.to(torch.float32),
+        x_ref,
         w13_dq.to(torch.float32),
         w13_bias.to(torch.float32),
         w2_dq.to(torch.float32),
@@ -2051,7 +2076,7 @@ def test_rocm_mxfp4_moe_oracle(
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
         limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
-        act_type=str(config.get("act_type", "bf16")),
+        act_type=act_type,
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )
