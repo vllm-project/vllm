@@ -8211,6 +8211,141 @@ def test_waiting_encoder_stall_kv_holder_keeps_drain_priority():
     assert stalled in scheduler.kv_holding_waiting
 
 
+def test_waiting_skip_releases_encoder_cache_hits_on_lookahead_zero():
+    """Skipping a waiting request after an encoder hit must release its pin.
+
+    When `_try_schedule_encoder_inputs` pulls a cached item out of `freeable`
+    and `_reserve_prefill_lookahead` then shrinks `num_new_tokens` to 0, the
+    requeued waiting request must not hold the encoder cache entry pinned and
+    starve later requests from evicting it.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_seqs=4,
+        max_num_batched_tokens=600,
+        max_model_len=2048,
+        encoder_cache_size=576,
+    )
+    scheduler.num_prefill_lookahead = 3
+    manager = scheduler.encoder_cache_manager
+
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=576,
+        mm_hashes_list=[["img_cached"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+        req_ids=["seed"],
+    )[0]
+    manager.allocate(seed, 0)
+    manager.free(seed)
+    assert "img_cached" in manager.freeable
+    assert manager.num_freeable_slots == 576
+
+    # Advance `filler` into RUNNING so step 2 consumes 599 of 600 batched tokens,
+    # leaving token_budget=1 before the WAITING queue runs.
+    filler = create_requests(
+        num_requests=1, num_tokens=1199, max_tokens=1, req_ids=["filler"]
+    )[0]
+    scheduler.add_request(filler)
+    step1 = scheduler.schedule()
+    assert step1.num_scheduled_tokens == {"filler": 600}
+
+    # `blocked` has 3 remaining prompt tokens (`num_computed_tokens=575` of 578)
+    # and `num_prefill_lookahead=3`: _try_schedule_encoder_inputs hits `img_cached`
+    # first and _reserve_prefill_lookahead then shrinks num_new_tokens to 0.
+    blocked = create_requests(
+        num_requests=1,
+        num_tokens=578,
+        mm_hashes_list=[["img_cached"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+        max_tokens=1,
+        req_ids=["blocked"],
+    )[0]
+    blocked.num_computed_tokens = 575
+    successor = create_requests(
+        num_requests=1,
+        num_tokens=10,
+        mm_hashes_list=[["img_new"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=1)]],
+        max_tokens=1,
+        req_ids=["successor"],
+    )[0]
+
+    scheduler.add_request(blocked)
+    scheduler.add_request(successor)
+
+    output = scheduler.schedule()
+
+    assert "blocked" not in output.num_scheduled_tokens
+    assert "blocked" not in manager.request_cached_ids
+    assert "successor" in output.num_scheduled_tokens
+    assert output.scheduled_encoder_inputs["successor"] == [0]
+    assert "img_cached" not in manager.cached
+
+
+def test_waiting_skip_releases_encoder_cache_hit_on_unchunked_mm_zero():
+    """Multi-item unchunked rollback to 0 must release earlier cache hits."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_seqs=4,
+        max_num_batched_tokens=600,
+        max_model_len=2048,
+        disable_chunked_mm_input=True,
+        encoder_cache_size=576,
+    )
+    scheduler.num_prefill_lookahead = 1
+    manager = scheduler.encoder_cache_manager
+
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=561,
+        mm_hashes_list=[["img_0"]],
+        mm_positions=[[PlaceholderRange(offset=1, length=560)]],
+        req_ids=["seed"],
+    )[0]
+    manager.allocate(seed, 0)
+    manager.free(seed)
+    assert "img_0" in manager.freeable
+    assert manager.num_freeable_slots == 576
+
+    # Advance `filler` into RUNNING so step 2 consumes 595 of 600 batched tokens,
+    # leaving token_budget=5 before the WAITING queue runs.
+    filler = create_requests(
+        num_requests=1, num_tokens=1195, max_tokens=1, req_ids=["filler"]
+    )[0]
+    scheduler.add_request(filler)
+    step1 = scheduler.schedule()
+    assert step1.num_scheduled_tokens == {"filler": 600}
+
+    # Prompt has img_0 [1, 561) (cached) followed by img_1 [561, 1121) (uncached).
+    # Resuming from num_computed_tokens=560 with budget=5 reaches img_0, hits
+    # check_and_update_cache, and then rolls num_new_tokens back to
+    # max(0, 561 - (560 + 1)) = 0 on img_1.
+    req = create_requests(
+        num_requests=1,
+        num_tokens=1150,
+        mm_hashes_list=[["img_0", "img_1"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=1, length=560),
+                PlaceholderRange(offset=561, length=560),
+            ]
+        ],
+        max_tokens=1,
+        req_ids=["req"],
+    )[0]
+    req.num_computed_tokens = 560
+
+    scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    assert "req" not in output.num_scheduled_tokens
+    assert "req" not in manager.request_cached_ids
+    assert "img_0" in manager.freeable
+    assert manager.num_freeable_slots == 576
+
+
 def test_encoder_cache_retained_across_preemption_and_resume():
     """Regression guard for issue #38551 (preemption path).
 
@@ -9952,3 +10087,25 @@ def test_ec_eviction_published_when_no_tokens_are_scheduled():
     assert [call.args[0].events for call in publisher.publish.call_args_list] == [
         [ECRemoved(mm_hashes=["cached"], medium="GPU")]
     ]
+
+
+def test_waiting_skip_does_not_inflate_encoder_decoder_free_slots():
+    """Skipping an encoder-decoder request on num_new_tokens == 0 must not
+    call EncoderDecoderCacheManager.free() and inflate num_free_slots."""
+    scheduler = _create_encoder_decoder_scheduler(max_num_batched_tokens=1000)
+    manager = scheduler.encoder_cache_manager
+    cache_size = manager.cache_size
+
+    r1, r2 = create_requests(
+        2,
+        num_tokens=10,
+        mm_hashes_list=[["enc_1"], ["enc_2"]],
+        mm_positions=[[PlaceholderRange(0, 600)]] * 2,
+    )
+    scheduler.add_request(r1)
+    scheduler.add_request(r2)
+
+    output = scheduler.schedule()
+    assert list(output.num_scheduled_tokens.keys()) == [r1.request_id]
+    assert r2 in scheduler.waiting
+    assert manager.num_free_slots == cache_size

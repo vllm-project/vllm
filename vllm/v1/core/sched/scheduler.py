@@ -1465,13 +1465,22 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens < request.num_tokens - num_computed_tokens
                     ):
                         # Encoder cache pressure must not split a prompt that
-                        # requires full prefill. Release references acquired by hits.
-                        self.encoder_cache_manager.free(request)
+                        # requires full prefill.
                         num_new_tokens = 0
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled. Requeue it so it does
-                        # not stall the requests behind it.
+                        # The request cannot be scheduled. Release any encoder
+                        # cache hits pinned before num_new_tokens dropped to 0,
+                        # unless queued for mismatch error cleanup.
+                        # Encoder-decoder models skip check_and_update_cache and
+                        # their free() unconditionally adds slots.
+                        if (
+                            request.has_encoder_inputs
+                            and not self.is_encoder_decoder
+                            and request_id not in self.encoder_cache_mismatch_reqs
+                        ):
+                            self.encoder_cache_manager.free(request)
+                        # Requeue it so it does not stall the requests behind it.
                         skip_request(request_queue)
                         continue
 
