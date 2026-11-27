@@ -269,6 +269,3 @@ model and context limit as the worker.
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --remote-generation-url http://worker:50051 --max-model-len 512
 ```
-
-Client disconnects and matched stop strings cancel remote generation by closing
-the stream. Explicit abort by request ID is unsupported in this mode.
