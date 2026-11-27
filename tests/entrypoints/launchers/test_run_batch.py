@@ -2086,6 +2086,28 @@ async def test_batch_responses_background_rejected():
     handler.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_batch_responses_chaining_rejected(monkeypatch):
+    # With the store enabled, a chained line resolves or 404s depending on
+    # whether the earlier line has finished, so chaining is rejected up front.
+    monkeypatch.setattr("vllm.envs.VLLM_ENABLE_RESPONSES_API_STORE", True)
+    handler = AsyncMock()
+
+    line = json.loads(INPUT_RESPONSES_BATCH)
+    line["body"]["previous_response_id"] = "resp_first"
+    request = BatchRequestInput.model_validate_json(json.dumps(line))
+    assert request.body.previous_response_id == "resp_first"
+
+    result = await run_batch_module.run_request(
+        make_responses_wrapper()(handler), request
+    )
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert "previous_response_id" in result.error.error.message
+    assert result.error is not None
+    handler.assert_not_called()
+
+
 def test_responses():
     with (
         tempfile.NamedTemporaryFile("w") as input_file,

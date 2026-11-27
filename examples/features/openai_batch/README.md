@@ -46,9 +46,11 @@ cat examples/features/openai_batch/openai_example_batch.jsonl
 ```
 
 Lines with `url` set to `/v1/responses` run through the [Responses API](https://platform.openai.com/docs/api-reference/responses).
-`background` must be omitted or `false` (batch lines run to completion), and
-`previous_response_id` chaining is not available because batch lines run
-concurrently without a response store.
+`background` must be omitted or `false` (batch lines run to completion).
+`previous_response_id` is rejected with a 400 error: batch lines run
+concurrently, so with `VLLM_ENABLE_RESPONSES_API_STORE=1` a chained line
+would resolve or return 404 depending on whether the earlier line has
+finished.
 
 ### Step 2: Run the batch
 

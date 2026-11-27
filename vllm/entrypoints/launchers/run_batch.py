@@ -827,7 +827,10 @@ def make_responses_wrapper() -> WrapperFn:
 
     A background response returns a queued placeholder and finishes
     generation in a task the batch runner never collects, so background
-    requests are rejected per line.
+    requests are rejected per line. `previous_response_id` is rejected
+    because batch lines run concurrently: with
+    `VLLM_ENABLE_RESPONSES_API_STORE=1` it would resolve only if the
+    earlier line has already finished.
     """
 
     def wrapper(handler_fn: Callable):
@@ -835,11 +838,18 @@ def make_responses_wrapper() -> WrapperFn:
             request: ResponsesRequest,
         ) -> ResponsesResponse | ErrorResponse:
             if request.background:
+                message = "Background responses are not supported in batch mode."
+            elif request.previous_response_id is not None:
+                message = (
+                    "Chaining responses with previous_response_id is not "
+                    "supported in batch mode."
+                )
+            else:
+                message = None
+            if message is not None:
                 return ErrorResponse(
                     error=ErrorInfo(
-                        message=(
-                            "Background responses are not supported in batch mode."
-                        ),
+                        message=message,
                         type="BadRequestError",
                         code=HTTPStatus.BAD_REQUEST.value,
                     )
