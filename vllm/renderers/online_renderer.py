@@ -488,6 +488,7 @@ class OnlineRenderer:
             engine_input=self.render_responses_harmony_messages(
                 messages,
                 cache_salt=request.cache_salt,
+                cache_salt_start_idx=getattr(request, "cache_salt_start_idx", None),
                 tok_params=request.build_tok_params(self.model_config),
             ),
         )
@@ -519,6 +520,7 @@ class OnlineRenderer:
         messages: list[OpenAIMessage],
         *,
         cache_salt: str | None,
+        cache_salt_start_idx: int | None = None,
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         arrival_time = time.time()
@@ -529,6 +531,8 @@ class OnlineRenderer:
                 prompt,
             )
         engine_input = tokens_input(prompt["prompt_token_ids"], cache_salt=cache_salt)
+        if cache_salt_start_idx is not None:
+            engine_input["cache_salt_start_idx"] = cache_salt_start_idx
         engine_input["arrival_time"] = arrival_time
         return engine_input
 
@@ -576,6 +580,9 @@ class OnlineRenderer:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
             engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
+            start_idx = getattr(request, "cache_salt_start_idx", None)
+            if start_idx is not None:
+                engine_input["cache_salt_start_idx"] = start_idx
             return [], [engine_input]
 
         messages: list[OpenAIMessage] = []
@@ -625,6 +632,9 @@ class OnlineRenderer:
         engine_input = tokens_input(
             prompt["prompt_token_ids"], cache_salt=request.cache_salt
         )
+        start_idx = getattr(request, "cache_salt_start_idx", None)
+        if start_idx is not None:
+            engine_input["cache_salt_start_idx"] = start_idx
 
         return messages, [engine_input]
 
@@ -796,7 +806,7 @@ class OnlineRenderer:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "cache_salt_start_idx")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
@@ -860,9 +870,12 @@ class OnlineRenderer:
             # tokenized, so conversation is empty. The adjust_request tail below
             # still runs.
             conversation: list[ConversationMessage] = []
+            reuse_salt_idx = getattr(request, "cache_salt_start_idx", None)
             engine_input = tokens_input(
                 reuse_ids, cache_salt=getattr(request, "cache_salt", None)
             )
+            if reuse_salt_idx is not None:
+                engine_input["cache_salt_start_idx"] = reuse_salt_idx
         else:
             (conversation,), (engine_input,) = await renderer.render_chat_async(
                 [messages],
@@ -870,7 +883,11 @@ class OnlineRenderer:
                 tok_params,
                 prompt_extras={
                     k: v
-                    for k in ("mm_processor_kwargs", "cache_salt")
+                    for k in (
+                        "mm_processor_kwargs",
+                        "cache_salt",
+                        "cache_salt_start_idx",
+                    )
                     if (v := getattr(request, k, None)) is not None
                 },
                 skip_mm_cache=skip_mm_cache,
