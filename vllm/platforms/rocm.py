@@ -199,6 +199,22 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
+@with_amdsmi_context
+def _query_device_name_from_amdsmi(physical_device_id: int) -> str:
+    handle = amdsmi_get_processor_handles()[physical_device_id]
+    asic_info = amdsmi_get_gpu_asic_info(handle)
+    asic_info_device_id: str = asic_info["device_id"]
+    if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
+        return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
+    return asic_info["market_name"]
+
+
+@with_amdsmi_context
+def _query_device_uuid_from_amdsmi(physical_device_id: int) -> str:
+    handle = amdsmi_get_processor_handles()[physical_device_id]
+    return amdsmi_get_gpu_device_uuid(handle)
+
+
 def _get_gcn_arch() -> str:
     """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
@@ -1051,31 +1067,32 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
-        asic_info = amdsmi_get_gpu_asic_info(handle)
-        asic_info_device_id: str = asic_info["device_id"]
-        if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
-            return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
-        return asic_info["market_name"]
+        try:
+            return _query_device_name_from_amdsmi(physical_device_id)
+        except Exception as e:
+            logger.debug("Failed to get device name via amdsmi: %s", e)
+            logger.warning_once(
+                "Failed to get device name via amdsmi, falling back to "
+                "torch.cuda. This will initialize CUDA."
+            )
+        return torch.cuda.get_device_name(device_id)
 
     @classmethod
-    @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         try:
-            device = amdsmi_get_processor_handles()[physical_device_id]
-        except AmdSmiException as error:
-            logger.error("amdsmi device query failed ", exc_info=error)
-            return ""
-        try:
-            device_uuid = amdsmi_get_gpu_device_uuid(device)
-        except AmdSmiException as error:
-            logger.error("amdsmi device uuid query failed ", exc_info=error)
-        return device_uuid
+            return _query_device_uuid_from_amdsmi(physical_device_id)
+        except Exception as e:
+            # Callers match GPUs by UUID, so the fallback must differ per GPU.
+            logger.debug("Failed to get device uuid via amdsmi: %s", e)
+            logger.warning_once(
+                "Failed to get device uuid via amdsmi, falling back to 'rocm:%d'.",
+                physical_device_id,
+            )
+            return f"rocm:{physical_device_id}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

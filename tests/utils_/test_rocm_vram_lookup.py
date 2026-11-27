@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Finding amdgpu's exact VRAM counter from KFD topology and DRM sysfs. Plain
-files in a temporary directory, so this runs without a GPU."""
+"""Finding amdgpu's exact VRAM counter from KFD topology and DRM sysfs (plain
+files in a temporary directory, so this runs without a GPU), and the ROCm
+device queries that must work when amdsmi cannot initialize, as on WSL2."""
 
 import pytest
+import torch
 
+from vllm.platforms import current_platform
 from vllm.platforms.rocm_device_memory import find_vram_used_file
 
 GB = 1 << 30
@@ -131,3 +134,47 @@ def test_vram_total_must_match_hip(root, vram_total, found):
 def test_no_kfd_topology(tmp_path):
     path, reason = _find(tmp_path)
     assert path is None and "no KFD topology" in reason
+
+
+@pytest.fixture
+def rocm_without_amdsmi(monkeypatch: pytest.MonkeyPatch):
+    """RocmPlatform with amdsmi_init() failing as on WSL2 (#64664)."""
+    if not current_platform.is_rocm():
+        pytest.skip("needs a ROCm GPU")
+    import amdsmi
+
+    from vllm.platforms import rocm
+
+    def amdsmi_init():
+        # AMDSMI_STATUS_DRIVER_NOT_LOADED: WSL2 has /dev/dxg but no amdgpu.
+        raise amdsmi.AmdSmiLibraryException(34)
+
+    monkeypatch.setattr(rocm, "amdsmi_init", amdsmi_init)
+    # get_device_name is cached: drop names from earlier tests, and do not
+    # leak the fallback name into later ones.
+    rocm.RocmPlatform.get_device_name.cache_clear()
+    yield rocm.RocmPlatform
+    rocm.RocmPlatform.get_device_name.cache_clear()
+
+
+def test_device_name_without_amdsmi(rocm_without_amdsmi):
+    name = rocm_without_amdsmi.get_device_name(0)
+    assert name == torch.cuda.get_device_name(0)
+
+
+@pytest.mark.parametrize(
+    ("visible_devices", "device_id", "uuid"),
+    [(None, 0, "rocm:0"), ("3,1", 0, "rocm:3")],
+)
+def test_device_uuid_without_amdsmi(
+    rocm_without_amdsmi,
+    monkeypatch: pytest.MonkeyPatch,
+    visible_devices,
+    device_id,
+    uuid,
+):
+    """A distinct UUID per physical GPU: callers match GPUs by UUID."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    if visible_devices is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    assert rocm_without_amdsmi.get_device_uuid(device_id) == uuid
