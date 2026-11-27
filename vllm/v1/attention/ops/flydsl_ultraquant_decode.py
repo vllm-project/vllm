@@ -671,11 +671,6 @@ def flydsl_ultraquant_decode_attention(
     )
     num_verify_tokens = int(num_verify_tokens)
     if num_verify_tokens > 1:
-        if QG not in _ULTRAQUANT_FLYDSL_GQA:
-            raise ValueError(
-                "UltraQuant verify decode requires GQA "
-                f"{' or '.join(map(str, _ULTRAQUANT_FLYDSL_GQA))}, got {QG}"
-            )
         if not 2 <= num_verify_tokens <= 8:
             raise ValueError(
                 f"UltraQuant verify width must be 2..8; got {num_verify_tokens}"
@@ -830,8 +825,6 @@ def flydsl_ultraquant_decode_attention(
     _inkernel_qrot = (
         _FUSE_QROT_INKERNEL
         and num_verify_tokens == 1
-        and int(D) == 256
-        and QG in _ULTRAQUANT_FLYDSL_GQA
         and query.dim() == 3
         and query.stride(2) == 1
         and query.stride(1) == int(D)

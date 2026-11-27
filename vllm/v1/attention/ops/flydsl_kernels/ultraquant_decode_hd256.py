@@ -717,9 +717,7 @@ def _build_wide_verify(
     tile scores that many query tokens. Q is rotated on the host. Query group
     size is 6, 8 or 16.
     """
-    # QG=6 (Qwen3.6 full-attention layers) reuses the 8-row WHT lane map with
-    # two inactive rows masked. Padded MFMA rows past QG are dropped by the
-    # per-row keep mask.
+    # QG=6 pads the MFMA rows past QG. The per-row keep mask drops them.
     assert query_group_size in (6, 8, 16), (
         "multi-token verify requires query_group_size 6, 8 or 16; "
         f"got {query_group_size}"
