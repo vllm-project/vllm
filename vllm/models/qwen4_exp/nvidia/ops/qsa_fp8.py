@@ -489,7 +489,7 @@ def qsa_sparse_paged_decode(
     assert k_pairs.stride(0) % 8 == 0 and k_pairs.stride(1) % 8 == 0
     assert v_pairs.stride()[:2] == k_pairs.stride()[:2]
     num_rows, num_query_heads, head_dim = q.shape
-    assert head_dim == 256, f"Expected head_dim == 256, got {head_dim}"
+    assert head_dim >= 32, f"Expected head_dim >= 32, got {head_dim}"
     num_cache_blocks, page_size, num_kv_heads = k_cache.shape[:3]
     selection_width = logical_indices.shape[1] - 1
     base_programs = num_rows * num_kv_heads
