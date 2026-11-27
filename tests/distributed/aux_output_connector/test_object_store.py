@@ -629,3 +629,25 @@ def test_writer_does_not_spin_behind_a_batch_that_expired_during_a_marker_write(
     release.set()
     writer.close()
     writer._thread.join(10)
+
+
+def test_writer_writes_a_refused_drop_marker_after_the_next_put_that_lands():
+    accept = threading.Event()
+    attempts: list[list[str]] = []
+
+    def put(keys):
+        attempts.append(keys)
+        return None if accept.is_set() else -200
+
+    client, _, writer = _writer(put, 1.0)
+    writer.put(_objects("g/0"))
+    deadline = time.monotonic() + 5
+    while ["g/dropped"] not in attempts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ["g/dropped"] in attempts and "g/dropped" not in client.objects
+    accept.set()
+    writer.put(_objects("h/0"))
+    wait_for_writer(writer)
+    writer.close()
+    writer._thread.join(10)
+    assert {"h/0", "g/dropped"} <= set(client.objects)

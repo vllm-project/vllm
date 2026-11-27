@@ -227,6 +227,7 @@ class AuxObjectWriter:
         self._closing = False
         self._failing = False
         self._markers: dict[str, bytes] = {}
+        self._unwritten_markers: dict[str, bytes] = {}
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="vllm-aux-object-writer"
         )
@@ -289,6 +290,9 @@ class AuxObjectWriter:
                     self._expire(time.monotonic())
                     self._cond.notify_all()
                     markers, self._markers = self._markers, {}
+                if error is None:
+                    markers = self._unwritten_markers | markers
+                    self._unwritten_markers = {}
                 if markers:
                     self._write_markers(markers)
         finally:
@@ -301,7 +305,7 @@ class AuxObjectWriter:
             objects[0][0],
             reason,
         )
-        text = str(reason).encode() or b"?"
+        text = str(reason).encode(errors="backslashreplace") or b"?"
         for key, _ in objects:
             self._markers.setdefault(_drop_marker(key), text)
 
@@ -309,7 +313,8 @@ class AuxObjectWriter:
         try:
             self._store.put_batch(list(markers), list(markers.values()))
         except Exception as e:
-            logger.error("Drop markers %s are not written: %s", list(markers), e)
+            logger.error("Drop markers %s are not written yet: %s", list(markers), e)
+            self._unwritten_markers.update(markers)
 
     def _write(self, deadline: float, objects: AuxObjects) -> object:
         keys = [key for key, _ in objects]
