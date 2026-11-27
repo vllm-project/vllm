@@ -15,10 +15,8 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
-    PinnedBlockSet,
     trim_null_head,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -921,36 +919,6 @@ class KVCacheManager:
                 start_idx = start_token // mgr.block_size
                 blocks = mgr.req_to_blocks[request_id]
                 mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
-
-    def pin_blocks_for_later(
-        self, block_hashes: Sequence[BlockHash]
-    ) -> list[PinnedBlockSet] | None:
-        """Reserve GPU blocks for KV that is being prefetched.
-
-        Returns one set per prefix-cacheable group, or None when the manager
-        declines. The caller fills the blocks from its own tier, then calls
-        `publish_prefetched_blocks`; a request arriving afterwards hits them
-        through the ordinary prefix-cache path and takes over the reference.
-        """
-        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
-        if not group_ids:
-            return None
-        block_size = self.kv_cache_config.kv_cache_groups[group_ids[0]].block_size
-        return self.block_pool.pin_blocks_by_hash(block_hashes, group_ids, block_size)
-
-    def publish_prefetched_blocks(self, pinned: list[PinnedBlockSet]) -> None:
-        """Make prefetched blocks visible to prefix caching."""
-        for pinned_set in pinned:
-            self.block_pool.publish_pinned_hashes(pinned_set)
-
-    def release_prefetched_blocks(
-        self,
-        pinned: list[PinnedBlockSet],
-        on_reuse: Callable[[KVCacheBlock], None] | None = None,
-    ) -> None:
-        """Return prefetched blocks to the pool, keeping them readable."""
-        for pinned_set in pinned:
-            self.block_pool.release_pinned(pinned_set, on_reuse)
 
     def take_kv_cache_block_copies(
         self,
