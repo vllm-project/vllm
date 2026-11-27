@@ -291,6 +291,7 @@ mod tests {
             renderer: RendererSelection::Hf,
             language_model_only: false,
             chat_template: None,
+            decisions_read_strategy: None,
             default_chat_template_kwargs: None,
             reasoning_effort_map: HashMap::new(),
             trust_request_chat_template: false,

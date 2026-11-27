@@ -215,13 +215,9 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_api_keys(config.api_keys.clone())
         .with_cors(config.cors.clone())
         .with_access_log(config.access_log.clone())
-<<<<<<< HEAD
+        .with_render_fingerprint(render_fingerprint)
         .with_system_fingerprint(system_fingerprint)
         .with_decisions(decisions);
-=======
-        .with_render_fingerprint(render_fingerprint)
-        .with_system_fingerprint(system_fingerprint);
->>>>>>> abe4d02b1f ([Rust] Make render fingerprints cross-language compatible)
     if let Some((engine_core, server_info)) = &engine_core {
         state = (state.with_engine_core_client())
             .with_server_info(server_info.clone())
