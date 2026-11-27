@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
@@ -22,6 +24,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
@@ -48,6 +51,15 @@ def _kv_connector_enabled() -> bool:
     return kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
 
 
+@dataclass
+class RocmAiterUnifiedAttentionMetadata(RocmAttentionMetadata):
+    # Batch ordered decode -> prefill (reorder_batch_threshold = 1). Only set
+    # for mixed batches: views of the prefill part, built once per step.
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    prefill_query_start_loc: torch.Tensor | None = None
+
+
 class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
     # Step-dependent fields reference persistent input buffers directly.
     supports_draft_decode_metadata_update = True
@@ -55,9 +67,34 @@ class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
     def update_draft_decode_metadata(self, _metadata: RocmAttentionMetadata) -> None:
         pass
 
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._split_decode = envs.VLLM_ROCM_UNIFIED_ATTN_SPLIT_DECODE
+        if self._split_decode:
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmAiterUnifiedAttentionMetadata:
+        base = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        meta = RocmAiterUnifiedAttentionMetadata(**vars(base))
+        if self._split_decode and common_attn_metadata.max_query_len > 1:
+            num_decodes, num_prefills, num_decode_tokens, _ = (
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=1)
+            )
+            if num_decodes > 0 and num_prefills > 0:
+                meta.num_decodes = num_decodes
+                meta.num_decode_tokens = num_decode_tokens
+                qsl = meta.query_start_loc
+                meta.prefill_query_start_loc = qsl[num_decodes:] - qsl[num_decodes]
+        return meta
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
-    ) -> RocmAttentionMetadata:
+    ) -> RocmAiterUnifiedAttentionMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
         # Avoid capturing the real maximum sequence length while preserving
         # query_start_loc, which unified attention consumes during replay.
@@ -202,6 +239,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         from vllm.platforms.rocm import on_gfx11
 
         self.unified_attention = unified_attention
+        self._triton_prefill_hd256 = envs.VLLM_ROCM_UNIFIED_ATTN_HD256_TRITON_PREFILL
         # RDNA3 has no low precision MMA, preserve query precision
         self.supports_quant_query_input = not on_gfx11()
 
@@ -314,7 +352,56 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if attn_metadata.causal:
+        # gfx950: at head size 256 the Triton 2D kernel runs long prefill chunks
+        # ~20% faster than the Gluon kernel (decode batches stay on Gluon).
+        backend = (
+            "triton"
+            if self._triton_prefill_hd256
+            and self.head_size == 256
+            and max_seqlen_q >= 256
+            else None
+        )
+        nd = getattr(attn_metadata, "num_decodes", 0)
+        if nd and attn_metadata.causal:
+            # Mixed batch: decodes (first nd requests) take the split-KV decode
+            # launch, the prefill requests the 2D kernel.
+            ndt = attn_metadata.num_decode_tokens
+            common = dict(
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+                sinks=self.sinks,
+                output_scale=output_scale,
+                shuffled_kv_cache=self._use_shuffle_kv,
+                k=key_cache,
+                v=value_cache,
+                max_seqlen_k=max_seqlen_k,
+            )
+            self.unified_attention(
+                q=query[:ndt],
+                out=output[:ndt],
+                cu_seqlens_q=cu_seqlens_q[: nd + 1],
+                max_seqlen_q=1,
+                seqused_k=seqused_k[:nd],
+                block_table=block_table[:nd],
+                **common,
+            )
+            self.unified_attention(
+                q=query[ndt:num_actual_tokens],
+                out=output[ndt:num_actual_tokens],
+                cu_seqlens_q=attn_metadata.prefill_query_start_loc,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k[nd:],
+                block_table=block_table[nd:],
+                backend=backend,
+                **common,
+            )
+        elif attn_metadata.causal:
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -336,6 +423,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 sinks=self.sinks,
                 output_scale=output_scale,
                 shuffled_kv_cache=self._use_shuffle_kv,
+                backend=backend,
             )
         else:
             # The aiter kernel is causal-only. Non-causal cross-attention
