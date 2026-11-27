@@ -1754,9 +1754,7 @@ if __name__ == "__main__":
                 "Static routing requires --encode-servers-urls "
                 "and --decode-servers-urls"
             )
-        app.state.enable_per_video_kwargs_slicing = (
-            args.enable_per_video_kwargs_slicing
-        )
+        app.state.enable_per_video_kwargs_slicing = args.enable_per_video_kwargs_slicing
         app.state.e_urls = [
             u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
         ]
