@@ -792,35 +792,42 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace)
         "Only power of two Hadamard sizes up to 2^15 are supported, got ", had_size);
 
     const auto res_shape = x.sizes();
-    x = torch::stable::reshape(x, {-1, had_size});
+    if (x.numel() == 0) {
+        return inplace ? x : torch::stable::empty_like(x);
+    }
 
-    auto numel = x.numel();
+    torch::stable::Tensor x_2d = torch::stable::reshape(x, {-1, had_size});
+    if (!x_2d.is_contiguous()) {
+        x_2d = torch::stable::contiguous(x_2d);
+    }
+
+    auto numel = x_2d.numel();
     if (numel % 256 != 0) {
-        x = torch::stable::pad(x, {0, 0, 0, (256 - numel % 256) / had_size});
+        x_2d = torch::stable::pad(x_2d, {0, 0, 0, (256 - numel % 256) / had_size});
     }
 
-    if (x.stride(-1) != 1) {
-        x = torch::stable::contiguous(x);
-    }
-    torch::stable::Tensor out = inplace ? x : torch::stable::empty_like(x);
+    torch::stable::Tensor out = inplace ? x_2d : torch::stable::empty_like(x_2d);
 
-    torch::stable::accelerator::DeviceGuard device_guard(x.get_device_index());
+    torch::stable::accelerator::DeviceGuard device_guard(x_2d.get_device_index());
     auto stream = get_current_cuda_stream();
 
-    VLLM_STABLE_DISPATCH_HALF_TYPES(x.scalar_type(), "hadacore_transform_runfht", [&] {
+    VLLM_STABLE_DISPATCH_HALF_TYPES(x_2d.scalar_type(), "hadacore_transform_runfht", [&] {
       auto constexpr SCALAR_TYPE = torch::headeronly::CppTypeToScalarType<scalar_t>::value;
-      hadacore::run_fht<SCALAR_TYPE>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
+      hadacore::run_fht<SCALAR_TYPE>(x_2d.data_ptr(), out.data_ptr(), x_2d.numel(), had_size, stream);
     });
 
     if (numel % 256 != 0) {
         out = torch::stable::narrow(out, 0, 0, numel / had_size);
     }
 
-    if (inplace && out.data_ptr() != x.data_ptr()) {
-        torch::stable::copy_(x, torch::stable::view(out, res_shape));
+    auto result = torch::stable::reshape(out, res_shape);
+    if (inplace) {
+        if (result.data_ptr() != x.data_ptr()) {
+            torch::stable::copy_(x, result);
+        }
         return x;
     }
-    return torch::stable::reshape(out, res_shape);
+    return result;
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {

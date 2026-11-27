@@ -6,7 +6,6 @@ import math
 import pytest
 import torch
 from compressed_tensors.transform import deterministic_hadamard_matrix
-
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
@@ -51,3 +50,31 @@ def test_hadacore_odd_row_counts(
     y = ops.hadacore_transform(x.clone(), inplace=True)
     y_true = (x.to(hadamard.dtype) @ hadamard.T).to(y.dtype)
     torch.testing.assert_close(y, y_true, atol=0.05, rtol=0.02)
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_hadacore_non_contiguous(inplace, dtype=torch.bfloat16, device="cuda"):
+    """Non-contiguous views must not read or write their padding columns (#70383)."""
+    base = torch.full((4, 96), 99.0, dtype=dtype, device=device)
+    x = base[:, :64]
+    torch.manual_seed(0)
+    x.copy_(torch.randn(4, 64, dtype=dtype, device=device))
+    expected = ops.hadacore_transform(x.contiguous().clone(), inplace=False)
+
+    y = ops.hadacore_transform(x, inplace=inplace)
+
+    torch.testing.assert_close(y, expected, atol=0.05, rtol=0.02)
+    if inplace:
+        torch.testing.assert_close(x, expected, atol=0.05, rtol=0.02)
+    torch.testing.assert_close(
+        base[:, 64:], torch.full_like(base[:, 64:], 99.0), atol=0, rtol=0
+    )
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_hadacore_empty_batch(inplace, dtype=torch.bfloat16, device="cuda"):
+    """An empty batch must return instead of launching a zero-block grid (#70383)."""
+    x = torch.empty((0, 64), dtype=dtype, device=device)
+    y = ops.hadacore_transform(x, inplace=inplace)
+    assert y.shape == x.shape
+    assert y.numel() == 0
