@@ -2604,31 +2604,9 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if not should_emit_output and (
-                prompt_logprobs_tensors is not None
-                or prompt_token_id_logprobs is not None
-            ):
-                assert self.num_sampled_tokens_per_step == 0
-                # Diffusion prompt scores accompany the first emitted canvas.
-                request.held_prompt_logprobs = (
-                    prompt_logprobs_tensors,
-                    prompt_token_id_logprobs,
-                )
-                prompt_logprobs_tensors = None
-                prompt_token_id_logprobs = None
-            elif should_emit_output and request.held_prompt_logprobs is not None:
-                held_logprobs, held_token_id_logprobs = request.held_prompt_logprobs
-                # A recomputed prefill can supply newer scores after preemption.
-                if prompt_logprobs_tensors is None:
-                    prompt_logprobs_tensors = held_logprobs
-                if prompt_token_id_logprobs is None:
-                    prompt_token_id_logprobs = held_token_id_logprobs
-                request.held_prompt_logprobs = None
             if self.aux_output_connector is not None and should_emit_output:
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
@@ -2695,6 +2673,9 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
+            # Get prompt logprobs for this request.
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -3322,7 +3303,6 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
-        request.held_prompt_logprobs = None
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)

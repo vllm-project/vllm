@@ -31,7 +31,6 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
-    from vllm.v1.outputs import LogprobsTensors
 
 
 @dataclass(slots=True)
@@ -232,9 +231,6 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
-        self.held_prompt_logprobs: (
-            tuple[LogprobsTensors | None, torch.Tensor | None] | None
-        ) = None
 
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
