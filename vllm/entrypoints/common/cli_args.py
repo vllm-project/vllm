@@ -112,8 +112,8 @@ class BaseFrontendArgs:
     """JSON mapping that rewrites a request's reasoning effort to a value the
     chat template supports, for templates that silently fall back on efforts
     they do not recognize. Applies to the effort set through the Chat
-    Completions, Responses and Anthropic Messages APIs; efforts not listed
-    pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
+    Completions, Responses, Anthropic Messages and `/tokenize` APIs; efforts
+    not listed pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
     for a template that only knows low, high and max."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
