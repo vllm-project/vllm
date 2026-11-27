@@ -4059,10 +4059,11 @@ class Scheduler(SchedulerInterface):
 
         The step's forward already ran on incomplete KV, so every block the
         load wrote is bad, in every KV cache group. Those blocks are evicted
-        from the prefix cache, whatever the request's state now, and requests
-        that already share them are handled too. Under the recompute policy
-        the requests are preempted and recomputed from scratch, as recurrent
-        state cannot resume from a partial prefix; otherwise they fail.
+        from the prefix cache, whatever the request's state now, together with
+        everything a request computed over them, and requests that already
+        share them are handled too. Under the recompute policy the requests
+        are preempted and recomputed from scratch, as recurrent state cannot
+        resume from a partial prefix; otherwise they fail.
 
         Returns:
             IDs of affected requests whose output this step must be skipped.
@@ -4095,24 +4096,29 @@ class Scheduler(SchedulerInterface):
         # Preempted by an earlier schedule() before this output arrived.
         preempted_early = set(failed) - affected
         async_affected: set[str] = set()
+        blocks_to_evict = [set(ids) for ids in bad_block_ids]
         for request in self.requests.values():
-            if request.request_id in failed or request.status not in (
+            if request.status not in (
                 RequestStatus.RUNNING,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
             ):
                 continue
-            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-            if any(
-                not group_bad.isdisjoint(ids)
-                for group_bad, ids in zip(bad_block_ids, block_ids)
-            ):
-                if request.status == RequestStatus.RUNNING:
-                    affected.add(request.request_id)
-                else:
-                    async_affected.add(request.request_id)
+            # Everything a request holds from its first bad block on was
+            # computed over incomplete KV, including blocks of later steps.
+            block_ids = self.kv_cache_manager.get_block_ids_from_first_of(
+                request.request_id, bad_block_ids
+            )
+            if block_ids is None:
+                continue
+            for group_evict, ids in zip(blocks_to_evict, block_ids):
+                group_evict.update(ids)
+            if request.status == RequestStatus.RUNNING:
+                affected.add(request.request_id)
+            elif request.request_id not in failed:
+                async_affected.add(request.request_id)
 
         self.kv_cache_manager.evict_blocks_by_group(
-            [sorted(ids) for ids in bad_block_ids]
+            [sorted(ids) for ids in blocks_to_evict]
         )
         failed_async = self._handle_failed_recving(async_affected)
 

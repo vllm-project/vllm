@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -832,6 +832,33 @@ class KVCacheManager:
                 blocks = blocks[start_token // manager.block_size :]
             block_ids.append([b.block_id for b in blocks if not b.is_null])
         return tuple(block_ids)
+
+    def get_block_ids_from_first_of(
+        self, request_id: str, block_ids: Sequence[Collection[int]]
+    ) -> tuple[list[int], ...] | None:
+        """Get the request's non-null block ids, in every KV cache group, from
+        the first token it holds in `block_ids` (one collection per group)
+        on. Returns None if the request holds none of them."""
+        first_token: int | None = None
+        for manager, blocks, group_block_ids in zip(
+            self.coordinator.single_type_managers,
+            self.get_blocks(request_id).blocks,
+            block_ids,
+        ):
+            for idx, block in enumerate(blocks):
+                if block.is_null or block.block_id not in group_block_ids:
+                    continue
+                token = (
+                    0
+                    if isinstance(manager, CrossAttentionManager)
+                    else idx * manager.block_size
+                )
+                if first_token is None or token < first_token:
+                    first_token = token
+                break
+        if first_token is None:
+            return None
+        return self.get_block_ids_from_token(request_id, first_token)
 
     def evict_blocks_by_group(self, block_ids: Sequence[Sequence[int]]) -> None:
         """Evict blocks from the prefix cache, given one list of block IDs per
