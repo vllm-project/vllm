@@ -189,16 +189,34 @@ class ConvertWeights:
         """Split another tensor of a module whose weight a converter splits (e.g. a
         quantized checkpoint's `weight_scale`) like the weight: by its rows or by blocks
         of them, and copy a single value or a 1-D tensor of another length (e.g.
-        `weight_shape`) to every piece. `None` if `name` is no such tensor or it
-        doesn't divide like the weight."""
+        `g_idx`) to every piece. `None` if `name` is no such tensor."""
         module, _, param = name.rpartition(".")
         if param == "weight":
             return None
         first, source = rename_source_key(
             f"{module}.weight", self.renamings, self.converters
         )
-        if source is None:
+        if source is None or (weight_rows := self.split_rows(first, source)) is None:
             return None
+        rows = list(weight_rows.values())
+        if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
+            pieces = (tensor,) * len(rows)
+        else:
+            block, rest = divmod(sum(rows), tensor.shape[0])
+            if rest or any(r % block for r in rows):
+                raise ValueError(
+                    f"Cannot split {name!r} of shape {tuple(tensor.shape)} like its "
+                    f"weight, into {rows} rows."
+                )
+            pieces = tensor.split([r // block for r in rows])
+        return {
+            weight_name.removesuffix("weight") + param: piece
+            for weight_name, piece in zip(weight_rows, pieces)
+        }
+
+    def split_rows(self, first: str, source: str) -> dict[str, int] | None:
+        """The rows of each weight that `source`'s converter splits the weight renamed
+        to `first` into, by name. `None` unless it splits it into model tensors."""
         targets = self.pattern_to_converter[source].target_patterns
         if len(targets) < 2:
             return None
@@ -206,18 +224,7 @@ class ConvertWeights:
         full_layer_names = [self.mapper.map_name(n) for n in weight_names]
         if not all(n in self.shapes for n in full_layer_names):
             return None
-        rows = [self.shapes[n][0] for n in full_layer_names]
-        if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
-            pieces = (tensor,) * len(rows)
-        else:
-            block, rest = divmod(sum(rows), tensor.shape[0])
-            if not block or rest or any(r % block for r in rows):
-                return None
-            pieces = tensor.split([r // block for r in rows])
-        return {
-            weight_name.removesuffix("weight") + param: piece
-            for weight_name, piece in zip(weight_names, pieces)
-        }
+        return {w: self.shapes[n][0] for w, n in zip(weight_names, full_layer_names)}
 
 
 VLLM_ATTN_ATTR = "attn"
