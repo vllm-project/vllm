@@ -839,8 +839,8 @@ presets:
     hardware: b300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    description: "Concurrency 1 to 660 on 2 to 9 B300 nodes: TP8 + DCP8 prefill workers with EP8 on MegaMoE and TP8 + DCP8 decode workers on the low-latency decode backend, one node each, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM; NIXL and Mooncake move KV over AWS EFA."
-    source: { label: "InferenceX #5175", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5175", key: "kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "48965730eeae7a2bc9e51845bb8860b52bbab9cf" }
+    description: "Concurrency 1 to 640 on 2 to 9 B300 nodes: TP8 + DCP8 prefill workers with EP8 on MegaMoE and TP8 + DCP8 decode workers on the low-latency decode backend, one node each, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM; NIXL and Mooncake move KV over AWS EFA."
+    source: { label: "InferenceX #5175", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5175", key: "kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "747bde06049a6ed0e59c5708721c18adb747dfc1" }
     image:
       vllm: "vllm/vllm-openai:kimi-k31-mc-f4c9618@sha256:01257a77db1a749f97a542431d40c89cbec750c2f1585282e5975b4872ea7b19"
       dynamo: "ec06c09e7232e24f6faeec4069acdc61e4379916"
@@ -1158,11 +1158,21 @@ presets:
               K31_TCS45: "1"
               K31_W112: "1"
               K31_S30K: "6"
-      c96:
-        label: "96 (1P3D)"
-        concurrency: 96
-        description: "One prefill and three decode workers (32 GPUs), 4 draft tokens, small-batch decode kernels."
+      c64:
+        label: "64 (1P2D)"
+        concurrency: 64
+        description: "One prefill and two decode workers (24 GPUs), 4 draft tokens, small-batch decode kernels, prefill EPLB."
         roles:
+          prefill:
+            # Expert-parallel load balancing: re-place the routed experts every
+            # 1500 steps from a 1000-step load window, with no redundant experts.
+            args: ["--enable-eplb", "--eplb-config", &k31_b300_eplb '{"window_size":1000,"step_interval":1500,"num_redundant_experts":0,"log_balancedness":true,"log_balancedness_interval":50}']
+            env:
+              # Less host work per eager prefill step, same outputs.
+              K31_CPU1: "1"
+              # Indexer logits budget per call, so a long prompt runs in fewer
+              # indexer chunks.
+              VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "4096"
           decode:
             env:
               K31_DCPV8: "1"
@@ -1203,17 +1213,56 @@ presets:
               K31_TCS: "1"
               K31_TCS45: "1"
               K31_W112: "1"
-      c660:
-        label: "660 (4P5D)"
-        concurrency: 660
-        description: "Four prefill and five decode workers (72 GPUs), 5 draft tokens, 128 decode sequences with FlashInfer autotuning."
+      c264:
+        label: "264 (2P3D)"
+        concurrency: 264
+        description: "Two prefill and three decode workers (40 GPUs), 5 draft tokens, 704-token prefix-match units, prefill EPLB, 128 decode sequences with FlashInfer autotuning and the TRT-LLM MoE engine above 128 rows."
+        # Half the draft's 1408-token sliding-window block, with sub-block hits
+        # on that group and the draft's tail hit rule (env below).
+        args: ["--prefix-match-unit", "704"]
         json_args:
           "--speculative-config": { num_speculative_tokens: 5 }
         roles:
           prefill:
-            # Less host work per eager prefill step, same outputs.
+            args: ["--enable-eplb", "--eplb-config", *k31_b300_eplb]
             env:
               K31_CPU1: "1"
+              VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "4096"
+              VLLM_SWA_FINE_GRAINED_HITS: "1"
+              VLLM_DFLASH_SWA_TAIL_HITS: "1"
+          decode:
+            remove_args: ["--no-enable-flashinfer-autotune"]
+            args:
+              - "--enable-flashinfer-autotune"
+              - "--gpu-memory-utilization"
+              - "0.98"
+              - "--max-num-seqs"
+              - "128"
+              - "--max-cudagraph-capture-size"
+              - "768"
+              - "--compilation-config"
+              - '{"cudagraph_capture_sizes":[24,48,72,96,120,144,168,192,216,240,264,288,312,336,360,384,408,432,456,480,504,528,552,576,600,624,648,672,696,720,744,768]}'
+            env:
+              VLLM_SWA_FINE_GRAINED_HITS: "1"
+              VLLM_DFLASH_SWA_TAIL_HITS: "1"
+              # The MoE of decode steps above 128 rows on the image's TRT-LLM
+              # MoE engine; both engines use the checkpoint's MXFP4 experts.
+              VLLM_K31_WIDE_ENGINES: "65-1024:trtllm"
+      c640:
+        label: "640 (4P5D)"
+        concurrency: 640
+        description: "Four prefill and five decode workers (72 GPUs), 5 draft tokens, 704-token prefix-match units, prefill EPLB, 128 decode sequences with FlashInfer autotuning."
+        args: ["--prefix-match-unit", "704"]
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 5 }
+        roles:
+          prefill:
+            args: ["--enable-eplb", "--eplb-config", *k31_b300_eplb]
+            env:
+              K31_CPU1: "1"
+              VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "4096"
+              VLLM_SWA_FINE_GRAINED_HITS: "1"
+              VLLM_DFLASH_SWA_TAIL_HITS: "1"
           decode:
             remove_args: ["--no-enable-flashinfer-autotune"]
             args:
@@ -1228,6 +1277,9 @@ presets:
               - "768"
               - "--compilation-config"
               - '{"cudagraph_capture_sizes":[24,48,72,96,120,144,168,192,216,240,264,288,312,336,360,384,408,432,456,480,504,528,552,576,600,624,648,672,696,720,744,768]}'
+            env:
+              VLLM_SWA_FINE_GRAINED_HITS: "1"
+              VLLM_DFLASH_SWA_TAIL_HITS: "1"
     runbook: |
       The disaggregated B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5175](https://github.com/SemiAnalysisAI/InferenceX/pull/5175)). Dynamo + vLLM run TP8 + DCP8 prefill and decode workers, one B300 node each. The prefill workers also run the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL on its LIBFABRIC backend, and all workers share a Mooncake store in host DRAM on its EFA transport. The lane ran the image digest the preset pins, Dynamo built from `ec06c09e7232e24f6faeec4069acdc61e4379916` (main) and Mooncake `0.3.14`; the preset has been measured only on that combination, on AWS B300 nodes with 16 EFA devices each.
 
@@ -1235,16 +1287,17 @@ presets:
       |---:|---:|---:|---:|---:|---:|---:|---|
       | 1 | 1 | 1 | 2 | 7 | 64 | 0.95 | 8 to 64 in steps of 8 |
       | 20, 48 | 1 | 3 | 4 | 5 | 64 | 0.95 | 6 to 384 in steps of 6 |
-      | 96 | 1 | 3 | 4 | 4 | 64 | 0.95 | 5 to 320 in steps of 5 |
-      | 660 | 4 | 5 | 9 | 5 | 128 | 0.98 | 24 to 768 in steps of 24 |
+      | 64 | 1 | 2 | 3 | 4 | 64 | 0.95 | 5 to 320 in steps of 5 |
+      | 264 | 2 | 3 | 5 | 5 | 128 | 0.98 | 24 to 768 in steps of 24 |
+      | 640 | 4 | 5 | 9 | 5 | 128 | 0.98 | 24 to 768 in steps of 24 |
 
       Each point renders one prefill worker and one decode worker; start the table's number of workers per role with the same commands, one node each.
 
       **Serving config.**
-      - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, `--gpu-memory-utilization 0.97` and `--enforce-eager`. `--max-async-kv-loads-per-step 4` starts up to four Mooncake store loads per engine step, and `--long-prefill-token-threshold 4096` chunks prompts with more than 4096 new tokens so that one long prompt does not hold back the others. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each. Prefill computes the sparse-attention indexer logits in BF16 (`"indexer_logits_dtype":"bfloat16"` in `--attention-config`) and selects the indexer top-k with `--kernel-config '{"sparse_indexer_topk_backend":"deep_select"}'`. At 660 clients, `K31_CPU1=1` does less host work per eager prefill step, with the same outputs.
-      - **Decode:** TP8 + DCP8 without expert parallelism, with `VLLM_ENABLE_GEMM_RS=0` and `--max-async-kv-loads-per-step 2`. `--additional-config '{"decode_backend":"latency_specialized"}'` runs pure decode steps on the fused low-latency path; the Low-latency decode toggle is not offered under PD, so the preset sets the flag in the decode args. `--use-replayssm` makes KDA verification replay the accepted prefix instead of keeping one recurrent state per draft token. The decode `--compilation-config` sets only the capture sizes (multiples of 1 + draft tokens per request) and replaces the PD strategy's `FULL_DECODE_ONLY`, so the CUDA graph mode is vLLM's default, as in the lane. From 1 to 96 clients, decode turns on the image's small-batch decode kernels of the `latency_specialized` backend with the `K31_*` environment switches the points list; with 5 draft tokens, `K31_S30K=6` sizes them for 6 verify rows per request. At 660 clients, decode admits up to 128 requests at `--gpu-memory-utilization 0.98`, captures up to 768 rows, autotunes its FlashInfer kernels (`--enable-flashinfer-autotune` in place of `--no-enable-flashinfer-autotune`) and sets the BF16 indexer logits too.
-      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit` set to the block size of the draft's sliding-window KV group, 1408 with 4 draft tokens and 1536 at 1 client with 7 (with any other unit, vLLM turns off partial prefix-cache hits for the whole hybrid KV cache, and next-turn Mooncake store hits drop); `--no-enable-flashinfer-autotune` (except decode at 660 clients), `--stream-interval 10` and `--numa-bind`, which binds each worker's processes to the NUMA node of their GPUs. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
-      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` (5 GQA layers, 2,048-token sliding window), with probabilistic drafting and block rejection: 7 draft tokens at 1 client, 5 at 20, 48 and 660 clients, and 4 at 96.
+      - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, `--gpu-memory-utilization 0.97` and `--enforce-eager`. `--max-async-kv-loads-per-step 4` starts up to four Mooncake store loads per engine step, and `--long-prefill-token-threshold 4096` chunks prompts with more than 4096 new tokens so that one long prompt does not hold back the others. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each. Prefill computes the sparse-attention indexer logits in BF16 (`"indexer_logits_dtype":"bfloat16"` in `--attention-config`) and selects the indexer top-k with `--kernel-config '{"sparse_indexer_topk_backend":"deep_select"}'`. At 64, 264 and 640 clients, `K31_CPU1=1` does less host work per eager prefill step, with the same outputs; `--enable-eplb` with `--eplb-config '{"window_size":1000,"step_interval":1500,"num_redundant_experts":0,"log_balancedness":true,"log_balancedness_interval":50}'` re-places the routed experts every 1500 steps from a 1000-step load window, without redundant experts; and `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=4096` raises the indexer's logits budget per call from 512 MB, so a long prompt runs in fewer indexer chunks.
+      - **Decode:** TP8 + DCP8 without expert parallelism, with `VLLM_ENABLE_GEMM_RS=0` and `--max-async-kv-loads-per-step 2`. `--additional-config '{"decode_backend":"latency_specialized"}'` runs pure decode steps on the fused low-latency path; the Low-latency decode toggle is not offered under PD, so the preset sets the flag in the decode args. `--use-replayssm` makes KDA verification replay the accepted prefix instead of keeping one recurrent state per draft token. The decode `--compilation-config` sets only the capture sizes (multiples of 1 + draft tokens per request) and replaces the PD strategy's `FULL_DECODE_ONLY`, so the CUDA graph mode is vLLM's default, as in the lane. From 1 to 64 clients, decode turns on the image's small-batch decode kernels of the `latency_specialized` backend with the `K31_*` environment switches the points list; with 5 draft tokens, `K31_S30K=6` sizes them for 6 verify rows per request. At 264 and 640 clients, decode admits up to 128 requests at `--gpu-memory-utilization 0.98`, captures up to 768 rows and autotunes its FlashInfer kernels (`--enable-flashinfer-autotune` in place of `--no-enable-flashinfer-autotune`). At 264 clients, `VLLM_K31_WIDE_ENGINES=65-1024:trtllm` runs the MoE of decode steps above 128 rows on the image's TRT-LLM MoE engine (by default it takes over only above 320 rows); both engines use the checkpoint's MXFP4 experts. At 640 clients, decode sets the BF16 indexer logits too.
+      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit` set to the block size of the draft's sliding-window KV group, 1408 with 4 draft tokens and 1536 at 1 client with 7 (with any other unit, vLLM turns off partial prefix-cache hits for the whole hybrid KV cache, and next-turn Mooncake store hits drop). At 264 and 640 clients both roles use 704-token units instead, with `VLLM_SWA_FINE_GRAINED_HITS=1` (sub-block prefix-cache hits on the draft's sliding-window KV group) and `VLLM_DFLASH_SWA_TAIL_HITS=1` (the draft's tail hit rule), so that group keeps its hits at 704-token granularity. Both roles also set `--no-enable-flashinfer-autotune` (except decode at 264 and 640 clients), `--stream-interval 10` and `--numa-bind`, which binds each worker's processes to the NUMA node of their GPUs. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` (5 GQA layers, 2,048-token sliding window), with probabilistic drafting and block rejection: 7 draft tokens at 1 client, 5 at 20, 48, 264 and 640 clients, and 4 at 64.
       - **Collectives and kernels:** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`), and so do TOKENSPEED_MLA's FP16 partials (`TOKENSPEED_MLA_FP16_PARTIALS=0`). NCCL runs only inside a node (`NCCL_MNNVL_ENABLE=0`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `NCCL_TUNER_PLUGIN=ofi`).
       - **KV transfer over EFA:** the NIXL connector uses `"backends": ["LIBFABRIC"]`, with `NIXL_DISABLE_CUDA_ADDR_WA=1`, `FI_EFA_ENABLE_SHM_TRANSFER=0`, `UCX_MEMTYPE_REG_WHOLE=n` and `UCX_TCP_AF_PRIO=inet`. The Mooncake transfer engine uses `MC_SLICE_SIZE=1048576`, `MC_MAX_MR_SIZE=68719476736`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `MC_EFA_NIC_SELECTION=local` and `MC_MS_FILTERS` set to the node's 16 EFA devices, and `WITH_NVIDIA_PEERMEM=0` for hosts without the nvidia-peermem module. A rank registers tens of GB of GPU KV cache with the store, so `MC_MAX_MR_SIZE` must be above that: at the 4 GiB of the GB300 presets, every registration fails over EFA. vLLM loads from the store with 4 receive threads (`VLLM_MOONCAKE_LOAD_RECV_THREADS=4`), and `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE=1` makes a store lookup lease only the keys that a hit loads. The connector options add a 60 s store lookup timeout, `store_tp_size: 1` and `store_chunk_size: 4096`. The store keeps the tail pages a request loaded and drops the older tails it consumed (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), and store lookups start before admission, up to 16 at a time and kept for 30 s (`lookup_prefetch_limit: 16`, `lookup_prefetch_ttl_s: 30`); this cuts store evictions and the prefill work they cause.
       - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files.
@@ -1281,7 +1334,7 @@ presets:
       python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 1
       ```
 
-      `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` skips the frontend's preflight validation of tool parameter schemas marked `strict: true`. Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation.
+      `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` skips the frontend's preflight validation of tool parameter schemas marked `strict: true`. Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation. At 264 clients the lane drops `--router-session-affinity-ttl-secs`, so each request goes to the least-loaded decode worker.
 
       ### Benchmark-only settings left out
 
@@ -1289,14 +1342,14 @@ presets:
 
       ### Throughput measurement only (synthetic acceptance)
 
-      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 4.16 for 7 draft tokens (1 client), 3.81 for 5 (20, 48 and 660 clients) and 3.46 for 4 (96 clients). Only `--speculative-config` changes, on both roles:
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 4.16 for 7 draft tokens (1 client), 3.81 for 5 (20, 48, 264 and 640 clients) and 3.46 for 4 (64 clients). Only `--speculative-config` changes, on both roles:
 
       ```bash
       # 1 client
       --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":4.16}'
-      # 20, 48 and 660 clients
+      # 20, 48, 264 and 640 clients
       --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":5,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.81}'
-      # 96 clients
+      # 64 clients
       --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
       ```
 
