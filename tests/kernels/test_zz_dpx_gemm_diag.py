@@ -173,6 +173,7 @@ def test_dpx_gemm_diag(monkeypatch):
 def test_dispatch_overhead():
     """Host cost of vLLM's GEMM dispatch against calling the kernel directly."""
     from vllm.model_executor.layers import utils as layer_utils
+    from vllm.platforms import rocm
 
     cu = torch.cuda.get_device_properties(0).multi_processor_count
     gen = torch.Generator().manual_seed(7)
@@ -203,7 +204,7 @@ def test_dispatch_overhead():
                     1,
                 ),
             }
-            if 10 <= n <= 128:
+            if 10 <= n <= 128 and rocm.on_gfx950():
                 for grid in sorted({cu, 256}):
                     try:
                         y = ops.wvSplitKrc(x, weight, grid, None)
