@@ -69,7 +69,11 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import (
+    _cgroup_cpu_limit,
+    available_cpu_count,
+    set_default_torch_num_threads,
+)
 
 from torch._inductor.utils import fresh_cache
 
@@ -1689,6 +1693,24 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
+
+
+_TORCH_DEFAULT_THREADS = pytest.StashKey[int]()
+
+
+def pytest_configure(config):
+    # torch starts one thread per physical core and ignores the cgroup CPU
+    # quota, so its parallel CPU ops get throttled in small CI containers.
+    config.stash[_TORCH_DEFAULT_THREADS] = torch.get_num_threads()
+    torch.set_num_threads(min(torch.get_num_threads(), available_cpu_count()))
+
+
+def pytest_report_header(config):
+    return (
+        f"CPUs: cpu_count {os.cpu_count()}, usable {available_cpu_count()}, "
+        f"cgroup quota {_cgroup_cpu_limit()}, torch threads "
+        f"{config.stash[_TORCH_DEFAULT_THREADS]} -> {torch.get_num_threads()}"
+    )
 
 
 @pytest.fixture(scope="session")
