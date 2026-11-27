@@ -14,7 +14,6 @@ processor inserts `mm:ss` timestamps between frames so the model can
 reason about temporal order.
 """
 
-import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
@@ -638,6 +637,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 width=img_width,
                 height=img_height,
                 num_images=mm_counts.get("image", 0),
+                overrides=image_overrides,
             ),
         }
 
@@ -671,9 +671,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 height=frame_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=dataclasses.replace(video_overrides, width=None, height=None)
-                if video_overrides
-                else None,
+                overrides=video_overrides,
             )
 
         return data

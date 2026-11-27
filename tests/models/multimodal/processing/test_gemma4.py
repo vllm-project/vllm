@@ -331,6 +331,28 @@ def test_dummy_reaches_budget_within_size_hints(
     assert num_embeds == expected_embeds
 
 
+@pytest.mark.parametrize(
+    "options",
+    [{"num_frames": 2, "width": 32, "height": 560}, {"num_frames": 2, "height": 96}],
+)
+def test_embedding_gemma2_dummy_video_respects_size_hints(options: dict[str, int]):
+    model_config = ModelConfig(
+        EMBEDDING_GEMMA2_MODEL_ID,
+        limit_mm_per_prompt={"video": {"count": 1, **options}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    frames, _ = processor.dummy_inputs.get_dummy_mm_data(
+        model_config.max_model_len,
+        {"video": 1},
+        model_config.get_multimodal_config().limit_per_prompt,
+    )["video"][0]
+    height, width = frames.shape[1:3]
+
+    assert width <= options.get("width", width)
+    assert height <= options.get("height", height)
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     ctx = build_model_context(
