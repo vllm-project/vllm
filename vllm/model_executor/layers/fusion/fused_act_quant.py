@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
 )
 from vllm.model_executor.layers.fusion.silu_mul_mxfp8_quant import (
+    _SILU_MXFP8_TRITON_SUPPORTED,
     _silu_mxfp8_max_rows,
 )
 from vllm.model_executor.layers.linear import LinearBase
@@ -262,6 +263,8 @@ def _uses_compiled_native_silu(act_fn: torch.nn.Module) -> bool:
     from torch._inductor import config as inductor_config
 
     config = get_cached_compilation_config()
+    eager_numerics = getattr(inductor_config, "eager_numerics", None)
+    triton_config = getattr(inductor_config, "triton", None)
     # Precision emulation retains an extra BF16 rounding boundary. Unknown
     # model compiler overrides or custom passes can also change this contract.
     allowed_options = {
@@ -275,12 +278,13 @@ def _uses_compiled_native_silu(act_fn: torch.nn.Module) -> bool:
         and current_platform.simple_compile_backend == "inductor"
         and not config.inductor_passes
         and not (config.inductor_compile_config.keys() - allowed_options)
-        and not inductor_config.emulate_precision_casts
-        and inductor_config.triton.codegen_upcast_to_fp32
-        and not inductor_config.use_fast_math
-        and not inductor_config.eager_numerics.division_rounding
-        and not inductor_config.eager_numerics.disable_ftz
-        and not inductor_config.eager_numerics.use_pytorch_libdevice
+        # Missing or unknown numerical options must retain the unfused path.
+        and getattr(inductor_config, "emulate_precision_casts", None) is False
+        and getattr(triton_config, "codegen_upcast_to_fp32", None) is True
+        and getattr(inductor_config, "use_fast_math", None) is False
+        and getattr(eager_numerics, "division_rounding", None) is False
+        and getattr(eager_numerics, "disable_ftz", None) is False
+        and getattr(eager_numerics, "use_pytorch_libdevice", None) is False
     )
 
 
@@ -300,6 +304,7 @@ def _silu_mxfp8_quant_supported(
     kernel = getattr(method, "kernel", getattr(scheme, "kernel", None))
     return (
         type(kernel) is FlashInferCutlassMxfp8LinearKernel
+        and _SILU_MXFP8_TRITON_SUPPORTED
         and _uses_compiled_native_silu(act_fn)
         and not x.requires_grad
         and x.is_cuda

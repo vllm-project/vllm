@@ -569,6 +569,75 @@ def test_silu_mxfp8_changed_graph_replay(native_vllm_config, rounding_mode):
     opcheck(torch.ops.vllm.silu_mul_mxfp8_quant, (x, rounding_mode))
 
 
+@_BLACKWELL_MXFP8_ONLY
+@pytest.mark.parametrize("rounding_mode", ["cuda", "compiled_native"])
+@torch.inference_mode()
+def test_silu_mxfp8_scale_thresholds(native_vllm_config, rounding_mode):
+    """Compare FlashInfer at scale boundaries and adjacent reachable BF16 amax."""
+    exponents = torch.arange(-129, 120, device="cuda", dtype=torch.int32)
+    thresholds = torch.ldexp(
+        torch.full_like(exponents, 448, dtype=torch.float32), exponents
+    ).to(torch.bfloat16)
+    targets = torch.stack(
+        (
+            torch.nextafter(thresholds, torch.zeros_like(thresholds)),
+            thresholds,
+            torch.nextafter(thresholds, torch.full_like(thresholds, float("inf"))),
+        ),
+        dim=1,
+    ).flatten()
+    k = 160
+    x = torch.empty((targets.numel(), 2 * k), device="cuda", dtype=torch.bfloat16)
+    # SiLU(32) rounds to exactly 32 in both paths; power-of-two scaling keeps
+    # all three adjacent BF16 maxima exact through the activation boundary.
+    x[:, :k] = 32
+    x[:, k:] = targets[:, None] / 32
+    act = SiluAndMul()
+    activated = act.forward_cuda(x) if rounding_mode == "cuda" else act(x)
+    assert torch.equal(activated, targets[:, None].expand_as(activated))
+    expected = mxfp8_e4m3_quantize(activated, is_sf_swizzled_layout=True)
+    actual = torch.ops.vllm.silu_mul_mxfp8_quant(x, rounding_mode)
+    for value, reference in zip(actual, expected):
+        _assert_mxfp8_bytes(value, reference)
+
+
+@_BLACKWELL_MXFP8_ONLY
+@pytest.mark.parametrize("rounding_mode", ["cuda", "compiled_native"])
+@pytest.mark.parametrize("k", [160, 2**29])
+@torch.inference_mode()
+def test_silu_mxfp8_empty_rows(native_vllm_config, k, rounding_mode):
+    """A reused custom-op graph can receive zero rows without a kernel launch."""
+    x = torch.empty((0, 2 * k), device="cuda", dtype=torch.bfloat16)
+    output, scale = torch.ops.vllm.silu_mul_mxfp8_quant(x, rounding_mode)
+    assert output.shape == (0, k) and output.dtype == torch.float8_e4m3fn
+    assert scale.shape == (0,) and scale.dtype == torch.uint8
+    assert output.device == scale.device == x.device
+    opcheck(torch.ops.vllm.silu_mul_mxfp8_quant, (x, rounding_mode))
+
+
+@_BLACKWELL_MXFP8_ONLY
+@pytest.mark.parametrize("rounding_mode", ["cuda", "compiled_native"])
+@pytest.mark.parametrize("m", [129, 257])
+@pytest.mark.parametrize("k", [128, 160])
+@torch.inference_mode()
+def test_silu_mxfp8_row_chunks(native_vllm_config, m, k, rounding_mode):
+    """Exercise the real oversized-row path using small 128-row chunk bounds."""
+    from vllm.model_executor.layers.fusion.silu_mul_mxfp8_quant import (
+        _silu_mul_mxfp8_quant_impl,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(m + k)
+    x = torch.randn(
+        (m, 2 * k), device="cuda", dtype=torch.bfloat16, generator=generator
+    )
+    before = x.clone()
+    expected = _mxfp8_reference(SiluAndMul(), x, rounding_mode)
+    actual = _silu_mul_mxfp8_quant_impl(x, rounding_mode, max_rows=128)
+    for value, reference in zip(actual, expected):
+        _assert_mxfp8_bytes(value, reference)
+    _assert_mxfp8_bytes(x, before)
+
+
 def _mxfp8_quant_config(kind):
     if kind == "modelopt":
         return ModelOptMxFp8Config(True, None, [])
@@ -604,13 +673,15 @@ def _mxfp8_quant_config(kind):
 @_BLACKWELL_MXFP8_ONLY
 @pytest.mark.parametrize("kind", ["modelopt", "inc", "compressed-tensors"])
 @pytest.mark.parametrize(
-    "activation", ["cuda", "native", "compiled_native", "override"]
+    "activation", ["cuda", "native", "compiled_native", "default", "override"]
 )
 @torch.inference_mode()
 def test_silu_mxfp8_real_consumer(dist_init, kind, activation):
-    """Exercise actual quantization bridges and preserve native-act fallback."""
+    """Require actual fusion, including the default config and Dynamo wrapper."""
     config = VllmConfig(
-        compilation_config=CompilationConfig(
+        compilation_config=CompilationConfig()
+        if activation == "default"
+        else CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["all" if activation == "cuda" else "none"],
             inductor_compile_config={"max_autotune": True}
@@ -643,16 +714,22 @@ def test_silu_mxfp8_real_consumer(dist_init, kind, activation):
         )
         linear.quant_method.process_weights_after_loading(linear)
         assert get_input_quant_key(linear) == kMxfp8Dynamic
-        act = SiluAndMul(compile_native=activation in ("compiled_native", "override"))
+        compiled_native = activation in ("compiled_native", "default", "override")
+        act = (
+            SiluAndMul()
+            if activation == "default"
+            else SiluAndMul(compile_native=compiled_native)
+        )
         x = torch.randn(33, 320, dtype=torch.bfloat16, generator=generator)
         activated = act(x)
         expected = linear(activated)[0]
         dispatch = maybe_fused_act_quant
-        if activation in ("compiled_native", "override"):
+        if compiled_native:
             dispatch = torch.compile(dispatch, fullgraph=True)
+        # A renamed Dynamo wrapper attribute must fail this assertion in CI.
         actual = dispatch(act, x, linear)
         assert isinstance(actual, QuantizedActivation) == (
-            activation == "compiled_native"
+            activation in ("compiled_native", "default")
         )
         if isinstance(actual, QuantizedActivation):
             expected_q, expected_sf = _mxfp8_reference(act, x, "compiled_native")

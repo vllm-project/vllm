@@ -113,6 +113,7 @@ class Qwen3MLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        # Enable only MXFP8 here; preserve Qwen3's other activation paths.
         if get_input_quant_key(self.down_proj) == kMxfp8Dynamic:
             x = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         else:

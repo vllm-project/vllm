@@ -4,10 +4,27 @@
 from __future__ import annotations
 
 import torch
+from packaging.version import InvalidVersion, Version
 
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _silu_mxfp8_triton_supported() -> bool:
+    try:
+        if Version(triton.__version__) < Version("3.8.0"):
+            return False
+        from triton.backends.nvidia.compiler import CUDAOptions
+    except (ImportError, AttributeError, InvalidVersion):
+        return False
+    # Triton's CUDA backend silently discards unrecognized launch options.
+    options = getattr(CUDAOptions, "__dataclass_fields__", {})
+    return {"enable_reflect_ftz", "enable_fp_fusion"} <= options.keys()
+
+
+# Check once outside Dynamo. Numerical validation uses Torch 2.14 / Triton 3.8.
+_SILU_MXFP8_TRITON_SUPPORTED = _silu_mxfp8_triton_supported()
 
 
 def _silu_mxfp8_max_rows(k: int) -> int:
@@ -63,7 +80,7 @@ def _silu_mul_mxfp8_quant_kernel(
             )
         values = (activated * up).to(tl.bfloat16).to(tl.float32)
 
-        # FlashInfer's MXFP8 quantizer rounds amax / 448 upward to UE8M0.
+        # Match FlashInfer CuTe DSL's reciprocal multiply before UE8M0 rounding.
         maximum = tl.reduce(tl.abs(values), 1, _max_ignore_nan)
         normalized_max = maximum * (1.0 / 448.0)
         bits = normalized_max.to(tl.uint32, bitcast=True)
@@ -128,32 +145,55 @@ def _silu_mul_mxfp8_quant(
     assert rounding_mode in ("cuda", "compiled_native"), "Unsupported SiLU rounding"
     assert x.is_cuda and x.dtype == torch.bfloat16 and x.is_contiguous()
     assert x.ndim == 2 and x.shape[1] > 0 and x.shape[1] % 64 == 0
+    assert _SILU_MXFP8_TRITON_SUPPORTED, (
+        "SiLU MXFP8 fusion requires Triton 3.8+ with CUDA numeric options"
+    )
+    # Compiled graphs may be reused without Dynamo guards on the row count.
+    return _silu_mul_mxfp8_quant_impl(
+        x, rounding_mode, _silu_mxfp8_max_rows(x.shape[1] // 2)
+    )
+
+
+def _silu_mul_mxfp8_quant_impl(
+    x: torch.Tensor, rounding_mode: str, max_rows: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     m, two_k = x.shape
     k = two_k // 2
-    # Check here too: vLLM can reuse compiled graphs without Dynamo shape guards.
-    assert 0 < m <= _silu_mxfp8_max_rows(k), "MXFP8 row limit exceeded"
     output, scale = _silu_mul_mxfp8_quant_fake(x)
-    groups = m * (k // 32)
-    scale_cols, scale_size = round_up(k // 32, 4), scale.numel()
-    # Decode needs enough CTAs to cover K; larger M amortizes a wider tile.
-    groups_per_cta = 4 if m <= 32 else 128
-    grid = (max(triton.cdiv(groups, groups_per_cta), scale_size // 512),)
-    _silu_mul_mxfp8_quant_kernel[grid](
-        x,
-        output,
-        scale,
-        M=m,
-        K=k,
-        NUM_GROUPS=groups,
-        PADDED_SCALE_COLS=scale_cols,
-        PADDED_SCALE_SIZE=scale_size,
-        GROUPS_PER_CTA=groups_per_cta,
-        COMPILED_NATIVE=rounding_mode == "compiled_native",
-        num_warps=4,
-        enable_fp_fusion=rounding_mode == "compiled_native",
-        # Inductor disable_ftz=False leaves this CUDA backend default enabled.
-        enable_reflect_ftz=True,
-    )
+    if m == 0:
+        return output, scale
+    assert 0 < max_rows <= _silu_mxfp8_max_rows(k) and max_rows % 128 == 0
+    scale_cols = round_up(k // 32, 4)
+    # Whole 128-row scale tiles concatenate in the flat F8_128x4 layout.
+    for start in range(0, m, max_rows):
+        end = min(start + max_rows, m)
+        rows = end - start
+        groups = rows * (k // 32)
+        scale_size = round_up(rows, 128) * scale_cols
+        groups_per_cta = 4 if rows <= 32 else 128
+        grid = (max(triton.cdiv(groups, groups_per_cta), scale_size // 512),)
+        if m <= max_rows:
+            chunk_x, chunk_output, chunk_scale = x, output, scale
+        else:
+            chunk_x = x[start:end]
+            chunk_output = output[start:end]
+            chunk_scale = scale[start * scale_cols : round_up(end, 128) * scale_cols]
+        _silu_mul_mxfp8_quant_kernel[grid](
+            chunk_x,
+            chunk_output,
+            chunk_scale,
+            M=rows,
+            K=k,
+            NUM_GROUPS=groups,
+            PADDED_SCALE_COLS=scale_cols,
+            PADDED_SCALE_SIZE=scale_size,
+            GROUPS_PER_CTA=groups_per_cta,
+            COMPILED_NATIVE=rounding_mode == "compiled_native",
+            num_warps=4,
+            enable_fp_fusion=rounding_mode == "compiled_native",
+            # Inductor disable_ftz=False leaves this CUDA backend default enabled.
+            enable_reflect_ftz=True,
+        )
     return output, scale
 
 
