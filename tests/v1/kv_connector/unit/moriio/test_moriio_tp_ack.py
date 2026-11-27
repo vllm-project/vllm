@@ -789,7 +789,7 @@ def _consumer_worker(events: list[str], mode: MoRIIOMode) -> MoRIIOConnectorWork
     worker._ready_requests = queue.Queue()
     worker.load_ready_flag = {}
     worker._reqs_to_send = {}
-    worker._eager_handshake_all_dp_ranks = lambda metadata: None  # type: ignore[method-assign]
+    worker._eager_handshake_all_dp_ranks = lambda metadata: set()  # type: ignore[method-assign]
     worker._read_blocks_for_req = lambda req_id, meta: events.append(f"read:{req_id}")  # type: ignore[method-assign]
     worker._await_reads_issued_this_step = lambda: None  # type: ignore[method-assign]
     return worker

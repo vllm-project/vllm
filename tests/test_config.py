@@ -695,7 +695,15 @@ def test_pd_dcp_interleave_size_respects_explicit_settings(
         config.validate_block_size()
 
 
-def test_kv_offloading_does_not_adjust_dcp_interleave_size():
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        KVTransferConfig(kv_connector="OffloadingConnector", kv_role="kv_both"),
+        KVTransferConfig(kv_connector="MoRIIOConnector", kv_role="kv_consumer"),
+    ],
+    ids=["offloading", "moriio"],
+)
+def test_connector_does_not_adjust_dcp_interleave_size(kv_transfer_config):
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
         device_config=DeviceConfig(device="cpu"),
@@ -705,10 +713,7 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
             cp_kv_cache_interleave_size=1,
             distributed_executor_backend="mp",
         ),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="OffloadingConnector",
-            kv_role="kv_both",
-        ),
+        kv_transfer_config=kv_transfer_config,
     )
 
     kv_cache_groups = [SimpleNamespace(block_size=16)]

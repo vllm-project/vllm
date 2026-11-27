@@ -315,6 +315,8 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.tp_rank = tp_rank
     worker.pp_rank, worker.pp_size = 0, 1
+    worker.dcp_size, worker.cp_kv_cache_interleave_size = 1, 1
+    worker.block_size = BLOCK_SIZE
     worker.world_size = tp_size
     worker.use_mla = layers[0].kind == "mla"
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
@@ -376,6 +378,7 @@ def _connect(
     consumers: list[Rank],
     dp_engine: str,
     monkeypatch: pytest.MonkeyPatch,
+    **dcp,
 ) -> None:
     """Route the producer's sessions and notifications to the decode ranks."""
     consumer = consumers[0].worker
@@ -394,6 +397,7 @@ def _connect(
             for name, layout in consumer.mamba_state_layouts.items()
         },
         attention_block_sizes=consumer.attention_block_sizes,
+        **dcp,
     )
     # The handshake carries the metadata as msgpack.
     metadata = msgspec.msgpack.decode(
@@ -629,6 +633,93 @@ def _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts):
                 f"{mismatched} of {received.numel()} bytes of {layer.name} wrong "
                 f"on decode rank {consumer.tp_rank}"
             )
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "interleave"), [(1, 1), (4, BLOCK_SIZE)], ids=["fan-out", "fan-in"]
+)
+def test_hybrid_write_into_dcp_splits_mla_tokens_but_not_the_state(
+    monkeypatch, producer_tp, interleave
+):
+    """Prefill without DCP -> decode TP2 x DCP2 of an MLA + KDA model with an
+    MLA DSpark draft in its own group, as Kimi-K3: each decode rank receives
+    the MLA tokens of its DCP rank, target and draft, and the whole recurrent
+    state of its TP heads, and completes once each of its writers is done."""
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    draft = Layer("draft0", "mla", "draft")
+    monkeypatch.setitem(MODELS, "k3", (1, [*MODELS["mla_hybrid"][1], draft]))
+    monkeypatch.setitem(PREFILL_BLOCKS, "draft", [0, 5])
+    monkeypatch.setitem(DECODE_BLOCKS, "draft", [4, 1])
+    heads, layers = MODELS["k3"]
+    state = _global_state(layers, heads)
+    groups = _groups("k3", True)
+    consumers = [
+        _build_rank("k3", d, 2, KVCacheLayout.LBNHC, True, state, False)
+        for d in range(2)
+    ]
+    for consumer in consumers:
+        consumer.wrapper = _consumer_wrapper()
+
+    done_after = {}
+    for p in range(producer_tp):
+        producer = _build_rank(
+            "k3", p, producer_tp, KVCacheLayout.LBNHC, True, state, True
+        )
+        producer.worker.dcp_size = 1
+        producer.worker.model_config.get_head_size = lambda: 8  # type: ignore[method-assign]
+        assert producer.worker._non_mla_dcp_layer() is None
+        _connect(
+            producer,
+            consumers,
+            "decode",
+            monkeypatch,
+            dcp_size=2,
+            cp_kv_cache_interleave_size=interleave,
+        )
+        info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS[g] for g in groups])
+        producer.wrapper.done_remote_allocate_req_dict["t"] = info
+        writer = make_moriio_writer(producer.worker)
+        for layer in layers:
+            writer._execute_write_task(
+                WriteTask(
+                    request_id="req",
+                    transfer_id="t",
+                    dst_engine_id="decode",
+                    local_block_ids=[PREFILL_BLOCKS[g] for g in groups],
+                    remote_block_ids_hint=None,
+                    layer_name=layer.name,
+                    event=SimpleNamespace(synchronize=lambda: None),
+                    remote_notify_port=NOTIFY_PORT,
+                    remote_ip="decode",
+                    remote_tp_size=2,
+                    tp_mapping=producer.worker._write_tp_mapping(2),
+                )
+            )
+        info.writes_expected = len(layers)
+        writer._finalize_if_complete("t", info)
+        for d, consumer in enumerate(consumers):
+            if consumer.wrapper.pop_finished_write_req_ids():
+                done_after[d] = p
+
+    # With fan-in, the second writer of a decode rank writes only state.
+    assert done_after == ({0: 0, 1: 0} if producer_tp == 1 else {0: 1, 1: 3})
+    for d, consumer in enumerate(consumers):
+        kda = consumer.caches["kda0"].view(NUM_BLOCKS, -1)
+        assert torch.equal(kda, _expected(layers[1], "mamba", state, heads, d, 2, kda))
+        for name, group in (("mla0", "full"), ("draft0", "draft")):
+            mla = torch.zeros_like(consumer.caches[name])
+            for token in range(len(PREFILL_BLOCKS[group]) * BLOCK_SIZE):
+                if token // interleave % 2 == d:
+                    pos = token // (2 * interleave) * interleave + token % interleave
+                    src = PREFILL_BLOCKS[group][token // BLOCK_SIZE]
+                    dst = DECODE_BLOCKS[group][pos // BLOCK_SIZE]
+                    mla[dst, :, pos % BLOCK_SIZE] = state[name][
+                        src, :, token % BLOCK_SIZE
+                    ]
+            assert torch.equal(consumer.caches[name], mla), (name, d)
 
 
 def test_write_refuses_peer_with_different_block_size(monkeypatch):
