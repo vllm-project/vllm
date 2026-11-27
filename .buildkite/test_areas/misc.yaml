@@ -152,6 +152,29 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200) EC Filesystem Tiering"
+  key: ec-filesystem-tiering
+  device: h200
+  num_devices: 1
+  timeout_in_minutes: 45
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - .buildkite/test_areas/misc.yaml
+    - vllm/config/
+    - vllm/distributed/ec_transfer/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/v1/
+    - tests/utils.py
+    - tests/v1/ec_connector/integration/test_filesystem_tiering.py
+  env:
+    PYTHONUNBUFFERED: "1"
+    VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  commands:
+    - pytest -v -s v1/ec_connector/integration/test_filesystem_tiering.py
+
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
@@ -360,6 +383,7 @@ steps:
 
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
+  automatic_shard: true
   depends_on:
     - image-build-cpu
   source_file_dependencies:
@@ -599,8 +623,8 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke"
-  key: python-314-smoke-nightly
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.12 Smoke"
+  key: python-312-smoke-nightly
   depends_on: ~
   optional: true
   timeout_in_minutes: 85
@@ -608,10 +632,10 @@ steps:
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   commands:
-  - PYTHON_ONLY_COMPILE_PYTHON=3.14 bash standalone_tests/python_only_compile.sh
+  - PYTHON_ONLY_COMPILE_PYTHON=3.12 bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      label: ":amd: (MI355) [Nightly] Python 3.14 Smoke"
+      label: ":amd: (MI355) [Nightly] Python 3.12 Smoke"
       dind: false
       device: mi355_1
       timeout_in_minutes: 55
@@ -787,6 +811,7 @@ steps:
 
 - label: ":computer: (CPU) Multimodal + Config"
   key: cpu-multimodal-config
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -893,6 +918,7 @@ steps:
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -904,6 +930,7 @@ steps:
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -1055,11 +1082,13 @@ steps:
     - vllm/distributed/device_communicators/
     - vllm/model_executor/determinism
     - vllm/model_executor/layers
+    - vllm/models/common/ops/fused_allreduce_rms_norm.py
     - vllm/v1/attention
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - pytest -v -s v1/determinism/test_fused_allreduce_rms_norm_batch_invariant.py
     - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
     - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
     - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN

@@ -664,9 +664,6 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        return weight_name.startswith("mtp.")
-
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 

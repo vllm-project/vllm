@@ -534,7 +534,6 @@ def test_pp_tied_word_embeddings(
     for pp_size in (1, 2):
         with vllm_runner(
             model_id,
-            trust_remote_code=False,
             max_model_len=512,
             enable_chunked_prefill=True,
             enforce_eager=True,

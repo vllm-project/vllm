@@ -398,16 +398,132 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     assert topk_call["topk_tokens"] == block_topk
 
 
+def _qsa_mqa_paged_reference(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    visible_lengths: torch.Tensor,
+) -> torch.Tensor:
+    pages = page_table.index_select(0, token_to_req.long()).long()
+    keys = k_cache[pages, :, 0, :].flatten(1, 2)
+    scores = torch.einsum("rhd,rnd->rnh", q.float(), keys.float())
+    logits = torch.relu(scores).sum(dim=-1) / math.sqrt(q.shape[-1])
+    positions = torch.arange(keys.shape[1], device=q.device).unsqueeze(0)
+    return logits.masked_fill(positions >= visible_lengths.unsqueeze(1), -torch.inf)
+
+
+def _indexer_tensor(
+    shape: tuple[int, ...], dtype: str, generator: torch.Generator
+) -> torch.Tensor:
+    torch_dtype = {
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp8": current_platform.fp8_dtype(),
+    }[dtype]
+    return torch.randn(shape, device="cuda", generator=generator).to(torch_dtype)
+
+
+class _KernelSpy:
+    """Counts launches of a Triton kernel."""
+
+    def __init__(self, kernel) -> None:
+        self.kernel = kernel
+        self.launches = 0
+
+    def __getitem__(self, grid):
+        self.launches += 1
+        return self.kernel[grid]
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
+@pytest.mark.parametrize("case", ["mixed", "decode1", "decode32", "decode33"])
+def test_qsa_mqa_paged_matches_reference(
+    monkeypatch: pytest.MonkeyPatch, dtype: str, case: str
+) -> None:
+    # mixed: a prefill chunk, a decode request and rows with nothing visible
+    # share one 16-row block of the tiled kernel, whose widest row sees 257
+    # columns (one past a 64-column block). decodeN: one row per request,
+    # lengths ending mid-page; up to 32 rows use the gfx942 one-row kernel.
+    spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
+    monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    page_size, compress_ratio, table_width = 16, 4, 24
+    if case == "mixed":
+        positions = [range(986, 1029), range(159, 162), range(3)]
+        lengths = torch.tensor([1029, 162, 3], device="cuda", dtype=torch.int32)
+        token_to_req = torch.tensor(
+            [r for r, p in enumerate(positions) for _ in p],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        query_positions = torch.tensor(
+            [i for p in positions for i in p], device="cuda", dtype=torch.int64
+        )
+    else:
+        num_requests = int(case.removeprefix("decode"))
+        lengths = torch.randint(
+            1,
+            1500,
+            (num_requests,),
+            device="cuda",
+            dtype=torch.int32,
+            generator=generator,
+        )
+        token_to_req = torch.arange(num_requests, device="cuda", dtype=torch.int32)
+        query_positions = (lengths - 1).to(torch.int64)
+    num_requests = lengths.numel()
+    num_pages = num_requests * table_width + 8
+    q = _indexer_tensor((token_to_req.numel(), 2, 32), dtype, generator)
+    k_cache = _indexer_tensor((num_pages, page_size, 1, 32), dtype, generator)
+    page_table = torch.randperm(
+        num_pages, device="cuda", dtype=torch.int32, generator=generator
+    )[: num_requests * table_width].view(num_requests, table_width)
+
+    logits, visible_blocks = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        lengths,
+        compress_ratio,
+        single_row_decode=case != "mixed",
+    )
+
+    assert spy.launches == (
+        qsa_ops.get_cdna_version() == 3 and case in ("decode1", "decode32")
+    )
+    expected_visible = torch.minimum(
+        (query_positions + 1) // compress_ratio,
+        lengths[token_to_req.long()] // compress_ratio,
+    ).to(torch.int32)
+    torch.testing.assert_close(visible_blocks, expected_visible, rtol=0, atol=0)
+    # Logits at or past visible_blocks are undefined.
+    columns = torch.arange(logits.shape[1], device="cuda")
+    logits = logits.masked_fill(columns >= expected_visible[:, None], -torch.inf)
+    expected = _qsa_mqa_paged_reference(
+        q, k_cache, page_table, token_to_req, expected_visible
+    )
+    torch.testing.assert_close(logits, expected, rtol=1e-4, atol=1e-5)
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
     [
+        # The _split1 cases exceed 512 programs (rows x KV heads) and run the
+        # per-CDNA-version profile.
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
+        pytest.param(257, 24, 2, 1792, id="tp1_split1"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
+        pytest.param(513, 12, 1, 1792, id="tp2_split1"),
         pytest.param(32, 6, 1, 1024, id="tp4_split8"),
         pytest.param(257, 6, 1, 1024, id="tp4_split4"),
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        pytest.param(513, 3, 1, 1024, id="tp8_split1"),
     ],
 )
 def test_qsa_sparse_paged_attention_matches_reference(

@@ -238,8 +238,8 @@ def test_load_inplace_offline_reload(
 def test_load_inplace_false_no_reload(
     qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """Test that load_inplace=False prevents reloading when an adapter
-    with the same ID already exists.
+    """Without load_inplace, an id already used by another adapter is
+    rejected instead of serving the loaded adapter's weights.
     """
     llm = LLM(
         model=MODEL_PATH,
@@ -271,19 +271,10 @@ def test_load_inplace_false_no_reload(
         f"Expected meowing output, got: {first_output}"
     )
 
-    # Try to load woofing LoRA with same ID but load_inplace=False
-    # This should NOT reload (adapter 2 already exists)
     woofing_request_no_reload = LoRARequest(
         lora_name="test-adapter-2-woof",
-        lora_int_id=adapter_id,  # Same ID
+        lora_int_id=adapter_id,
         lora_path=qwen3_woofing_lora_files,
     )
-
-    outputs = llm.chat(
-        [messages], sampling_params, lora_request=woofing_request_no_reload
-    )
-    second_output = outputs[0].outputs[0].text.strip()
-    # Should still get meowing output because it didn't reload
-    assert "Meow Meow Meow" in second_output, (
-        f"Expected meowing output (no reload), got: {second_output}"
-    )
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.chat([messages], sampling_params, lora_request=woofing_request_no_reload)

@@ -8,7 +8,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator_config import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import SpeculativeConfig
+    from vllm.config import ModelConfig, SpeculativeConfig
 
 
 class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
@@ -19,8 +19,8 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     uses_target_hidden_states = True
     parallel_drafting = True
     supports_watermarking = True
-    # Stores its context K/V from the target's hidden states, without drafting.
-    supports_prefill_context_kv_only = True
+    # Its context K/V is projected from the target's hidden states.
+    projects_context_kv = True
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:
@@ -30,6 +30,10 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
+
+    @classmethod
+    def supports_draft_eplb(cls, draft_model_config: "ModelConfig") -> bool:
+        return draft_model_config.is_moe
 
     @classmethod
     def default_draft_decode_context_parallel_size(

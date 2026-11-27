@@ -262,6 +262,10 @@ def test_fused_post_conv_int64_token_offset():
 @pytest.mark.parametrize(
     "head_ratio,tp_size,query_lengths,state_dtype,norm_dtype",
     [
+        pytest.param(
+            3, 1, (4, 2, 0), torch.float16, torch.bfloat16, id="ratio3-fp16-ragged"
+        ),
+        pytest.param(4, 4, (9,), torch.float16, torch.float32, id="ratio4-fp16-max"),
         pytest.param(8, 16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
         pytest.param(8, 4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
         pytest.param(8, 16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
@@ -319,6 +323,15 @@ def test_fused_post_conv_int64_token_offset():
             torch.bfloat16,
             torch.float32,
             id="ratio2-16reqs-ragged",
+        ),
+        # Enough requests for no V split: 16-bit state runs the separate kernel.
+        pytest.param(
+            3,
+            1,
+            (9,) + (4,) * 6 + (2, 0),
+            torch.float16,
+            torch.bfloat16,
+            id="ratio3-9reqs-fp16",
         ),
     ],
 )

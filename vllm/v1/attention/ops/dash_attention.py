@@ -832,7 +832,36 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
         raise ValueError("DASH Flash backends require byte-aligned segments")
     _, _, cuq, cuk = _indptr(device, n, topk, bs, local)
     queries = q[:, None].expand(n, groups, heads, dim).reshape(-1, heads, dim)
-    if backend == "FLASH_ATTN":
+    if backend == "ROCM_AITER_FA":
+        from aiter import mha_varlen_fwd
+
+        lengths = torch.cat((torch.zeros_like(used[:1]), used.cumsum(0))).to(
+            torch.int32
+        )
+        # Call CK directly rather than AITER's shape-dependent ASM dispatcher.
+        out, lse, _, _ = mha_varlen_fwd(
+            q=queries,
+            k=k,
+            v=v,
+            cu_seqlens_q=cuq,
+            cu_seqlens_k=lengths,
+            max_seqlen_q=1,
+            max_seqlen_k=max(bs, local),
+            min_seqlen_q=0,
+            dropout_p=0.0,
+            softmax_scale=dim**-0.5,
+            logits_soft_cap=0.0,
+            zero_tensors=False,
+            is_causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            sink_size=0,
+            return_softmax_lse=True,
+            return_dropout_randval=False,
+            cu_seqlens_k_padded=cuk,
+        )
+        lse = lse.T
+    elif backend == "FLASH_ATTN":
         from vllm.v1.attention.backends.fa_utils import (
             flash_attn_varlen_func,
             get_flash_attn_version,

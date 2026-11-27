@@ -75,7 +75,10 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
         monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
     monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
     platform = SimpleNamespace(
-        is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
+        is_cpu=lambda: False,
+        is_cuda_alike=lambda: True,
+        is_rocm=lambda: False,
+        is_xpu=lambda: False,
     )
     monkeypatch.setattr(engine_utils, "current_platform", platform)
     threads = SimpleNamespace(count=initial_threads)
@@ -161,11 +164,14 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
     [
         (True, None, 0, 0, 15.0),
         (True, None, 0, 7, 7),
-        (True, None, 0, None, None),
+        (True, None, 0, None, 15.0),
+        (False, None, 0, None, None),
+        (True, None, 7, None, None),
         (False, None, 0, 0, 0),
         (True, None, 7, 0, 0),
         (False, "30", 0, 0, 30.0),
         (False, "30", 7, 0, 0),
+        (False, "30", 0, None, 30.0),
     ],
 )
 def test_engine_core_process_shutdown_timeout(

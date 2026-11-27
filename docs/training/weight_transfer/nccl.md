@@ -103,9 +103,16 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 `update_weights` fields.
 
 !!! note "Memory"
-    The rotating buffers are live for the whole transfer:
-    `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
-    defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
+    Each side holds a buffer of up to `packed_buffer_size_bytes` per rotating
+    buffer, so up to `packed_buffer_size_bytes * packed_num_buffers` (2 GiB at
+    the defaults); it is smaller for small transfers. On the trainer, each
+    buffer starts at 64 MiB (or its first bytes, if more) and doubles as
+    needed; while growing, the old buffer is briefly held too and may stay
+    reserved by PyTorch's caching allocator. The workers size each receive
+    buffer to its chunk. Lower `packed_buffer_size_bytes` if that is too much
+    headroom. CPU-resident sources work but are copied synchronously, which is
+    slower. A non-contiguous tensor split across chunks also needs a contiguous
+    copy of its full size on the trainer while it is sent.
 
 ### Metadata and `iter_full()` must agree
 
@@ -225,10 +232,12 @@ that broadcasts that update, so one start/finish lifecycle can carry updates
 from several trainer ranks.
 
 - Unpacked: one broadcast per tensor.
-- Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
-  order; broadcast a chunk as soon as its size **exceeds**
-  `packed_buffer_size_bytes` (the crossing tensor stays in the chunk), then the
-  remainder.
+- Packed: lay the tensors' `t.contiguous().view(-1).view(torch.uint8)` bytes
+  out in `names` order as one stream, each tensor starting at a multiple of 16,
+  and cut it every `packed_buffer_size_bytes` (rounded down to 16); a tensor
+  crossing a cut is split there; an empty tensor adds no padding. Broadcast
+  each chunk as soon as it is full (or only alignment padding would fit),
+  ending at its last byte, then the rest; a chunk of no bytes is not sent.
 
 Trainer-side communicators without vLLM:
 

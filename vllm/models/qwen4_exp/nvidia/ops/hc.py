@@ -190,10 +190,92 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 MIN_FUSED_UP_M = 512
 
 
+@triton.jit(do_not_specialize=["num_tokens"])
+def _hc_up_gate_mix_sm90_kernel(
+    lowrank,
+    weight,
+    xn,
+    output,
+    num_tokens,
+    stride_lowrank_m: tl.constexpr,
+    stride_lowrank_k: tl.constexpr,
+    stride_weight_n: tl.constexpr,
+    stride_weight_k: tl.constexpr,
+    stride_xn_m: tl.constexpr,
+    stride_xn_n: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # Each output tile needs matching features from all four HC streams.
+    HIDDEN: tl.constexpr = 2560
+    RANK: tl.constexpr = 320
+    HC: tl.constexpr = 4
+    GROUP_M: tl.constexpr = 8
+    tile = tl.program_id(0)
+    num_m = tl.cdiv(num_tokens, BLOCK_M)
+    num_h: tl.constexpr = HIDDEN // (BLOCK_N // HC)
+    first_m = tile // (GROUP_M * num_h) * GROUP_M
+    group_m = tl.minimum(num_m - first_m, GROUP_M)
+    in_group = tile % (GROUP_M * num_h)
+    tile_m = first_m + in_group % group_m
+    tile_h = in_group // group_m
+
+    rows = (tile_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+    cols = tl.arange(0, BLOCK_N)
+    features = tile_h * (BLOCK_N // HC) + cols % (BLOCK_N // HC)
+    gate_cols = cols // (BLOCK_N // HC) * HIDDEN + features
+    k = tl.arange(0, BLOCK_K)
+    acc = tl.full((BLOCK_M, BLOCK_N), 0, tl.float32)
+    for block in range(RANK // BLOCK_K):
+        offset = block * BLOCK_K + k
+        a = tl.load(
+            lowrank
+            + rows[:, None] * stride_lowrank_m
+            + offset[None, :] * stride_lowrank_k,
+            rows[:, None] < num_tokens,
+            other=0,
+        )
+        w = tl.load(
+            weight
+            + gate_cols[:, None] * stride_weight_n
+            + offset[None, :] * stride_weight_k,
+        )
+        acc = tl.dot(a, tl.trans(w), acc)
+
+    # Match F.linear's bf16 output and the original stream accumulation order.
+    gate = tl.sigmoid(acc.to(tl.bfloat16).to(tl.float32))
+    x = tl.load(
+        xn + rows[:, None] * stride_xn_m + gate_cols[None, :] * stride_xn_n,
+        rows[:, None] < num_tokens,
+        other=0,
+    ).to(tl.float32)
+    gate = tl.permute(tl.reshape(gate, (BLOCK_M, HC, BLOCK_N // HC)), (0, 2, 1))
+    x = tl.permute(tl.reshape(x, (BLOCK_M, HC, BLOCK_N // HC)), (0, 2, 1))
+    g_even, g_odd = tl.split(tl.reshape(gate, (BLOCK_M, BLOCK_N // HC, 2, 2)))
+    x_even, x_odd = tl.split(tl.reshape(x, (BLOCK_M, BLOCK_N // HC, 2, 2)))
+    g0, g2 = tl.split(g_even)
+    g1, g3 = tl.split(g_odd)
+    x0, x2 = tl.split(x_even)
+    x1, x3 = tl.split(x_odd)
+    mixed = tl.fma(g3, x3, tl.fma(g2, x2, tl.fma(g1, x1, g0 * x0))) / HC
+    out_cols = tile_h * (BLOCK_N // HC) + tl.arange(0, BLOCK_N // HC)
+    tl.store(
+        output + rows[:, None] * HIDDEN + out_cols[None, :],
+        mixed,
+        rows[:, None] < num_tokens,
+    )
+
+
 def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
     return (
-        hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
-        and current_platform.is_device_capability_family(100)
+        (
+            current_platform.is_device_capability(90)
+            or (
+                current_platform.is_device_capability_family(100)
+                and hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
+            )
+        )
         and hc_count == 4
         and w_up.dtype == torch.bfloat16
         and tuple(w_up.shape) == (4 * 2560, 320)
@@ -203,13 +285,35 @@ def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
 def hc_up_gate_mix(
     lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
 ) -> torch.Tensor:
-    """`hc_gate_mix(xn, F.linear(lowrank, w_up), 4)` in one SM100 kernel.
+    """Fuse the BF16 up projection and gate mix for four streams, H=2560, K=320.
 
-    The gate stays on chip in fp32 (the chain rounds it to bf16) and the
-    sigmoid uses `tanh.approx`; results are within one bf16 ULP of an fp32
-    reference.
-    Only hc_count 4, hidden size 2560 and rank 320 are supported.
+    SM90 rounds the gate to BF16 before sigmoid. SM100 keeps it in FP32.
     """
+    if current_platform.is_device_capability(90):
+        assert lowrank.shape == (xn.shape[0], 320)
+        assert xn.ndim == 2 and xn.shape[1] == 10240
+        assert w_up.shape == (10240, 320)
+        assert lowrank.dtype == xn.dtype == w_up.dtype == torch.bfloat16
+        assert lowrank.device == xn.device == w_up.device
+        out = xn.new_empty(xn.shape[0], 2560)
+        block_m, block_n, block_k = 64, 128, 32
+        grid = (triton.cdiv(xn.shape[0], block_m) * (xn.shape[1] // block_n),)
+        _hc_up_gate_mix_sm90_kernel[grid](
+            lowrank,
+            w_up,
+            xn,
+            out,
+            xn.shape[0],
+            *lowrank.stride(),
+            *w_up.stride(),
+            *xn.stride(),
+            block_m,
+            block_n,
+            block_k,
+            num_warps=4,
+            num_stages=4,
+        )
+        return out
     out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)
     torch.ops._C.qwen4_exp_hc_up_gate_mix(out, lowrank, xn, w_up)
     return out

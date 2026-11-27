@@ -1,0 +1,162 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "MiniCPM-OCR 1.0"
+  slug: "minicpm-ocr-1-0"
+  provider: "MiniCPM (OpenBMB)"
+  description: "MiniCPM-OCR 1.0 (1.3B) — OCR-specific document-parsing VLM that turns page images and region crops into Markdown text, tables, formulas, charts, and seals"
+  date_added: 2026-11-17
+  date_updated: 2026-11-17
+  tasks:
+    - multimodal
+  performance_headline: "93.68 on Real5-OmniDocBench — OCR-specific 1.3B model with DSpark speculative decoding"
+  related_recipes:
+    - openbmb/MiniCPM-V-4.6
+  default_hardware: rtx_4090
+  hardware:
+    rtx_4090: verified
+
+model:
+  model_id: "openbmb/MiniCPM-OCR-1.0"
+  min_vllm_version: "0.34.0"
+  docker_image: "vllm/vllm-openai:v0.34.0"
+  architecture: dense
+  parameter_count: "1.3B"
+  active_parameters: "1.3B"
+  context_length: 262144
+  base_args:
+    - "--trust-request-mm-kwargs"
+    - "--limit-mm-per-prompt"
+    - '{"image":36,"video":0}'
+    - "--max-model-len"
+    - "40960"
+    - "--max-num-batched-tokens"
+    - "40960"
+  base_env: {}
+
+dependencies:
+  - note: "The minicpm_ocr processors ship in transformers >= 5.21; vLLM 0.34.0 accepts < 5.23"
+    command: 'uv pip install -U "transformers>=5.21.0,<5.23.0"'
+
+features:
+  spec_decoding:
+    description: "DSpark speculative decoding with the matching 0.3B draft model (15 tokens per step) — the model card reports ~55% faster end-to-end parsing"
+    args:
+      - "--speculative-config"
+      - '{"method":"dspark","model":"openbmb/MiniCPM-OCR-1.0-DSpark","num_speculative_tokens":15,"enable_adaptive_verification":false}'
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 4
+    description: "BF16 weights (~2.6 GB) — fits on a single 24 GB consumer GPU"
+  awq:
+    model_id: "openbmb/MiniCPM-OCR-1.0-AWQ"
+    label: "AWQ"
+    precision: int4
+    vram_minimum_gb: 3
+    description: "Official 4-bit AWQ checkpoint — smaller footprint, same serving path"
+  gptq:
+    model_id: "openbmb/MiniCPM-OCR-1.0-GPTQ"
+    label: "GPTQ"
+    precision: int4
+    vram_minimum_gb: 3
+    description: "Official 4-bit GPTQ checkpoint — smaller footprint, same serving path"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+troubleshooting:
+  - title: "ValueError: The checkpoint you are trying to load has model type `minicpm_ocr` but Transformers does not recognize this architecture"
+    body: |
+      transformers < 5.21 predates the `minicpm_ocr` config and processors.
+      Install transformers 5.21–5.22 (`uv pip install -U "transformers>=5.21.0,<5.23.0"`);
+      the recipe's dependency step does this.
+
+guide: |
+  ## Overview
+
+  **MiniCPM-OCR 1.0** is a 1.3B OCR-specific model in the MiniCPM-V family. It
+  pairs a SigLIP-style vision encoder with the **Qwen3.5-0.8B** hybrid
+  linear/full-attention backbone from MiniCPM-V 4.6, and is trained for
+  text-centric document parsing: text blocks, tables, formulas, charts, seals,
+  and key-information extraction. It scores **93.68 on Real5-OmniDocBench** and
+  **54.7 on OCRBench v2**.
+
+  The checkpoint is the recognition stage. Send a page image or a cropped
+  region together with a region prompt; for PDFs, the companion `minicpm-ocr`
+  SDK detects layout with PP-DocLayoutV3, crops regions, calls this service,
+  and assembles the results into Markdown/JSON.
+
+  This recipe was run end to end on **one RTX 4090 (24 GB)** with vLLM 0.34.0
+  and transformers 5.22, on the BF16 checkpoint and both official 4-bit
+  checkpoints, with and without the DSpark draft model. With DSpark on the
+  4090, test requests accepted ~60% of drafted tokens (348/570), and
+  multi-token requests completed 20–45% faster than plain decoding.
+
+  ## Prerequisites
+
+  - **vLLM ≥ 0.34.0** — v0.33.0 registered `MiniCPMOcrForConditionalGeneration`
+    but pins transformers < 5.21, before the `minicpm_ocr` processors shipped.
+    0.34.0 includes the follow-up downsample fix ([PR #64105](https://github.com/vllm-project/vllm/pull/64105)).
+  - **transformers ≥ 5.21, < 5.23** — the range the model's processors need
+    within vLLM 0.34.0's pin.
+  - One GPU is enough: BF16 weights are ~2.6 GB, and the DSpark draft model
+    adds ~0.6 GB. Use `temperature=0` for OCR.
+  - **Context** — the default command keeps the model guide's 40,960-token
+    window, sized for page crops; the checkpoint supports up to 262,144 tokens.
+
+  ## Client usage
+
+  The prompt selects what to read in the image: `Text Recognition:` for text
+  blocks and pages, `Table Recognition:` for tables, `Formula Recognition:` for
+  formulas, `Seal Recognition:` for seals, and `Chart to Table:` for charts.
+  Key-information extraction takes a field list instead. Tables and charts come
+  back as OTSL; the SDK converts them to HTML.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=600)
+
+  response = client.chat.completions.create(
+      model="openbmb/MiniCPM-OCR-1.0",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://.../page.png"}},
+              {"type": "text", "text": "Text Recognition:"},
+          ],
+      }],
+      temperature=0.0,
+      max_tokens=2048,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Full documents with the SDK
+
+  The official SDK handles layout detection, region cropping, and result
+  assembly around this service. Install it in a separate environment
+  (`pip install "minicpm-ocr[all]"`) and point it at the server. Pass the
+  served model name (`--model`) to match the server; the SDK defaults to
+  `minicpm-ocr`.
+
+  The server keeps `--trust-request-mm-kwargs` so the SDK can set
+  per-request image-processing options such as `downsample_mode`. Keep it only
+  for trusted clients: without it, vLLM rejects per-request image options.
+
+  ## References
+
+  - [Model card](https://huggingface.co/openbmb/MiniCPM-OCR-1.0)
+  - [DSpark draft model](https://huggingface.co/openbmb/MiniCPM-OCR-1.0-DSpark)
+  - [GitHub: OpenBMB/MiniCPM-OCR](https://github.com/OpenBMB/MiniCPM-OCR)
+  - [Deployment guide](https://github.com/OpenBMB/MiniCPM-OCR/blob/main/docs/minicpm_ocr_tutorial_en.md)
+  - [vLLM support PR #63095](https://github.com/vllm-project/vllm/pull/63095)

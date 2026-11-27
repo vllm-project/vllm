@@ -1363,6 +1363,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
+        mm_missing_idxs_without_data: dict[str, list[int]] = {}
         for modality, idxs in mm_missing_idxs.items():
             if not idxs:
                 continue
@@ -1371,14 +1372,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise ValueError(
-                        f"Cache miss for {modality} at index {idx} "
-                        f"but data is not provided."
-                    )
+                    mm_missing_idxs_without_data.setdefault(modality, []).append(idx)
                 else:
                     missing_modality_data.append(data)
 
             mm_missing_data[modality] = missing_modality_data
+
+        if mm_missing_idxs_without_data:
+            missing_items = "; ".join(
+                f"{modality} at index {', '.join(map(str, idxs))}"
+                for modality, idxs in mm_missing_idxs_without_data.items()
+            )
+            raise ValueError(
+                f"Cache miss for {missing_items} but data is not provided."
+            )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
@@ -1858,6 +1865,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
+    """Set this if the decoder prompt always carries its complete prefix,
+    so the decoder start token must not be prepended to it."""
+
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether to leave the decoder start token out of this decoder prompt.
+
+        Override this instead of setting `skip_decoder_start_token` if only
+        some decoder prompts carry their complete prefix.
+        """
+        return self.skip_decoder_start_token
 
     @abstractmethod
     def create_encoder_prompt(

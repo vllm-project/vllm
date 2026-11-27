@@ -1329,6 +1329,51 @@ async fn responses_namespace_tool_call_reports_function_name_and_namespace() {
     }
 }
 
+/// Codex declares its tools through an `additional_tools` input item instead
+/// of `tools`; they reach the model and the echo like top-level tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_additional_tools_item_declares_tools() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            namespaced_tool_call_output_specs(),
+        )
+        .await;
+        let request = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [computer_use_namespace_tool()]
+                },
+                {"role": "user", "content": "Inspect Google Chrome."}
+            ],
+        });
+        let json = if stream {
+            responses_stream_terminal(&app, request).await
+        } else {
+            let response = responses_call(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            serde_json::from_slice(&body).expect("decode json")
+        };
+        engine_task.await.expect("mock engine task");
+
+        let call = json["output"]
+            .as_array()
+            .expect("output items")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("function call item: {json}"));
+        assert_eq!(call["name"], "get_app_state", "{json}");
+        assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
+        assert_eq!(json["tool_choice"], "auto", "{json}");
+        assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_store_dependent_features_are_rejected() {

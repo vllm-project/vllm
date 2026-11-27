@@ -78,24 +78,22 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
 
 
 def test_logging_config_cli_args(serve_parser):
-    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
-        args = serve_parser.parse_args(
-            [
-                "--logging-config",
-                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
-                "--logging-config.formatter",
-                "json",
-                "--log-level",
-                "DEBUG",
-                "--log-config-file",
-                "/tmp/flat.json",
-            ]
-        )
+    args = serve_parser.parse_args(
+        [
+            "--logging-config",
+            (
+                '{"log_level":"WARNING","formatter":"json",'
+                '"pylogging_config_file":"/tmp/json.json"}'
+            ),
+            "--log-level",
+            "DEBUG",
+        ]
+    )
 
     config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
     assert config.log_level == "DEBUG"
     assert config.formatter == "json"
-    assert config.pylogging_config_file == "/tmp/flat.json"
+    assert config.pylogging_config_file == "/tmp/json.json"
 
 
 ### Tests for LoRA module parsing

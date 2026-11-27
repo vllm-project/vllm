@@ -64,7 +64,7 @@ def noop_shutdown():
 
 
 def make_hybrid_gdn_kv_cache_config(
-    block_size: int, num_blocks: int = 16, mamba_cache_mode: str = "none"
+    block_size: int, num_blocks: int = 16, enable_prefix_caching: bool = False
 ) -> KVCacheConfig:
     gdn_spec = MambaSpec(
         block_size=block_size,
@@ -90,7 +90,9 @@ def make_hybrid_gdn_kv_cache_config(
             make_kv_cache_group(
                 ["model.layers.1.linear_attn"],
                 gdn_spec,
-                manager_config=MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                manager_config=MambaManager.config(
+                    enable_prefix_caching=enable_prefix_caching
+                ),
             ),
         ],
     )
@@ -139,10 +141,10 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
 ):
     vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        block_size, num_blocks=64, mamba_cache_mode="align"
+        block_size, num_blocks=64, enable_prefix_caching=True
     )
     scheduler = create_scheduler(
         vllm_config,
@@ -256,7 +258,9 @@ def test_lookahead_hashes_follow_truncated_prefill(
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     kv_config.hash_block_size = hash_block_size
     group = kv_config.kv_cache_groups[1]
-    group.manager_config = group.manager_config.replace_params(mamba_cache_mode="align")
+    group.manager_config = group.manager_config.replace_params(
+        enable_prefix_caching=True
+    )
     scheduler = scheduler_cls(config, "test-engine", kv_config)
     init_none_hash(sha256)
     hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)

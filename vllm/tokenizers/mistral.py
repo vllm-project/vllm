@@ -178,25 +178,9 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-def tekken_convert_ids_to_tokens(
-    tokenizer: "Tekkenizer", ids: Sequence[int]
-) -> list[str | bytes]:
-    """Convert ids to pieces, using raw `bytes` for byte-fallback tokens."""
-    tokens: list[str | bytes] = [tokenizer.id_to_piece(i) for i in ids]
-    if any("�" in t for t in tokens):
-        tokens = [
-            tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.KEEP)
-            if i >= tokenizer.num_special_tokens
-            else tokenizer.decode([i], SpecialTokenPolicy.KEEP)
-            for i in ids
-        ]
-    return tokens
-
-
 def tekken_convert_tokens_to_string(
     tokenizer: "Tekkenizer", tokens: Sequence[str | bytes]
 ) -> str:
-    """Reassemble pieces from `tekken_convert_ids_to_tokens` into text."""
     if any(isinstance(t, bytes) for t in tokens):
         ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
         return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)

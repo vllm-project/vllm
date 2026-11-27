@@ -251,8 +251,8 @@ class BlockPool:
         group_suffix = make_block_hash_with_group_id(BlockHash(b""), kv_cache_group_id)
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
-            # like sliding window attention, or Mamba models with prefix-caching
-            # in align mode. We skip null blocks here.
+            # like sliding window attention, or Mamba models with prefix caching.
+            # We skip null blocks here.
             if blk.is_null or (block_mask is not None and not block_mask[i]):
                 continue
             block_hash = new_block_hashes[i]

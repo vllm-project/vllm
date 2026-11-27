@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-11-11
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -327,7 +327,6 @@ presets:
     hardware: gb200
     strategy: multi_node_tp_pp
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 x PP2 + DCP8 across four GB200 trays with the DSpark K4 draft and an embedded Mooncake store."
     source: { label: "InferenceX #3748", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3748", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-agg", revision: b7eee97 }
     image: "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f"
@@ -460,7 +459,6 @@ presets:
     hardware: gb200
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "One TP16 + DCP16 prefill pool and one decode pool across four GB200 trays each, served by Dynamo with the DSpark K4 draft."
     source: { label: "InferenceX #4322", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4322", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-disagg", revision: b7eee97 }
     image:
@@ -639,7 +637,6 @@ presets:
     hardware: gb300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 + DCP8 prefill and decode workers across two GB300 trays each, served by Dynamo with the DSpark K4 draft: latency-specialized decode at 16-32 clients, KV-balanced decode attention at 112-264."
     source: { label: "InferenceX #4638", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4638", key: "kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: bc4d49f5df307680be5a1567e01b838b83b31b62 }
     image:

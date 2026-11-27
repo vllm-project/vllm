@@ -340,9 +340,9 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         vision_config = config.vision_config
 
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        kwargs.setdefault("image_size", vision_config.image_size)
-
-        return InternVLChatVideoProcessor(**kwargs)
+        return InternVLChatVideoProcessor(
+            image_size=kwargs.get("image_size", vision_config.image_size)
+        )
 
     @cached_property
     def ctx_video_token(self):

@@ -409,7 +409,7 @@ class MMEncoderAttention(CustomOp):
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             _get_flashinfer_workspace_buffer()
 
-        logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
+        logger.debug_once(f"Using {self.attn_backend} for MMEncoderAttention.")
 
         self._init_fp8_state()
 

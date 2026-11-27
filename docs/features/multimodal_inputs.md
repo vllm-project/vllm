@@ -622,7 +622,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache. If several skipped items miss the cache, the error names all of them by modality and index.
 
 ??? code
 
@@ -1141,6 +1141,32 @@ vllm serve llava-hf/llava-1.5-7b-hf \
   --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
 ```
 
+#### Image Decoding Backend
+
+vLLM decodes image bytes with one of these backends:
+
+| Backend | Description |
+| --- | --- |
+| `pil` (default) | Pillow, returns PIL images |
+| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"image": {"image_backend": "torchcodec"}}'
+```
+
+The `torchcodec` backend decodes faster than Pillow, and the HF image
+processor receives a tensor directly, skipping its PIL-to-tensor conversion.
+The pixel values are identical to the `pil` backend.
+Images with transparency, CMYK or 16-bit images, animated images and
+`image_mode` values other than `RGB` are decoded with Pillow.
+
+!!! note
+    The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
+    Pillow when it is unavailable. Some processors only accept PIL images
+    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
+    not support this backend yet.
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
@@ -1296,10 +1322,16 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+Embedding payloads that cannot be decoded in a supported format are rejected
+as client input errors with HTTP status 400. Memory exhaustion while loading an
+otherwise valid payload remains a server error.
 
 NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 

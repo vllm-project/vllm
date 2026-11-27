@@ -73,13 +73,13 @@ def _circular_group() -> KVCacheGroup:
     )
 
 
-def _mamba_group(mamba_cache_mode: str) -> KVCacheGroup:
-    # Name carries the mode so several groups can coexist in one config.
+def _mamba_group(enable_prefix_caching: bool) -> KVCacheGroup:
+    # Name carries the flag so several groups can coexist in one config.
     return new_kv_cache_group(
-        [f"mamba_{mamba_cache_mode}"],
+        [f"mamba_prefix_caching_{enable_prefix_caching}"],
         MambaManager.layer_config(
             MambaSpec(block_size=BLOCK_SIZE, shapes=((1,),), dtypes=(torch.float32,)),
-            mamba_cache_mode=mamba_cache_mode,
+            enable_prefix_caching=enable_prefix_caching,
             num_speculative_blocks=NUM_SPEC_STEPS,
         ),
     )
@@ -118,7 +118,7 @@ def _make_runner(
             num_lookahead_tokens=num_lookahead_tokens,
             num_scheduled_spec_tokens=num_spec_steps,
             is_mm_encoder_only=False,
-            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+            cache_config=SimpleNamespace(enable_prefix_caching=False),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
@@ -367,12 +367,12 @@ def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
     assert recorder.steps == []
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_warmup_reserves_mamba_speculative_blocks(enable_prefix_caching):
     """Mamba groups hold the running-state block plus the speculative tail.
 
     `MambaManager` reserves `num_speculative_blocks` blocks past the token
-    range in every cache mode, and the mamba kernels read all
+    range with or without prefix caching, and the mamba kernels read all
     `1 + num_speculative_blocks` of those block-table columns (see
     `mamba_get_block_table_tensor`).
     """
@@ -380,7 +380,7 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
     warmup_kernels(
         _make_runner(
-            [_attention_group(), _mamba_group(mamba_cache_mode)], NUM_SPEC_STEPS
+            [_attention_group(), _mamba_group(enable_prefix_caching)], NUM_SPEC_STEPS
         ),
         recorder.execute_model,
         recorder.sample_tokens,
@@ -388,19 +388,20 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
     assert recorder.steps, "warmup ran no steps"
     for num_blocks, num_computed, num_scheduled in recorder.steps:
-        # `MambaManager` drops the lookahead tokens in align mode to keep the
-        # allocation block-aligned, and keeps them otherwise. Pin the token
+        # `MambaManager` drops the lookahead tokens with prefix caching to keep
+        # the allocation block-aligned, and keeps them otherwise. Pin the token
         # range and the speculative tail separately, so an implementation that
         # returned a flat `1 + num_speculative_blocks` would fail.
-        if mamba_cache_mode == "align":
-            # Align mode sizes from the uncapped main-model range.
+        if enable_prefix_caching:
+            # Prefix caching sizes from the uncapped main-model range.
             lookahead, num_tokens = 0, num_computed + num_scheduled
         else:
             lookahead = NUM_SPEC_STEPS
             num_tokens = min(num_computed + num_scheduled + lookahead, MAX_MODEL_LEN)
         assert num_blocks[1] == cdiv(num_tokens, BLOCK_SIZE) + NUM_SPEC_STEPS, (
-            f"{mamba_cache_mode}: {num_blocks[1]} mamba blocks for "
-            f"{num_computed}+{num_scheduled} tokens and {lookahead} lookahead"
+            f"prefix_caching={enable_prefix_caching}: {num_blocks[1]} mamba "
+            f"blocks for {num_computed}+{num_scheduled} tokens and {lookahead} "
+            "lookahead"
         )
 
 
@@ -412,8 +413,8 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         kv_cache_groups=[
             _attention_group(),
             _circular_group(),
-            _mamba_group("none"),
-            _mamba_group("align"),
+            _mamba_group(False),
+            _mamba_group(True),
         ],
     )
 
@@ -422,7 +423,7 @@ def _row_length_config(dcp_world_size: int = 1) -> SimpleNamespace:
     """What `max_num_blocks_per_req` reads; align-mode Mamba specs return
     before the row clamp."""
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
     )
 
@@ -482,9 +483,11 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
             )
-            mode = getattr(group.manager_config, "mamba_cache_mode", None)
+            params = group.manager_config.params
+            prefix_caching = getattr(params, "enable_prefix_caching", None)
             assert len(group_held) == expected, (
-                f"{group.manager_cls.__name__} mode={mode}: real manager "
+                f"{group.manager_cls.__name__} prefix_caching={prefix_caching}: "
+                "real manager "
                 f"holds {len(group_held)} blocks for {num_tokens} tokens, "
                 f"_reserved_block_count predicts {expected}"
             )

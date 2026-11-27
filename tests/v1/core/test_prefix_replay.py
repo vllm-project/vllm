@@ -156,6 +156,42 @@ def test_hit_replays_window_without_reallocating():
     assert second.num_computed_tokens == NUM_PROMPT_TOKENS
 
 
+@pytest.mark.parametrize("via_connector", [False, True])
+def test_throttle_defers_prefix_replay(via_connector):
+    """A one-token cache-hit tail still needs prefill when its window replays."""
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig() if via_connector else None
+    )
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=HIT_TOKENS + 1,
+        same_prompt=not via_connector,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    if via_connector:
+        scheduler.connector.config = dataclasses.replace(
+            scheduler.connector.config, matched_tokens=HIT_TOKENS
+        )
+    scheduler.add_request(second)
+
+    for _ in range(2):
+        out = scheduler.schedule(throttle_prefills=True)
+        assert out.num_scheduled_tokens == {first.request_id: 1}
+        assert second.num_computed_tokens == 0
+        assert second.replay_start == 0
+        scheduler.update_from_output(out, _step_output(out, [first]))
+
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens == {
+        first.request_id: 1,
+        second.request_id: WINDOW + 1,
+    }
+    new_req = _new_req_data(out, second)
+    assert new_req.num_computed_tokens == HIT_TOKENS - WINDOW
+    assert new_req.replay_start == HIT_TOKENS - WINDOW
+
+
 def test_replay_only_chunks_make_progress():
     """A chunk cap smaller than the replay window schedules replay-only
     chunks; they advance the request instead of stalling it."""
@@ -274,15 +310,19 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
 
 
-def test_decode_bench_fill_does_not_replay():
+@pytest.mark.parametrize("throttle_prefills", [False, True])
+def test_decode_bench_fill_does_not_replay(throttle_prefills):
     """DecodeBenchConnector fills every group like a P/D transfer, so a filled
     request starts with a one-token decode step, not a replay."""
     scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
-    request = create_requests(
-        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
-    )[0]
-    scheduler.add_request(request)
+    first, request = create_requests(
+        num_requests=2, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )
+    scheduler.add_request(first)
     out = scheduler.schedule()
+    scheduler.update_from_output(out, _step_output(out, [first]))
+    scheduler.add_request(request)
+    out = scheduler.schedule(throttle_prefills=throttle_prefills)
     assert _new_req_data(out, request).replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == 1
 

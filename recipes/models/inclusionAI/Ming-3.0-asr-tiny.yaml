@@ -4,7 +4,7 @@ meta:
   provider: "inclusionAI"
   description: "Chinese, English, and dialect speech recognition with topic, hotword, and dialogue context."
   date_added: 2026-10-26
-  date_updated: 2026-11-09
+  date_updated: 2026-11-17
   tasks:
     - multimodal
   performance_headline: "Context-aware Chinese, English, and dialect ASR; single-GPU serving"
@@ -13,18 +13,10 @@ meta:
 
 model:
   model_id: "inclusionAI/Ming-3.0-asr-tiny"
-  min_vllm_version: "nightly"
-  nightly_required: true
+  min_vllm_version: "0.34.0"
   install:
     pip:
-      note: "Install from main for now."
-      command: |
-        git clone --branch main https://github.com/vllm-project/vllm.git
-        cd vllm
-        uv venv --python 3.12
-        source .venv/bin/activate
-        VLLM_USE_PRECOMPILED=1 uv pip install --editable ".[audio]" --torch-backend=auto
-        vllm download-kernels
+      command: 'uv pip install -U "vllm[audio]" --torch-backend=auto'
     docker: false
   architecture: moe
   parameter_count: "8.55B"
@@ -54,7 +46,7 @@ variants:
     description: "BF16 checkpoint; the capacity estimate includes the audio tower and is not a measured minimum."
     hardware_overrides:
       amd:
-        docker_image: "vllm/vllm-openai-rocm:nightly"
+        docker_image: "vllm/vllm-openai-rocm:v0.34.0"
         install:
           pip: false
           docker: true
@@ -104,7 +96,7 @@ guide: |
     --ipc=host --shm-size 16g \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
-    vllm/vllm-openai-rocm:nightly \
+    vllm/vllm-openai-rocm:v0.34.0 \
     inclusionAI/Ming-3.0-asr-tiny \
     --trust-remote-code \
     --tensor-parallel-size 1 \

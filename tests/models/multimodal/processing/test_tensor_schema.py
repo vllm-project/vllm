@@ -35,6 +35,7 @@ from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
@@ -138,9 +139,7 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(
-        model_config=model_config, cache_config=CacheConfig(block_size=16)
-    )
+    vllm_config = VllmConfig(model_config=model_config, cache_config=CacheConfig())
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,
@@ -150,6 +149,7 @@ def initialize_dummy_model(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
+        init_workspace_manager(torch.device(current_platform.device_type, 0))
 
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
@@ -158,6 +158,7 @@ def initialize_dummy_model(
         yield model
 
     del model
+    reset_workspace_manager()
     cleanup_dist_env_and_memory()
 
 
@@ -179,8 +180,19 @@ def test_model_tensor_schema(model_id: str):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
-    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
-        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+    xpu_unsupported_models = {
+        "zai-org/GLM-5.3-Flash",
+        "tencent/Hy4-preview",
+        "tencent/Hy4",
+    }
+    if current_platform.is_xpu() and model_id in xpu_unsupported_models:
+        pytest.skip(f"{model_id} is not supported on XPU")
+
+    if (
+        model_id == "thinkingmachines/Inkling-2-Small"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("Inkling 2 Small is only supported on CUDA")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
 
@@ -216,8 +228,15 @@ def test_model_tensor_schema(model_id: str):
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    assert supports_multimodal(model_cls)
+    assert isinstance(model_cls, type)
 
+    if (
+        model_config.hf_config.model_type == "hy_v4_flash_vl"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("HY4 Flash is only supported on CUDA")
+
+    assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory
 
     # Capture helpers return capture-buffer containers (e.g.

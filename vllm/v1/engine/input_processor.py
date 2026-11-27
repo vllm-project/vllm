@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -289,7 +290,9 @@ class InputProcessor:
     ) -> str:
         """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
-        generated based on the LoRA request to prevent incorrect cache hits.
+        generated based on the adapter name and path to prevent incorrect
+        cache hits when the same name is loaded from a different path.
+        Paths must identify immutable adapter versions for persistent cache reuse.
         """
         if (
             lora_request is None
@@ -297,7 +300,10 @@ class InputProcessor:
             or not self.lora_config.enable_tower_connector_lora
         ):
             return mm_hash
-        return f"{lora_request.lora_name}:{mm_hash}"
+        adapter_hash = hash_factors(
+            {"lora_name": lora_request.lora_name, "lora_path": lora_request.lora_path}
+        )
+        return f"{adapter_hash}:{mm_hash}"
 
     def inject_into_mm_cache(
         self,
@@ -415,10 +421,23 @@ class InputProcessor:
                 tok_params,
             )
 
-        current_platform.validate_request(engine_input, params)
-
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        try:
+            current_platform.validate_request(engine_input, params)
+            self._validate_model_inputs(encoder_input, decoder_input)
+        except Exception:
+            # Rendering recorded the multimodal items as sent to the engine,
+            # which a rejected request never does: resend them next time.
+            self.renderer.queue_mm_cache_invalidations(
+                [
+                    mm_hash
+                    for singleton in (encoder_input, decoder_input)
+                    if singleton is not None and singleton["type"] == "multimodal"
+                    for mm_hashes in singleton["mm_hashes"].values()
+                    for mm_hash in mm_hashes
+                ]
+            )
+            raise
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -624,9 +643,14 @@ class InputProcessor:
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
+            mm_hashes = prompt_input["mm_hashes"]
+            num_embeds_by_hash: dict[str, int] = {}
             for modality, mm_positions in decoder_mm_positions.items():
-                for mm_position in mm_positions:
+                for mm_hash, mm_position in zip(
+                    mm_hashes[modality], mm_positions, strict=True
+                ):
                     num_embeds = mm_position.get_num_embeds()
+                    num_embeds_by_hash[mm_hash] = num_embeds
                     if num_embeds > self.mm_encoder_cache_size:
                         raise VLLMValidationError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
@@ -636,6 +660,22 @@ class InputProcessor:
                             f"size or increase the encoder cache size "
                             f"by setting --limit-mm-per-prompt at startup."
                         )
+
+            # Without chunked prefill, the scheduler encodes all of a prompt's
+            # items in one step, so they must fit in the encoder cache together.
+            total_num_embeds = sum(num_embeds_by_hash.values())
+            if (
+                prompt_type == "decoder"
+                and not self.scheduler_config.enable_chunked_prefill
+                and not self.vllm_config.is_mm_encoder_only
+                and total_num_embeds > self.mm_encoder_cache_size
+            ):
+                raise VLLMValidationError(
+                    f"The prompt's multimodal items need {total_num_embeds} "
+                    "encoder cache tokens, more than the encoder cache size of "
+                    f"{self.mm_encoder_cache_size}. They must fit together when "
+                    "chunked prefill is disabled."
+                )
 
         # Shared by generate, embedding and pooling requests.
         if prompt_ids:

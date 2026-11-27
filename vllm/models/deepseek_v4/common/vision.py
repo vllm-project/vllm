@@ -42,6 +42,11 @@ from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     is_vit_use_data_parallel,
 )
+from vllm.models.deepseek_v4.common.ops.vision import (
+    vision_qk_rotary,
+    vision_rms_norm,
+    vision_spatial_merge,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -64,12 +69,6 @@ def get_vision_cos_sin(
     return _compute_vision_cos_sin(n_h, n_w, dim, theta)
 
 
-def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    dtype = x.dtype
-    x1, x2 = x.float().chunk(2, dim=-1)
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1).to(dtype)
-
-
 class DeepseekV4RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -77,10 +76,7 @@ class DeepseekV4RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x = x.float()
-        x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
-        return (self.weight * x).to(dtype)
+        return vision_rms_norm(x, self.weight, self.eps)
 
 
 class DeepseekV4PatchEmbed(nn.Module):
@@ -146,13 +142,16 @@ class DeepseekV4VisionAttention(nn.Module):
     ) -> torch.Tensor:
         n = x.size(0)
         qkv, _ = self.wqkv(x)
-        q, k, v = (t.view(n, self.n_heads, self.head_dim) for t in qkv.chunk(3, -1))
-        q = apply_rotary(q, cos, sin).unsqueeze(0)  # (b=1, n, h, d)
-        k = apply_rotary(k, cos, sin).unsqueeze(0)
+        q, k = vision_qk_rotary(qkv, cos, sin, self.n_heads, self.head_dim)
+        v = qkv.chunk(3, -1)[2].view(n, self.n_heads, self.head_dim)
         # Dense (cu_seqlens=None): one image per call. Varlen (cu_seqlens
         # set): packed multi-image batch for encoder CUDA graph replay.
         o = self.attn(
-            q, k, v.unsqueeze(0), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            v.unsqueeze(0),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         out, _ = self.wo(o.reshape(n, -1))
         return out
@@ -398,10 +397,7 @@ class DeepseekV4Aligner(nn.Module):
         exactly (unfold rows are channel-major, so the gathered patch rows
         are transposed before flattening).
         """
-        r2 = self.downsample_ratio**2
-        m = merge_idx.shape[0]
-        gathered = (x[merge_idx] * merge_mask).view(m, r2, -1)
-        gathered = gathered.permute(0, 2, 1).reshape(m, -1)
+        gathered = vision_spatial_merge(x, merge_idx, merge_mask)
         hidden, _ = self.w1(gathered)
         out, _ = self.w2(F.gelu(hidden))
         return out

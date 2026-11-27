@@ -27,6 +27,21 @@ remove_docker_container() {
 trap remove_docker_container EXIT
 remove_docker_container
 
+# Every run pulls a multi-GB per-commit image and nothing removes the old ones,
+# so the host eventually fails the pull with "no space left on device". Once
+# the Docker root filesystem crosses DISK_USAGE_THRESHOLD percent, drop images
+# that no container uses and that were built more than IMAGE_MAX_AGE ago.
+DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
+IMAGE_MAX_AGE=${IMAGE_MAX_AGE:-2h}
+docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
+if [[ -n "$docker_root" ]]; then
+    disk_usage=$(df "$docker_root" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%' || true)
+    if [[ "${disk_usage:-0}" -gt "$DISK_USAGE_THRESHOLD" ]]; then
+        echo "--- :broom: Disk usage ${disk_usage}% exceeds ${DISK_USAGE_THRESHOLD}%, pruning images"
+        docker image prune --force --all --filter "until=${IMAGE_MAX_AGE}" || true
+    fi
+fi
+
 docker pull "$IMAGE"
 
 # Run the image
@@ -52,6 +67,7 @@ shard_1_kernel_tests_1() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
+    pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestCpuTopkTopp
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py

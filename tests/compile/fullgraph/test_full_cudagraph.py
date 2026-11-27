@@ -85,7 +85,6 @@ def llm_pair(request):
         full = LLM(
             model=model,
             gpu_memory_utilization=0.43,
-            trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
             attention_config=backend_config.attention_config,
@@ -99,7 +98,6 @@ def llm_pair(request):
         piecewise = LLM(
             model=model,
             gpu_memory_utilization=0.43,
-            trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
             attention_config=backend_config.attention_config,

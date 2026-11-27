@@ -46,6 +46,7 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
     """Composite binding must reach HiSparse and existing pool-only connectors."""
     hisparse = object.__new__(HiSparseConnector)
     hisparse._role = KVConnectorRole.SCHEDULER
+    hisparse._vllm_config = SimpleNamespace(num_reprefillable_tokens=0)
     hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
     legacy = object.__new__(ExampleConnector)
     legacy.bind_gpu_block_pool = MagicMock()
@@ -65,8 +66,11 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
     legacy.bind_gpu_block_pool.assert_called_once_with(manager.block_pool)
 
 
-def test_hisparse_requires_block_outermost_device_layout():
-    assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
+@pytest.mark.parametrize(("use_mla", "layout"), [(True, "BLHNC"), (False, "BLNHC")])
+def test_hisparse_requires_block_outermost_device_layout(use_mla, layout):
+    config = MagicMock()
+    config.model_config.use_mla = use_mla
+    assert HiSparseConnector.get_required_kvcache_layout(config) == layout
 
 
 def test_scheduler_stats_report_host_pool_usage():

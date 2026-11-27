@@ -12,7 +12,7 @@ its blocks, and a decode rank completes only after all its writers did.
 
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -44,9 +44,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     derive_mamba_conv_split,
 )
+from vllm.models.minimax_m3.amd.sparse_attention_nvfp4 import (
+    MiniMaxM3SparseRocmNvfp4Backend,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     compute_layout_strides,
@@ -65,12 +69,14 @@ PREFILL_BLOCKS = {"full": [1, 4], "swa": [3], "mamba": [2]}
 DECODE_BLOCKS = {"full": [5, 2], "swa": [0], "mamba": [3]}
 # GDN state: Q and K are KEY_DIM channels, V is V_HEADS * V_DIM channels.
 KEY_DIM, V_HEADS, V_DIM, K_DIM, CONV_ROWS = 4, 4, 2, 2, 2
+# NVFP4 head size: 16 bytes of FP4 data and 2 scale bytes per token and side.
+NVFP4_HEAD_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
 class Layer:
     name: str
-    kind: str  # "full", "swa", "mla" or "mamba"
+    kind: str  # "full", "swa", "mla", "nvfp4", "nvfp4_by_head" or "mamba"
     group: str  # transfer group the layer's blocks come from
     # KV heads of this layer when they differ from the model-wide count.
     heads: int | None = None
@@ -116,6 +122,16 @@ MODELS = {
             ),
         ],
     ),
+    # MiniMax-M3: GQA attention next to a lightning-indexer key cache, which
+    # is MLA-like (one vector per token) and identical on every TP rank.
+    "gqa_indexer": (
+        4,
+        [Layer("attn0", "full", "full"), Layer("indexer0", "mla", "full")],
+    ),
+    # MiniMax-M3 on ROCm with --kv-cache-dtype nvfp4.
+    "nvfp4": (4, [Layer("attn0", "nvfp4", "full")]),
+    # The same page laid out by KV head, as MiniMax-M3's MSA backend does.
+    "nvfp4_by_head": (4, [Layer("attn0", "nvfp4_by_head", "full")]),
 }
 
 
@@ -164,6 +180,17 @@ def _spec(layer: Layer, num_heads: int, tp_size: int):
         return MLAAttentionSpec(
             block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
         )
+    if layer.kind.startswith("nvfp4"):
+        spec = MiniMaxM3SparseRocmNvfp4Backend.customize_spec(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=num_heads,
+                head_size=NVFP4_HEAD_SIZE,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+            )
+        )
+        return replace(spec, kv_head_major_slots=layer.kind == "nvfp4_by_head")
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=(
@@ -197,6 +224,26 @@ def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
             1, 255, shape, dtype=torch.uint8, generator=gen
         )
     return state
+
+
+def _shard(layer: Layer, content: torch.Tensor, held: range | slice) -> torch.Tensor:
+    """What a rank holding KV heads `held` stores of the `[..., H, N, C]`
+    unsharded `content` of one block or all blocks.
+
+    NVFP4 content holds two slots (K and V side) per head, each token a row of
+    FP4 data and its scales. A page laid out by KV head keeps a head's two
+    slots adjacent; the ROCm page stores the K and then the V side, each as
+    every held head's data followed by every held head's scales.
+    """
+    if layer.kind == "nvfp4_by_head":
+        return content.unflatten(-3, (-1, 2))[..., held, :, :, :].flatten(-4, -3)
+    if layer.kind != "nvfp4":
+        return content[..., held, :, :]
+    data_bytes = NVFP4_HEAD_SIZE // 2
+    sides = content.unflatten(-3, (2, -1))[..., held, :, :]
+    data, scales = sides.split([data_bytes, sides.shape[-1] - data_bytes], dim=-1)
+    page = torch.cat([data.flatten(-3), scales.flatten(-3)], dim=-1)
+    return page.view(*sides.shape[:-4], -1, *sides.shape[-2:])
 
 
 def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
@@ -260,7 +307,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
                     if layer.kind == "mla"
                     else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
                 )
-                cache.copy_(state[layer.name][:, held])
+                cache.copy_(_shard(layer, state[layer.name], held))
             regions.append(buffer)
             meta_counts[layer.name] = 1
         caches[layer.name] = cache
@@ -413,13 +460,15 @@ def _expected(
         else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
     )
     for src, dst in pairs:
-        expected[dst] = state[layer.name][src, held]
+        expected[dst] = _shard(layer, state[layer.name][src], held)
     return expected
 
 
 SCENARIOS = [
     (model, producer_tp, consumer_tp, hma)
     for model in MODELS
+    # The NVFP4 kernels take head-major pages only, see the NVFP4 tests.
+    if not model.startswith("nvfp4")
     for producer_tp, consumer_tp in [(1, 2), (2, 4), (2, 1), (4, 2), (2, 2), (1, 4)]
     for hma in (True, False)
     # Recurrent state needs the hybrid KV cache manager.
@@ -427,7 +476,7 @@ SCENARIOS = [
 ] + [
     # More ranks than some layers have heads: those layers replicate.
     (model, producer_tp, consumer_tp, hma)
-    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero")
+    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero", "gqa_indexer")
     for producer_tp, consumer_tp in [(4, 8), (8, 4)]
     for hma in (True, False)
 ]
@@ -446,6 +495,55 @@ SCENARIOS = [
 def test_write_lands_every_shard_byte_exact(
     monkeypatch, model, producer_tp, consumer_tp, hma, layouts
 ):
+    _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts)
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "consumer_tp"), [(4, 1), (2, 1), (4, 2), (1, 2), (1, 4), (2, 2)]
+)
+def test_nvfp4_write_lands_every_shard_byte_exact(
+    monkeypatch, producer_tp, consumer_tp
+):
+    """An NVFP4 page keeps all heads' data before all heads' scales on each
+    K/V side, so its 2 * H head slots are not per-head rows; a head is one
+    data run and one scale run per side."""
+    layouts = (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC)
+    _check_write(monkeypatch, "nvfp4", producer_tp, consumer_tp, False, layouts)
+
+
+def test_nvfp4_page_laid_out_by_kv_head_is_not_sliced(monkeypatch):
+    """MoRIIO only slices the split NVFP4 page by KV head; any other packed
+    NVFP4 page must fail loudly instead of landing in the wrong head slots."""
+    layouts = (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC)
+    with pytest.raises(ValueError, match="cannot slice KV heads"):
+        _check_write(monkeypatch, "nvfp4_by_head", 2, 1, False, layouts)
+
+
+@pytest.mark.parametrize(("producer_tp", "consumer_tp"), [(4, 2), (8, 4), (2, 4)])
+def test_replicated_indexer_cache_is_copied_whole(producer_tp, consumer_tp):
+    """An MLA-like cache in a GQA model (MiniMax-M3's indexer keys) is the
+    same on every rank: one producer per decode rank copies the whole block
+    (fan-in), or every decode rank gets the whole block (fan-out)."""
+    heads, layers = MODELS["gqa_indexer"]
+    state = _global_state(layers, heads)
+    ratio = max(producer_tp // consumer_tp, 1)
+    for p in range(producer_tp):
+        worker = _build_rank(
+            "gqa_indexer", p, producer_tp, KVCacheLayout.LBHNC, True, state, True
+        ).worker
+        mapping = worker._write_tp_mapping(consumer_tp, "indexer0")
+        writing = [t for t in mapping.targets if t.num_heads]
+        if p % ratio:
+            assert not writing
+            continue
+        assert writing and all(mapping.copies_whole_block(t) for t in writing)
+        assert {t.tp_rank for t in writing} == set(
+            worker._write_tp_mapping(consumer_tp).target_tp_ranks
+        )
+
+
+def _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts):
+    """Write every layer from all prefill ranks and check every decode rank."""
     monkeypatch.setattr(
         ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
     )
@@ -520,7 +618,11 @@ def test_write_lands_every_shard_byte_exact(
                 consumer_tp,
                 received,
             )
-            assert torch.equal(received, expected), (layer.name, consumer.tp_rank)
+            mismatched = int((received != expected).sum())
+            assert mismatched == 0, (
+                f"{mismatched} of {received.numel()} bytes of {layer.name} wrong "
+                f"on decode rank {consumer.tp_rank}"
+            )
 
 
 def test_write_refuses_peer_with_different_block_size(monkeypatch):

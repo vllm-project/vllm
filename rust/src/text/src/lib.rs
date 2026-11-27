@@ -12,7 +12,8 @@ use std::num::NonZeroU32;
 use std::time::Instant;
 
 pub use backend::{
-    DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
+    DefaultMaxTokens, DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits,
+    TextBackend,
 };
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;

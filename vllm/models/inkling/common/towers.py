@@ -16,10 +16,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import InklingAudioConfig, InklingVisionConfig
 
 from vllm.model_executor.layers.layernorm import RMSNorm
-
-from ..configs import InklingAudioConfig, InklingVisionConfig
 
 # ===========================================================================
 # Vision tower (HMLPPatchEncoder / InklingVision)

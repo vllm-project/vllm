@@ -12,7 +12,6 @@
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91 @ZJY0516
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
-/vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
@@ -31,8 +30,7 @@
 
 # Config utils
 /vllm/config/utils.py @hmellor
-/vllm/engine/arg_utils.py @hmellor
-/vllm/utils/argparse_utils.py
+/vllm/utils/argparse_utils.py @hmellor
 
 # Entrypoints
 /vllm/entrypoints/anthropic @chaunceyjiang @mgoin @DarkLight1337
@@ -104,8 +102,8 @@
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium @ZJY0516
-/vllm/v1/sample @22quinn @houseroad @njhill
-/vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
+/vllm/v1/sample @houseroad @njhill
+/vllm/v1/spec_decode @benchislett @MatthewBonanni
 /vllm/v1/structured_output @mgoin @aarnphm @benchislett @arpera
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium @ZJY0516
 /vllm/v1/kv_offload @ApostaC @orozery
@@ -192,12 +190,9 @@ mkdocs.yaml @hmellor
 /tests/**/*nemotron* @tomeras91
 
 # Qwen-specific files
-/vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
-/vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
+/vllm/model_executor/models/qwen* @vadiklyutiy
+/vllm/transformers_utils/configs/qwen* @vadiklyutiy
 /vllm/models/qwen4_exp @gau-nernst
-
-# MTP-specific files
-/vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye

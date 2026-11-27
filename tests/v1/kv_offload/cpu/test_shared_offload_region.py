@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from tests.utils import core_dumped_bytes
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
@@ -816,6 +817,27 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
 
 
 @pytest.mark.parametrize("num_segments", [1, 3])
+def test_region_is_left_out_of_core_dumps(iid, monkeypatch, num_segments):
+    """Every mapping of the region, segment files included, is skipped by
+    core dumps."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=5,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=num_segments,
+    )
+    try:
+        assert len(region._segments) == num_segments
+        start = region.base_tensor.data_ptr()
+        assert core_dumped_bytes(start, start + region.total_size_bytes) == 0
+    finally:
+        region.cleanup()
+
+
+@pytest.mark.parametrize("num_segments", [1, 3])
 def test_single_chunk_segments_preserve_shared_canonical_views(
     iid, monkeypatch, num_segments
 ):
@@ -1460,6 +1482,32 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         del export
         region.mmap_obj.close()  # type: ignore[union-attr]
         _cleanup_file(region.mmap_path)
+
+
+def test_private_region_unlinked_once_mapped(iid):
+    """A private region has no joiners, so its name is dropped without a
+    barrier while the mapping stays valid."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        private=True,
+    )
+    try:
+        assert not os.path.exists(path)
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert region.mmap_obj is not None
+        assert memoryview(region.mmap_obj)[0] == 7
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
 
 
 def test_backing_file_unlinked_after_barrier(iid):

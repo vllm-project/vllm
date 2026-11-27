@@ -56,7 +56,7 @@ repos:
         --extra-index-url, "https://download.pytorch.org/whl/cu132",
         --emit-index-url,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^(requirements/(common|cuda|test/cuda)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
@@ -76,7 +76,7 @@ repos:
         --index-strategy, unsafe-best-match,
         --torch-backend, cu132,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt|overrides)$
     - id: pip-compile
@@ -91,7 +91,7 @@ repos:
         --index-strategy, unsafe-best-match,
         --torch-backend, cu132,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/test/quantization_deps(\.in|_cuda\.txt)$
     - id: pip-compile
@@ -106,7 +106,7 @@ repos:
         # ROCm already ships conch in site-packages (requirements/rocm.txt).
         --no-emit-package, conch-triton-kernels,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/test/quantization_deps(\.in|_rocm\.txt)$
     - id: pip-compile
@@ -119,7 +119,7 @@ repos:
         -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
         # Exclude torch and CUDA/NVIDIA packages
         --no-emit-package, torch,
         --no-emit-package, torchvision,
@@ -190,7 +190,7 @@ repos:
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_39,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^(requirements/(common|xpu|test/xpu)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
@@ -203,7 +203,7 @@ repos:
         --index-strategy, unsafe-best-match,
         --torch-backend, cpu,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^(requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
       exclude: ^requirements/test/cuda\.txt$

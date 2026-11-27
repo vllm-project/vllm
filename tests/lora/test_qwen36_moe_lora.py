@@ -68,7 +68,6 @@ def _run_mixed_2d_3d_lora_test(
         tensor_parallel_size=tensor_parallel_size,
         enable_expert_parallel=not fully_sharded_loras,
         fully_sharded_loras=fully_sharded_loras,
-        trust_remote_code=True,
         enable_tower_connector_lora=True,
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},

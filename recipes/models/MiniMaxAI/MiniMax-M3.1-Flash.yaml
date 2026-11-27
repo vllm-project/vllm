@@ -147,7 +147,7 @@ features:
         args: []
   mono_decode:
     label: "Mono decode"
-    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager. With a seven-token DSpark draft, `--monokernel` also runs the draft steps as fused kernels."
     strategies: [single_node_tp]
     modes:
       # The kernels read the experts as AITER MXFP4 tables, which only the
@@ -163,9 +163,9 @@ features:
           - '{"indexer_kv_dtype": "fp8"}'
           - "--compilation-config"
           - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - "--monokernel"
         env:
           VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
-          VLLM_ROCM_MINIMAX_M3_MONO: "1"
         # Measured on MI355X only.
         hardware:
           hopper: unsupported
@@ -1437,6 +1437,47 @@ presets:
 
       The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
 
+  h100_agentx:
+    label: "AgentX TP8"
+    hardware: h100
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One 8-GPU H100 node, TP8, with FP8 KV and indexer caches, NVFP4 experts on the Marlin MoE, FlashInfer MSA on SM90 and three-token DSpark; the scheduler batch is twice the concurrency."
+    source: { label: "InferenceX #5124", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5124", key: "minimaxm31flash-fp4-h100-vllm-agentic-dspark", revision: 821c134923672226a67f5b09bb9e334f910389a1 }
+    image: "vllm/vllm-openai:nightly-8ca766326652caf4b8e50d1b9118d8a22f6adc73@sha256:b6d1cfc60cce1f6405d37ea77645a36a46065230fb643abc2eeb93a5dc8fb79b"
+    select:
+      features: { text_only: true }
+    # DSpark is off by default on Hopper; the lane enables it with the FLASH_ATTN drafter.
+    args:
+      - "--trust-remote-code"
+      - "--moe-backend"
+      - "marlin"
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--safetensors-load-strategy"
+      - "lazy"
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","rejection_sample_method":"block"}'
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+    # --max-num-seqs is twice the concurrency; the CUDA graph capture size covers
+    # it at four tokens per sequence (the sequence plus three draft tokens).
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2", "--max-cudagraph-capture-size", "8"] }
+      c2: { label: "2", concurrency: 2, args: ["--max-num-seqs", "4", "--max-cudagraph-capture-size", "16"] }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8", "--max-cudagraph-capture-size", "32"] }
+      c6: { label: "6", concurrency: 6, args: ["--max-num-seqs", "12", "--max-cudagraph-capture-size", "64"] }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16", "--max-cudagraph-capture-size", "64"] }
+      c10: { label: "10", concurrency: 10, args: ["--max-num-seqs", "20", "--max-cudagraph-capture-size", "128"] }
+      c12: { label: "12", concurrency: 12, args: ["--max-num-seqs", "24", "--max-cudagraph-capture-size", "128"] }
+
   mi355x_agentx:
     label: "AgentX TP4"
     hardware: mi355x
@@ -1554,6 +1595,7 @@ presets:
       - "1048576"
       - "--gpu-memory-utilization"
       - "0.85"
+      - "--monokernel"
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       DEBUG_HIP_DYNAMIC_QUEUES: "0"
@@ -1565,7 +1607,6 @@ presets:
       HIP_FORCE_DEV_KERNARG: "1"
       NCCL_DMABUF_ENABLE: "0"
       HSA_ENABLE_IPC_MODE_LEGACY: "1"
-      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
       VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
       VLLM_USE_RUST_FRONTEND: "1"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
@@ -1725,6 +1766,48 @@ presets:
       picks its RDMA port with a probe-and-release, and another process on a busy node can
       take it first. Restart the engine.
 
+  h200_agentx:
+    label: "AgentX TP8"
+    hardware: h200
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One 8-GPU H200 node, TP8, with FP8 KV and indexer caches, NVFP4 experts on the Marlin MoE, FlashInfer MSA on SM90 and three-token DSpark; the scheduler batch is twice the concurrency."
+    source: { label: "InferenceX #5122", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5122", key: "minimaxm31flash-fp4-h200-vllm-agentic-dspark", revision: c8054c5d34b915eab437887cb4a5b7229452291f }
+    image: "vllm/vllm-openai:nightly-8ca766326652caf4b8e50d1b9118d8a22f6adc73@sha256:b6d1cfc60cce1f6405d37ea77645a36a46065230fb643abc2eeb93a5dc8fb79b"
+    select:
+      features: { text_only: true }
+    # DSpark is off by default on Hopper; the lane enables it with the FLASH_ATTN drafter.
+    args:
+      - "--trust-remote-code"
+      - "--moe-backend"
+      - "marlin"
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","rejection_sample_method":"block"}'
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+    # --max-num-seqs is twice the concurrency; the CUDA graph capture size covers
+    # it at four tokens per sequence (the sequence plus three draft tokens).
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2", "--max-cudagraph-capture-size", "8"] }
+      c2: { label: "2", concurrency: 2, args: ["--max-num-seqs", "4", "--max-cudagraph-capture-size", "16"] }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8", "--max-cudagraph-capture-size", "32"] }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16", "--max-cudagraph-capture-size", "64"] }
+      c12: { label: "12", concurrency: 12, args: ["--max-num-seqs", "24", "--max-cudagraph-capture-size", "128"] }
+      c16: { label: "16", concurrency: 16, args: ["--max-num-seqs", "32", "--max-cudagraph-capture-size", "128"] }
+      c20: { label: "20", concurrency: 20, args: ["--max-num-seqs", "40", "--max-cudagraph-capture-size", "256"] }
+      c24: { label: "24", concurrency: 24, args: ["--max-num-seqs", "48", "--max-cudagraph-capture-size", "256"] }
+
 guide: |
   ## Overview
 
@@ -1777,8 +1860,8 @@ guide: |
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
   - With a seven-token DSpark draft (`num_speculative_tokens: 7`),
-    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs draft steps of up to 10 requests
-    as fused FlyDSL kernels.
+    `--monokernel` runs draft steps of up to 10 requests as fused FlyDSL
+    kernels.
 
   ### Parallel index top-k (AMD MI355X)
 

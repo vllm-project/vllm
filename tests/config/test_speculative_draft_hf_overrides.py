@@ -342,7 +342,7 @@ def test_arch_mapping_applies_before_callable_override():
 def test_inkling_override_exposes_all_mtp_depths():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
-        model_type="inkling_model",
+        model_type="inkling_text",
         local_layer_ids=[1, 3],
     )
     config = _make_hf_config(

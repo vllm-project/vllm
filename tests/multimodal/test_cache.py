@@ -269,8 +269,18 @@ class _StubModelConfig:
     real model, keeping this unit test free of any Hugging Face / network lookup.
     """
 
-    def __init__(self, mm_processor_cache_gb: float) -> None:
-        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+    def __init__(
+        self,
+        mm_processor_cache_gb: float,
+        mm_shm_cache_buffer_name: str | None = None,
+    ) -> None:
+        mm_config_kwargs: dict[str, str] = {}
+        if mm_shm_cache_buffer_name is not None:
+            mm_config_kwargs["mm_shm_cache_buffer_name"] = mm_shm_cache_buffer_name
+        self._mm_config = MultiModalConfig(
+            mm_processor_cache_gb=mm_processor_cache_gb,
+            **mm_config_kwargs,
+        )
 
     def get_multimodal_config(self) -> MultiModalConfig:
         return self._mm_config
@@ -438,7 +448,7 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     assert "A" in p1._cache and "C" in p1._cache
 
 
-def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
+def test_shm_receiver_handles_prefix_covered_items():
     """Regression test for the EngineCore crash with prefix caching + SHM cache.
 
     On a repeated request, prefix caching can fully cover an item's
@@ -449,12 +459,12 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
     (vllm-project/vllm#54994). The address item must still be resolved and
     acknowledged so the object stays reclaimable.
     """
-    monkeypatch.setenv(
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_prefix_covered_items"
-    )
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(world_size=1),
-        model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
+        model_config=_StubModelConfig(
+            mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes,
+            mm_shm_cache_buffer_name="test_shm_prefix_covered_items",
+        ),
     )
     p0 = ShmObjectStoreSenderCache(vllm_config)
     p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
