@@ -19,8 +19,10 @@ from types import FunctionType, MethodType
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.activation import (
     GELU,
+    GeluAndMul,
     ReLUSquaredActivation,
     SiluAndMul,
 )
@@ -39,6 +41,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -243,6 +246,36 @@ if current_platform.is_cuda() and current_platform.has_device_capability(90):
     _FUSED_ACT_QUANT[_RELU2_STATIC_FP8_KEY] = relu_squared_static_fp8_quant
     _FUSED_ACT_QUANT_SUPPORT[_RELU2_STATIC_FP8_KEY] = (
         _relu_squared_static_fp8_quant_supported
+    )
+
+
+def _gelu_tanh_mul_fp8_per_token_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    d = x.shape[-1] // 2
+    return (
+        envs.VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT
+        and getattr(act_fn, "approximate", None) == "tanh"
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and x.shape[-1] == 2 * d
+        and d % 16 == 0
+        and d <= 16384
+    )
+
+
+if current_platform.is_rocm():
+    from vllm.model_executor.layers.fusion.gelu_tanh_mul_fp8_quant import (
+        gelu_tanh_mul_fp8_per_token_quant,
+    )
+
+    _GELU_TOKEN_FP8_KEY = (GeluAndMul, kFp8DynamicTokenSym)
+    _FUSED_ACT_QUANT[_GELU_TOKEN_FP8_KEY] = gelu_tanh_mul_fp8_per_token_quant
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_TOKEN_FP8_KEY] = (
+        _gelu_tanh_mul_fp8_per_token_supported
     )
 
 # Add CUDA-specific entries for dynamic block quantization

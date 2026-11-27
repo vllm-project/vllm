@@ -364,6 +364,7 @@ if TYPE_CHECKING:
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
+    VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT: bool = True
 
 
 def get_default_cache_root():
@@ -2459,6 +2460,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
         "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
     ).upper(),
+    # Fuse GeluAndMul(tanh) with the per-token FP8 quantization of the input of
+    # the FP8 down_proj that follows it (ROCm, Gemma-style MLPs)
+    "VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT", "1"))
+    ),
 }
 
 
