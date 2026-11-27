@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -220,6 +220,32 @@ class KVCacheCoordinator(ABC):
                     prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
+
+    def extra_reservation_for_shared_blocks(
+        self,
+        request_ids: Iterable[str],
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+    ) -> int:
+        """Extra blocks parked loads need if `new_computed_blocks` share their KV.
+
+        A cached reservation subtracts blocks with `ref_cnt == 1`. Touching
+        those blocks on admission raises `ref_cnt` and makes that reservation
+        too small, so the check has to count the overlap before the touch.
+        """
+        shared_block_ids = {
+            id(block)
+            for group in new_computed_blocks
+            for block in group
+            if not block.is_null
+        }
+        if not shared_block_ids:
+            return 0
+        request_ids = tuple(request_ids)
+        return sum(
+            manager.num_exclusive_suffix_blocks_shared(request_id, shared_block_ids)
+            for manager in self.single_type_managers
+            for request_id in request_ids
+        )
 
     def allocate_new_computed_blocks(
         self,

@@ -1091,6 +1091,105 @@ def test_async_load_reserves_sliding_window_blocks_for_inflight():
     assert_scheduler_empty(scheduler)
 
 
+def test_parked_reservation_counts_prefix_blocks_about_to_be_shared():
+    """A later load that shares a parked request's exclusive block must not
+    be admitted against the stale, smaller reservation.
+
+    Sharing raises ``ref_cnt`` from 1 to 2 without changing the parked
+    request's block table, so ``cap - exclusive`` grows. The admission check
+    has to include that overlap before the touch, and the cache has to match
+    the post-touch estimate afterwards.
+    """
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size, max_num_batched_tokens=block_size * 4
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=400,
+        kv_cache_config=make_kv_cache_config(
+            block_size, swa_enabled=True, sw_size=block_size * 2, num_blocks=400
+        ),
+    )
+    prefix = block_size * 2
+    warmup = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=prefix,
+        common_prefix_len=prefix,
+        max_tokens=1,
+    )
+    scheduler.add_request(warmup)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([warmup], use_eos=True)
+    )
+    assert warmup.is_finished()
+
+    def matched(request, num_computed_tokens, *_args, **_kwargs):
+        if not (request.kv_transfer_params or {}).get("do_remote_prefill"):
+            return (0, False)
+        external = request.num_tokens - num_computed_tokens
+        return (external, True) if external > 0 else (0, False)
+
+    req_a = create_request(
+        request_id=2,
+        block_size=block_size,
+        num_tokens=prefix + block_size,
+        common_prefix_len=prefix,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=3,
+        block_size=block_size,
+        num_tokens=prefix + block_size,
+        common_prefix_len=prefix,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    with patch.object(
+        scheduler.connector, "get_num_new_matched_tokens", side_effect=matched
+    ):
+        scheduler.add_request(req_a)
+        scheduler.schedule()
+        assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        before = scheduler._parked_reservations[req_a]
+
+        scheduler.add_request(req_b)
+        hits, num_local, _, _ = scheduler._get_local_prefix_cache_hit(req_b)
+        assert num_local >= prefix
+        extra = (
+            scheduler.kv_cache_manager.coordinator.extra_reservation_for_shared_blocks(
+                (req_a.request_id,), hits.blocks
+            )
+        )
+        assert extra >= 1
+
+        reserved: list[int] = []
+        real_allocate = scheduler.kv_cache_manager.allocate_slots
+
+        def spy_allocate(*args, **kwargs):
+            reserved.append(kwargs.get("reserved_blocks", 0))
+            return real_allocate(*args, **kwargs)
+
+        with patch.object(
+            scheduler.kv_cache_manager, "allocate_slots", side_effect=spy_allocate
+        ):
+            scheduler.schedule()
+
+    assert reserved
+    assert max(reserved) >= before + extra
+    if req_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+        # The touch has landed, so the cache must match the live estimate
+        # and the blocks left free must still cover it.
+        assert scheduler._parked_reservations[req_a] == (
+            scheduler._request_remaining_blocks(req_a)
+        )
+        free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+        assert free >= scheduler._request_remaining_blocks(req_a)
+
+
 @pytest.mark.parametrize(
     ("swa_enabled", "block_size", "num_spec_tokens", "num_blocks"),
     [(False, 16, 3, 8), (True, 16, 3, 17), (True, 64, 31, 40)],

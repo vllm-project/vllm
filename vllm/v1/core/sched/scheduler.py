@@ -1501,10 +1501,13 @@ class Scheduler(SchedulerInterface):
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations)
                     # plus its own spec decode step blocks, to avoid deadlock and
-                    # predictable preemptions.
+                    # predictable preemptions. Also keep blocks a prefix hit
+                    # will stop a parked load from recycling: sharing raises
+                    # `ref_cnt` only once this allocation touches them.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks
+                        + self._extra_reservation_for_prefix_share(new_computed_blocks)
                     )
 
                 # Replayed tokens are already counted in the adopted hit; a
@@ -1537,6 +1540,11 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                # Prefix hits adopted above may have raised ref_cnt on blocks a
+                # parked load was counting as recyclable. Refresh before the
+                # next admission reads the cache.
+                self._refresh_parked_reservations()
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -3746,8 +3754,12 @@ class Scheduler(SchedulerInterface):
         )
 
     def _reserve_parked(self, request: Request) -> None:
-        """Cache a parked async KV load's reservation. Set when parked and refreshed
-        at promotion, the only points where the load's held blocks change."""
+        """Cache a parked async KV load's reservation.
+
+        Set when the load is parked, refreshed when a later admission shares
+        one of its exclusive blocks (`ref_cnt` rises without a block-table
+        change), and refreshed again at promotion.
+        """
         if self.kv_cache_config.hisparse_host_num_blocks is not None:
             # HiSparse's depends on free host blocks, so it is summed on demand.
             self._inflight_prefills.add(request)
@@ -3756,6 +3768,24 @@ class Scheduler(SchedulerInterface):
         cached = self._parked_reservations.get(request, 0)
         self._parked_reserved_blocks += blocks - cached
         self._parked_reservations[request] = blocks
+
+    def _refresh_parked_reservations(self) -> None:
+        for request in list(self._parked_reservations):
+            self._reserve_parked(request)
+
+    def _extra_reservation_for_prefix_share(self, new_computed_blocks) -> int:
+        """Blocks to add to the parked reservation before this prefix hit lands."""
+        if not self._parked_reservations and not self._inflight_prefills:
+            return 0
+        request_ids = {
+            request.request_id
+            for request in (*self._parked_reservations, *self._inflight_prefills)
+        }
+        return (
+            self.kv_cache_manager.coordinator.extra_reservation_for_shared_blocks(
+                request_ids, new_computed_blocks.blocks
+            )
+        )
 
     def _unreserve_parked(self, request: Request) -> None:
         self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)

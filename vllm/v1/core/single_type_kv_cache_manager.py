@@ -284,6 +284,37 @@ class SingleTypeKVCacheManager(ABC):
         """Return a reservation, or None to use the allocation-based admission check."""
         return None
 
+    def num_exclusive_suffix_blocks_shared(
+        self, request_id: str, shared_block_ids: set[int]
+    ) -> int:
+        """Exclusive live-suffix blocks of `request_id` that `shared_block_ids` will touch.
+
+        These are the blocks the admission cap treats as recyclable
+        (`ref_cnt == 1` up to the first null). A later prefix hit raises
+        `ref_cnt` without changing the block table, so each one increases the
+        remaining reservation by one. Managers that do not use that accounting
+        return 0.
+        """
+        if (
+            not shared_block_ids
+            or self.max_admission_blocks_per_request is None
+            or type(self).get_num_blocks_to_allocate
+            is not SingleTypeKVCacheManager.get_num_blocks_to_allocate
+            or type(self).get_num_blocks_to_reserve
+            is not SingleTypeKVCacheManager.get_num_blocks_to_reserve
+        ):
+            return 0
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks:
+            return 0
+        num_shared = 0
+        for block in reversed(blocks):
+            if block.is_null:
+                break
+            if block.ref_cnt == 1 and id(block) in shared_block_ids:
+                num_shared += 1
+        return num_shared
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
