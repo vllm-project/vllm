@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, attention residuals, relative-bias attention, short convolutions, and a bundled DSpark speculator."
   date_added: 2026-11-12
-  date_updated: 2026-11-20
+  date_updated: 2026-11-27
   difficulty: intermediate
   tasks:
     - multimodal
@@ -13,7 +13,6 @@ meta:
   related_recipes:
     - thinkingmachines/Inkling
     - thinkingmachines/Inkling-Small
-    - thinkingmachines/Inkling-2-Small-MXFP8
   hardware:
     gb200: verified
     h200: verified
@@ -64,25 +63,11 @@ variants:
       - arch:sm100
       - arch:sm103
     description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47); attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft. Blackwell quantizes expert activations to the same format; Hopper keeps them in BF16 (W4A16/W8A16)."
-
-compatible_strategies:
-  - single_node_tp
-  - multi_node_tp
-
-# H200 has no cross-node NVLink for pure multi-node TP.
-strategy_hardware:
-  multi_node_tp:
-    hopper: unsupported
-
-hardware_overrides: {}
-
-strategy_overrides:
-  # One 4-GPU GB200 tray. A 1M-token request does not fit next to the weights
-  # at TP4 (64.5 GiB KV per GPU needed, ~51 GiB free), so cap the context.
-  # Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
-  # sequence; 256 sequences keep a 262K-token request within the KV cache.
-  single_node_tp:
-    tp: 4
+    # One node, TP4. A 1M-token request does not fit next to the weights (64.5
+    # GiB KV per GPU needed, ~51 GiB free on a GB200 tray), so cap the context.
+    # Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
+    # sequence; 256 sequences keep a 262K-token request within the KV cache.
+    # On two trays the multi_node_tp block below replaces these.
     hardware_overrides:
       blackwell:
         extra_args:
@@ -98,6 +83,58 @@ strategy_overrides:
           - "131072"
           - "--max-num-seqs"
           - "256"
+  mxfp8:
+    model_id: "thinkingmachines/Inkling-2-Small-MXFP8"
+    precision: mxfp8
+    # Blackwell runs the experts as native MXFP8; Hopper as W8A16 (Humming GEMMs).
+    precision_hardware:
+      brand: NVIDIA
+    # 623 GB of safetensors x 1.2.
+    vram_minimum_gb: 747
+    supported_hardware:
+      - h200
+      - arch:sm100
+      - arch:sm103
+    description: "Parse reasoning output with the Inkling reasoning parser."
+    # TP8 on an 8-GPU node (H200, B200, B300).
+    tp: 8
+    # Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
+    # sequence, so cap the batch at 256 sequences as for the default checkpoint.
+    extra_args:
+      - "--max-num-seqs"
+      - "256"
+    hardware_overrides:
+      # One GB200 tray (768 GB) cannot hold the weights (623 GB) plus the KV
+      # cache of a 1M-token request (64.5 GiB per GPU), so it takes two trays.
+      gb200:
+        vram_minimum_gb: 900
+      blackwell:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+      # 8x H200: 62 GiB KV per GPU fits 1M (1.66M-token cache), but requests
+      # past ~800K tokens looped in tests (777K and below answered correctly).
+      hopper:
+        extra_args:
+          - "--max-model-len"
+          - "524288"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+# H200 has no cross-node NVLink for pure multi-node TP.
+strategy_hardware:
+  multi_node_tp:
+    hopper: unsupported
+
+hardware_overrides: {}
+
+strategy_overrides:
+  # The default checkpoint runs TP4 on one node; the MXFP8 variant sets TP8.
+  # Each variant's hardware_overrides carry its single-node context cap.
+  single_node_tp:
+    tp: 4
   # Two trays (TP8) serve the full 1M context. --no-numa-bind works around a
   # headless-node startup crash with vLLM's default NUMA binding.
   multi_node_tp:
@@ -112,6 +149,7 @@ troubleshooting:
   - title: "To serve at least one request with the model's max seq len (1048576), (64.47 GiB KV cache is needed, which is larger than the available KV cache memory"
     when:
       strategies: [single_node_tp]
+      variants: [default]
     body: "A 1M-token request does not fit at TP4. Keep `--max-model-len 262144` on a GB200 tray (`131072` on 4x H200), or use the multi-node TP strategy with 2 GB200 nodes (TP8) for the full 1M context."
   - title: "AssertionError: Executable was changed during NUMA binding context"
     when:
@@ -159,8 +197,23 @@ guide: |
   with BF16 activations. With the command above (DSpark and the reasoning parser), GSM8K is
   0.977 (0-shot, chat) with a DSpark acceptance length of 4.5.
 
-  An MXFP8 checkpoint is also available; see the
-  [Inkling 2 Small MXFP8 recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small-MXFP8).
+  ### MXFP8 checkpoint
+
+  The MXFP8 variant serves [thinkingmachines/Inkling-2-Small-MXFP8](https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8):
+  the same model, with every routed expert in MXFP8. Inkling 2 Small was trained in NVFP4, and
+  Thinking Machines recommends the NVFP4 checkpoint for all use cases. MXFP8 scores 1-2 points
+  higher on evals, at about 1.6x the memory.
+
+  The checkpoint needs about 750 GB. It runs at TP8 (TP8 attention with EP8 experts) on one
+  8-GPU H200, B200 or B300 node, or on two GB200 trays. One GB300 tray (4x 288 GB) holds it at
+  TP4; that layout follows from the memory budget and has not been run.
+
+  - **H200, TP8:** contexts up to 524,288 tokens. With the command above (DSpark and the
+    reasoning parser), GSM8K is 0.972-0.974 (0-shot, chat) with a DSpark acceptance length of 4.5.
+  - **Blackwell:** the full 1,048,576-token context.
+
+  On Hopper, its experts run as W8A16 GEMMs with BF16 activations. Requests name the served
+  checkpoint: with this variant, use `thinkingmachines/Inkling-2-Small-MXFP8` as `model`.
 
   LoRA adapters are supported on the attention projections and the routed experts. Expert
   adapters need BF16 expert weights; with the NVFP4/MXFP8 experts of this checkpoint, use
@@ -209,6 +262,7 @@ guide: |
 
   - [Inkling 2 Small announcement](https://thinkingmachines.ai/news/inkling-2-small/)
   - [Inkling 2 Small on Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Small)
+  - [Inkling 2 Small MXFP8 on Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8)
   - [vLLM blog: Inkling 2 Small on vLLM](https://vllm.ai/blog/2026-11-12-inkling2-small)
   - [Inkling recipe](https://recipes.vllm.ai/thinkingmachines/Inkling)
   - [DeepSeek DSpark (DeepSpec)](https://github.com/deepseek-ai/DeepSpec)
