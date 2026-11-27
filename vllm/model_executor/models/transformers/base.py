@@ -1061,14 +1061,14 @@ class Base(
         """The modules a converter splits `module_name`'s weight into (e.g. Molmo2's
         fused `att_proj`), with their rows, `None` for one not on this rank. The LoRA
         rename mapper has already applied the renamings to `module_name`."""
-        weights = self._split_weights(f"{module_name}.weight", [])
-        if weights is None:
+        weight_names = self._split_weights(f"{module_name}.weight", [])
+        if weight_names is None:
             return None
         return {
             weight.removesuffix(".weight"): (
                 self._output_size(weight) if self._loaded_by(weight) else None
             )
-            for weight in weights
+            for weight in weight_names
         }
 
     def _split_weights(

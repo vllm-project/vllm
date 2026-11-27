@@ -254,7 +254,7 @@ class LoRAModel:
                 if rows := split_rows(module_name):
                     lora = loras.pop(module_name)
                     sizes = [n for n in rows.values() if n is not None]
-                    # No rows: its pieces aren't on this rank, so nothing here uses it
+                    # `None` rows: its pieces aren't on this rank, nothing here uses it
                     if len(sizes) < len(rows):
                         continue
                     for target, lora_b in zip(rows, lora.lora_b.split(sizes)):
