@@ -632,6 +632,7 @@ def measure_kv_cache_blocks(
     *,
     init_free_memory: int,
     requested_memory: int,
+    extra_reserve_bytes: int = 0,
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
@@ -681,6 +682,7 @@ def measure_kv_cache_blocks(
                 format_gib(requested_memory),
                 format_gib(withheld),
             )
+    available = max(available - extra_reserve_bytes, 0)
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,

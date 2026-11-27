@@ -267,7 +267,8 @@ def test_sizing_step_measures_torch_reserve_growth():
     assert kv_cache.torch_reserve_growth_bytes == 924 * mib
 
 
-def test_measured_sizing_caps_torch_memory(monkeypatch):
+@pytest.mark.parametrize("extra_reserve_gib", [0, 1])
+def test_measured_sizing_caps_torch_memory(monkeypatch, extra_reserve_gib):
     """Torch's caching allocator may grow into what stays free once the cache
     is extended, less multimodal IPC memory and the non-torch reserve,
     rather than caching fragmented segments until other allocations fail."""
@@ -314,11 +315,14 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
         torch.device("cpu"),
         init_free_memory=10 * gib,
         requested_memory=10 * gib,
+        extra_reserve_bytes=extra_reserve_gib * gib,
     )
 
-    assert num_blocks == 4
-    # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
-    left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
+    assert num_blocks == 4 - extra_reserve_gib
+    # 6 GiB free, of which extending takes (num_blocks - 1) and IPC keeps 1.
+    left_free = (
+        2 + extra_reserve_gib
+    ) * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
 
 

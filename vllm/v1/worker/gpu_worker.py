@@ -1299,8 +1299,15 @@ class Worker(WorkerBase):
 
         num_kv_blocks = None
         if self.cache_config.enable_extensible_kv_cache:
+            from vllm.model_executor.models.vision import (
+                get_unallocated_pos_embed_cache_bytes,
+            )
+
             kv_cache = self.model_runner.extensible_kv_cache
             assert kv_cache is not None
+            extra_reserve_bytes = get_unallocated_pos_embed_cache_bytes(
+                getattr(self.model_runner, "model", None)
+            )
             # Every rank must size the KV cache identically.
             num_kv_blocks = _min_across_ranks(
                 measure_kv_cache_blocks(
@@ -1309,6 +1316,7 @@ class Worker(WorkerBase):
                     self.device,
                     init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
+                    extra_reserve_bytes=extra_reserve_bytes,
                 )
             )
 

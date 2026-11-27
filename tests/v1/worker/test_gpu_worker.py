@@ -495,9 +495,11 @@ def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
     class _ModelWithCache(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self._abs_pos_cache = InterpolatedPosEmbedCache(max_bytes=reserve_bytes)
+            self.cache = InterpolatedPosEmbedCache(max_bytes=reserve_bytes)
 
     saved_plans: list[int] = []
+    captured_reserves: list[int] = []
+    noop = lambda *_a, **_kw: None
     compilation_config = SimpleNamespace(
         mode=CompilationMode.NONE,
         backend="",
@@ -527,19 +529,27 @@ def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
         parallel_config=SimpleNamespace(data_parallel_index=0),
         model_runner=SimpleNamespace(
             model=_ModelWithCache(),
-            profile_run=lambda **kwargs: None,
+            profile_run=noop,
             model_memory_usage=0,
             lora_config=None,
-            maybe_remove_all_loras=lambda _cfg: None,
+            maybe_remove_all_loras=noop,
             is_pooling_model=True,
             capture_model=lambda: 0,
+            extensible_kv_cache=SimpleNamespace(
+                min_committed_blocks=1, commit=noop, record_transient_peak=noop
+            ),
+            block_tables=SimpleNamespace(clear_input_block_tables=noop),
         ),
+        device=torch.device("cpu"),
+        init_free_memory=80 * GiB_bytes,
         init_snapshot=SimpleNamespace(
             free_memory=80 * GiB_bytes, total_memory=80 * GiB_bytes
         ),
         requested_memory=72 * GiB_bytes,
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
-        _maybe_activate_jit_monitor=lambda: None,
+        _maybe_activate_jit_monitor=noop,
+        execute_model=noop,
+        sample_tokens=noop,
     )
     profile_result = SimpleNamespace(
         after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
@@ -547,7 +557,17 @@ def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
         non_kv_cache_memory=20 * GiB_bytes,
         transient_peak_headroom=0,
     )
-    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    for attr in (
+        "maybe_apply_startup_plan",
+        "kernel_warmup",
+        "warmup_kernels",
+        "run_kv_cache_sizing_warmup",
+        "set_random_seed",
+        "freeze_gc_heap",
+        "maybe_attach_gc_debug_callback",
+        "enable_gpu_sync_check",
+    ):
+        monkeypatch.setattr(gpu_worker, attr, noop)
     monkeypatch.setattr(
         gpu_worker,
         "memory_profiling",
@@ -555,21 +575,35 @@ def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
     )
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: False)
     monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(gpu_worker, "kernel_warmup", lambda _: None)
+    monkeypatch.setattr(gpu_worker.torch.accelerator, "reset_peak_memory_stats", noop)
     monkeypatch.setattr(
         gpu_worker, "maybe_save_startup_plan", lambda _w, kv: saved_plans.append(kv)
     )
-    monkeypatch.setattr(gpu_worker, "set_random_seed", lambda *_args: None)
-    monkeypatch.setattr(gpu_worker, "freeze_gc_heap", lambda: None)
-    monkeypatch.setattr(gpu_worker, "maybe_attach_gc_debug_callback", lambda: None)
-    monkeypatch.setattr(gpu_worker, "enable_gpu_sync_check", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker,
+        "measure_kv_cache_blocks",
+        lambda *_a, extra_reserve_bytes=0, **_kw: (
+            captured_reserves.append(extra_reserve_bytes) or 10
+        ),
+    )
+    monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda n: n)
 
     available = gpu_worker.Worker.determine_available_memory(worker)
     assert available == 52 * GiB_bytes - reserve_bytes
 
     gpu_worker.Worker._compile_or_warm_up_model(worker)
-    redundancy_buffer = 150 * (1 << 20)
-    assert saved_plans == [52 * GiB_bytes - reserve_bytes - redundancy_buffer]
+    assert saved_plans == [52 * GiB_bytes - reserve_bytes - 150 * (1 << 20)]
+
+    # Extensible KV cache passes the remaining reserve after warmup allocations.
+    populated = 4 * (1 << 20)
+    worker.cache_config.enable_extensible_kv_cache = True
+    worker.model_runner.model.cache.get_or_compute(
+        torch.empty(0),
+        1,
+        lambda *_: torch.empty(populated, dtype=torch.uint8),
+    )
+    gpu_worker.Worker._compile_or_warm_up_model(worker)
+    assert captured_reserves == [reserve_bytes - populated]
 
 
 # Memory accounting of the profiling run (Worker.determine_available_memory).
