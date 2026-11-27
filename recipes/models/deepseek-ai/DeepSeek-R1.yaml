@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek-R1 is a 671B-parameter MoE reasoning model built on the DeepSeek-V3 architecture, trained with large-scale reinforcement learning for strong chain-of-thought capabilities."
   date_added: 2025-08-01
-  date_updated: 2026-10-02
+  date_updated: 2026-11-27
   tasks:
     - text
   performance_headline: "Open-weights RL-trained reasoning model with native FP8 / FP4 variants"
@@ -19,6 +19,7 @@ meta:
     mi325x: verified
     mi350x: verified
     mi355x: verified
+    mi455x: supported
 
 model:
   model_id: "deepseek-ai/DeepSeek-R1"
@@ -72,11 +73,14 @@ variants:
     model_id: "amd/DeepSeek-R1-0528-MXFP4-MTP-MoEFP4"
     precision: mxfp4
     vram_minimum_gb: 403
-    description: "AMD MXFP4 quantized weights for MI350X / MI355X (gfx950)"
+    description: "AMD MXFP4 quantized weights for MI350X / MI355X (gfx950) and MI455X (gfx1250)"
     supported_hardware:
       - mi350x
       - mi355x
-    tp: 8
+      - mi455x
+    tp:
+      mi455x: 4
+      default: 8
     extra_args:
       - "--no-enable-expert-parallel"
       - "--kv-cache-dtype"
@@ -119,6 +123,11 @@ strategy_overrides:
         extra_env:
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+      mi455x:
+        extra_env:
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_USE_AITER_FP8BMM: "1"
   single_node_dpa_tp:
     extra_env:
       VLLM_ENGINE_READY_TIMEOUT_S: "1800"
@@ -137,7 +146,7 @@ guide: |
 
   - **Hardware (FP8)**: 8x H200 (CUDA) or 8x MI300X / MI325X / MI355X (ROCm)
   - **Hardware (NVFP4)**: 4x B200 GPUs
-  - **Hardware (MXFP4)**: 8x MI350X / MI355X (ROCm)
+  - **Hardware (MXFP4)**: 8x MI350X / MI355X or 4x MI455X (ROCm)
   - **vLLM**: Current stable release
 
   ### CUDA
@@ -188,7 +197,7 @@ guide: |
   ### 8xMI355X (FP8)
 
   Tensor Parallel (TP8) — ROCm. Validated on MI355X only; INT4 quick reduce and
-  fused shared experts are not enabled on other AMD GPUs or other strategies:
+  fused shared experts are enabled only on MI355X and MI455X, with this strategy:
   ```bash
   export VLLM_ROCM_USE_AITER=1
   export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
