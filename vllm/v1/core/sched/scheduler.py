@@ -4117,9 +4117,7 @@ class Scheduler(SchedulerInterface):
             elif request.request_id not in failed:
                 async_affected.add(request.request_id)
 
-        self.kv_cache_manager.evict_blocks_by_group(
-            [sorted(ids) for ids in blocks_to_evict]
-        )
+        self.kv_cache_manager.evict_blocks_by_group(blocks_to_evict)
         failed_async = self._handle_failed_recving(async_affected)
 
         if not self.recompute_kv_load_failures:

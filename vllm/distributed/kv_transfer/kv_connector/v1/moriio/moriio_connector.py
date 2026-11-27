@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import queue
-import re
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import msgpack
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 

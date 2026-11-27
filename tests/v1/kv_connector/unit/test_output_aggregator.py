@@ -71,6 +71,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         finished_recving: set[str] | None = None,
         invalid_block_ids: set[int] | None = None,
         failed_recving: set[str] | None = None,
+        failed_sync_recving: set[str] | None = None,
         expected_finished_count: int = 0,
         kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
         kv_cache_events: KVConnectorKVEvents | None = None,
@@ -80,6 +81,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
             failed_recving=failed_recving or set(),
+            failed_sync_recving=failed_sync_recving or set(),
             expected_finished_count=expected_finished_count,
             kv_connector_worker_meta=kv_connector_worker_meta,
             kv_cache_events=kv_cache_events,
@@ -154,6 +156,13 @@ def test_aggregate_workers_output():
     assert aggregated_output is output1
     aggregated_kv_output = output1.kv_connector_output
     assert aggregated_kv_output.failed_recving == {"req3"}
+
+    # Any worker may report a failed synchronous load.
+    output1 = DummyModelRunnerOutput()
+    output2 = DummyModelRunnerOutput(failed_sync_recving={"req4"})
+    aggregated_output = aggregator.aggregate([output1, output2])
+    assert aggregated_output is output1
+    assert output1.kv_connector_output.failed_sync_recving == {"req4"}
 
 
 def test_aggregate_workers_output_with_expected_finished_count():
