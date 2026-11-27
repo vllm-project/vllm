@@ -176,7 +176,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config,
             kv_cache_spec,
-            get_kv_cache_checkpoint_alignment(vllm_config, layer_names),
+            get_kv_cache_checkpoint_alignment(vllm_config),
         )
 
     def build_for_cudagraph_capture(

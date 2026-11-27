@@ -493,7 +493,7 @@ class BailingMoELinearAttention(LinearAttention):
 
         return BailingLinearAttentionBackend
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         # The prefill splits at any checkpoint offset.
         return 1
 
