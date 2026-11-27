@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import json
 import queue
 from pathlib import Path
-from typing import TypeAlias, TypeVar
+from typing import TypeAlias, TypeGuard, TypeVar
 
 from transformers import AutoTokenizer, BatchEncoding, PythonBackend, TokenizersBackend
 
@@ -38,19 +39,60 @@ class ThreadSafeHFTokenizerMixin:
     pass
 
 
-def batch_decode_singleton_tokens(
-    tokenizer: TokenizerLike, token_ids: list[int]
-) -> list[str] | None:
-    """Batch HF singleton decodes without bypassing custom decoding policies."""
+def _has_standard_hf_decode(tokenizer: TokenizerLike) -> TypeGuard[TokenizersBackend]:
     cls = type(tokenizer)
     if isinstance(tokenizer, ThreadSafeHFTokenizerMixin):
         # TokenizerPool only adds forwarding methods to the original class.
         cls = cls.__bases__[0]
-    if (
+    return (
         isinstance(tokenizer, TokenizersBackend)
         and cls.decode is TokenizersBackend.decode
         and getattr(cls, "_decode", None) is TokenizersBackend._decode
+    )
+
+
+def hf_singleton_text_mismatch(
+    tokenizer: TokenizerLike, token_ids: list[int], text: str
+) -> bool:
+    """Prove literal singleton decodes cannot match without decoding each token."""
+    if not _has_standard_hf_decode(tokenizer):
+        return False
+    if callable(getattr(tokenizer, "decode_prompt_with_offsets", None)) or (
+        getattr(tokenizer.clean_up_tokenization, "__func__", None)
+        is not TokenizersBackend.clean_up_tokenization
     ):
+        return False
+    backend = tokenizer.backend_tokenizer
+    try:
+        steps = [json.loads(backend.decoder.__getstate__())]
+    except (AttributeError, TypeError, ValueError):
+        return False
+    ignored = {" "}
+    while steps:
+        step = steps.pop()
+        if step["type"] == "Sequence":
+            steps.extend(step["decoders"])
+        elif step["type"] == "WordPiece":
+            # Cleanup can change letters (" do not" -> " don't"), not just spaces.
+            if step.get("cleanup", True):
+                return False
+            ignored.update(step["prefix"])
+        elif step["type"] != "Fuse":
+            return False
+    # Fuse preserves pieces; WordPiece only adds spaces/removes prefixes.
+    # Standard HF cleanup removes spaces. Any other mismatch survives
+    # singleton decoding, so it cannot take priority over verified spans.
+    translation = dict.fromkeys(map(ord, ignored))
+    translated_text = text.translate(translation)
+    decoded = backend.decode(token_ids, skip_special_tokens=False)
+    return decoded.translate(translation) != translated_text
+
+
+def batch_decode_singleton_tokens(
+    tokenizer: TokenizerLike, token_ids: list[int]
+) -> list[str] | None:
+    """Batch HF singleton decodes without bypassing custom decoding policies."""
+    if _has_standard_hf_decode(tokenizer):
         backend = tokenizer.backend_tokenizer
         pieces = backend.decode_batch(
             [[token_id] for token_id in token_ids], skip_special_tokens=False

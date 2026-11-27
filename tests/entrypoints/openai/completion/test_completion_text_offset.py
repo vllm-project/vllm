@@ -8,6 +8,7 @@ from cProfile import Profile
 
 import pytest
 from tokenizers import (
+    AddedToken,
     Tokenizer,
     decoders,
     models,
@@ -64,35 +65,41 @@ def test_normalized_echo_offsets_preserve_special_token_boundaries(
         prompt_input["prompt_token_offsets"] = tokenizer(
             text, add_special_tokens=add_special_tokens, return_offsets_mapping=True
         )["offset_mapping"]
-    with Profile() as profile:
-        offsets = _get_prompt_text_offsets(
-            tokenizer, ids, text, prompt_input=prompt_input, source_text=text
-        )
+    offsets = _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+    )
     assert offsets == [*expected, len(text)]
-    if reuse_source_offsets:
-        # Batch singleton decodes before reusing the source offsets.
-        decode_calls = sum(
-            entry.callcount
-            for entry in profile.getstats()
-            if entry.code == tokenizer.decode.__func__.__code__
-        )
-        assert decode_calls == 0
 
 
-@pytest.mark.parametrize("num_tokens", [8192, 32768])
-@pytest.mark.parametrize("pooled", [False, True])
-def test_normalized_echo_offsets_batch_singleton_decodes(num_tokens, pooled):
+@pytest.mark.parametrize(
+    "wordpiece_cleanup,pooled,normalize",
+    [
+        (None, False, True),
+        (False, True, True),
+        (False, False, False),
+        (True, False, True),
+    ],
+)
+def test_echo_offsets_reuse_source_before_singleton_decodes(
+    wordpiece_cleanup, pooled, normalize
+):
+    num_tokens = 8192
     backend = Tokenizer(
         models.WordLevel({"x": 0, "é": 1, "[UNK]": 2}, unk_token="[UNK]")
     )
-    backend.normalizer = normalizers.Lowercase()
+    if normalize:
+        backend.normalizer = normalizers.Lowercase()
     backend.pre_tokenizer = pre_tokenizers.Split("", behavior="isolated")
-    backend.decoder = decoders.Fuse()
+    backend.decoder = (
+        decoders.Fuse()
+        if wordpiece_cleanup is None
+        else decoders.WordPiece(cleanup=wordpiece_cleanup)
+    )
     tokenizer = TokenizersBackend(tokenizer_object=backend)
     tokenizer = get_cached_tokenizer(tokenizer)
     if pooled:
         tokenizer = maybe_make_thread_pool(tokenizer)
-    text = "x" * (num_tokens - 1) + "É"
+    text = "x" * (num_tokens - 1) + ("É" if normalize else "𐍈")
     encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     ids = encoding["input_ids"]
     assert len(ids) == num_tokens
@@ -108,14 +115,63 @@ def test_normalized_echo_offsets_batch_singleton_decodes(num_tokens, pooled):
         in (tokenizer.decode.__func__.__code__, tokenizer._decode.__func__.__code__)
         for entry in profile.getstats()
     )
-    assert (
-        sum(
-            entry.callcount
-            for entry in profile.getstats()
-            if isinstance(entry.code, str) and "'decode_batch'" in entry.code
-        )
-        == 1
+    assert not any(
+        isinstance(entry.code, str) and "'id_to_token'" in entry.code
+        for entry in profile.getstats()
     )
+    reuse_source = wordpiece_cleanup is not True
+    assert sum(
+        entry.callcount
+        for entry in profile.getstats()
+        if isinstance(entry.code, str) and "'decode_batch'" in entry.code
+    ) == int(not reuse_source)
+
+
+@pytest.mark.parametrize("wordpiece", [False, True])
+def test_echo_offsets_keep_literal_boundaries_with_untrimmed_source(wordpiece):
+    backend = Tokenizer(models.WordLevel({"é": 0, "x": 1}))
+    # Even an unchanged replacement can collapse source spans.
+    backend.normalizer = normalizers.Sequence(
+        [normalizers.Replace("éx", "éx"), normalizers.Lowercase()]
+    )
+    backend.pre_tokenizer = pre_tokenizers.Split("", behavior="isolated")
+    backend.decoder = (
+        decoders.WordPiece(cleanup=False) if wordpiece else decoders.Fuse()
+    )
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    text = "éx"
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    assert encoding["offset_mapping"] == [(1, 2), (1, 2)]
+    prompt_input = tokens_input(encoding["input_ids"], prompt=text)
+    prompt_input["prompt_token_offsets"] = encoding["offset_mapping"]
+    assert _get_prompt_text_offsets(
+        tokenizer,
+        encoding["input_ids"],
+        text,
+        prompt_input=prompt_input,
+        source_text=text,
+    ) == list(range(len(text) + 1))
+
+
+def test_echo_offsets_keep_literal_boundaries_with_wordpiece_cleanup():
+    backend = Tokenizer(models.WordLevel({"do not": 0, "É": 1}))
+    backend.normalizer = normalizers.Sequence(
+        [normalizers.Replace("do not", "do not"), normalizers.Lowercase()]
+    )
+    backend.decoder = decoders.WordPiece()
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    tokenizer.add_tokens([AddedToken("É", normalized=False)])
+    text = "Édo not"
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    ids = encoding["input_ids"]
+    assert encoding["offset_mapping"] == [(0, 1), (6, 7)]
+    assert tokenizer.decode(ids) == "É don't"
+    assert "".join(tokenizer.decode([token_id]) for token_id in ids) == text
+    prompt_input = tokens_input(ids, prompt=text)
+    prompt_input["prompt_token_offsets"] = encoding["offset_mapping"]
+    assert _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+    ) == [0, 1, len(text)]
 
 
 @pytest.mark.parametrize("split_unicode", [False, True])

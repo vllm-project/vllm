@@ -53,6 +53,7 @@ from vllm.tokenizers.detokenizer_utils import decode_token_ids_with_offsets
 from vllm.tokenizers.hf import (
     batch_decode_singleton_tokens,
     encode_with_special_tokens_mask,
+    hf_singleton_text_mismatch,
 )
 from vllm.utils.async_utils import make_async, merge_async_iterators
 from vllm.utils.collection_utils import as_list
@@ -116,6 +117,23 @@ def _get_source_text_offsets(
     return [*starts, len(text)]
 
 
+def _has_untrimmed_source_offsets(tokenizer: TokenizerLike) -> bool:
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return False
+    try:
+        processor = backend.post_processor
+        processors = [json.loads(processor.__getstate__())] if processor else []
+    except (AttributeError, TypeError, ValueError):
+        return False
+    while processors:
+        config = processors.pop()
+        if config.get("trim_offsets", False):
+            return False
+        processors.extend(config.get("processors", []))
+    return True
+
+
 def _get_prompt_text_offsets(
     tokenizer: TokenizerLike | None,
     token_ids: list[int],
@@ -142,6 +160,13 @@ def _get_prompt_text_offsets(
                 source_offsets = [source_offsets[i] for i in visible]
     if not token_ids:
         return None
+    untrimmed_source = None
+    if source_offsets is not None:
+        untrimmed_source = _has_untrimmed_source_offsets(tokenizer)
+        if untrimmed_source and hf_singleton_text_mismatch(tokenizer, token_ids, text):
+            source_mask = [int(start == end == 0) for start, end in source_offsets]
+            if starts := _get_source_text_offsets(text, source_offsets, source_mask):
+                return starts
     for skip_special_tokens in (False, True):
         decoded = decode_token_ids_with_offsets(
             tokenizer, token_ids, skip_special_tokens=skip_special_tokens
@@ -169,21 +194,11 @@ def _get_prompt_text_offsets(
                 return offsets
     # Trimmed encoding spans cannot establish decoded token starts, even
     # when the source text and token IDs match. Keep the legacy fallback.
-    backend = getattr(tokenizer, "backend_tokenizer", None)
-    if backend is None:
+    if untrimmed_source is None:
+        untrimmed_source = _has_untrimmed_source_offsets(tokenizer)
+    if not untrimmed_source:
         return None
-    try:
-        processor = backend.post_processor
-        processors = [json.loads(processor.__getstate__())] if processor else []
-    except (AttributeError, TypeError, ValueError):
-        return None
-    while processors:
-        config = processors.pop()
-        if config.get("trim_offsets", False):
-            return None
-        processors.extend(config.get("processors", []))
     if source_offsets is not None:
-        # HF source offsets use (0, 0) for tokens added by the postprocessor.
         source_mask = [int(start == end == 0) for start, end in source_offsets]
         if starts := _get_source_text_offsets(text, source_offsets, source_mask):
             return starts

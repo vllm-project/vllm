@@ -51,9 +51,7 @@ def decode_token_ids_with_offsets(
     if backend is None or backend.decoder is None:
         return None
 
-    tokens = [backend.id_to_token(token_id) for token_id in token_ids]
-    if any(token is None for token in tokens):
-        return None
+    byte_fallback_config = None
     if not isinstance(backend.decoder, ByteLevel):
         try:
             config = json.loads(backend.decoder.__getstate__())
@@ -69,7 +67,15 @@ def decode_token_ids_with_offsets(
             and steps[0]["type"] == "ByteLevel"
             and all(step["type"] == "Fuse" for step in steps[1:])
         ):
-            return _decode_byte_fallback_with_offsets(tokens, config)
+            if not any(step["type"] == "ByteFallback" for step in steps):
+                return None
+            byte_fallback_config = config
+
+    tokens = [backend.id_to_token(token_id) for token_id in token_ids]
+    if any(token is None for token in tokens):
+        return None
+    if byte_fallback_config is not None:
+        return _decode_byte_fallback_with_offsets(tokens, byte_fallback_config)
 
     byte_decoder = _byte_level_decoder()
     pieces: list[bytes] = []
