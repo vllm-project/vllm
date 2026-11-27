@@ -2498,9 +2498,10 @@ class Scheduler(SchedulerInterface):
             ):
                 # Not a prefill chunk, so this step added placeholders.
                 request.num_output_placeholder_steps -= 1
-            if scheduled_spec_token_ids and (
+            verified_draft = scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
-            ):
+            )
+            if verified_draft:
                 if num_drafted_tokens_per_req is not None:
                     assert num_verified_tokens_per_req is not None
                     num_draft_tokens = num_drafted_tokens_per_req[req_index]
@@ -2677,6 +2678,26 @@ class Scheduler(SchedulerInterface):
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
+                spec_metrics = request.spec_decode_metrics
+                if spec_metrics is not None and finish_reason is None:
+                    if (
+                        request.sampling_params is not None
+                        and request.sampling_params.stop
+                    ):
+                        # The frontend can finish this request on this output. Send
+                        # only this step, even at the detailed reporting level.
+                        spec_metrics = RequestSpecDecodeMetrics.new(
+                            self.num_spec_tokens
+                        )
+                        if verified_draft:
+                            spec_metrics.observe(
+                                num_draft_tokens=num_draft_tokens,
+                                num_accepted=num_accepted,
+                                num_verified_tokens=num_verified,
+                                detailed=self.spec_decode_metrics_level == "detailed",
+                            )
+                    else:
+                        spec_metrics = None
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -2691,11 +2712,7 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
-                        spec_decode_metrics=(
-                            request.spec_decode_metrics
-                            if finish_reason is not None
-                            else None
-                        ),
+                        spec_decode_metrics=spec_metrics,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,

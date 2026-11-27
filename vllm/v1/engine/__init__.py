@@ -316,7 +316,8 @@ class EngineCoreOutput(
 
     new_sampling_mask: SamplingMaskLists | None = None
 
-    # Per-request spec-decode acceptance; attached only on the final output.
+    # The final output carries all verification steps. For text-stop requests,
+    # an intermediate output carries only the steps verified in that update.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
