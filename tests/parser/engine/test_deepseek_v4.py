@@ -37,6 +37,7 @@ from vllm.parser.deepseek_v4 import (
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
+from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
@@ -303,6 +304,100 @@ class TestMissingStringAttribute:
             "location": "Paris",
             "date": "tomorrow",
         }
+
+
+class TestNonStringArgValueConversions:
+    """Markup in a non-JSON value is not reconverted on every `>` delta."""
+
+    _HTML_LINE = '<div class="card"><a href="/p/1">title</a></div>\n'
+
+    @pytest.fixture
+    def count_arg_conversions(self, monkeypatch):
+        calls = []
+        original = ParserEngine._safe_arg_prefix
+
+        def counting(json_str, string_keys=None):
+            calls.append(json_str)
+            return original(json_str, string_keys)
+
+        monkeypatch.setattr(ParserEngine, "_safe_arg_prefix", staticmethod(counting))
+        return calls
+
+    @staticmethod
+    def _html_call(attr: str, path_first: bool = True) -> str:
+        value = TestNonStringArgValueConversions._HTML_LINE * 200
+        path = f"{_param('path', 'true', 'index.html')}\n" if path_first else ""
+        return (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}write_file{DSML_INVOKE_NAME_END}\n"
+            f"{path}"
+            f'<｜DSML｜parameter name="content"{attr}>{value}{_PARAM_CLOSE}\n'
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_non_streaming_converts_few_times(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr)
+
+        _, _, tool_calls = DeepSeekV4Parser(mock_tokenizer).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert tool_calls is not None
+        assert json.loads(tool_calls[0].arguments) == {
+            "path": "index.html",
+            "content": self._HTML_LINE * 200,
+        }
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_streaming_matches_final_arguments(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr)
+        chunks = [text[i : i + 16] for i in range(0, len(text), 16)]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "path": "index.html",
+            "content": self._HTML_LINE * 200,
+        }
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_non_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+
+        _, _, tool_calls = DeepSeekV4Parser(mock_tokenizer).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert tool_calls is not None
+        assert json.loads(tool_calls[0].arguments) == {"content": self._HTML_LINE * 200}
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+        chunks = [text[i : i + 16] for i in range(0, len(text), 16)]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": self._HTML_LINE * 200
+        }
+        assert len(count_arg_conversions) <= 5
 
 
 # ── Bare </think> absorption and duplicate <think> absorption ─────────

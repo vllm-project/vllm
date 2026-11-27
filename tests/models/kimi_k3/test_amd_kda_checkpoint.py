@@ -56,18 +56,17 @@ class _StubSpeculativeConfig:
     method = "dspark"
     max_num_new_slots_for_drafting = 0
     enable_adaptive_verification = False
-    speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
+    speculator_config = SimpleNamespace(
+        speculator_class="DSparkSpeculator", num_hash_lookahead_tokens=0
+    )
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
 
-    def use_eagle_block_drop(self) -> bool:
-        return False
-
 
 def _builder(
     num_prefill_checkpoint_blocks: int = 1,
-    mamba_cache_mode: str = "align",
+    enable_prefix_caching: bool = True,
     block_size: int = BLOCK_SIZE,
     prefix_match_unit: int | None = None,
     num_spec: int = 0,
@@ -75,7 +74,7 @@ def _builder(
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=block_size
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
@@ -216,10 +215,10 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
     )
 
 
-def test_checkpoint_metadata_absent_outside_align_mode() -> None:
+def test_checkpoint_metadata_absent_without_prefix_caching() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
     )
     assert getattr(md, "checkpoint", None) is None
 
@@ -477,7 +476,7 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 
 
 def _checkpoint_alignment_for(**attrs) -> int | None:
-    """Run the layer's `get_kv_cache_checkpoint_alignment`."""
+    """Run the layer's `get_cache_checkpoint_alignment`."""
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
@@ -486,9 +485,7 @@ def _checkpoint_alignment_for(**attrs) -> int | None:
         use_safe_gate=True,
     ).items():
         setattr(layer, name, attrs.get(name, value))
-    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
-    vllm_config.cache_config.mamba_cache_mode = "align"
-    return layer.get_kv_cache_checkpoint_alignment(vllm_config)
+    return layer.get_cache_checkpoint_alignment()
 
 
 def test_opt_in_publishes_chunk_walk_alignment() -> None:

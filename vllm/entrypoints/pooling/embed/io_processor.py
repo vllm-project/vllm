@@ -117,7 +117,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.final_res_batch is None:
             raise ValueError("Final response batch not available")
 
-        if not self.enable_chunked_processing:
+        # /pooling shares this processor but never chunks its inputs.
+        if ctx.chunked_embedding_metadata is None:
             self._enforce_cohere_max_tokens(ctx)
             return super().post_process_online(ctx)
 
@@ -349,13 +350,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
             ),
         )
 
-        mm_config = self.model_config.multimodal_config
-        tok_params = request.build_tok_params(self.model_config)
+        chat_tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_chat_tok_params
+        )
         chat_params = request.build_chat_params(
             self.chat_template, self.chat_template_content_format
         ).with_defaults(
             default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
 
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
@@ -366,7 +367,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             EncodeChatRenderParams(
                 conversations=all_messages[i],
                 chat_params=chat_params,
-                tok_params=tok_params,
+                tok_params=chat_tok_params,
                 prompt_extras=ctx.prompt_extras,
                 skip_mm_cache=False,
                 params=params_seq[i],

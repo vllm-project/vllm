@@ -9,7 +9,7 @@ use thiserror_ext::AsReport;
 
 use super::DeepSeekV32ChatRenderer;
 use crate::EffortValue;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{
@@ -319,8 +319,9 @@ fn tool_results_require_matching_tool_call_ids() {
 
     let error = render_result(&request).unwrap_err();
 
-    expect!["chat template error: invalid DeepSeek V3.2 tool message: unknown tool_call_id `call-unknown`"]
+    expect!["invalid DeepSeek V3.2 tool message: unknown tool_call_id `call-unknown`"]
         .assert_eq(&error.to_report_string());
+    assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
 }
 
 #[test]
@@ -332,8 +333,9 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
 
     let error = render_result(&request).unwrap_err();
 
-    expect!["chat template error: invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
+    expect!["invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
         .assert_eq(&error.to_report_string());
+    assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
 }
 
 #[test]

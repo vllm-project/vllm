@@ -74,7 +74,7 @@ def can_reuse_fused_moe_kernel(parallel_config: ParallelConfig) -> bool:
     The EP backend must preserve its CUDA graph entries when ranks are connected,
     disconnected, masked, or unmasked.
     """
-    return parallel_config.all2all_backend == "nixl_ep"
+    return parallel_config.all2all_backend in ("nixl_ep", "mooncake_ep")
 
 
 def batch_transfer_weights(

@@ -26,8 +26,9 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
+    RenderedGenerateRequest,
 )
-from vllm.inputs import mm_input
+from vllm.inputs import MultiModalInput, mm_input
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -133,7 +134,7 @@ def _image_engine_input(
     *,
     pixel_keep_on_cpu: bool = False,
     grid_keep_on_cpu: bool = True,
-) -> tuple[object, MultiModalFieldElem, MultiModalFieldElem]:
+) -> tuple[MultiModalInput, MultiModalFieldElem, MultiModalFieldElem]:
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
         field=MultiModalBatchedField(keep_on_cpu=pixel_keep_on_cpu),
@@ -188,6 +189,90 @@ def test_extract_without_kwargs_keeps_layout():
     assert layout.mm_placeholders == full.mm_placeholders
 
 
+def _mixed_engine_input(*, audio_keep_on_cpu: bool = False):
+    engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
+    audio_item = MultiModalKwargsItem(
+        {
+            "input_features": MultiModalFieldElem(
+                data=torch.randn(5, 3, dtype=torch.float32),
+                field=MultiModalBatchedField(keep_on_cpu=audio_keep_on_cpu),
+            )
+        }
+    )
+    return mm_input(
+        prompt_token_ids=[1, 2, 3],
+        mm_kwargs={"image": engine_input["mm_kwargs"]["image"], "audio": [audio_item]},
+        mm_hashes={"image": ["abc123"], "audio": ["def456"]},
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=0, length=1)],
+            "audio": [PlaceholderRange(offset=1, length=1)],
+        },
+    )
+
+
+@pytest.mark.parametrize("audio_keep_on_cpu", [False, True])
+def test_metadata_payload_matches_tensors_without_kwargs(audio_keep_on_cpu):
+    """Only `kwargs_data` differs from a `tensors` render of the same input."""
+    if audio_keep_on_cpu:
+        engine_input = _mixed_engine_input(audio_keep_on_cpu=True)
+    else:
+        engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
+
+    full = extract_mm_features(engine_input, mm_payload="tensors")
+    metadata_only = extract_mm_features(engine_input, mm_payload="metadata")
+
+    assert full is not None and metadata_only is not None
+    assert metadata_only.kwargs_data is None
+    assert metadata_only.mm_metadata is not None
+    assert metadata_only.mm_metadata == full.mm_metadata
+    assert metadata_only.mm_hashes == full.mm_hashes
+    assert metadata_only.mm_placeholders == full.mm_placeholders
+
+
+def test_metadata_payload_requires_ec_on_generate_not_render():
+    """Render can return metadata-only items; generate needs EC params for them."""
+    engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
+    features = extract_mm_features(engine_input, mm_payload="metadata")
+    body: dict[str, object] = {
+        "token_ids": [1, 2, 3],
+        "features": features,
+        "sampling_params": {},
+    }
+
+    rendered = RenderedGenerateRequest.model_validate(body)
+    forwarded = rendered.model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="require ec_transfer_params"):
+        GenerateRequest.model_validate(forwarded)
+
+    GenerateRequest.model_validate(
+        {**forwarded, "ec_transfer_params": {"do_remote": True}}
+    )
+
+
+def test_metadata_payload_rejects_modality_without_metadata():
+    with pytest.raises(ValueError, match="requires metadata for every modality"):
+        extract_mm_features(_mixed_engine_input(), mm_payload="metadata")
+
+
+@pytest.mark.parametrize(
+    ("mm_payload", "has_kwargs"),
+    [("tensors", True), ("none", False)],
+)
+def test_modality_without_metadata_nulls_mm_metadata(mm_payload, has_kwargs):
+    """Metadata is complete or absent, so partial modalities still render."""
+    features = extract_mm_features(_mixed_engine_input(), mm_payload=mm_payload)
+
+    assert features is not None
+    assert features.mm_metadata is None
+    assert set(features.mm_hashes) == {"image", "audio"}
+    if has_kwargs:
+        assert features.kwargs_data is not None
+        assert set(features.kwargs_data) == {"image", "audio"}
+    else:
+        assert features.kwargs_data is None
+
+
 _MESSAGES = [{"role": "user", "content": "hi"}]
 
 
@@ -217,6 +302,11 @@ def test_return_mm_kwargs_is_alias_for_mm_payload(request_cls, body):
         {**body, "return_mm_kwargs": False, "mm_payload": "tensors"}
     )
     assert explicit.mm_payload == "tensors"
+
+    assert (
+        request_cls.model_validate({**body, "mm_payload": "metadata"}).mm_payload
+        == "metadata"
+    )
 
     with pytest.raises(ValidationError):
         request_cls.model_validate({**body, "mm_payload": "source"})
@@ -359,6 +449,81 @@ def test_kwargs_and_metadata_generate_does_not_require_ec():
     assert torch.equal(item["image_grid_thw"].data, image_grid_thw.data)
 
 
+def _referenced_item_features(metadata: dict | None) -> MultiModalFeatures:
+    return MultiModalFeatures.model_validate(
+        {
+            "mm_hashes": {"image": ["ref", "cached"]},
+            "mm_placeholders": {
+                "image": [{"offset": 0, "length": 1}, {"offset": 2, "length": 1}]
+            },
+            "kwargs_refs": {
+                "image": [
+                    {
+                        "uri": "s3://tensor-bucket/tenant/request/image-0",
+                        "format": "safetensors-v1",
+                        "nbytes": 1024,
+                        "digest": "a" * 64,
+                    },
+                    None,
+                ]
+            },
+            "mm_metadata": None
+            if metadata is None
+            else {
+                "image": [encode_mm_kwargs_item(MultiModalKwargsItem(metadata)), None]
+            },
+        }
+    )
+
+
+def test_tensor_reference_loads_item_and_accepts_matching_metadata():
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    loaded: list[tuple[str, str]] = []
+
+    def load(modality, ref):
+        loaded.append((modality, ref.uri))
+        return MultiModalKwargsItem(
+            {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
+        )
+
+    features = _referenced_item_features({"image_grid_thw": image_grid_thw})
+    with pytest.raises(ValueError, match="reference loader"):
+        mm_kwargs_from_features(features)
+    item, cached = mm_kwargs_from_features(features, reference_loader=load)["image"]
+
+    assert loaded == [("image", "s3://tensor-bucket/tenant/request/image-0")]
+    assert cached is None
+    assert item is not None
+    assert set(item) == {"pixel_values", "image_grid_thw"}
+    assert item["pixel_values"] is pixel_values
+    assert torch.equal(item["image_grid_thw"].data, image_grid_thw.data)
+
+
+@pytest.mark.parametrize("change", ["value", "extra_field"])
+def test_metadata_cannot_change_a_referenced_item(change):
+    """Validated fields of a referenced item can't be overridden by metadata."""
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    if change == "value":
+        metadata = {
+            "image_grid_thw": MultiModalFieldElem(
+                data=image_grid_thw.data * 2, field=image_grid_thw.field
+            )
+        }
+    else:
+        metadata = {"image_grid_thw": image_grid_thw}
+
+    def load(modality, ref):
+        item = {"pixel_values": pixel_values}
+        if change == "value":
+            item["image_grid_thw"] = image_grid_thw
+        return MultiModalKwargsItem(item)
+
+    with pytest.raises(ValueError, match="doesn't match its kwargs_refs object"):
+        mm_kwargs_from_features(
+            _referenced_item_features(metadata), reference_loader=load
+        )
+
+
 def test_cache_hit_null_kwargs_keeps_metadata_slot():
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
@@ -447,3 +612,25 @@ def test_placeholder_roundtrip(is_embed):
 def test_placeholder_rejects_mismatched_is_embed():
     with pytest.raises(ValidationError, match="is_embed"):
         PlaceholderRangeInfo(offset=0, length=4, is_embed=[True])
+
+
+def test_metadata_cannot_change_field_settings_of_a_referenced_item():
+    """Equal data with another field config keeps the loaded item's config."""
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    assert image_grid_thw.field.keep_on_cpu
+    gpu_grid = MultiModalFieldElem(
+        data=image_grid_thw.data, field=MultiModalBatchedField(keep_on_cpu=False)
+    )
+
+    def load(modality, ref):
+        return MultiModalKwargsItem(
+            {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
+        )
+
+    item, _ = mm_kwargs_from_features(
+        _referenced_item_features({"image_grid_thw": gpu_grid}),
+        reference_loader=load,
+    )["image"]
+
+    assert item is not None
+    assert item["image_grid_thw"].field.keep_on_cpu

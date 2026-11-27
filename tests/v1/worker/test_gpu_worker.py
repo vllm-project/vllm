@@ -5,7 +5,7 @@ import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -61,9 +61,9 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
         total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
     )
     with worker._external_weight_charges.track():
-        record_external_weight_charge("weights.sock", False, 20)
+        record_external_weight_charge("weights.sock", 20)
         if fallback:
-            record_external_weight_fallback("weights.sock", False)
+            record_external_weight_fallback("weights.sock")
     worker.disable_extensible_kv_cache()
     assert worker.requested_memory == requested
 
@@ -610,6 +610,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         ),
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
+        iteration_timer=None,
         _pp_send_work=[previous_tensor_send],
         _pp_transport=None,
     )
@@ -855,6 +856,90 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
     assert kv_cache_config.num_blocks == 16
 
 
+def test_extensible_extend_keeps_layers_sharing_host_resident_kv_bound(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The views rebuilt at the final extend omit host-resident layers (HiSparse),
+    whose storage does not move, so they are left as bound. A layer sharing one's
+    KV (a DSpark draft) stays bound to it, while one sharing a device layer's KV
+    follows the new view (#68561)."""
+    from vllm.v1.worker import extensible_kv_cache
+    from vllm.v1.worker.gpu import attn_utils
+
+    host, old_device, new_device = (torch.tensor([float(i)]) for i in range(3))
+    monkeypatch.setattr(
+        attn_utils,
+        "get_shared_kv_cache_layers",
+        lambda config: {"host_reader": "host", "device_reader": "device"},
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "ensure_kv_transfer_initialized",
+        lambda config, kv_cache_config: None,
+    )
+    monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(
+        extensible_kv_cache, "get_kv_connector", lambda config, kv_caches: None
+    )
+    bound: dict[str, torch.Tensor] = {}
+
+    def layer(name):
+        return SimpleNamespace(
+            bind_kv_cache=lambda kv_cache: bound.__setitem__(name, kv_cache)
+        )
+
+    names = ("host", "host_reader", "device", "device_reader")
+    runner = SimpleNamespace(
+        extensible_kv_cache=SimpleNamespace(
+            committed_kv_cache_tensors=lambda config, layout, num_blocks: [],
+            num_committed_blocks=8,
+            physical_bytes=0,
+            commit=lambda num_blocks, defragment, shrink: None,
+            committed_views=lambda config, layout, sizes: {"device": new_device},
+        ),
+        kv_cache_config=SimpleNamespace(
+            num_blocks=4,
+            kv_cache_tensors=[
+                SimpleNamespace(host_resident=True, layers=["host"]),
+                SimpleNamespace(host_resident=False, layers=["device"]),
+            ],
+        ),
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=None,
+            attention_config=SimpleNamespace(hisparse_config=None),
+            cache_config=SimpleNamespace(use_replayssm=False),
+        ),
+        compilation_config=SimpleNamespace(
+            static_forward_context={name: layer(name) for name in names}
+        ),
+        kernel_block_sizes=None,
+        attn_groups=[],
+        speculator=None,
+        device=torch.device("cpu"),
+        kv_caches_by_layer={
+            "host": host,
+            "host_reader": host,
+            "device": old_device,
+            "device_reader": old_device,
+        },
+    )
+
+    extensible_kv_cache.extend_kv_cache(
+        runner, SimpleNamespace(num_blocks=4, kv_cache_tensors=[]), 8
+    )
+
+    expected = {
+        "host": host,
+        "host_reader": host,
+        "device": new_device,
+        "device_reader": new_device,
+    }
+    # The host-resident layer itself is not rebound.
+    assert bound == {name: expected[name] for name in names if name != "host"}
+    assert runner.kv_caches_by_layer == expected
+
+
 GiB = GiB_bytes
 
 
@@ -1025,6 +1110,34 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool", "pool"]
 
 
+def test_shutdown_frees_a_model_whose_loader_references_it():
+    """A loader such as ModelExpress keeps a reference to the model it loaded.
+    Shutdown must drop the model-to-loader binding, or that model and its
+    memory outlive an engine that ran in-process."""
+    import weakref
+
+    from torch import nn
+
+    from vllm.model_executor.model_loader.base_loader import bind_model_loader
+    from vllm.v1.worker.gpu_worker import Worker
+
+    model = nn.Module()
+    bind_model_loader(model, SimpleNamespace(model=model))
+    worker = object.__new__(Worker)
+    worker.profiler = None
+    worker.elastic_ep_executor = SimpleNamespace(shutdown=lambda: None)
+    worker.model_runner = SimpleNamespace(
+        model=model, eplb_state=None, shutdown=lambda: None
+    )
+
+    worker.shutdown()
+    model_ref = weakref.ref(model)
+    del model, worker
+    gc.collect()
+
+    assert model_ref() is None
+
+
 @create_new_process_for_each_test("spawn")
 def test_startup_heap_frozen_before_weight_loading(monkeypatch):
     """Ensure objects alive before startup are frozen by the time weights
@@ -1042,3 +1155,30 @@ def test_startup_heap_frozen_before_weight_loading(monkeypatch):
     monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
     LLM("facebook/opt-125m", enforce_eager=True)
     assert frozen_at_load > frozen_before
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["passes", "fails"])
+def test_probe_forward_leaves_serving_state(fails):
+    """The engine keeps serving after a probe, so the probe leaves the KV
+    connector enabled and the iteration records to the engine's own dummy
+    batches."""
+    connector = SimpleNamespace(disabled=False)
+    connector.set_disabled = lambda disabled: setattr(connector, "disabled", disabled)
+
+    def dummy_run(*args, **kwargs):
+        connector.set_disabled(True)
+        if fails:
+            raise RuntimeError("injected")
+        connector.set_disabled(False)
+
+    worker = object.__new__(gpu_worker.Worker)
+    worker.model_runner = SimpleNamespace(
+        decode_query_len=1, kv_connector=connector, _dummy_run=dummy_run
+    )
+    worker.iteration_timer = Mock()
+
+    error = worker.probe_forward()
+
+    assert (error is not None and "injected" in error) == fails
+    assert not connector.disabled
+    assert not worker.iteration_timer.method_calls

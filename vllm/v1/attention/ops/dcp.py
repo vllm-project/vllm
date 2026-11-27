@@ -29,7 +29,9 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
@@ -634,7 +636,11 @@ def _dcp_a2a_send_recv_buffers(
     )
 
 
-@triton.jit
+# The batch size and the LSE layout (the attention backend's, e.g. a
+# transposed [H, B] buffer) change from step to step; only scalar loads use
+# them, so the kernel compiles once per NUM_SEQS_POW2 bucket instead of once
+# per their alignments.
+@triton.jit(do_not_specialize=["num_seqs", "lse_stride_B", "lse_stride_H"])
 def _dcp_a2a_pack_send_kernel(
     out_ptr,
     lse_ptr,
@@ -1221,6 +1227,22 @@ def reserve_query_head_storage(
 _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
 
+def _use_cutedsl_direct_a2a(
+    world_size: int, heads_per_rank: int, head_dim: int, dtype: torch.dtype
+) -> bool:
+    # The CuTe DSL kernels hold every source in registers (W <= 8), push one
+    # LSE per thread (H / W <= 64) and cover MLA's 512-dim BF16 latent.
+    return (
+        dtype == torch.bfloat16
+        and 1 < world_size <= 8
+        and 0 < heads_per_rank <= 64
+        and head_dim == 512
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_cutedsl()
+    )
+
+
 class DirectDCPA2AWorkspace(DirectCPWorkspace):
     """Persistent symmetric buffers for direct DCP output exchange."""
 
@@ -1268,6 +1290,15 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         self.received_signal, self.peer_signal_ptrs = self._allocate(
             signal_shape, torch.int32
         )
+        # Set on SM100 to select the CuTe DSL kernels (same buffers and
+        # protocol, two launches instead of four): [W + 1] int32 per ubatch.
+        self.cutedsl_counters: torch.Tensor | None = None
+        if _use_cutedsl_direct_a2a(self.world_size, heads_per_rank, head_dim, dtype):
+            self.cutedsl_counters = torch.zeros(
+                (num_ubatches, self.world_size + 1),
+                dtype=torch.int32,
+                device=self.device,
+            )
 
     def lse_reduce(
         self,
@@ -1282,7 +1313,7 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         output = partial_output.new_empty(
             (num_tokens, self.heads_per_rank, self.head_dim)
         )
-        torch.ops._C.direct_dcp_a2a_lse_reduce(
+        args = (
             partial_output,
             partial_lse,
             seq_lens,
@@ -1300,6 +1331,16 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
             self.max_num_tokens,
             is_lse_base_on_e,
         )
+        if self.cutedsl_counters is None:
+            torch.ops._C.direct_dcp_a2a_lse_reduce(*args)
+        else:
+            from vllm.v1.attention.ops.dcp_direct_a2a_cutedsl import (
+                direct_dcp_a2a_lse_reduce_cutedsl,
+            )
+
+            direct_dcp_a2a_lse_reduce_cutedsl(
+                *args, counters=self.cutedsl_counters[ubatch]
+            )
         return output
 
 
@@ -1648,6 +1689,14 @@ class MLADCPManager:
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self.num_heads = num_heads
+        self.query_head_dim = query_head_dim
+        self.output_head_dim = output_head_dim
+        self.query_dtype = query_dtype
+        self.output_dtype = output_dtype
+        self.is_lse_base_on_e = is_lse_base_on_e
+        self.direct_a2a: DirectDCPA2AWorkspace | None = None
         # Set when the combine can merge W_UV-projected outputs instead.
         self.v_up_proj_combine: Callable[..., None] | None = None
 
@@ -1670,7 +1719,7 @@ class MLADCPManager:
             vllm_config.kernel_config.enable_jit_warmup
             and self.use_a2a
             and (
-                not self._has_direct_a2a_workspace
+                self.direct_a2a is None
                 or self.max_num_tokens
                 < vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -1692,6 +1741,14 @@ class MLADCPManager:
                 is_base_e=is_lse_base_on_e,
                 return_lse=False,
             )
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.direct_a2a is not None
+            and self.direct_a2a.cutedsl_counters is not None
+        ):
+            from vllm.v1.attention.ops import dcp_direct_a2a_cutedsl
+
+            dcp_direct_a2a_cutedsl.register_warmup(self.group.world_size, num_heads)
         # Largest batch the query gather serves without NCCL; 0 if never.
         self.direct_query_gather_max_tokens = 0
         self.query_gather = (
@@ -1723,7 +1780,7 @@ class MLADCPManager:
                 dtype,
                 self.num_ubatches,
             )
-        self._has_direct_a2a_workspace = direct_workspace is not None
+        self.direct_a2a = direct_workspace
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
             return functools.partial(

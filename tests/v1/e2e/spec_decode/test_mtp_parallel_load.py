@@ -19,8 +19,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.reader import Counter, Metric
 
-DEEPSEEK_MTP_MAIN_RANDOM = "vllm-project/deepseek_mtp_main_random"
-DEEPSEEK_MTP_DRAFT_RANDOM = "vllm-project/deepseek_mtp_draft_random"
+DEEPSEEK_MTP_MAIN_RANDOM = "vllm/deepseek_mtp_main_random"
+DEEPSEEK_MTP_DRAFT_RANDOM = "vllm/deepseek_mtp_draft_random"
 QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 
 PROMPT = "The capital of France is"

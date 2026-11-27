@@ -25,9 +25,9 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
-MODEL = "vllm-project/Kimi-K3-8L-dummy"
+MODEL = "vllm/Kimi-K3-8L-dummy"
 # The recipe's DSpark draft, reading target layers that exist in MODEL.
-DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
+DRAFT = "vllm/Kimi-K3-DSpark-for-8L-dummy"
 
 # Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
 # unaligned tail, and each later turn appends TURN_TOKENS random tokens.
@@ -279,15 +279,11 @@ class Turn:
         return self.output[0] == self.recompute[0]
 
 
-def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
-    """A turn must reuse the previous prompt up to its last checkpoint.
-
-    EAGLE-style drafts drop the trailing unit, so the checkpoint is one earlier.
-    """
+def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
+    """A turn reuses the previous prompt up to its last checkpoint."""
     if not prev_prompt_len:
         return 0
-    checkpoint = (prev_prompt_len - 1) // hit_unit * hit_unit
-    return max(checkpoint - hit_unit, 0) if spec else checkpoint
+    return (prev_prompt_len - 1) // hit_unit * hit_unit
 
 
 @contextlib.contextmanager
@@ -345,11 +341,15 @@ def _run_conversation(
         else:
             computed = output = _complete(decode_url, prompt, "conv")
         recompute = _complete(decode_url, prompt, f"recompute-{turn}")
+        expected_cached = _expected_cached(prev_len, hit_unit)
+        if deployment.prefill is not None:
+            # The prefiller stops at the checkpoint, so its hits end a unit lower.
+            expected_cached = max(expected_cached - hit_unit, 0)
         turns.append(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit, mode.spec),
+                expected_cached=expected_cached,
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),
