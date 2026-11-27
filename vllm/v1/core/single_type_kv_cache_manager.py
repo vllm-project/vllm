@@ -1168,9 +1168,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_group, **kwargs)
         params = self.manager_config.params
         assert isinstance(params, SlidingWindowManager.Params)
-        # The worker frees by the window alone. A sink group reports a reach
-        # of 0 to the cache-hit logic, but it must still skip the tokens
-        # before the window.
+        # The worker masks by sliding_window_reach, which is 0 for a sink
+        # group, so the pinned sink stays readable. The cache-hit logic still
+        # skips tokens before the window, so it uses this window-based count.
         self.num_retained_tokens = (
             params.sliding_window - 1 + params.extra_retained_tokens
         )

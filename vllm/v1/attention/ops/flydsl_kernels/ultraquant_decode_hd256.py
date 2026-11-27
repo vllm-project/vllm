@@ -130,7 +130,6 @@ def build_ultraquant_decode_hd256_module(
             query_group_size=query_group_size,
             kv_block_size=kv_block_size,
             tile_groups_per_partition=tile_groups_per_partition,
-            fuse_qrot=fuse_qrot,
             stride_q_seq=stride_q_seq,
             stride_q_head=stride_q_head,
             num_verify_tokens=int(num_verify_tokens),
@@ -160,8 +159,6 @@ def build_ultraquant_decode_hd256_module(
 
     QG = int(query_group_size)
     QG_LOAD_ITERS = (QG * Q_GROUPS_PER_ROW) // WARP_SIZE  # 8@QG16, 4@QG8, 3@QG6
-
-    _BLOCK_THREADS = WARP_SIZE
 
     # Fuse Q rotation (q_rot = Q @ PiT) into this kernel as an in-register WHT.
     # The 8-row lane map masks its two inactive rows for GQA-6.
@@ -703,7 +700,6 @@ def _build_wide_verify(
     query_group_size: int = QUERY_GROUP_SIZE,
     kv_block_size: int = KV_BLOCK_SIZE,
     tile_groups_per_partition: int = 1,
-    fuse_qrot: bool = True,
     stride_q_seq: int | None = None,
     stride_q_head: int | None = None,
     num_verify_tokens: int = 1,
@@ -715,11 +711,11 @@ def _build_wide_verify(
     `[num_blocks, block_size, num_kv_heads, padded_slot]` uint8 AoS.
 
     QK is always scaled FP4×E4M3 MFMA; V always uses native CVT + HW
-    transpose; tile-groups are always strided. `fuse_qrot` selects the
-    in-kernel WHT when the query layout is eligible.
+    transpose; tile-groups are always strided.
 
     Four-wave schedule for ``num_verify_tokens`` 2..8. One read of each KV
-    tile scores that many query tokens. Requires query group size 6.
+    tile scores that many query tokens. Q is rotated on the host. Query group
+    size is 6, 8 or 16.
     """
     # QG=6 (Qwen3.6 full-attention layers) reuses the 8-row WHT lane map with
     # two inactive rows masked. Padded MFMA rows past QG are dropped by the
@@ -752,12 +748,6 @@ def _build_wide_verify(
     # three instructions. Width 2 is 12 rows, one instruction.
     NT = (NUM_Q * QG + 15) // 16
     QG_LOAD_ITERS = (QG * Q_GROUPS_PER_ROW) // WARP_SIZE  # 8@QG16, 4@QG8, 3@QG6
-
-    _BLOCK_THREADS = WARP_SIZE
-
-    # Fuse Q rotation (q_rot = Q @ PiT) into this kernel as an in-register WHT.
-    # The 8-row lane map masks its two inactive rows for GQA-6.
-    _FUSE_QROT = bool(fuse_qrot)
 
     # Cache policy for the read-once KV code stream. gfx9 buffer aux bits:
     # bit0=sc0, bit1=nt, bit4=sc1; 0 = no hint, 2 = nt, 18 = nt|sc1.
@@ -903,120 +893,9 @@ def _build_wide_verify(
         cent_lds[c_idx_safe] = fx.Float32(cent_buf[c_idx_safe])
         gpu.barrier()
 
-        # ===== STEP B': in-kernel Q rotation (fused WHT) ==================
-        # PiT is the orthonormal Sylvester Hadamard with a column permutation
-        # folded in on the host, so q_rot = Q @ PiT is a Walsh-Hadamard
-        # transform: 8 butterfly stages instead of a 256x256 matmul, cheap
-        # enough to redo in every partition instead of a separate kernel.
-        # After the E4M3 haircut it matches the matmul bit-for-bit.
-        #
-        # Lane map: lane L owns row r = L>>3 and the 32 CONSECUTIVE head-dims
-        # d = (L&7)*32 + t. That puts butterfly stages 0..4 (strides 1..16)
-        # entirely inside one lane's registers, and leaves only stages 5..7
-        # (strides 32/64/128 == chunk XOR 1/2/4) needing a cross-lane exchange.
-        if const_expr(_FUSE_QROT):
-            _wrow = lane >> 3  # 0..7  row within the group
-            _wchk = lane & 7  # 0..7  32-dim chunk
-            # inv(qperm) is a pure bit permutation of the head-dim index:
-            #   dest = (d & 0x8F) | ((d>>2)&0x10) | ((d<<1)&0x60)
-            # which splits additively into a compile-time part in t and a
-            # per-lane part in the chunk index (verified exhaustively):
-            #   ct(t) = (t & 0x0F) | ((t & 0x10) << 1)
-            #   rt(c) = ((c&2)<<3) | ((c&1)<<6) | ((c&4)<<5)
-            _perm_base = ((_wchk & 2) << 3) | ((_wchk & 1) << 6) | ((_wchk & 4) << 5)
-            _inv_sqrtD = fx.Float32(1.0 / math.sqrt(HEAD_SIZE))
-            for _qi in range_constexpr(NUM_Q):
-                # Bind before the runtime `if`. The FlyDSL rewriter does not
-                # close a branch over a Python list.
-                _qsrc = q_rows[_qi]
-                _row_base = fx.Int32(_qi * QG)
-                for _qit in range_constexpr((QG + 7) // 8):
-                    _qrow = _wrow + _qit * 8
-                    if _qrow < QG:
-                        _qb = (
-                            _qsrc * _stride_q_seq
-                            + (kv_h * QG + _qrow) * _stride_q_head
-                            + _wchk * 32
-                        )
-                        # ---- load this lane's 32 raw-Q head-dims (4 x dwordx4) ----
-                        _v = []
-                        for _j in range_constexpr(4):
-                            _raw = load_vec(q_buf, (_qb + _j * 8) // 2, 4)
-                            _rb = _raw.bitcast(fx.BFloat16)
-                            for _e in range_constexpr(8):
-                                _v.append(_rb[_e].to(fx.Float32))
-                        # ---- stages 0..4: in-register, no LDS, no cross-lane ----
-                        for _s in range_constexpr(5):
-                            _st = 1 << _s
-                            _nx = list(_v)
-                            for _g in range_constexpr(32 // (2 * _st)):
-                                for _k in range_constexpr(_st):
-                                    _i0 = _g * 2 * _st + _k
-                                    _i1 = _i0 + _st
-                                    _a, _b = _v[_i0], _v[_i1]
-                                    _nx[_i0] = _a + _b
-                                    _nx[_i1] = _a - _b
-                            _v = _nx
-                        # ---- stages 5..7: chunk XOR 1/2/4 via ds_swizzle ----
-                        # ds_swizzle_b32 offset (bit15=0, 32-lane groups):
-                        #   [4:0]=and_mask [9:5]=or_mask [14:10]=xor_mask
-                        # pure XOR k -> and_mask=0x1F, or_mask=0, xor_mask=k. The
-                        # partner is always within the same 32-lane group (k<=4).
-                        for _s in range_constexpr(3):
-                            _k = 1 << _s
-                            _swz = fx.Int32((_k << 10) | 0x1F).ir_value()
-                            # High half of the pair computes (partner - mine), the low
-                            # half (mine + partner). Fold that into a single sign
-                            # computed ONCE per stage, so each element costs one
-                            # multiply-add rather than a branch or a per-element select.
-                            _sf = ((_wchk & _k) != 0).select(
-                                fx.Float32(-1.0), fx.Float32(1.0)
-                            )
-                            _nx = []
-                            for _t in range_constexpr(32):
-                                _mi = _v[_t].bitcast(fx.Int32).ir_value()
-                                _pt = fx.Int32(
-                                    rocdl.ds_swizzle(T.i32, _mi, _swz)
-                                ).bitcast(fx.Float32)
-                                _nx.append(_v[_t] * _sf + _pt)
-                            _v = _nx
-                        # ---- 1/sqrt(D) normalization + E4M3 haircut -> bf16 ----
-                        # cvt_pk_fp8_f32 is the SAME instruction the QK operand build
-                        # uses, so this reproduces the host haircut exactly. E4M3 is a
-                        # subset of bf16, so the bf16 store below is lossless and every
-                        # downstream consumer stays byte-identical.
-                        _hc = []
-                        for _p in range_constexpr(16):
-                            _w = rocdl.cvt_pk_fp8_f32(
-                                T.i32,
-                                _v[2 * _p] * _inv_sqrtD,
-                                _v[2 * _p + 1] * _inv_sqrtD,
-                                0,
-                                0,
-                            )
-                            _u = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), _w, 0))
-                            _hc.append(_u[0].to(fx.BFloat16))
-                            _hc.append(_u[1].to(fx.BFloat16))
-                        # ---- permuted store ----
-                        # ct(t) maps t=0..15 -> 0..15 and t=16..31 -> 32..47, i.e. TWO
-                        # contiguous 16-element runs, so the scatter is still 4 aligned
-                        # 16-byte vector stores rather than 32 scalar writes.
-                        _qrow_elem = (_row_base + _qrow) * HEAD_SIZE
-                        for _half in range_constexpr(2):
-                            for _q4 in range_constexpr(2):
-                                _elems = [
-                                    _hc[_half * 16 + _q4 * 8 + _e] for _e in range(8)
-                                ]
-                                _vec = fx.Vector.from_elements(
-                                    _elems, dtype=fx.BFloat16
-                                )
-                                _dst = _qrow_elem + _perm_base + (_half * 32 + _q4 * 8)
-                                (q_lds_i32 + _dst // 2).store(_vec.bitcast(fx.Int32))
-            gpu.barrier()
-
         # ===== STEP B: Load pre-rotated q_rot → row-major Q LDS ==========
-        for _qi in range_constexpr(0 if _FUSE_QROT else NUM_Q):
-            for c in range_constexpr(0 if _FUSE_QROT else QG_LOAD_ITERS):
+        for _qi in range_constexpr(NUM_Q):
+            for c in range_constexpr(QG_LOAD_ITERS):
                 row_chunk = lane + c * WARP_SIZE
                 row = row_chunk >> Q_ROW_SHIFT  # 0..QG-1
                 col_b = row_chunk & Q_COL_MASK  # 0..Q_GROUPS_PER_ROW-1

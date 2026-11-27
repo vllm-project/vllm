@@ -785,8 +785,8 @@ def flydsl_ultraquant_decode_attention(
     # ---- Pooled buffers ---------------------------------------------------
     # Under graph capture, take scratch from the graph's own allocations
     # instead of the shared pool. The pool is shared across layers, and at
-    # high KV-pool utilization the shared scratch corrupts the UltraQuant
-    # target and the draft in graph replay (see the accuracy diagnosis).
+    # high KV-pool utilization the shared scratch corrupts UltraQuant graph
+    # replay.
     if torch.cuda.is_current_stream_capturing():
         _SEGM_POOL._bufs.clear()
     pool_bufs = _SEGM_POOL.get(

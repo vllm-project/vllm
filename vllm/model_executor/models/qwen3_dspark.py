@@ -225,9 +225,8 @@ class Qwen3DSparkModel(DFlashQwen3Model):
         # 4 tokens rounded up to whole KV pages.
         # The draft model is built with its own cache dtype, so this cannot
         # key off the target's ultraquant_4bit. Key off the windowed backend.
-        # A full-length draft cache is what kept c40 behind FP8. The attention
-        # impl was already built with no sliding window; only the cache
-        # manager sees this window.
+        # The attention impl was already built with no sliding window; only the
+        # cache manager sees this window.
         backend = vllm_config.attention_config.backend
         if backend is not None and backend.name == "ROCM_AITER_FA_DSPARK":
             from vllm.v1.attention.ops.dspark_draft_window import (
