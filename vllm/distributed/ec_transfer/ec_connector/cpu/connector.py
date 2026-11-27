@@ -66,6 +66,17 @@ class ECCPUConnector(ECConnectorBase):
         return ECCPUScheduler(vllm_config)
 
     # Worker-side forwarders.
+    def start_save_caches(
+        self, encoder_cache: dict[str, torch.Tensor] | None = None, **kwargs
+    ) -> None:
+        if encoder_cache is None:
+            return
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, ECCPUConnectorMetadata)
+        for mm_hash in metadata.saves:
+            if mm_hash in encoder_cache:
+                self.save_caches(encoder_cache, mm_hash)
+
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
     ) -> None:

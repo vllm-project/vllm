@@ -28,12 +28,12 @@ class _DoneCompletion:
 class RecordingFSWorker(FSOffloadingWorker):
     """Concrete FSOffloadingWorker that records I/O ops instead of doing I/O."""
 
-    def __init__(self, block_size_factor: int):
+    def __init__(self, blocks_per_file: int):
         mapper = FileMapper(
             root_dir="/tmp/test",
             model_name="test",
             tokens_per_hash=16,
-            blocks_per_file=block_size_factor,
+            blocks_per_file=blocks_per_file,
             tp_size=1,
             pp_size=1,
             pcp_size=1,
@@ -41,7 +41,7 @@ class RecordingFSWorker(FSOffloadingWorker):
             rank=0,
             dtype="float16",
         )
-        super().__init__(file_mapper=mapper, block_size_factor=block_size_factor)
+        super().__init__(file_mapper=mapper, blocks_per_file=blocks_per_file)
         self.recorded: list[tuple[str, list[FileOp]]] = []
 
     def submit_io(self, file_ops, is_store, ready_event):
@@ -69,12 +69,12 @@ def _make_device_ptrs(
 
 
 def test_offset_within_single_file(monkeypatch):
-    """block_size_factor=3, block_indices=(1,), 2 blocks → 1 file at positions 1,2."""
+    """blocks_per_file=3, block_indices=(1,), 2 blocks → 1 file at positions 1,2."""
     import torch
 
     monkeypatch.setattr(torch, "Event", lambda: MagicMock(record=MagicMock()))
 
-    worker = RecordingFSWorker(block_size_factor=3)
+    worker = RecordingFSWorker(blocks_per_file=3)
     block_size = 64
     device_ptrs = _make_device_ptrs(
         n_blocks=2, n_data_refs=1, block_size=block_size, block_indices=(1,)
@@ -94,7 +94,7 @@ def test_offset_within_single_file(monkeypatch):
 
 
 def test_offset_spanning_two_files(monkeypatch):
-    """block_size_factor=3, block_indices=(2,), 3 blocks → 2 files.
+    """blocks_per_file=3, block_indices=(2,), 3 blocks → 2 files.
 
     First file: 1 block at position 2.
     Second file: 2 blocks at positions 0,1.
@@ -103,7 +103,7 @@ def test_offset_spanning_two_files(monkeypatch):
 
     monkeypatch.setattr(torch, "Event", lambda: MagicMock(record=MagicMock()))
 
-    worker = RecordingFSWorker(block_size_factor=3)
+    worker = RecordingFSWorker(blocks_per_file=3)
     block_size = 64
     device_ptrs = _make_device_ptrs(
         n_blocks=3, n_data_refs=1, block_size=block_size, block_indices=(2,)

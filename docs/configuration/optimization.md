@@ -342,14 +342,18 @@ Batch-level DP needs to be implemented on a per-model basis,
 and enabled by setting `supports_encoder_tp_data = True` in the model class.
 Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
 
-Known supported models (with corresponding benchmarks):
+Known supported models (with implementation references and benchmarks where available):
 
 - dots_ocr (<https://github.com/vllm-project/vllm/pull/25466>)
+- Gemma 4 (<https://github.com/vllm-project/vllm/pull/60314>)
 - GLM-4.1V or above (<https://github.com/vllm-project/vllm/pull/23168>)
+- HY4 VL and HY4-Flash VL (<https://github.com/vllm-project/vllm/pull/69676>)
 - InternVL (<https://github.com/vllm-project/vllm/pull/23909>)
+- Kimi-K2.5/K2.6 (<https://github.com/vllm-project/vllm/pull/68739>)
 - Kimi-VL (<https://github.com/vllm-project/vllm/pull/23817>)
 - Llama4 (<https://github.com/vllm-project/vllm/pull/18368>)
 - MiniCPM-V-2.5 or above (<https://github.com/vllm-project/vllm/pull/23327>, <https://github.com/vllm-project/vllm/pull/23948>)
+- MiMo-V2.6 (<https://github.com/vllm-project/vllm/pull/64179>)
 - Qwen2-VL or above (<https://github.com/vllm-project/vllm/pull/22742>, <https://github.com/vllm-project/vllm/pull/24955>, <https://github.com/vllm-project/vllm/pull/25445>)
 - Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
