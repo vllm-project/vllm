@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger, set_vllm_process_name
 from vllm.platforms import current_platform
 from vllm.platforms.interface import in_wsl
-from vllm.ray.lazy_utils import is_in_ray_actor
+from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
@@ -136,6 +136,14 @@ def _maybe_force_spawn():
 
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
+    elif is_ray_initialized():
+        # A forked child inherits Ray's initialized state but not the threads
+        # behind it, so its first Ray call (e.g. creating the executor's
+        # placement group) hangs. Spawn, and connect to the same cluster.
+        import ray
+
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
+        reasons.append("Ray is initialized and cannot be used from a forked child")
 
     # NUMA binding uses executable hijacking, which requires spawn.
     if any(

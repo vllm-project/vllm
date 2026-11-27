@@ -57,6 +57,7 @@ def test_numa_bind_cli_start_method(monkeypatch, start_method, numa_args, force_
     monkeypatch.setattr(sys, "argv", ["vllm", "serve", *numa_args])
     for check in (
         "is_in_ray_actor",
+        "is_ray_initialized",
         "cuda_is_initialized",
         "xpu_is_initialized",
         "in_wsl",
@@ -66,6 +67,25 @@ def test_numa_bind_cli_start_method(monkeypatch, start_method, numa_args, force_
     _maybe_force_spawn()
     expected_method = "spawn" if force_spawn else start_method
     assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == expected_method
+
+
+def test_ray_initialized_forces_spawn(monkeypatch):
+    """A forked child inherits the driver's initialized Ray state without the
+    threads behind it, and its first Ray call hangs, so spawn and point the
+    child at the same cluster."""
+    ray = pytest.importorskip("ray")
+    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["vllm"])
+    for check in ("cuda_is_initialized", "xpu_is_initialized", "in_wsl"):
+        monkeypatch.setattr(system_utils, check, lambda: False)
+    ray.init(num_cpus=1, include_dashboard=False)
+    try:
+        _maybe_force_spawn()
+        assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
+        assert os.environ["RAY_ADDRESS"] == ray.get_runtime_context().gcs_address
+    finally:
+        ray.shutdown()
 
 
 def test_suppress_stdout_when_sys_stdout_has_no_fd(capfd):
