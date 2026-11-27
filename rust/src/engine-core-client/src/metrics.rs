@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use tracing::info;
 use vllm_metrics::{
-    EngineLabels, HistogramMetric, RequestMetrics, SchedulerMetrics, SchedulerStatsHandles,
+    EngineLabels, HistogramMetric, METRICS, RequestMetrics, SchedulerMetrics, SchedulerStatsHandles,
 };
 
 use crate::protocol::stats::{SchedulerIterationDetails, SchedulerStats};
@@ -67,6 +67,9 @@ impl SchedulerStatsRecorder {
         engines: &[ConnectedEngine],
     ) -> Self {
         Self::record_cache_config_info(metrics, engines);
+        if let Some(engine) = engines.first() {
+            metrics.set_kv_cache_device(engine.ready_response.kv_cache_device());
+        }
         let engines = engines
             .iter()
             .filter_map(|engine| {
@@ -181,7 +184,13 @@ fn iteration_log_line(
     if details.is_dummy {
         line.push_str(" (dummy)");
     }
-    write!(line, ", GPU KV cache usage: {:.1}%", kv_cache_usage * 100.0).unwrap();
+    write!(
+        line,
+        ", {} KV cache usage: {:.1}%",
+        METRICS.scheduler.kv_cache_device(),
+        kv_cache_usage * 100.0
+    )
+    .unwrap();
     if details.num_encoder_inputs > 0 {
         write!(
             line,
