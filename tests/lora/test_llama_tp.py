@@ -87,8 +87,8 @@ def generate_and_test(llm, llama32_lora_files):
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("cudagraph_specialize_lora", [True, False])
-def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
-    llm = vllm.LLM(
+def test_llama_lora(vllm_runner, llama32_lora_files, cudagraph_specialize_lora: bool):
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         # also test odd max_num_seqs
@@ -98,43 +98,46 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=cudagraph_specialize_lora,
         ),
-    )
-    generate_and_test(llm, llama32_lora_files)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, llama32_lora_files)
 
 
 @create_new_process_for_each_test()
-def test_llama_lora_transformers_backend(llama32_lora_files):
+def test_llama_lora_transformers_backend(vllm_runner, llama32_lora_files):
     """The adapter also targets `lm_head` and `embed_tokens`."""
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         model_impl="transformers",
         enable_lora=True,
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
-    )
-    generate_and_test(llm, llama32_lora_files)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, llama32_lora_files)
 
 
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-def test_llama_lora_tp4(llama32_lora_files):
-    llm = vllm.LLM(
+def test_llama_lora_tp4(vllm_runner, llama32_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
         tensor_parallel_size=4,
-    )
-    generate_and_test(llm, llama32_lora_files)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, llama32_lora_files)
 
 
 @multi_gpu_test(num_gpus=4)
-def test_llama_lora_tp4_fully_sharded_loras(llama32_lora_files):
-    llm = vllm.LLM(
+def test_llama_lora_tp4_fully_sharded_loras(vllm_runner, llama32_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=8,
@@ -142,5 +145,6 @@ def test_llama_lora_tp4_fully_sharded_loras(llama32_lora_files):
         max_model_len=1024,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
-    )
-    generate_and_test(llm, llama32_lora_files)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, llama32_lora_files)

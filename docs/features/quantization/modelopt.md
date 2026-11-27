@@ -20,18 +20,21 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
-- `INT8_PB_WO`: block-scaled INT8 weight-only linear layers with 16-bit
-  activations (use `quantization="modelopt_int8"`): a symmetric int8 `weight`
-  and a `weight_scale` per `group_size` input elements (for example 16 or 32).
-  `group_size` is required. vLLM serves these layers with its mixed-precision
-  (WNA16) kernels, such as Marlin and Humming. MoE experts are not supported.
+- `INT8_PB_WO`: block-scaled INT8 weight-only linear layers and MoE experts
+  with 16-bit activations (use `quantization="modelopt_int8"`): a symmetric
+  int8 `weight` and a `weight_scale` per `group_size` input elements (for
+  example 16 or 32). `group_size` is required. vLLM serves these layers with
+  its mixed-precision (WNA16) kernels, such as Marlin and Humming on NVIDIA and
+  Triton on ROCm. MoE experts run on NVIDIA GPUs only, on the WNA16 MoE
+  kernels (Marlin, Triton, or Humming with `--moe-backend humming`).
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`). Each layer may use any format above;
-  `INT8_PB_WO` layers take their own `group_size`. A token embedding marked
-  `W4A16_NVFP4` stays packed and only the looked-up rows are dequantized; the
-  model must build its embedding with the checkpoint prefix, as Nemotron-H does.
-  Such an embedding cannot be tied to the LM head, so checkpoints that tie it
-  are rejected.
+  `INT8_PB_WO` layers take their own `group_size`. `INT8_PB_WO` routed
+  experts must use it for every expert and projection of their MoE layer, with
+  one `group_size`. A token embedding marked `W4A16_NVFP4` stays packed and only
+  the looked-up rows are dequantized; the model must build its embedding with
+  the checkpoint prefix, as Nemotron-H does. Such an embedding cannot be tied to
+  the LM head, so checkpoints that tie it are rejected.
 
 For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
 when required by the GPU, for example on AMD MI300.
@@ -75,7 +78,8 @@ compute-bound steps draw realistic power (a narrow range runs faster than real
 weights on power-capped GPUs).
 ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
 gate/up global scales, including for FlashInfer MegaMoE
-(`--moe-backend flashinfer_moe_ep_cutedsl`).
+(`--moe-backend flashinfer_moe_ep_cutedsl`). On SM107 GPUs, see
+[FlashInfer MegaMoE on SM107](../../serving/expert_parallel_deployment.md#flashinfer-megamoe-on-sm107).
 Muse Spark's NVIDIA `deep_gemm_mega_moe` backend also supports dummy loading:
 it initializes valid NVFP4 scales and finalizes its expert weights and residual
 constants before the first forward. Enable expert parallelism for this backend.

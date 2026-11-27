@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -52,6 +52,12 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             --kv-transfer-config \
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
     """
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     def __init__(
         self,

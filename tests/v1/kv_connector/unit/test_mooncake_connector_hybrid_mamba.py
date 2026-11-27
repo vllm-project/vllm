@@ -24,6 +24,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
+    MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
@@ -49,7 +50,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .test_mooncake_connector import patch_worker_dependencies
+from .test_mooncake_connector import _stub_worker_shutdown, patch_worker_dependencies
 from .utils import (
     create_request,
     create_scheduler,
@@ -64,7 +65,7 @@ def noop_shutdown():
 
 
 def make_hybrid_gdn_kv_cache_config(
-    block_size: int, num_blocks: int = 16, mamba_cache_mode: str = "none"
+    block_size: int, num_blocks: int = 16, enable_prefix_caching: bool = False
 ) -> KVCacheConfig:
     gdn_spec = MambaSpec(
         block_size=block_size,
@@ -90,7 +91,9 @@ def make_hybrid_gdn_kv_cache_config(
             make_kv_cache_group(
                 ["model.layers.1.linear_attn"],
                 gdn_spec,
-                manager_config=MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                manager_config=MambaManager.config(
+                    enable_prefix_caching=enable_prefix_caching
+                ),
             ),
         ],
     )
@@ -139,10 +142,10 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
 ):
     vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        block_size, num_blocks=64, mamba_cache_mode="align"
+        block_size, num_blocks=64, enable_prefix_caching=True
     )
     scheduler = create_scheduler(
         vllm_config,
@@ -179,6 +182,7 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
     scheduler.add_request(replay)
     output = scheduler.schedule()
 
+    assert isinstance(output.kv_connector_metadata, MooncakeConnectorMetadata)
     [pull] = output.kv_connector_metadata.reqs_to_recv["prefill-engine"].values()
     attn_pull, gdn_pull = pull.local_block_ids
     assert len(attn_pull) == expected_attn_pull_blocks
@@ -207,6 +211,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
+    assert request.kv_transfer_params is not None
     assert request.kv_transfer_params["_p_side_truncated"] is True
 
     # Re-adding or rescheduling the request must not truncate another token.
@@ -256,7 +261,9 @@ def test_lookahead_hashes_follow_truncated_prefill(
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     kv_config.hash_block_size = hash_block_size
     group = kv_config.kv_cache_groups[1]
-    group.manager_config = group.manager_config.replace_params(mamba_cache_mode="align")
+    group.manager_config = group.manager_config.replace_params(
+        enable_prefix_caching=True
+    )
     scheduler = scheduler_cls(config, "test-engine", kv_config)
     init_none_hash(sha256)
     hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
@@ -318,6 +325,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         num_blocks = kv_cache_config.num_blocks
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
@@ -353,7 +361,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -375,6 +383,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
         factor = 4
         worker._physical_blocks_per_logical_kv_block = factor
 
@@ -392,7 +401,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         assert worker.kv_block_len_per_layer == [physical_page_bytes]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -405,13 +414,16 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
     worker.use_mla = False
-    worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
+    worker.transfer_backend = SimpleNamespace(
+        register_regions=lambda *_: None,
+        unregister_regions=lambda *_: None,
+    )
     worker.is_kv_consumer = True
     worker.tp_rank = 0
     worker.tp_size = 1
@@ -421,11 +433,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         layer_name: spec
         for group in kv_cache_config.kv_cache_groups
         for layer_name, spec in group.kv_cache_specs.items()
-    }
-    worker._layer_group_indices = {
-        layer_name: group_index
-        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
-        for layer_name in group.layer_names
     }
 
     ratio = 4
@@ -503,13 +510,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes
-    ]
-    assert dst_ptrs == [
-        remote_base_addr + remote_logical_block * ratio * physical_page_bytes
-    ]
-    assert lengths == [num_kernel_blocks * physical_page_bytes]
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [remote_base_addr + remote_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(lengths, [num_kernel_blocks * physical_page_bytes])
 
     def split_contiguous_blocks(src_ids, dst_ids):
         return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
@@ -543,9 +552,9 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     ]
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == expected_src_ptrs
-    assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * num_kernel_blocks
+    np.testing.assert_array_equal(src_ptrs, expected_src_ptrs)
+    np.testing.assert_array_equal(dst_ptrs, expected_dst_ptrs)
+    np.testing.assert_array_equal(lengths, [physical_page_bytes] * num_kernel_blocks)
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
@@ -574,6 +583,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         fa_cache_width = (
@@ -585,8 +595,8 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         gdn_cache = backing[:3]
 
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
-        ) as batch_register_memory:
+            worker.transfer_backend, "register_regions", return_value=None
+        ) as register_regions:
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
@@ -598,13 +608,14 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             fa_cache.data_ptr(),
             gdn_cache.data_ptr(),
         ]
-        batch_register_memory.assert_called_once()
-        registered_ptrs, registered_lens = batch_register_memory.call_args[0]
-        assert registered_ptrs == [backing.data_ptr()]
-        assert registered_lens == [backing.untyped_storage().nbytes()]
+        register_regions.assert_called_once()
+        regions = register_regions.call_args.args[0]
+        assert [(region.base_addr, region.length) for region in regions] == [
+            (backing.data_ptr(), backing.untyped_storage().nbytes())
+        ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -626,6 +637,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 0x100
         transfer_id = "xfer-hybrid-gdn"
@@ -709,24 +721,30 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == [
-            0x5000 + 4 * block_len,
-            0x1000 + 10 * block_len,
-        ]
-        assert dst_ptrs == [
-            0x6000 + 7 * block_len,
-            0x2000 + 30 * block_len,
-        ]
-        assert lengths == [block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs,
+            [
+                0x5000 + 4 * block_len,
+                0x1000 + 10 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs,
+            [
+                0x6000 + 7 * block_len,
+                0x2000 + 30 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(lengths, [block_len, 2 * block_len])
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
 
@@ -756,6 +774,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         worker.transfer_topo = SimpleNamespace(is_kv_layout_blocks_first=False)
         regions = worker._get_transfer_regions(
@@ -779,5 +798,5 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None

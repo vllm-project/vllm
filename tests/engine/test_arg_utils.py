@@ -104,6 +104,26 @@ def test_watermark_config_cli():
     assert config.enforce is True
 
 
+def test_watermark_config_cli_reads_key_file(tmp_path):
+    """A mounted secret keeps the key off the command line."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("1234567890\n")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            json.dumps({"key_file": str(key_file)}),
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.key == 1234567890
+
+
 @pytest.mark.parametrize(
     "option",
     ["--gpu-memory-utilization", "--device-memory-utilization"],
@@ -612,6 +632,20 @@ def test_attention_config():
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
 
+    # test --attention-backend auto keeps automatic selection
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "auto",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.backend is None
+
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
         [
@@ -640,6 +674,35 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("from_cli", [False, True], ids=["python", "cli"])
+def test_attention_backend_rejects_torch_sdpa(from_cli):
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if from_cli:
+        parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+        args = parser.parse_args(
+            [
+                "--model",
+                "facebook/opt-125m",
+                "--attention-backend",
+                "TORCH_SDPA",
+            ]
+        )
+        engine_args = EngineArgs.from_cli_args(args)
+    else:
+        engine_args = EngineArgs(
+            model="facebook/opt-125m",
+            attention_backend=AttentionBackendEnum.TORCH_SDPA,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
         engine_args.create_engine_config()
 
 
@@ -1074,7 +1137,10 @@ class TestDpDeviceIdSharding:
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
-            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            device_ids=None,
         )
         assert _build_device_ids(args, local_rank=0) == [0, 1]
         assert _build_device_ids(args, local_rank=1) == [2, 3]
@@ -1086,12 +1152,41 @@ class TestDpDeviceIdSharding:
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
-            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            device_ids=[4, 5, 6, 7],
         )
         assert _build_device_ids(args, local_rank=0) == [4, 5]
         assert _build_device_ids(args, local_rank=1) == [6, 7]
         with pytest.raises(ValueError, match="needs devices"):
             _build_device_ids(args, local_rank=2)
+
+    def test_dp_supervisor_device_ids_accounts_for_pcp(self):
+        """Each DP child needs TP * PP * PCP devices."""
+        import argparse
+
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
+            device_ids=None,
+        )
+        assert _build_device_ids(args, local_rank=0) == [0, 1, 2, 3]
+        assert _build_device_ids(args, local_rank=1) == [4, 5, 6, 7]
+
+        args_with_ids = argparse.Namespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
+            device_ids=[0, 1, 2, 3, 4, 5, 6, 7],
+        )
+        assert _build_device_ids(args_with_ids, local_rank=0) == [0, 1, 2, 3]
+        assert _build_device_ids(args_with_ids, local_rank=1) == [4, 5, 6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            _build_device_ids(args_with_ids, local_rank=2)
 
     def test_dp_rank_shards_user_assigned_gpu_ids(self):
         """get_physical_gpu_ids_for_local_dp_rank slices the user-provided

@@ -2,7 +2,7 @@
 # This script tests if the python only compilation works correctly
 # for users who do not have any compilers installed on their system
 #
-# Set PYTHON_ONLY_COMPILE_PYTHON (e.g. 3.14) to install into a fresh uv venv
+# Set PYTHON_ONLY_COMPILE_PYTHON (e.g. 3.12) to install into a fresh uv venv
 # with that interpreter and run a short generation, as a smoke test for
 # Python versions other than the one the CI image is built with.
 
@@ -208,8 +208,10 @@ print(torch.cuda.get_device_properties(0).gcnArchName.split(":")[0],
         --index-strategy unsafe-best-match \
         "torch[device-${rocm_arch}]==${torch_version}" \
         "torchvision[device-${rocm_arch}]==${torchvision_version}"
-    # Use the venv's own ROCm SDK and amdsmi bindings, not the image's.
-    unset LD_LIBRARY_PATH
+    # Use the venv's own ROCm SDK and amdsmi bindings, not the image's. Also
+    # drop the env of CI's kernel recorder: it is built for the image's ROCm,
+    # and its spawn default cannot re-import the stdin script below.
+    unset LD_LIBRARY_PATH LD_PRELOAD ROCP_TOOL_LIBRARIES VLLM_WORKER_MULTIPROC_METHOD
     PYTHONPATH="$(python3 -c 'import _rocm_sdk_core as c; print(c.__path__[0])')/share/amd_smi"
     export PYTHONPATH
 # ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
@@ -221,7 +223,9 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     # Use the CUDA build the image's own torch was installed with, for both the
     # new venv's torch and the precompiled wheel variant.
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
-    uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
+    # A uv-managed interpreter ships the Python headers that Triton needs to
+    # build its driver at runtime; the image's system python3.12 has none.
+    uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" --managed-python /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
     # --torch-backend lists non-torch packages (e.g. outlines-core) at older versions,
     # so add the index for the image's CUDA build instead and let uv take the best

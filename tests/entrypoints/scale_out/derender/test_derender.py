@@ -442,6 +442,7 @@ async def test_derender_chat_metrics_passthrough(client):
     actual = response.json()["metrics"]
     assert set(actual) == {
         "time_to_first_token_ms",
+        "time_to_first_content_token_ms",
         "generation_time_ms",
         "queue_time_ms",
         "mean_itl_ms",
@@ -1712,7 +1713,6 @@ def _ensure_harmony_vocab():
 def harmony_server():
     _ensure_harmony_vocab()
     args = [
-        "--trust-remote-code",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "openai",
@@ -1733,7 +1733,7 @@ async def harmony_client(harmony_server):
 
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 def _harmony_extract_assistant_ids(
@@ -1852,9 +1852,7 @@ def harmony_default_server():
     otherwise harmony markup leaks unparsed into derender output.
     """
     _ensure_harmony_vocab()
-    with RemoteLaunchRenderServer(
-        HARMONY_MODEL, ["--trust-remote-code"]
-    ) as remote_server:
+    with RemoteLaunchRenderServer(HARMONY_MODEL, []) as remote_server:
         yield remote_server
 
 
@@ -2266,7 +2264,7 @@ def test_generate_derender_role_is_response_role(tokenizer):
         finish_reason="stop",
     )
 
-    ((message, _),) = derenderer._derender_text_choices(
+    ((message, _),), _ = derenderer._derender_text_choices(
         [output], ParseContext().to_chat_request(), 0, None
     )
 

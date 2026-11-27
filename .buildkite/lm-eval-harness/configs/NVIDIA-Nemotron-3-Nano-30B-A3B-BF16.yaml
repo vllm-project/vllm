@@ -12,4 +12,3 @@ max_model_len: 262144
 enforce_eager: false
 apply_chat_template: true
 fewshot_as_multiturn: true
-trust_remote_code: true

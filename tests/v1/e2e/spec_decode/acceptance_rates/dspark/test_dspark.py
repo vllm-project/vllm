@@ -106,7 +106,6 @@ def test_dspark_correctness_and_acceptance_rate(
 
     runner_config = {
         "block_size": None,
-        "trust_remote_code": True,
         "speculative_config": speculative_config,
         "max_model_len": config.max_model_len,
         "gpu_memory_utilization": config.gpu_memory_utilization,

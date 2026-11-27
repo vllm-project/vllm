@@ -426,6 +426,29 @@ class TranscriptionResponseDiarized(OpenAIBaseModel):
     usage: TranscriptionUsageAudio
 
 
+class TranscriptionUsageTokens(OpenAIBaseModel):
+    type: Literal["tokens"] = "tokens"
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    """Text added to a streamed diarized transcription."""
+
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+    segment_id: str
+
+
+class TranscriptionTextDoneEvent(OpenAIBaseModel):
+    """Last event of a streamed `diarized_json` transcription."""
+
+    type: Literal["transcript.text.done"] = "transcript.text.done"
+    text: str
+    usage: TranscriptionUsageTokens
+
+
 TranscriptionResponseVariant: TypeAlias = (
     TranscriptionResponse | TranscriptionResponseVerbose | TranscriptionResponseDiarized
 )

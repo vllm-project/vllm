@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the fused dual-GemmaRMSNorm + concat kernel used by the
-Qwen3.5 MTP drafter.
+"""Unit tests for the fused dual-GemmaRMSNorm kernels used by MTP drafters.
 
-The kernel must match the eager 3-op reference: two Gemma-style RMSNorms
-(scale by `1 + weight`, fp32 accumulation) followed by a last-dim concat.
+The kernels must match the eager Gemma-style RMSNorm reference (scale by
+`1 + weight`, fp32 accumulation): `fused_pre_fc_norms` concatenates two
+same-width norms for the Qwen3.5 drafter's single FC, and
+`fused_pre_fc_norms_split` normalizes two different widths into separate
+outputs for the Qwen4Exp drafter's two FC GEMMs.
 """
 
 import pytest
 import torch
 
-from vllm.kernels.triton.fused_pre_fc_norms import fused_pre_fc_norms
+from vllm.kernels.triton.fused_pre_fc_norms import (
+    fused_pre_fc_norms,
+    fused_pre_fc_norms_split,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -64,3 +69,46 @@ def test_fused_pre_fc_norms_correctness(
     assert fused.shape == (num_tokens, 2 * hidden_size)
     rtol, atol = TOLS[dtype]
     torch.testing.assert_close(fused.float(), ref.float(), rtol=rtol, atol=atol)
+
+
+@requires_cuda
+@torch.inference_mode()
+@pytest.mark.parametrize("strided_hidden", [False, True])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_fused_pre_fc_norms_split_correctness(
+    num_tokens: int, dtype: torch.dtype, strided_hidden: bool
+):
+    """Two-width variant (Qwen4Exp MTP: H and hc_count*H feed separate FC
+    GEMMs) matches the eager GemmaRMSNorm reference and returns contiguous
+    outputs, also for a strided hidden-stream view."""
+    set_random_seed(0)
+    h_emb, h_hid = 2560, 4 * 2560
+    embeds = torch.randn(num_tokens, h_emb, dtype=dtype, device="cuda")
+    hidden = torch.randn(
+        num_tokens * 2 if strided_hidden else num_tokens,
+        h_hid,
+        dtype=dtype,
+        device="cuda",
+    )
+    if strided_hidden:
+        hidden = hidden[::2]
+    emb_w = torch.randn(h_emb, dtype=dtype, device="cuda") * 0.2
+    hid_w = torch.randn(h_hid, dtype=dtype, device="cuda") * 0.2
+
+    emb_out, hid_out = fused_pre_fc_norms_split(embeds, hidden, emb_w, hid_w, EPS)
+
+    assert emb_out.is_contiguous() and hid_out.is_contiguous()
+    rtol, atol = TOLS[dtype]
+    torch.testing.assert_close(
+        emb_out.float(),
+        _gemma_rmsnorm(embeds, emb_w, EPS).float(),
+        rtol=rtol,
+        atol=atol,
+    )
+    torch.testing.assert_close(
+        hid_out.float(),
+        _gemma_rmsnorm(hidden, hid_w, EPS).float(),
+        rtol=rtol,
+        atol=atol,
+    )
