@@ -16,10 +16,12 @@ QuantizationMethods = Literal[
     "awq",
     "auto_awq",
     "fp8",
+    "w4afp8",
     "fbgemm_fp8",
     "modelopt",
     "modelopt_fp4",
     "modelopt_mxfp8",
+    "modelopt_int8",
     "modelopt_mixed",
     "auto_gptq",
     "gptq",
@@ -35,6 +37,7 @@ QuantizationMethods = Literal[
     "mxfp4",
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
+    "inkling2",
     "online",
     # Below are online quant shorthand names (see vllm.config.quantization).
     # Listed here as strings to avoid a circular import; kept in sync with
@@ -44,6 +47,7 @@ QuantizationMethods = Literal[
     "fp8_per_channel",
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
+    "nvfp4_weight_only",
     "mxfp8",
     "lut_b_moe",
     "mxfp4_hadamard32",
@@ -131,6 +135,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
         deepseek_config = DeepseekV4FP8Config
 
+    from vllm.models.inkling2.quant_config import Inkling2QuantConfig
+
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
     from .compressed_tensors.compressed_tensors import (
@@ -143,6 +149,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
+        ModelOptInt8Config,
         ModelOptMixedPrecisionConfig,
         ModelOptMxFp8Config,
         ModelOptNvFp4Config,
@@ -151,16 +158,19 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
+    from .w4afp8 import W4AFP8Config
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AutoAWQConfig,
         "awq_marlin": AutoAWQConfig,
         "auto_awq": AutoAWQConfig,
         "fp8": Fp8Config,
+        "w4afp8": W4AFP8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_int8": ModelOptInt8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
@@ -174,6 +184,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": deepseek_config,
+        "inkling2": Inkling2QuantConfig,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
         # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the

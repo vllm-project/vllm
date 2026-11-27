@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the elastic fault-tolerance framework.
 
-Requires nixl_ep FT hardware; gated behind ``has_nixl_ep()``.
+Requires nixl_ep FT hardware; gated behind `has_nixl_ep()`.
 """
 
 import contextlib
@@ -109,7 +109,7 @@ if _SPEC:
 
 
 def _install_fault_injection(monkeypatch, tmp_path, rank: int) -> None:
-    """Install a sitecustomize that raises on ``rank`` once armed.
+    """Install a sitecustomize that raises on `rank` once armed.
 
     Disarmed until the test calls /collective_rpc (needs VLLM_SERVER_DEV_MODE,
     set here).
@@ -214,7 +214,7 @@ def _run_gsm8k_eval(server, stage: str) -> float:
 
 
 def _in_parallel(fn, servers) -> list:
-    """Run ``fn(server)`` for all servers concurrently; return results in order."""
+    """Run `fn(server)` for all servers concurrently; return results in order."""
     with ThreadPoolExecutor(max_workers=len(servers)) as ex:
         return list(ex.map(fn, servers))
 
@@ -284,11 +284,11 @@ def _wait_for_engines(
     match_values: set[str],
     deadline_s: int = FAULT_DETECTION_DEADLINE_S,
 ) -> list[dict[str, Any] | None]:
-    """Poll ``/v1/fault_tolerance/status`` until each server's engine status matches.
+    """Poll `/v1/fault_tolerance/status` until each server's engine status matches.
 
-    A server matches when its engine-status dict has ``match_key`` equal to
-    one of ``match_values``. Returns one engine-status dict per server. Servers still
-    unmatched after ``deadline_s`` get None.
+    A server matches when its engine-status dict has `match_key` equal to
+    one of `match_values`. Returns one engine-status dict per server. Servers still
+    unmatched after `deadline_s` get None.
     """
     results: dict[int, dict[str, Any]] = {}
     pending = dict(enumerate(servers))
@@ -334,7 +334,7 @@ def _driving(*servers):
 
 
 def _wait_for_ft_failure(server, deadline_s: int) -> str | None:
-    """Wait until ``/v1/fault_tolerance/status`` records the FT failure outcome."""
+    """Wait until `/v1/fault_tolerance/status` records the FT failure outcome."""
     engine_status = _wait_for_engines(
         [server],
         match_key="ft_state",
@@ -355,7 +355,7 @@ def _drive_to_faulted(
 ) -> dict[int, dict[str, Any]]:
     """Drive every engine until each reports a matching fault status.
 
-    Returns a ``{rank: engine_status}`` map. Asserts no rank hung (all matched
+    Returns a `{rank: engine_status}` map. Asserts no rank hung (all matched
     within the deadline) so callers can assume every value is present.
     """
     ranks = sorted(servers_by_rank)
@@ -377,21 +377,27 @@ def _drive_to_faulted(
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
-    """An exception injected into the inference path drives full retry recovery.
+    """Resume a faulted stream and preserve accuracy after retry recovery.
 
-    The fault is patched into ``sync_cudagraph_and_dp_padding`` on rank 1 via
-    a generated ``sitecustomize``; it raises on the engine's first DP-sync
+    The fault is patched into `sync_cudagraph_and_dp_padding` on rank 1 via
+    a generated `sitecustomize`; it raises on the engine's first DP-sync
     step after arming, so rank 1 goes UNHEALTHY and rank 0 times out on the
-    DP allreduce. Both UNHEALTHY is the precondition for ``retry``.
+    DP allreduce. Both UNHEALTHY is the precondition for `retry`.
 
     The injection is armed (via /collective_rpc) only after the baseline
     accuracy eval; accuracy is compared before and after recovery, mirroring
     test_elastic_ep.py.
+    EOS is ignored so the stream must reach its fixed token count.
     """
     _install_fault_injection(monkeypatch, tmp_path, rank=1)
     dp_size = 2
     faulted_rank = 1
-    with _ft_manager(dp_size=dp_size) as servers:
+    max_tokens = 100
+    recompute_args = [
+        "--fault-tolerance-config",
+        '{"request_failure_policy": "recompute"}',
+    ]
+    with _ft_manager(recompute_args, dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
 
@@ -401,9 +407,40 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 2. Baseline accuracy (the injection is still disarmed).
         initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
 
-        # 3. Arm, then drive: the injected rank faults on its next engine step.
+        # Arm only after the stream has produced output.
+        client = servers_by_rank[0].get_client()
+        stream = client.completions.create(
+            model=MODEL_NAME,
+            prompt="Hello, my name is",
+            max_tokens=max_tokens,
+            temperature=0.0,
+            # Enforce fixed-length recovery so EOS cannot bypass the fault.
+            extra_body={"ignore_eos": True},
+            stream=True,
+            timeout=600.0,
+        )
+        chunks = []
+        stream_error = None
+        stream_started = threading.Event()
+
+        def _consume():
+            nonlocal stream_error
+            try:
+                for chunk in stream:
+                    chunks.append(chunk)
+                    if chunk.choices and chunk.choices[0].text:
+                        stream_started.set()
+            except Exception as e:
+                stream_error = e
+
+        consumer = threading.Thread(target=_consume, daemon=True)
+        consumer.start()
+        assert stream_started.wait(timeout=30), "stream did not start before fault"
+        assert consumer.is_alive(), "stream ended before fault injection"
         _arm_ft_injection(list(servers_by_rank.values()))
         faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
+        assert stream_error is None, stream_error
+        assert consumer.is_alive(), "stream ended instead of stalling at fault"
 
         # The rank that raised carries the fault info from its own exception.
         assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
@@ -411,10 +448,25 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 4. retry every engine.
         round_id = str(uuid.uuid4())
         for server in servers_by_rank.values():
-            _apply_ft(server, "retry", request_id=round_id)
+            _apply_ft(server, "retry", {"abort": False}, request_id=round_id)
 
         # 5. Recovery completes: every engine returns to healthy and serves again.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
+
+        # The stalled stream must complete without lost or duplicated tokens.
+        consumer.join(timeout=120)
+        assert not consumer.is_alive(), "stream did not complete after recovery"
+        assert stream_error is None, stream_error
+        content = [c for c in chunks if c.choices and c.choices[0].text]
+        assert len(content) == max_tokens, (
+            f"expected {max_tokens} streamed tokens, got {len(content)}"
+        )
+        finish_reasons = [
+            c.choices[0].finish_reason
+            for c in chunks
+            if c.choices and c.choices[0].finish_reason
+        ]
+        assert finish_reasons == ["length"], finish_reasons
 
         # 6. Post-recovery accuracy vs the pre-fault baseline.
         recovered_accuracy = _run_gsm8k_eval(servers_by_rank[0], "After retry")
@@ -442,11 +494,11 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
 
     SIGKILLing rank 0's worker leaves its EngineCore DEAD while the other ranks
     detect the peer fault and go UNHEALTHY. The orchestrator then sends
-    ``scale_down`` with ``removed_dp_ranks=[0]`` to every survivor.
+    `scale_down` with `removed_dp_ranks=[0]` to every survivor.
 
 
-    Also verifies that a DEAD engine rejects ``retry``: recovery is gated on
-    UNHEALTHY, so trying ``retry`` on the victim records a rejection reason.
+    Also verifies that a DEAD engine rejects `retry`: recovery is gated on
+    UNHEALTHY, so trying `retry` on the victim records a rejection reason.
 
     Accuracy is measured before the fault and after scale_down; the survivor
     must stay within ACCURACY_TOL of the pre-fault baseline.

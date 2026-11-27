@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
@@ -111,8 +112,8 @@ class BaseFrontendArgs:
     """JSON mapping that rewrites a request's reasoning effort to a value the
     chat template supports, for templates that silently fall back on efforts
     they do not recognize. Applies to the effort set through the Chat
-    Completions, Responses and Anthropic Messages APIs; efforts not listed
-    pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
+    Completions, Responses, Anthropic Messages and `/tokenize` APIs; efforts
+    not listed pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
     for a template that only knows low, high and max."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
@@ -176,37 +177,37 @@ class BaseFrontendArgs:
     `--enable-log-requests`. Output text and finish reasons are logged at INFO,
     while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
-    """If set to False, output deltas will not be logged. Relevant only if 
+    """If set to False, output deltas will not be logged. Relevant only if
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
-    """Cohere ``/cohere/v2/chat`` only. Whether the served model is a
+    """Cohere `/cohere/v2/chat` only. Whether the served model is a
     reasoning Command-family model. When True (default), the assistant's
-    chain-of-thought is surfaced as a ``thinking`` content block (or
-    ``content-*`` events on the stream). When False, reasoning is
-    surfaced as Cohere's ``tool_plan`` field (or ``tool-plan-delta``
+    chain-of-thought is surfaced as a `thinking` content block (or
+    `content-*` events on the stream). When False, reasoning is
+    surfaced as Cohere's `tool_plan` field (or `tool-plan-delta`
     events) whenever the model emits tool calls, matching older non-
     reasoning Command models. Has no effect on the non-Cohere
     endpoints."""
     cohere_format: str = "cmd4"
-    """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
-    format to render: ``cmd4`` (current Command A+ models; default) or
-    ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    """Cohere `--tokenizer-mode cohere` only. Which Cohere prompt
+    format to render: `cmd4` (current Command A+ models; default) or
+    `cmd3` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
     wrong format silently produces a prompt the model wasn't trained
     on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
-    ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
-    explicit request-level ``chat_template_kwargs.cohere_format`` takes
+    `--default-chat-template-kwargs '{"cohere_format": "..."}'` -- any
+    explicit request-level `chat_template_kwargs.cohere_format` takes
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
-    """The ``reasoning_effort`` used for Anthropic Messages, token counting,
-    and render requests with ``thinking: {"type": "disabled"}`` or
-    ``thinking: {"type": "between_tools"}``.
-    ``none`` turns thinking off for models that support it; ``low`` suits
+    """The `reasoning_effort` used for Anthropic Messages, token counting,
+    and render requests with `thinking: {"type": "disabled"}` or
+    `thinking: {"type": "between_tools"}`.
+    `none` turns thinking off for models that support it; `low` suits
     models that always think
-    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
-    ``low`` when the renderer rejects ``none`` or renders it the same as a
-    thinking effort, and ``none`` otherwise."""
+    (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses
+    `low` when the renderer rejects `none` or renders it the same as a
+    thinking effort, and `none` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
@@ -214,25 +215,33 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
-    enable_scale_out: bool = False
+    enable_scale_out: bool = envs.VLLM_SERVER_DEV_MODE
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
     `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Defaults to `VLLM_SERVER_DEV_MODE`.
     Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
     always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
-    """Controls the ``system_fingerprint`` field on responses.
+    """Controls the `system_fingerprint` field on responses.
 
-    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+    - `full` (default): `vllm-<version>[-<parallelism>]-<hash8>`. Encodes
       server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
       8-char config hash.
-    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
-    - ``custom``: emits the literal string from ``--fingerprint-value``.
-    - ``none``: the field is omitted (serialized as ``null``).
+    - `hash`: `vllm-<version>-<hash8>`. Parallelism stripped.
+    - `custom`: emits the literal string from `--fingerprint-value`.
+    - `none`: the field is omitted (serialized as `null`).
     """
     fingerprint_value: str | None = None
-    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
+    """Literal fingerprint string used when `--fingerprint-mode=custom`."""
+    max_tokenize_tokens: int | None = None
+    """Maximum number of tokens allowed in `/tokenize`, `/detokenize`, and
+    `/v1/messages/count_tokens` requests. Defaults to `VLLM_MAX_TOKENIZE_TOKENS`
+    if set, otherwise `max(max_model_len * 2, 131072)`. Set to `<= 0` to
+    disable the limit.
+    Currently enforced on standard template rendering paths
+    in the Python frontend (GPT-OSS Harmony rendering is not yet covered)."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -242,7 +251,7 @@ class BaseFrontendArgs:
         """Customize argparse kwargs before arguments are registered.
 
         Subclasses should override this and call
-        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
+        `super()._customize_cli_kwargs(frontend_kwargs)` first.
         """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
@@ -265,7 +274,7 @@ class BaseFrontendArgs:
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Register CLI arguments for this frontend class.
 
-        Subclasses should override ``_customize_cli_kwargs`` instead of
+        Subclasses should override `_customize_cli_kwargs` instead of
         this method so that base-class postprocessing is always applied.
         """
         from vllm.engine.arg_utils import get_kwargs
@@ -295,6 +304,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    mm_tensor_refs_config: MMTensorRefsConfig | None = None
+    """Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    processed multimodal tensors that clients upload to an S3-compatible store.
+    Requires `--enable-scale-out` or `--tokens-only`. Off by default. Example:
+    `'{"s3_allowed_uri_prefix": "s3://bucket/prefix"}'`."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -421,10 +435,15 @@ class FrontendArgs(BaseFrontendArgs):
 
 def resolve_default_chat_template_kwargs(
     args: argparse.Namespace,
+    tokenizer_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    """Resolve renderer defaults, including the dedicated Cohere format flag.
+
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
+    """
     kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
+    if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
         kwargs.setdefault("cohere_format", args.cohere_format)
     return kwargs
 
@@ -563,6 +582,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if getattr(args, "mm_tensor_refs_config", None) is not None and not (
+        getattr(args, "enable_scale_out", False) or getattr(args, "tokens_only", False)
+    ):
+        raise ValueError(
+            "Error: --mm-tensor-refs-config requires --enable-scale-out or "
+            "--tokens-only, which serve /inference/v1/generate"
+        )
 
     # SSE keep-alive interval must be zero (disabled) or a positive integer.
     if getattr(args, "sse_keep_alive_interval", 0) < 0:

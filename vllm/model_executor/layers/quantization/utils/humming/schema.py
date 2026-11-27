@@ -3,11 +3,13 @@
 """Map Humming schemas and handle shared checkpoint quantization settings."""
 
 import dataclasses
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -21,7 +23,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
     from vllm.utils.humming import (
@@ -51,10 +52,13 @@ def humming_update_schema_hadamard_block_size(
     return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
 
 
-if has_humming():
+# Built lazily so importing this module does not import humming, which spawns
+# background build processes.
+@cache
+def _humming_to_quant_dtype() -> dict["humming_dtypes.DataType", Any]:
     from vllm.utils.humming import dtypes as humming_dtypes
 
-    _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
+    return {
         humming_dtypes.float4e0m3: FP4_DTYPE,
         humming_dtypes.float4e2m1: FP4_DTYPE,
         humming_dtypes.float6e2m3: scalar_types.float6_e2m3f,
@@ -72,7 +76,12 @@ if has_humming():
         humming_dtypes.uint7: torch.uint8,
     }
 
-    _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
+
+@cache
+def _humming_to_scale_dtype() -> dict["humming_dtypes.DataType", torch.dtype]:
+    from vllm.utils.humming import dtypes as humming_dtypes
+
+    return {
         humming_dtypes.float8e8m0: MXFP_SCALE_DTYPE,
         humming_dtypes.float8e4m3: FP8_DTYPE,
         humming_dtypes.float16: torch.float16,
@@ -114,10 +123,10 @@ def weight_schema_to_quant_key(
                 param_dtype = torch.float16
 
     schema = schema.to_humming_schema(param_dtype)
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
+    dtype = _humming_to_quant_dtype()[schema.b_dtype]
 
     if schema.bs_dtype is not None:
-        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.bs_dtype]
+        scale_dtype = _humming_to_scale_dtype()[schema.bs_dtype]
     else:
         scale_dtype = torch.float32
 
@@ -166,7 +175,7 @@ def input_schema_to_quant_key(
     mode = schema.input_quant_mode
     if mode == InputQuantizationMode.Disabled:
         return None
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.a_dtype]
+    dtype = _humming_to_quant_dtype()[schema.a_dtype]
 
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
@@ -178,7 +187,7 @@ def input_schema_to_quant_key(
     # float32 scale. Getting this right lets a grouped FP8 activation match
     # kFp8Dynamic128Sym instead of an unmatchable uint8-scaled key.
     if schema.input_scale_dtype is not None:
-        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+        scale_dtype = _humming_to_scale_dtype()[schema.input_scale_dtype]
     elif gs == 16:
         scale_dtype = FP8_DTYPE
     elif gs == 32:
@@ -211,6 +220,7 @@ def input_schema_to_quant_key(
 
 def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
+    from vllm.utils.humming import dtypes as humming_dtypes
 
     if key is None:
         return HummingInputSchema(input_quant_mode=InputQuantizationMode.Disabled)
@@ -218,10 +228,10 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     if not key.symmetric:
         raise ValueError("Humming input quantization must be symmetric")
 
-    quant_dtypes = {value: dtype for dtype, value in _HUMMING_TO_QUANT_DTYPE.items()}
+    quant_dtypes = {value: dtype for dtype, value in _humming_to_quant_dtype().items()}
     quant_dtypes[FP4_DTYPE] = humming_dtypes.float4e2m1
     quant_dtypes[FP8_DTYPE] = humming_dtypes.float8e4m3
-    scale_dtypes = {value: dtype for dtype, value in _HUMMING_TO_SCALE_DTYPE.items()}
+    scale_dtypes = {value: dtype for dtype, value in _humming_to_scale_dtype().items()}
     if key.dtype not in quant_dtypes or key.scale.dtype not in scale_dtypes:
         raise ValueError(f"Unsupported Humming input or scale dtype: {key}")
 
@@ -258,14 +268,46 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     )
 
 
+def _warn_input_fallback(
+    requested: "humming_dtypes.DataType | None",
+    executed: "humming_dtypes.DataType | None",
+) -> None:
+    if requested is None or requested.num_bits >= 16 or executed == requested:
+        return
+    logger.warning_once(
+        "Humming runs %s activations as %s. Set VLLM_STRICT_QUANT_SCHEME=1 "
+        "to forbid this fallback.",
+        requested,
+        "unquantized" if executed is None or executed.num_bits >= 16 else executed,
+    )
+
+
 def check_and_fallback_input_schema(
     weight_schema: "BaseWeightSchema",
     input_schema: "BaseInputSchema",
     param_dtype: torch.dtype | None = None,
     allow_fallback: bool = True,
+    allow_fp8_sm100: bool = True,
+    warn: bool = True,
 ) -> "HummingInputSchema":
-    from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
+    """Resolve *input_schema* against *weight_schema*, falling back if needed.
 
+    Args:
+        weight_schema: the weight schema the input must be compatible with.
+        input_schema: the requested input schema.
+        param_dtype: model compute dtype, used as the 16-bit fallback.
+        allow_fallback: if False, return the requested schema as-is.
+        allow_fp8_sm100: whether FP8 activations may be honored on
+            SM100-SM119. Humming's dense FP8 UMMA path is fast there, but the
+            MoE grouped-GEMM path is not (the tuner can emit invalid two-CTA
+            configs), so the MoE call sites pass False.
+        warn: whether to log fallbacks; False when only probing the result.
+
+    """
+    from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
+    from vllm.utils.humming import dtypes as humming_dtypes
+
+    allow_fallback = allow_fallback and not envs.VLLM_STRICT_QUANT_SCHEME
     capability = current_platform.get_device_capability()
     assert capability is not None
     sm_version = capability.to_int()
@@ -322,20 +364,30 @@ def check_and_fallback_input_schema(
     input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
 
+    fp8_dtypes = (
+        humming_dtypes.float8e4m3,
+        humming_dtypes.float8e5m2,
+        humming_dtypes.float8e3m4,
+    )
+
     def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
         if dtype is None or dtype.num_bits == 16:
             return False
         is_int4_deprecated = dtype == humming_dtypes.int4 and sm_version >= 90
         is_int8_deprecated = dtype == humming_dtypes.int8 and 103 <= sm_version < 110
-        # Humming has not yet implemented high-performance FP8 computation
-        # on SM10X and SM11X. Therefore, it is temporarily considered deprecated.
-        # TODO: removed this after Humming has high-performance FP8 computation
-        is_fp8_deprecated = dtype.num_bits < 16 and 100 <= sm_version < 120
-        return is_int4_deprecated or is_int8_deprecated or is_fp8_deprecated
+        # FP8 is fine when the caller has a fast path for it (dense UMMA):
+        # other sub-16-bit dtypes (e.g. FP4) still lack fast kernels on
+        # SM10X/SM11X.
+        is_low_bit_deprecated = (
+            dtype.num_bits < 16
+            and (dtype not in fp8_dtypes or not allow_fp8_sm100)
+            and 100 <= sm_version < 120
+        )
+        return is_int4_deprecated or is_int8_deprecated or is_low_bit_deprecated
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
-            if is_deprecated(a_dtype):
+            if warn and is_deprecated(a_dtype):
                 msg = f"Humming {a_dtype} activation is slow on SM{sm_version} now."
                 logger.warning_once(msg)
             return input_schema
@@ -349,11 +401,13 @@ def check_and_fallback_input_schema(
                 and a_dtype.num_bits == 8
                 and input_group_size == 32
                 and input_scale_dtype == humming_dtypes.float8e8m0
-                and sm_version >= 120
+                and sm_version >= (100 if allow_fp8_sm100 else 120)
             )
             is_groupwise = input_group_size > 0 or weight_group_size > 0
             if input_bits == 8 and is_groupwise and not is_mxfp8:
                 # prefer wna16 for groupwise weight or groupwise input
+                if warn:
+                    _warn_input_fallback(a_dtype, None)
                 return HummingInputSchema()
 
             return input_schema
@@ -391,6 +445,8 @@ def check_and_fallback_input_schema(
                 input_quant_mode=quant_mode,
             )
             if candidate.is_compatible_with(weight_schema, param_dtype):
+                if warn:
+                    _warn_input_fallback(a_dtype, dtype)
                 return candidate
 
     raise ValueError(
@@ -398,6 +454,30 @@ def check_and_fallback_input_schema(
         f"weight schema {weight_schema} on SM{sm_version} "
         f"({allow_fallback=})"
     )
+
+
+def humming_executed_input_quant_key(
+    weight_quant_config: dict[str, Any],
+    activation_key: QuantKey | None,
+    allow_fallback: bool = True,
+) -> QuantKey | None:
+    """The activation quantization Humming runs on this device for weights
+    described by `weight_quant_config` when `activation_key` is requested.
+    None if it runs unquantized activations or rejects the request."""
+    from vllm.utils.humming import BaseWeightSchema
+
+    if activation_key is None:
+        return None
+    try:
+        executed = check_and_fallback_input_schema(
+            BaseWeightSchema.from_config(weight_quant_config),
+            quant_key_to_input_schema(activation_key),
+            allow_fallback=allow_fallback,
+            warn=False,
+        )
+    except ValueError:
+        return None
+    return input_schema_to_quant_key(executed)
 
 
 def resolve_humming_layer_config(config: dict[str, Any], prefix: str) -> dict[str, Any]:

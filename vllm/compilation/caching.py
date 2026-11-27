@@ -216,7 +216,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         optimized_call: Callable[..., Any],
         is_encoder: bool = False,
         vllm_backend: Any | None = None,
-        sym_tensor_indices: list[int] | None = None,
         aot_autograd_config: dict[str, Any] | None = None,
         execution_code: str | None = None,
         submod_names: list[str] | None = None,
@@ -229,7 +228,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.is_encoder = is_encoder
         self.shape_env = None
         self.vllm_backend = vllm_backend
-        self.sym_tensor_indices = sym_tensor_indices
         self.execution_code = execution_code
         self.submod_names = submod_names
         self.consts = consts
@@ -293,27 +291,18 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
+        for _, submod in state["graph_module"].named_children():
             if hasattr(submod, "graph"):
                 for node in submod.graph.nodes:
                     node.meta.pop("source_fn_stack", None)
                     node.meta.pop("nn_module_stack", None)
 
-        if state.get("sym_tensor_indices"):
-            # put tensor inputs on meta device since their data
-            # isn't needed, yet we need the meta for make_copy_and_call
-            state["example_inputs"] = pytree.tree_map_only(
-                torch.Tensor,
-                lambda inp: torch.empty_like(inp, device="meta"),
-                state["example_inputs"],
-            )
-        else:
-            # mask off all tensor inputs since they are large and not needed.
-            state["example_inputs"] = pytree.tree_map_only(
-                torch.Tensor,
-                lambda inp: torch.empty_like(inp, device="meta"),
-                state["example_inputs"],
-            )
+        # mask off all tensor inputs since they are large and not needed.
+        state["example_inputs"] = pytree.tree_map_only(
+            torch.Tensor,
+            lambda inp: torch.empty_like(inp, device="meta"),
+            state["example_inputs"],
+        )
 
         state["graph_module"] = cls.serialize_graph_module(state["graph_module"])
         state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
@@ -484,7 +473,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     Args:
         fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
-            prefix, sym_tensor_indices, is_encoder, etc.
+            prefix, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing
             pre-compiled artifacts for each submodule/shape combination.
         vllm_config: The vLLM configuration.
@@ -497,7 +486,6 @@ def reconstruct_serializable_fn_from_mega_artifact(
     """
     from vllm.compilation.backends import (
         VllmBackend,
-        make_copy_and_call,
         wrap_with_cudagraph_if_needed,
     )
     from vllm.compilation.piecewise_backend import PiecewiseBackend
@@ -587,23 +575,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
             state["graph_module"], fake_mode=fake_mode
         )
 
-    if compilation_config.cudagraph_copy_inputs:
-        sym_tensor_indices = state["sym_tensor_indices"]
-        input_buffers = [
-            torch.empty_like(
-                state["example_inputs"][idx], device=vllm_config.device_config.device
-            )
-            for idx in sym_tensor_indices
-        ]
-        optimized_call = make_copy_and_call(
-            sym_tensor_indices, input_buffers, runtime_callable
-        )
-    else:
-        optimized_call = runtime_callable
-
     fn = VllmSerializableFunction(
         **state,
-        optimized_call=optimized_call,
+        optimized_call=runtime_callable,
         vllm_backend=None,
     )
     return fn

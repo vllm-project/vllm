@@ -3,11 +3,11 @@
 """Load plan on tiny CPU models.
 
 Invariant, for these models (whose loaders set no module state): planning
-(after ``start_reload``, as the NCCL engine does at the first update) changes
+(after `start_reload`, as the NCCL engine does at the first update) changes
 no registration, attribute, address or layout, and no
 bytes outside checkpoint tensors, and a direct reload that copies each
-name's boxes into its ``get_dest`` tensors (and sends fallbacks in full through
-``load_weights``) leaves every tensor byte for byte as a cold start on the same
+name's boxes into its `get_dest` tensors (and sends fallbacks in full through
+`load_weights`) leaves every tensor byte for byte as a cold start on the same
 weights, at the same addresses, on the first update and on later ones that
 reuse the plan.
 """
@@ -27,25 +27,35 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
+    lifecycle,
     load_planned,
     plan_loads,
     start_reload,
 )
+from vllm.model_executor.model_loader.reload import plan as plan_module
+from vllm.model_executor.model_loader.reload.direct import track_loaded_params
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    _BYTE_CONTAINERS,
+    copy_weight_,
+    replace_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
 _CPU = torch.device("cpu")
 BF16 = torch.bfloat16
+U8, E8M0, E4M3 = torch.uint8, torch.float8_e8m0fnu, torch.float8_e4m3fn
 
 
 @pytest.fixture(autouse=True)
 def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    # several tests start a reload they never finish; restore the flag after each
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
 
 
 def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:
@@ -56,15 +66,16 @@ def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:
 
 
 class _Toy(torch.nn.Module):
-    """Loads ``name`` through its parameter's ``weight_loader`` (or
-    ``default_weight_loader``); ``stacked`` maps checkpoint names to a fused
-    parameter and shard id, as models' ``stacked_params_mapping`` does."""
+    """Loads `name` through its parameter's `weight_loader` (or
+    `default_weight_loader`); `stacked` maps checkpoint names to a fused
+    parameter and shard id, as models' `stacked_params_mapping` does."""
 
     stacked: dict[str, tuple[str, object]] = {}
     skipped: frozenset[str] = frozenset()
 
     def load_weights(self, weights):
         params = dict(self.named_parameters(remove_duplicate=False))
+        loaded = set()
         for name, weight in weights:
             if name in self.skipped:
                 continue
@@ -72,15 +83,20 @@ class _Toy(torch.nn.Module):
                 target, shard = self.stacked[name]
                 param = params[target]
                 param.weight_loader(param, weight, shard)
+                loaded.add(target)
                 continue
             param = params[name]
             getattr(param, "weight_loader", default_weight_loader)(param, weight)
+            loaded.add(name)
+        return loaded
 
 
 def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     return {
-        name: torch.randn(shape, generator=gen).to(dtype)
+        name: torch.randint(256, shape, generator=gen, dtype=U8).view(dtype)
+        if dtype in _BYTE_CONTAINERS
+        else torch.randn(shape, generator=gen).to(dtype)
         for name, (shape, dtype) in shapes.items()
     }
 
@@ -97,7 +113,7 @@ def _cold_start(make, weights):
 
 
 def _planned_reload(model, plan: LoadPlan, weights) -> None:
-    """What an engine does after ``start_reload``: boxes into their
+    """What an engine does after `start_reload`: boxes into their
     destinations, fallbacks in full, in batches of two as a packed transfer
     hands them over."""
     items = list(weights.items())
@@ -126,10 +142,10 @@ def _registrations(model):
 
 
 def _plan(model, shapes, mirrors=()) -> LoadPlan:
-    """``plan_loads`` (after ``start_reload``), checking that planning changed
+    """`plan_loads` (after `start_reload`), checking that planning changed
     no registration, module attribute, address or layout, and no bytes but
     those of checkpoint tensors (the bake runs loaders' constant writes and
-    reads of their destination for real) and of ``mirrors``: other tensors a
+    reads of their destination for real) and of `mirrors`: other tensors a
     fallback's loader writes from its destination."""
     state, registrations = _state(model), _registrations(model)
     plan = plan_loads(model, _metadata(shapes))
@@ -172,7 +188,7 @@ def _check_plan_equals_cold_start(make, shapes, mirrors=()):
 
 
 def _offset(dest: torch.Tensor, param: torch.Tensor) -> int:
-    """Where ``dest`` starts in ``param``'s storage, relative to ``param``."""
+    """Where `dest` starts in `param`'s storage, relative to `param`."""
     return dest.storage_offset() - param.storage_offset()
 
 
@@ -188,12 +204,14 @@ _LINEAR_SHAPES = {
 }
 
 
-def _linear_model():
+def _linear_model(padding_size=0):
     def make():
         model = _Toy()
         kw = dict(bias=False, params_dtype=BF16)
         model.qkv_proj = QKVParallelLinear(8, 2, 4, 2, **kw)
-        model.gate_up_proj = MergedColumnParallelLinear(8, [6, 6], **kw)
+        model.gate_up_proj = MergedColumnParallelLinear(
+            8, [6, 6], padding_size=padding_size, **kw
+        )
         model.down_proj = RowParallelLinear(6, 8, **kw)
         model.stacked = {
             "q_proj.weight": ("qkv_proj.weight", "q"),
@@ -205,6 +223,29 @@ def _linear_model():
         return model
 
     return make
+
+
+def test_padded_merged_reuses_load_plan_without_preserving_stale_padding(
+    default_vllm_config, dist_init
+):
+    make = _linear_model(padding_size=3)
+    model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
+    address = model.gate_up_proj.weight.data_ptr()
+    plan = None
+    for seed in (1, 2):
+        with torch.no_grad():
+            model.gate_up_proj.weight[-3:].fill_(float("nan"))
+        start_reload(model)
+        if plan is None:
+            plan = _plan(model, _LINEAR_SHAPES)
+            assert plan.get_dest("gate_proj.weight") is not None
+        weights = _checkpoint(_LINEAR_SHAPES, seed=seed)
+        _planned_reload(model, plan, weights)
+        expected = _cold_start(make, weights)
+        torch.testing.assert_close(
+            model.gate_up_proj.weight, expected.gate_up_proj.weight, rtol=0, atol=0
+        )
+        assert model.gate_up_proj.weight.data_ptr() == address
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -270,7 +311,7 @@ _TOY_SHAPES = {
     "embed.weight": ((10, 4), BF16),
     "lm_head.weight": ((10, 4), BF16),  # tied: the loader skips it
     "proj.weight": ((4, 6), BF16),  # transposing loader, transposing PWAL
-    "router.bias": ((5,), BF16),  # FP32 parameter: a cast
+    "router.bias": ((5,), BF16),  # FP32 parameter: a direct cast
     "strided.weight": ((8, 3), BF16),  # every other row
 }
 
@@ -291,6 +332,23 @@ def _toy_model():
     return model
 
 
+def test_planned_update_is_checked_for_completeness():
+    """Names the plan copies count as loaded; one left out fails at finish."""
+    model = _toy_model()
+    track_loaded_params(model)  # as a direct-mode cold start does
+    model.load_weights(_checkpoint(_TOY_SHAPES, seed=0).items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
+    start_reload(model)
+    plan = _plan(model, _TOY_SHAPES)
+    new = _checkpoint(_TOY_SHAPES, seed=1)
+    _planned_reload(model, plan, new)
+    assert plan.get_dest("proj.weight")  # a direct name
+    start_reload(model)
+    partial = {n: t for n, t in new.items() if n != "proj.weight"}
+    with pytest.raises(RuntimeError, match=r"did not load 1 .*proj\.weight"):
+        _planned_reload(model, plan, partial)
+
+
 def test_toy_loaders():
     """One model for transpose, tied alias, cast and step slice, so that their
     targets share a model (and, for the tied pair, a storage)."""
@@ -306,9 +364,9 @@ def test_toy_loaders():
     assert plan.get_boxes("lm_head.weight") is None
     assert plan.get_dest("lm_head.weight") == []
 
-    assert plan.get_dest("router.bias") is None
-    assert "casts torch.bfloat16 to torch.float32" in entries["router.bias"].reason
-    assert plan.get_boxes("router.bias") == (((0, 5),),)
+    ((box, dest),) = plan.get_dest("router.bias")
+    assert box == ((0, 5),)
+    assert dest.dtype == torch.float32
 
     assert plan.get_dest("strided.weight") is None
     assert "step" in entries["strided.weight"].reason
@@ -320,7 +378,7 @@ _E, _I, _H = 4, 4, 3
 
 
 def _experts_model(ep_rank: int, ep_size: int, tp_rank: int, tp_size: int):
-    """``experts.gate_up_proj`` [E, 2I, H] and ``experts.down_proj`` [E, H, I]
+    """`experts.gate_up_proj` [E, 2I, H] and `experts.down_proj` [E, H, I]
     (transformers v5), loaded one expert at a time as RoutedExperts does."""
     local = range(ep_rank * _E // ep_size, (ep_rank + 1) * _E // ep_size)
     i_shard = _I // tp_size
@@ -371,7 +429,7 @@ def test_fused_experts_under_ep(ep_rank):
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_fused_experts_under_expert_tp(tp_rank):
-    """Also pins the internal ``Write``/``Region`` form (RFC §11), which CI
+    """Also pins the internal `Write`/`Region` form (RFC §11), which CI
     compares across ranks."""
     _, plan = _check_plan_equals_cold_start(
         _experts_model(0, 1, tp_rank, 2), _EXPERT_SHAPES
@@ -391,6 +449,10 @@ def test_fused_experts_under_expert_tp(tp_rank):
 # ------------------------------------------------------------ fallbacks
 
 
+def _raw_copy(param, loaded):
+    param.copy_(loaded)
+
+
 def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     def make():
         model = _Toy()
@@ -406,8 +468,10 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     [
         (lambda p, w: p.copy_(w * 2), "applies"),
         (lambda p, w: p.copy_(w.to(torch.float32).to(BF16)), "applies"),
+        (lambda p, w: p.copy_(w.view(torch.int16)), "a view of the torch.bfloat16"),
         (lambda p, w: p.copy_(w if bool(w.sum() > 0) else -w), "reads tensor values"),
-        (lambda p, w: p.__setitem__(slice(None), w), "without Tensor.copy_"),
+        (lambda p, w: p.__setitem__([0, 2], w[:2]), "index_put_"),
+        (lambda p, w: p.__setitem__(True, w), "applies view"),
         (lambda p, w: p.copy_(w).mul_(2), "reads the destination"),  # composed
         (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
         (lambda p, w: torch.add(w, 0, out=p), "without Tensor.copy_ (add.out)"),
@@ -416,8 +480,10 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     ids=[
         "arith",
         "cast-roundtrip",
+        "view-cast",
         "value-read",
-        "setitem",
+        "setitem-list",
+        "setitem-bool",
         "composed",
         "expand",
         "out",
@@ -431,10 +497,20 @@ def test_fallbacks(loader, reason):
     assert reason in (plan.entries["layer.weight"].reason or "")
 
 
+def test_setitem_with_a_traced_index_falls_back():
+    make, shapes = _single(
+        lambda p, w: p.__setitem__(w[:2], w[2:]), shape=(4,), dtype=torch.int64
+    )
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    plan = _plan(model, shapes)
+    assert "index_put_" in (plan.entries["layer.weight"].reason or "")
+
+
 def test_noop_to_and_constant_fill_stay_direct():
     """A constant write into a checkpoint tensor (padding, as
-    ``VocabParallelEmbedding`` fills) runs while planning and stays out of
-    the plan: post-load processing owns padding."""
+    `VocabParallelEmbedding` fills) runs while planning and stays out of
+    the plan: replays don't redo it."""
 
     def loader(param, loaded):
         param[4:].fill_(1)
@@ -511,7 +587,7 @@ def _mirror_norm(mirror, param, loaded):
 )
 def test_mirror_buffer_falls_back(loader, reason):
     """Kimi-K3 KDA's decode copies: a loader that also writes a non-persistent
-    buffer, behind ``if not param.is_meta``, is a fallback so the buffer is
+    buffer, behind `if not param.is_meta`, is a fallback so the buffer is
     reloaded too."""
 
     def make():
@@ -534,13 +610,38 @@ def test_mirror_buffer_falls_back(loader, reason):
         (lambda p, w: p.copy_(w.unflatten(0, (2, 3))), (6, 4), (2, 3, 4)),
         (lambda p, w: p.copy_(w.split([2, 4])[1]), (6, 4), (4, 4)),
         (lambda p, w: p.copy_(w.t().contiguous()[1:3]), (4, 6), (2, 4)),
+        (lambda p, w: p.__setitem__(1, w), (4,), (2, 4)),
     ],
-    ids=["unflatten", "split", "contiguous"],
+    ids=["unflatten", "split", "contiguous", "setitem"],
 )
 def test_view_ops_stay_direct(loader, shape, param_shape):
     make, shapes = _single(loader, shape=shape, param_shape=param_shape)
     _, plan = _check_plan_equals_cold_start(make, shapes)
     assert plan.get_dest("layer.weight") is not None
+
+
+@pytest.mark.parametrize(
+    "loader,sent,held,cast",
+    [
+        (copy_weight_, E8M0, U8, None),  # byte containers copy as bytes
+        (copy_weight_, U8, E8M0, None),
+        (copy_weight_, torch.float4_e2m1fn_x2, U8, None),
+        (_raw_copy, torch.int8, U8, None),  # same-width integer casts keep bits
+        (_raw_copy, U8, torch.int8, None),
+        (copy_weight_, BF16, E4M3, E4M3),  # value casts replay by value
+        (copy_weight_, E4M3, BF16, BF16),
+        (copy_weight_, torch.float8_e5m2, E4M3, E4M3),
+    ],
+    ids=lambda v: getattr(v, "__name__", str(v)),
+)
+def test_copy_time_dtype_change_stays_direct(loader, sent, held, cast):
+    """`cast` is the write's dtype; `None` is a byte copy in the sent dtype."""
+    make, _ = _single(loader, shape=(8,), dtype=held)
+    _, plan = _check_plan_equals_cold_start(make, {"layer.weight": ((8,), sent)})
+    (write,) = plan.entries["layer.weight"].writes
+    assert write.dtype == cast
+    ((_, dest),) = plan.get_dest("layer.weight")
+    assert dest.dtype == (cast or sent)
 
 
 def test_tensors_sharing_one_storage():
@@ -564,7 +665,7 @@ def test_tensors_sharing_one_storage():
 
 
 def _two_names(loader_a):
-    """``a`` through ``loader_a``, ``b`` a plain copy."""
+    """`a` through `loader_a`, `b` a plain copy."""
 
     def make():
         model = _Toy()
@@ -608,8 +709,8 @@ def test_meta_failure_is_not_called_a_value_read():
 
 
 class _Paired(_Toy):
-    """Stashes ``weight_a`` until ``weight_b`` arrives: a list that ends up
-    empty again, or an attribute that stays (``keep_stash``)."""
+    """Stashes `weight_a` until `weight_b` arrives: a list that ends up
+    empty again, or an attribute that stays (`keep_stash`)."""
 
     keep_stash = False
 
@@ -634,7 +735,7 @@ class _Paired(_Toy):
 @pytest.mark.parametrize("keep_stash", [False, True])
 def test_paired_loader_is_refused(monkeypatch, keep_stash):
     """Whether the loader keeps its stash or not, the combined write is
-    labelled ``weight_a``, so ``weight_b`` writes nothing itself and the plan
+    labelled `weight_a`, so `weight_b` writes nothing itself and the plan
     is refused."""
     monkeypatch.setattr(_Paired, "keep_stash", keep_stash)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
@@ -647,7 +748,7 @@ def test_paired_loader_is_refused(monkeypatch, keep_stash):
 
 
 class _PairedWithValueRead(_Toy):
-    """``weight_a`` is stashed until ``weight_b`` arrives, and ``x``, which
+    """`weight_a` is stashed until `weight_b` arrives, and `x`, which
     arrives between them, reads its values."""
 
     def __init__(self):
@@ -669,9 +770,9 @@ class _PairedWithValueRead(_Toy):
 
 
 def test_a_stop_resumes_without_replaying_names():
-    """A stop resumes ``load_weights`` after the stopped name instead of
+    """A stop resumes `load_weights` after the stopped name instead of
     replaying the names before it, so the stash holds only this bake's
-    ``weight_a``: the pair is refused, not silently "not needed"."""
+    `weight_a`: the pair is refused, not silently "not needed"."""
     shapes = {
         "layer.weight_a": ((4,), BF16),
         "x.weight": ((4,), BF16),
@@ -686,7 +787,7 @@ def test_a_stop_resumes_without_replaying_names():
 
 def test_a_trace_kept_past_planning_fails_loudly(monkeypatch):
     """A loader that keeps an incoming tensor on the module keeps a planning
-    trace; using it in a later ``load_weights`` raises instead of writing
+    trace; using it in a later `load_weights` raises instead of writing
     nowhere."""
     monkeypatch.setattr(_Paired, "keep_stash", True)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
@@ -702,7 +803,7 @@ def test_a_trace_kept_past_planning_fails_loudly(monkeypatch):
 
 def test_overlapping_writes_fall_back():
     """Both tied names write the same storage: only they go through
-    ``load_weights``, in arrival order as at cold start."""
+    `load_weights`, in arrival order as at cold start."""
 
     def make():
         model = _toy_model()
@@ -719,11 +820,89 @@ def test_overlapping_writes_fall_back():
     assert plan.get_dest("proj.weight") is not None
 
 
+@pytest.mark.parametrize(
+    "second,overlap",
+    [(slice(2, 4), False), (slice(1, 4), True)],
+    ids=["apart", "shared"],
+)
+def test_interleaved_column_writes(second, overlap):
+    """Column blocks' byte spans intersect; only a shared column is an overlap."""
+    cols = {0: slice(0, 2), 1: second}
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        model.layer.weight = _param(
+            4, 4, loader=lambda p, w, shard: p[:, cols[shard]].copy_(w)
+        )
+        model.stacked = {"a": ("layer.weight", 0), "b": ("layer.weight", 1)}
+        return model
+
+    shapes = {"a": ((4, 2), BF16), "b": ((4, second.stop - second.start), BF16)}
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert (plan.entries["a"].reason == "writes overlap with 'b'") == overlap
+    assert (plan.get_dest("b") is None) == overlap
+
+
+def _planned_params(n: int):
+    shapes = {f"p{i}": ((4,), BF16) for i in range(n)}
+
+    def make():
+        model = _Toy()
+        for name in shapes:
+            setattr(model, name, _param(4))
+        return model
+
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    return model, _plan(model, shapes), shapes
+
+
+def test_load_planned_flushes_without_dropping_or_repeating(monkeypatch):
+    model, plan, shapes = _planned_params(5)
+    sizes: list[int] = []
+    foreach = torch._foreach_copy_
+
+    def counting(dsts, srcs):
+        sizes.append(len(dsts))
+        foreach(dsts, srcs)
+
+    monkeypatch.setattr(torch, "_foreach_copy_", counting)
+    monkeypatch.setattr(plan_module, "_FLUSH_BYTES", 12)  # past it every 2 names
+    new = _checkpoint(shapes, 1)
+    load_planned(model, plan, new.items())
+    assert sizes == [2, 2, 1]
+    assert all(torch.equal(getattr(model, n), w) for n, w in new.items())
+
+
+def test_load_planned_last_write_of_a_name_wins():
+    model, plan, shapes = _planned_params(2)
+    first, second = _checkpoint(shapes, 1), _checkpoint(shapes, 2)
+    load_planned(model, plan, [*first.items(), ("p0", second["p0"])])
+    assert torch.equal(model.p0, second["p0"])
+    assert torch.equal(model.p1, first["p1"])
+
+
+def test_load_planned_retries_a_failed_batch_pair_by_pair(monkeypatch):
+    model, plan, shapes = _planned_params(2)
+
+    def fail(dsts, srcs):
+        raise RuntimeError("batched copy failed")
+
+    monkeypatch.setattr(torch, "_foreach_copy_", fail)
+    new = _checkpoint(shapes, 1)
+    load_planned(model, plan, new.items())
+    assert all(torch.equal(getattr(model, n), w) for n, w in new.items())
+    new["p1"] = torch.empty(4, dtype=BF16, device="meta")  # no data to copy
+    with pytest.raises(RuntimeError, match="copying 'p1'"):
+        load_planned(model, plan, new.items())
+
+
 def test_layerwise_mode_is_refused(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+    with pytest.raises(RuntimeError, match="reloads layerwise"):
         plan_loads(model, _metadata(shapes))
 
 
@@ -736,7 +915,7 @@ def test_duplicate_names_are_refused():
 
 
 def test_plan_outside_a_direct_reload_is_refused():
-    """The plan takes its layout from what ``begin_direct_reload`` applied."""
+    """The plan takes its layout from what `begin_direct_reload` applied."""
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
     with pytest.raises(RuntimeError, match="between start_reload and finish_reload"):

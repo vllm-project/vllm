@@ -57,12 +57,12 @@ def _reasoning_item(
 
 @pytest.fixture(scope="module")
 def server():
-    from .conftest import BASE_TEST_ENV
+    from .conftest import BASE_TEST_ENV, RESPONSES_STORE_ENV
 
     args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
     env_dict = {
         **BASE_TEST_ENV,
-        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+        **RESPONSES_STORE_ENV,
         # uncomment for tool calling
         # PYTHON_EXECUTION_BACKEND: "dangerously_use_uv",
     }

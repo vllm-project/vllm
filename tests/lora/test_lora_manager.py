@@ -289,7 +289,10 @@ def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
     )
 
 
-def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_model):
+@pytest.mark.parametrize("runner_first", [False, True])
+def test_dedup_shared_module_across_paths(
+    default_vllm_config, dist_init, dummy_model, monkeypatch, runner_first
+):
     """A module reachable from two attribute paths (e.g. a MoE gate held
     both directly on the block and inside its inner runner) must produce a
     single LoRA wrapper. Both paths must end up pointing to that same
@@ -299,21 +302,22 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
     """
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
+    # Holds the SAME gate instance under another path. This mirrors how
+    # MoERunner.runner.gate references the block's gate in qwen3_moe.
+    class _Runner(nn.Module):
+        def __init__(self, g):
+            super().__init__()
+            self.gate = g  # alias path: "moe.runner.gate"
+
     class AliasContainer(nn.Module):
         def __init__(self, gate: nn.Module):
             super().__init__()
             self.gate = gate  # canonical path: "moe.gate"
-
-            # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how MoERunner.runner.gate references the
-            # block's gate in qwen3_moe.
-            class _Runner(nn.Module):
-                def __init__(self, g):
-                    super().__init__()
-                    self.gate = g  # alias path: "moe.runner.gate"
-
             self.runner = _Runner(gate)
+            if runner_first:
+                self._modules["gate"] = self._modules.pop("gate")
 
+    monkeypatch.setattr("vllm.lora.model_manager.MoERunner", _Runner)
     gate = ReplicatedLinear(10, 4, bias=False)
     model = dummy_model
     model.add_module("moe", AliasContainer(gate))
@@ -371,7 +375,11 @@ def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
         1,
         1,
         LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            enable_embedding_modules=True,
         ),
         torch.device(DEVICES[0]),
         default_vllm_config,
@@ -577,7 +585,11 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
         2,
         2,
         LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+            max_lora_rank=8,
+            max_cpu_loras=3,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            enable_embedding_modules=True,
         ),
         device=device,
         vllm_config=default_vllm_config,
@@ -1297,10 +1309,12 @@ def test_target_modules_multiple(default_vllm_config, dist_init, dummy_model, de
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_target_modules_none_uses_all(
+def test_target_modules_none_uses_defaults(
     default_vllm_config, dist_init, dummy_model, device
 ):
-    """Test that target_modules=None uses all supported modules."""
+    """The default wraps supported linear layers and leaves lm_head unwrapped."""
+    from vllm.lora.layers import LogitsProcessorWithLoRA
+
     _test_target_modules(
         dummy_model,
         None,
@@ -1311,7 +1325,7 @@ def test_target_modules_none_uses_all(
             ("dense2", RowParallelLinearWithLoRA),
             ("layer1.dense2", RowParallelLinearWithLoRA),
         ],
-        expected_no_lora=[],
+        expected_no_lora=[("logits_processor", LogitsProcessorWithLoRA)],
         vllm_config=default_vllm_config,
     )
 

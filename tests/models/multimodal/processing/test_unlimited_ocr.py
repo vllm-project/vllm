@@ -11,7 +11,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.transformers_utils.processors.deepseek_ocr import calculate_aspect_ratios
+
+from .test_common import _assert_inputs_equal
 
 
 @pytest.mark.parametrize("overrides, expected", [({}, 128), ({"rswa_window": 0}, None)])
@@ -20,6 +23,17 @@ def test_v2_output_window_reaches_runtime_config(overrides, expected):
     config = ModelConfig(model="baidu/Unlimited-OCR-2", hf_overrides=overrides)
     assert config.rswa_window == expected
     assert config.hf_text_config.rswa_window == expected
+
+
+def test_v2_turns_off_requested_extensible_kv_cache(caplog_vllm):
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2", enable_extensible_kv_cache=True
+    ).create_engine_config()
+
+    assert not config.cache_config.enable_extensible_kv_cache
+    assert "does not support the extensible KV cache" in caplog_vllm.text
 
 
 def test_v2_dummy_layers_preserve_dash_configuration():
@@ -124,7 +138,7 @@ def test_image_cache_identity_across_image_counts(
     elif use_embeds:
         assert hashes[0] == hashes[1]
         if use_uuid:
-            assert hashes[0] == "image-0"
+            assert hashes[0] == "uuid:image-0"
     else:
         assert lengths[0] > lengths[1] == lengths[2]
         assert hashes[0] != hashes[1]
@@ -156,6 +170,89 @@ def test_image_cache_identity_without_cropping(kwargs_on_init: bool):
         == results[1]["mm_placeholders"]["image"][0].length
     )
     assert results[0]["prompt_token_ids"] == results[2]["prompt_token_ids"]
+
+
+@pytest.mark.parametrize("model", ["baidu/Unlimited-OCR", "baidu/Unlimited-OCR-2"])
+@pytest.mark.parametrize("kwargs", [{"max_crops": 4}, {"crop_mode": False}])
+@pytest.mark.parametrize("num_images", [1, 2])
+def test_request_crop_kwargs_match_processed_image_tokens(model, kwargs, num_images):
+    config = ModelConfig(model=model, limit_mm_per_prompt={"image": 2})
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    images = [Image.new("RGB", (1000, 6000)), Image.new("RGB", (1600, 1200))]
+    images = images[:num_images]
+    prompt = "<image>\n" * num_images
+    hf_processor = processor.info.get_hf_processor(**kwargs)
+    expected = hf_processor(prompt=prompt, images=images, **kwargs)["num_image_tokens"]
+    cache = MultiModalProcessorOnlyCache(config)
+    for _ in range(2):
+        inputs = ProcessorInputs(
+            prompt=processor.info.get_tokenizer().encode(prompt),
+            mm_data_items=processor.info.parse_mm_data({"image": images}),
+            hf_processor_mm_kwargs=kwargs,
+            cache=cache,
+        )
+        result = processor.apply(inputs, TimingContext(enabled=False))
+        lengths = [p.length for p in result["mm_placeholders"]["image"]]
+        assert lengths == expected.tolist()
+
+
+def test_v2_multi_page_request_uses_processor_cache():
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=8192,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    prompt = processor.info.get_tokenizer().encode(
+        "<PAGE><image><PAGE><image>Multi page parsing."
+    )
+    images = [Image.new("RGB", (1920, 1080), color) for color in ("red", "blue")]
+    cache = MultiModalProcessorOnlyCache(config)
+    results = []
+    for data in (images, [None, None]):
+        inputs = ProcessorInputs(
+            prompt=prompt,
+            mm_data_items=processor.info.parse_mm_data({"image": data}),
+            mm_uuid_items={"image": ["page-0", "page-1"]},
+            cache=cache,
+        )
+        results.append(processor.apply(inputs, TimingContext(enabled=False)))
+
+    assert results[0]["prompt_token_ids"] == results[1]["prompt_token_ids"]
+    assert results[0]["mm_hashes"] == results[1]["mm_hashes"]
+
+
+def test_v2_partial_cache_hit_matches_uncached_request():
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=8192,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    tokenizer = processor.info.get_tokenizer()
+    page_a = Image.new("RGB", (1920, 1080), "red")
+    page_b = Image.new("RGB", (768, 1024), "blue")
+
+    def apply(text, data, uuids, cache):
+        inputs = ProcessorInputs(
+            prompt=tokenizer.encode(text),
+            mm_data_items=processor.info.parse_mm_data({"image": data}),
+            mm_uuid_items={"image": uuids},
+            cache=cache,
+        )
+        return processor.apply(inputs, TimingContext(enabled=False))
+
+    two_pages = "<PAGE><image><PAGE><image>Multi page parsing."
+    expected = apply(two_pages, [page_b, page_a], ["page-b", "page-a"], None)
+
+    cache = MultiModalProcessorOnlyCache(config)
+    apply("<PAGE><image>Multi page parsing.", [page_a], ["page-a"], cache)
+    actual = apply(two_pages, [page_b, None], ["page-b", "page-a"], cache)
+
+    assert expected["mm_placeholders"]["image"][0].length != (
+        expected["mm_placeholders"]["image"][1].length
+    )
+    _assert_inputs_equal(actual, expected)
 
 
 def test_v2_gundam_matches_official_wide_page_grid():
@@ -225,21 +322,13 @@ async def test_v2_async_rendering_rejects_bad_layout_and_preserves_image_cache()
         renderer.shutdown()
 
 
-@pytest.mark.parametrize(
-    "env, kwargs, message",
-    [
-        ("0", {}, "requires Model Runner V2"),
-        ("1", {"quantization": "fp8"}, "does not support quantized weights"),
-    ],
-)
-def test_v2_rejects_unsupported_runtime_before_loading(
-    monkeypatch, env, kwargs, message
-):
+def test_v2_rejects_unsupported_runtime_before_loading():
     from vllm.engine.arg_utils import EngineArgs
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env)
-    with pytest.raises(ValueError, match=message):
-        EngineArgs(model="baidu/Unlimited-OCR-2", **kwargs).create_engine_config()
+    with pytest.raises(ValueError, match="does not support quantized weights"):
+        EngineArgs(
+            model="baidu/Unlimited-OCR-2", quantization="fp8"
+        ).create_engine_config()
 
 
 def test_v2_preprocessed_features_validate_page_layout_at_admission():
@@ -292,3 +381,21 @@ def test_v2_preprocessed_features_validate_page_layout_at_admission():
                 )
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+def test_v2_rocm_defaults_select_aiter_for_dash_and_vision():
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2", enforce_eager=True
+    ).create_engine_config()
+    assert (
+        config.model_config.hf_text_config.unlimited_ocr2_attention_backend
+        == "ROCM_AITER_FA"
+    )
+    assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    mm_config = config.model_config.multimodal_config
+    assert mm_config is not None
+    assert mm_config.mm_encoder_attn_backend == AttentionBackendEnum.ROCM_AITER_FA

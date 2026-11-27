@@ -155,7 +155,7 @@ class Mamba2AttentionMetadataBuilder(
         )
         self.chunk_size: int = chunk_size
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
+            vllm_config, kv_cache_spec, self.checkpoint_alignment
         )
 
     def build(

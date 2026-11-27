@@ -90,9 +90,9 @@ def _supports_fused_pre_indexer(
 class QSAIndexer(nn.Module):
     """QSA projection weights, indexer caches, and paged, weight-free selection.
 
-    ``prefix`` must be the checkpoint's indexer prefix, normally
-    ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
-    ``index_qk_proj``, ``q_layernorm`` and ``k_layernorm`` under that prefix.
+    `prefix` must be the checkpoint's indexer prefix, normally
+    `model.layers.N.self_attn.indexer`.  Consequently the trainable names are
+    `index_qk_proj`, `q_layernorm` and `k_layernorm` under that prefix.
     """
 
     def __init__(
@@ -117,6 +117,21 @@ class QSAIndexer(nn.Module):
         self.index_head_dim = int(config.indexer_head_dim)
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
+        from .ops.qsa_indexer import (
+            QSA_TOPK_BACKENDS,
+            init_gvr2,
+            use_gvr2_topk,
+        )
+
+        self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        if self.topk_backend not in QSA_TOPK_BACKENDS:
+            raise ValueError(
+                f"sparse_indexer_topk_backend={self.topk_backend!r} is not "
+                f"supported by Qwen4Exp QSA; use one of {QSA_TOPK_BACKENDS}"
+            )
+        # Width 64 is float4-aligned, so this only checks platform and k.
+        if use_gvr2_topk(self.topk_backend, self.token_topk // self.compress_ratio, 64):
+            init_gvr2(vllm_config.scheduler_config.max_num_batched_tokens)
         self.rotary_emb = rotary_emb
         self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
@@ -218,19 +233,27 @@ class QSAIndexer(nn.Module):
         attn: "Qwen4ExpQSAAttention",
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
+        main_kv_cache: torch.Tensor | None = None,
+        block_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
-        the leading ``output_width`` columns are ``-1``-padded
+        the leading `output_width` columns are `-1`-padded
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
 
-        With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
+        With `attn.use_fused_qsa_prepare`, the same launch also writes
+        `attn`'s K/V into `main_kv_cache` at `slot_mapping` and prepares
+        its Q and gate from `qkv`, returned as the second element (None
+        otherwise). `qkv`, `slot_mapping` and `main_kv_cache` are only
+        read in that mode.
+
+        `block_indices` [num_tokens, token_topk // compress_ratio] receives
+        the selected compressed blocks before expansion: each row's leading
+        min(top-k, visible) entries, then -1. Not written on `skip_topk`
+        steps.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -274,15 +297,17 @@ class QSAIndexer(nn.Module):
 
         main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
         if attn.use_fused_qsa_prepare:
-            if qkv is None or slot_mapping is None:
-                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
+            if qkv is None or slot_mapping is None or main_kv_cache is None:
+                raise ValueError(
+                    "fused QSA prepare requires qkv, slot_mapping and main_kv_cache"
+                )
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
-            main_kv_cache = attn.kv_cache.transpose(1, 2)
+            main_kv_cache = main_kv_cache.transpose(1, 2)
             if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
             main_outputs = qsa_prepare(
@@ -320,14 +345,8 @@ class QSAIndexer(nn.Module):
             )
         else:
             # Unfused reference path
-            from flashinfer.norm import gemma_rmsnorm
-
             q = projected_q.reshape(-1, self.index_n_heads, self.index_head_dim)
-            q = gemma_rmsnorm(
-                q.reshape(-1, self.index_head_dim),
-                self.q_layernorm.weight,
-                self.q_layernorm.variance_epsilon,
-            ).reshape_as(q)
+            q = self.q_layernorm(q.reshape(-1, self.index_head_dim)).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
             q = q.to(self.indexer_dtype)
 
@@ -353,10 +372,8 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 rope_position_cache,
             )
-            compressed_keys = gemma_rmsnorm(
-                pooled.reshape(-1, self.index_head_dim),
-                self.k_layernorm.weight,
-                self.k_layernorm.variance_epsilon,
+            compressed_keys = self.k_layernorm(
+                pooled.reshape(-1, self.index_head_dim)
             ).reshape(-1, 1, self.index_head_dim)
             if getattr(self.rotary_emb, "mrope_section", None):
                 first_positions = first_positions.transpose(0, 1)
@@ -402,13 +419,6 @@ class QSAIndexer(nn.Module):
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
         visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
-        block_indices = torch.empty(
-            num_tokens,
-            self.token_topk // self.compress_ratio,
-            dtype=torch.int32,
-            device=q.device,
-        )
-
         # Decode requests occupy the leading rows and share one query length.
         if num_decode_tokens:
             num_decodes = compressed_metadata.num_decodes
@@ -424,6 +434,7 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                self.topk_backend,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
@@ -441,6 +452,7 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                self.topk_backend,
             )
         expand_qsa_block_indices(
             block_indices,

@@ -366,7 +366,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into ``output``, or stop after GEMM2 when it is None."""
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
         import flashinfer
 
         assert self.quant_config.w1_scale is not None

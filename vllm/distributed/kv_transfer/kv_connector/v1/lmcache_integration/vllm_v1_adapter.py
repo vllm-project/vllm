@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadSpec:
     # Number of tokens cached in vLLM
     vllm_cached_tokens: int
@@ -77,7 +77,7 @@ class LoadSpec:
     can_load: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class SaveSpec:
     # Skip already saved tokens
     skip_leading_tokens: int
@@ -85,7 +85,7 @@ class SaveSpec:
     can_save: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class DisaggSpec:
     req_id: str
     receiver_id: str
@@ -403,19 +403,13 @@ def need_gpu_interim_buffer(lmcache_config: LMCacheEngineConfig):
     return not lmcache_config.enable_pd
 
 
-def _calculate_mtp_layers(vllm_config, model_config):
+def _calculate_mtp_layers(vllm_config):
     num_mtp_layers = 0
     if vllm_config is not None and vllm_config.speculative_config is not None:
         logger.info(
             "vllm_config.speculative_config: %s", vllm_config.speculative_config
         )
-        # TODO(baoloongmao): Support other MTP methods
-        if vllm_config.speculative_config.method == "deepseek_mtp":
-            num_mtp_layers = getattr(
-                model_config.hf_config, "num_nextn_predict_layers", 0
-            )
-
-        elif vllm_config.speculative_config.uses_target_hidden_states:
+        if vllm_config.speculative_config.uses_target_hidden_states:
             try:
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 num_mtp_layers = draft_model_config.get_num_layers(
@@ -470,7 +464,7 @@ def _init_lmcache_engine(
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
-    num_mtp_layers = _calculate_mtp_layers(vllm_config, model_config)
+    num_mtp_layers = _calculate_mtp_layers(vllm_config)
     num_layer += num_mtp_layers
     chunk_size = lmcache_config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
@@ -986,7 +980,7 @@ class LMCacheConnectorV1Impl:
 
             is_first = True
 
-            for idx, request in enumerate(connector_metadata.requests):
+            for request in connector_metadata.requests:
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
                     continue
@@ -1375,7 +1369,7 @@ class LMCacheConnectorV1Impl:
         # In the latest vllm version, the type of scheduled_cached_reqs has
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
-            for i, req in enumerate(cached_reqs):
+            for req in cached_reqs:
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 

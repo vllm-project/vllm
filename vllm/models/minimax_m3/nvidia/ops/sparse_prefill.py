@@ -90,19 +90,26 @@ def _gqa_sparse_fwd_tiled_kernel(
         other=END,
     ).to(tl.int32)
     ids = tl.where(ids >= 0, ids, END)
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + q_start * stride_qn + pid_kh * gqa_group_size * stride_qh,
-        shape=(q_len, gqa_group_size, head_dim),
-        strides=(stride_qn, stride_qh, stride_qd),
-        offsets=(pid_q, 0, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(2, 1, 0),
-    )
-    q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
-    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
-    off_n = tl.arange(0, BLOCK_SIZE_K)
+    off_h = tl.arange(0, BLOCK_SIZE_H)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
+    qo_mask = (
+        (off_q < q_len)[:, None, None]
+        & (off_h < gqa_group_size)[None, :, None]
+        & d_mask[None, None, :]
+    )
+    rows = q_start + off_q
+    heads = pid_kh * gqa_group_size + off_h
+    q = tl.load(
+        q_ptr
+        + rows[:, None, None] * stride_qn
+        + heads[None, :, None] * stride_qh
+        + off_d[None, None, :] * stride_qd,
+        mask=qo_mask,
+        other=0.0,
+    )
+    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
+    off_n = tl.arange(0, BLOCK_SIZE_K)
     bt_row = block_table_ptr + pid_b * stride_bt_b
     sm_scale_log2e = sm_scale * 1.4426950409
     m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), tl.float32)
@@ -183,20 +190,15 @@ def _gqa_sparse_fwd_tiled_kernel(
         blk = tl.min(tl.reshape(remaining, (BLOCK_SIZE_Q * BLOCK_SIZE_T,)), axis=0)
     norm = tl.where(lse_i == float("-inf"), 0.0, tl.exp2(m_i - lse_i))
     acc_o *= norm[:, None]
-    o_ptrs = tl.make_block_ptr(
-        base=o_ptr + q_start * stride_on + pid_kh * gqa_group_size * stride_oh,
-        shape=(q_len, gqa_group_size, head_dim),
-        strides=(stride_on, stride_oh, stride_od),
-        offsets=(pid_q, 0, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(2, 1, 0),
-    )
     tl.store(
-        o_ptrs,
+        o_ptr
+        + rows[:, None, None] * stride_on
+        + heads[None, :, None] * stride_oh
+        + off_d[None, None, :] * stride_od,
         tl.reshape(acc_o, (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)).to(
             o_ptr.dtype.element_ty
         ),
-        boundary_check=(0, 1, 2),
+        mask=qo_mask,
     )
 
 

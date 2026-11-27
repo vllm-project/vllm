@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Equivalence tests for the fused mamba "align" block-table gather.
+"""Equivalence tests for the fused mamba prefix-caching block-table gather.
 
-`mamba_get_block_table_tensor`'s align branch used to be five PyTorch
+`mamba_get_block_table_tensor`'s prefix-caching branch used to be five PyTorch
 statements that expanded to seven kernel launches over a `(num_reqs,)` tensor.
 It is now one Triton kernel. These tests pin the fused kernel to the exact
 semantics of the expression it replaced, including cases a single-request
@@ -17,25 +17,32 @@ it), so a column stride of 1 must not be assumed.
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
+
+DEVICE_TYPE = current_platform.device_type
+
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs a GPU",
+)
 
 WIDTH = 64
 
 
-def _spec(block_size: int, num_speculative_blocks: int) -> MambaSpec:
-    # Only block_size and num_speculative_blocks are read by the align branch;
-    # shapes/dtypes just have to be well formed for the frozen dataclass.
+def _spec(block_size: int) -> MambaSpec:
+    # Only block_size is read by the align branch; shapes/dtypes just have to
+    # be well formed for the frozen dataclass.
     return MambaSpec(
         block_size=block_size,
         shapes=((1,),),
         dtypes=(torch.float32,),
-        num_speculative_blocks=num_speculative_blocks,
     )
 
 
 def _reference(block_table, seq_lens, block_size, num_spec_blocks):
-    """The align branch exactly as it was before the fusion."""
+    """The prefix-caching branch exactly as it was before the fusion."""
     start_indices = (seq_lens - 1) // block_size
     start_indices = start_indices.clamp(min=0)
     offsets = torch.arange(
@@ -61,66 +68,60 @@ def _make(nreq, block_size, nspec, device, noncontig=False):
     return bt, sl
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 @pytest.mark.parametrize("nreq", [1, 2, 8, 64])
 @pytest.mark.parametrize("block_size", [16, 64, 256])
 @pytest.mark.parametrize("nspec", [0, 1, 2, 3, 4, 7])
 def test_matches_reference(nreq, block_size, nspec):
-    bt, sl = _make(nreq, block_size, nspec, "cuda")
-    got = mamba_get_block_table_tensor(bt, sl, _spec(block_size, nspec), "align")
+    bt, sl = _make(nreq, block_size, nspec, DEVICE_TYPE)
+    got = mamba_get_block_table_tensor(bt, sl, _spec(block_size), True, nspec)
     want = _reference(bt, sl, block_size, nspec)
     assert got.shape == want.shape
     assert got.dtype == want.dtype
     torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 @pytest.mark.parametrize("nspec", [0, 3, 7])
 def test_non_contiguous_block_table(nspec):
     """A column stride != 1 must be honoured, not assumed away."""
-    bt, sl = _make(8, 64, nspec, "cuda", noncontig=True)
-    got = mamba_get_block_table_tensor(bt, sl, _spec(64, nspec), "align")
+    bt, sl = _make(8, 64, nspec, DEVICE_TYPE, noncontig=True)
+    got = mamba_get_block_table_tensor(bt, sl, _spec(64), True, nspec)
     want = _reference(bt, sl, 64, nspec)
     torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 def test_zero_seq_len_clamps_to_first_row():
     """CUDA-graph padding rows carry seq_len 0; the old code clamped to row 0."""
-    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.zeros(4, dtype=torch.int32, device="cuda")
-    got = mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "align")
+    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.zeros(4, dtype=torch.int32, device=DEVICE_TYPE)
+    got = mamba_get_block_table_tensor(bt, sl, _spec(64), True, 3)
     torch.testing.assert_close(got, _reference(bt, sl, 64, 3), atol=0, rtol=0)
     # start clamps to 0, so this is just the first 1 + nspec columns.
     torch.testing.assert_close(got, bt[:, :4], atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 def test_zero_requests_returns_empty():
     """An empty batch must not launch a (0,) grid."""
-    bt = torch.zeros((0, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.zeros(0, dtype=torch.int32, device="cuda")
-    got = mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "align")
+    bt = torch.zeros((0, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.zeros(0, dtype=torch.int32, device=DEVICE_TYPE)
+    got = mamba_get_block_table_tensor(bt, sl, _spec(64), True, 3)
     assert got.shape == (0, 4)
     assert got.dtype == bt.dtype
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-def test_none_mode_returns_the_input_unchanged():
-    """`MambaCacheMode` is Literal["align", "none"]; only "none" passes through.
-
-    An earlier version of this test also parametrised a "mode" of "all", which
-    is not a member of that Literal. Anything that is not "none" takes the
-    align branch and returns a NEW tensor, so asserting identity for it failed
-    -- correctly. The passthrough contract applies to "none" alone.
-    """
-    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device="cuda")
-    assert mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "none") is bt
+@requires_accelerator
+def test_without_prefix_caching_returns_the_input_unchanged():
+    """Without prefix caching the block table passes through unchanged."""
+    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device=DEVICE_TYPE)
+    assert mamba_get_block_table_tensor(bt, sl, _spec(64), False, 3) is bt
 
 
 # ---------------------------------------------------------------------------
-# CPU tensors. Every test above runs on "cuda", which is exactly how the
+# CPU tensors. Every test above runs on the accelerator, which is exactly how the
 # regression reached review: `mamba_get_block_table_tensor` is a SHARED
 # utility and its callers legitimately pass CPU tensors -- the GDN and
 # linear-attention metadata builders are unit-tested with
@@ -132,18 +133,18 @@ def test_none_mode_returns_the_input_unchanged():
 @pytest.mark.parametrize("nspec", [0, 1, 3])
 @pytest.mark.parametrize("block_size", [1, 16, 64])
 def test_cpu_tensors_match_the_reference(nspec, block_size):
-    """The align branch must work on CPU, not just on the accelerator."""
+    """The prefix-caching branch must work on CPU, not just on the accelerator."""
     width = 2 + nspec + 8
     bt = torch.arange(5 * width, dtype=torch.int32).reshape(5, width)
     sl = torch.tensor([0, 1, block_size, block_size * 3 + 1, 7], dtype=torch.int32)
-    got = mamba_get_block_table_tensor(bt, sl, _spec(block_size, nspec), "align")
+    got = mamba_get_block_table_tensor(bt, sl, _spec(block_size), True, nspec)
     want = _reference(bt, sl, block_size, nspec)
     assert torch.equal(got, want), f"cpu mismatch: {got.tolist()} != {want.tolist()}"
     assert got.device == bt.device
     assert got.dtype == bt.dtype
 
 
-def test_cpu_none_mode_passes_through():
+def test_cpu_without_prefix_caching_passes_through():
     bt = torch.arange(12, dtype=torch.int32).reshape(3, 4)
     sl = torch.tensor([1, 2, 3], dtype=torch.int32)
-    assert mamba_get_block_table_tensor(bt, sl, _spec(16, 3), "none") is bt
+    assert mamba_get_block_table_tensor(bt, sl, _spec(16), False, 3) is bt

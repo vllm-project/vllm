@@ -6,8 +6,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use vllm_tokenizer::{DecodedText, Tokenizer as _};
-use xgrammar_structural_tag::ToolChoice;
 use xgrammar_structural_tag::format::Format;
+use xgrammar_structural_tag::{AllowedToolRef, AllowedToolsMode, ToolChoice};
 
 use super::{BeamUnifiedParser, HfPosition, build_output_grammar, other_names};
 use crate::output_grammar::test_utils::outline;
@@ -305,6 +305,38 @@ fn required_calls_any_tool_after_reasoning() {
     );
 }
 
+/// `auto` allowed tools admit an answer or a call to the allowed tools only:
+/// neither the other declared tool nor an undeclared name.
+#[test]
+fn auto_allowed_tools_call_only_the_allowed_tools() {
+    let allowed = ToolChoice::allowed_tools(
+        AllowedToolsMode::Auto,
+        vec![AllowedToolRef::function("get_time")],
+    );
+    expect_test::expect![[r#"
+        sequence
+          tag `<|channel|>analysis<|message|>` .. `<|end|><|start|>assistant`
+            sequence
+              /[^<]/
+              text
+          or
+            sequence
+              sequence
+                ` to=get_time<|channel|>analysis <|constrain|>xml<|message|>`
+                sequence
+                  optional
+                    sequence
+                      optional `\n`
+                      tag `<rfl:parameter name="zone">\n` text excluding [`<|end|>`, `<|call|>`, `</rfl:parameter>`] `\n</rfl:parameter>`
+              optional `<|call|>`
+            sequence
+              `<|channel|>final<|message|>`
+              text excluding [`<|end|>`, `<|return|>`]
+              optional `<|return|>`
+    "#]]
+        .assert_eq(&grammar(HfPosition::ResponseStart, allowed, false).unwrap());
+}
+
 #[test]
 fn auto_with_a_strict_tool_also_allows_an_answer() {
     expect_test::expect![[r#"
@@ -539,6 +571,38 @@ fn none_with_tools_only_answers() {
             optional `<|return|>`
     "#]]
     .assert_eq(&grammar(HfPosition::ResponseStart, ToolChoice::none(), true).unwrap());
+}
+
+#[test]
+fn parameterless_tool_takes_no_arguments() {
+    // Like Python Beam, every declared schema is enforced, also for non-strict
+    // tools; a missing (`Null`) or empty schema declares no parameters.
+    let tool = |parameters| Tool {
+        name: "get_time".to_string(),
+        description: None,
+        parameters,
+        strict: None,
+        defer_loading: None,
+    };
+    let required = |parameters| {
+        grammar_with(
+            HfPosition::ResponseStart,
+            &[tool(parameters)],
+            ToolChoice::required(),
+            true,
+            false,
+            false,
+        )
+        .unwrap()
+    };
+    let no_parameters = required(json!({"type": "object", "properties": {}}));
+    for parameters in [Value::Null, json!({})] {
+        assert_eq!(
+            required(parameters.clone()),
+            no_parameters,
+            "parameters: {parameters}"
+        );
+    }
 }
 
 #[test]
@@ -870,7 +934,7 @@ fn lenient_arguments_come_in_declared_or_sorted_order() {
 
 #[test]
 fn other_names_match_every_name_but_the_given_ones() {
-    let regex = regex_automata::meta::Regex::new(&format!(
+    let regex = regex::Regex::new(&format!(
         "^(?:{})$",
         other_names(&["get", "get_time", "a.b"])
     ))

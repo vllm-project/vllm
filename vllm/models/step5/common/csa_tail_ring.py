@@ -19,7 +19,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, KVCacheSpec
 
 # One bf16 ``[index_k | index_z]`` row: 2 * 256 * 2 bytes.
 _ROW_ELEMENTS = 512
@@ -30,7 +31,7 @@ _TAIL_RING_BLOCK_SIZES = (32, 64, 128)
 def _minimum_tail_ring_block_size(
     bytes_per_token: int, block_size: int, required_rows: int
 ) -> int | None:
-    """Kernel block the tail ring needs, or None when ``block_size`` fits."""
+    """Kernel block the tail ring needs, or None when `block_size` fits."""
     for candidate in (block_size, *_TAIL_RING_BLOCK_SIZES):
         page = candidate * bytes_per_token
         if page % _ROW_BYTES == 0 and page // _ROW_BYTES >= required_rows:
@@ -91,7 +92,7 @@ class Step5CSATailRingMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        spec = cast(CircularBufferSpec, self.kv_cache_spec)
+        spec = cast(AttentionSpec, self.kv_cache_spec)
         self.capacity = spec.page_size_bytes // _ROW_BYTES
         context = self.vllm_config.compilation_config.static_forward_context
         self.layers = [cast("Step5CSATailRing", context[n]) for n in self.layer_names]
@@ -151,16 +152,16 @@ class Step5CSATailRingBackend(AttentionBackend):
 
 
 class Step5CSATailRing(nn.Module, AttentionLayerBase):
-    """Raw ``[index_k | index_z]`` rows of each request's open CSA region.
+    """Raw `[index_k | index_z]` rows of each request's open CSA region.
 
     A region summary is a fixed-order online softmax over its eight rows, so
     the rows are the whole state: the row that closes a region replays the
     other seven from here, and a rejected draft is undone by the next step
     overwriting its row.
 
-    One verify step stores up to ``k + 1`` rows while the next step may still
+    One verify step stores up to `k + 1` rows while the next step may still
     replay up to seven earlier rows of the same region, so the ring needs
-    ``7 + k`` rows. It is sized to one main KV page so that it shares the
+    `7 + k` rows. It is sized to one main KV page so that it shares the
     page size of the other KV cache groups.
     """
 
@@ -185,9 +186,9 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
         self.capacity = 0
         self.rows_per_block = 0
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         main = self._static_forward_context[self.main_layer_name]
-        main_spec = main.get_kv_cache_spec(vllm_config)
+        main_spec = main.get_kv_cache_config(vllm_config).spec
         page_bytes = main_spec.page_size_bytes
         if page_bytes % _ROW_BYTES or page_bytes // _ROW_BYTES < self.required_rows:
             raise ValueError(
@@ -199,7 +200,7 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
         # Declare the main block size so the ring does not coarsen the hybrid
         # prefix-cache alignment; the page holds ``capacity`` 1 KB rows.
         block_size = main_spec.block_size
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=page_bytes // (block_size * torch.bfloat16.itemsize),
@@ -208,6 +209,7 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
             # Rows are addressed across blocks, which may be strided.
             block_stride_alignment=_ROW_BYTES,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Step5CSATailRingBackend
@@ -246,7 +248,7 @@ def _configured_tail_ring_block_size() -> int | None:
         main = layer._static_forward_context.get(layer.main_layer_name)
         if main is None:
             continue
-        spec = main.get_kv_cache_spec(vllm_config)
+        spec = main.get_kv_cache_config(vllm_config).spec
         if not isinstance(spec, AttentionSpec):
             continue
         needed = _minimum_tail_ring_block_size(

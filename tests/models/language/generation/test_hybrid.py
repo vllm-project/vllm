@@ -14,7 +14,6 @@ from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -28,15 +27,12 @@ pytestmark = pytest.mark.hybrid_model
 APC_MULTIPLY_BY = 300
 
 SSM_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "tiiuae/falcon-mamba-tiny-dev",
-    # mamba2-codestral in transformers is broken pending:
-    # https://github.com/huggingface/transformers/pull/40861
-    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
+    "vllm-project/mamba2-130m-hf",
+    "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
+    "tiiuae/Falcon-H1-Tiny-90M-Instruct",
     "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
@@ -45,12 +41,11 @@ HYBRID_MODELS = [
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 FP32_STATE_MODELS = [
-    "state-spaces/mamba-130m-hf",
+    "vllm-project/mamba2-130m-hf",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -206,16 +201,12 @@ def test_mamba_cache_cg_padding(
     """
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
-    vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
-    cudagraph_dispatcher = CudagraphDispatcher(vllm_config)
-    cudagraph_dispatcher.initialize_cudagraph_keys(
-        vllm_config.compilation_config.cudagraph_mode
-    )
-    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+    vllm_config = EngineArgs(model=model).create_engine_config()
+    compilation_config = vllm_config.compilation_config
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
-    while (
-        len(example_prompts)
-        == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
+    while len(example_prompts) in (
+        compilation_config.decode_cudagraph_capture_request_sizes or ()
     ):
         example_prompts.append(example_prompts[0])
 
@@ -316,6 +307,104 @@ def test_distributed_correctness(
         outputs_1_lst=vllm_outputs_tp_2,
         name_0="vllm_tp_1",
         name_1="vllm_tp_2",
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", ["ibm-granite/granite-4.0-tiny-preview"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_pipeline_parallel_correctness(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    """Each pipeline stage must load and run only its own layers. A MoE
+    checkpoint also covers the router-to-gate weight rename."""
+    with vllm_runner(
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+    ) as vllm_model:
+        vllm_outputs_pp_1 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        model,
+        pipeline_parallel_size=2,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+    ) as vllm_model:
+        vllm_outputs_pp_2 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs_pp_1,
+        outputs_1_lst=vllm_outputs_pp_2,
+        name_0="vllm_pp_1",
+        name_1="vllm_pp_2",
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", ["ibm-granite/granite-4.0-tiny-preview"])
+def test_pipeline_parallel_mamba_only_stage_prefix_caching(
+    vllm_runner, monkeypatch, model: str
+) -> None:
+    """A pipeline stage that holds only Mamba layers uses the KV cache block
+    size of the stages with attention layers, so prefix caching reuses the
+    same tokens as without pipeline parallelism.
+
+    The model's first attention layer is layer 5, so a 5/35 split leaves the
+    first stage with Mamba layers only. Each prompt extends the previous one
+    and is generated alone, which makes the cache hits deterministic.
+    """
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,35")
+    lines = [
+        f"Record {i}: the code for item {i} is {i * 7919 % 10007}.\n"
+        for i in range(160)
+    ]
+    prompts = [
+        "".join(lines[:n]) + "The code for item 3 is" for n in (40, 80, 120, 160)
+    ]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=5)
+    outputs = {}
+    num_cached_tokens = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model,
+            pipeline_parallel_size=pp_size,
+            max_num_seqs=MAX_NUM_SEQS,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            max_model_len=4096,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            results = [
+                vllm_model.llm.generate(prompt, sampling_params)[0]
+                for prompt in prompts
+            ]
+        num_cached_tokens[pp_size] = [result.num_cached_tokens for result in results]
+        outputs[pp_size] = [
+            (
+                list(result.outputs[0].token_ids),
+                result.outputs[0].text,
+                result.outputs[0].logprobs,
+            )
+            for result in results
+        ]
+
+    assert any(num_cached_tokens[1]), num_cached_tokens
+    assert num_cached_tokens[2] == num_cached_tokens[1], num_cached_tokens
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0="vllm_pp_1",
+        name_1="vllm_pp_2",
     )
 
 
@@ -848,7 +937,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", [SSM_MODELS[0]])
 def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
@@ -903,7 +992,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", ["vllm-project/mamba2-1.3b-hf"])
 def test_apc_common_prefix_same_batch(
     model: str,
     monkeypatch,
@@ -1013,3 +1102,81 @@ def test_zaya_cca_state(
                 name_0="hf",
                 name_1="vllm",
             )
+
+
+def test_zaya_cca_exports_state_at_checkpoint() -> None:
+    """A checkpoint holds the CCA state of the prefill stopped at its offset.
+
+    A decode leads the batch, so the prefills' tokens start after its token.
+    Nothing else in the cache changes.
+    """
+    import torch
+    from torch import nn
+
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
+    from vllm.model_executor.models.zaya import ZayaCCA
+    from vllm.v1.attention.backends.short_conv_attn import (
+        ShortConvAttentionMetadata,
+    )
+
+    channels, groups, delayed_dim, num_slots = 12, 3, 4, 8
+    cca = object.__new__(ZayaCCA)
+    nn.Module.__init__(cca)
+    cca.history_len = 2
+    cca.conv_qk_depthwise = nn.Conv1d(channels, channels, 2, groups=channels)
+    cca.conv_qk_grouped = nn.Conv1d(channels, channels, 2, groups=groups)
+    torch.manual_seed(0)
+    initial = (
+        torch.randn(num_slots, channels, cca.history_len),
+        torch.randn(num_slots, delayed_dim),
+    )
+
+    def run(qk, delayed, num_decodes, prefill_lens, slots, checkpoint=None):
+        cca.kv_cache = tuple(t.clone() for t in initial)
+        query_start_loc = torch.tensor([0, *prefill_lens]).cumsum(0)
+        metadata = ShortConvAttentionMetadata(
+            num_prefills=len(prefill_lens),
+            num_prefill_tokens=sum(prefill_lens),
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decodes,
+            num_reqs=num_decodes + len(prefill_lens),
+            query_start_loc_p=query_start_loc,
+            has_initial_states_p=torch.zeros(len(prefill_lens), dtype=torch.bool),
+            state_indices_tensor_p=torch.tensor(slots[num_decodes:]),
+            state_indices_tensor_d=torch.tensor(slots[:num_decodes]).view(-1, 1),
+            query_start_loc_d=None,
+            num_accepted_tokens=None,
+            seq_lens=torch.tensor([1] * num_decodes + prefill_lens),
+            checkpoint=checkpoint,
+        )
+        with torch.no_grad():
+            cca._mix_with_state(metadata, qk, delayed, torch.zeros(delayed_dim))
+        return cca.kv_cache
+
+    prefill_lens, offsets, checkpoint_slots = [40, 24], [32, 16], [5, 6]
+    num_tokens = 1 + sum(prefill_lens)
+    qk, delayed = (
+        torch.randn(num_tokens, channels),
+        torch.randn(num_tokens, delayed_dim),
+    )
+    checkpoint = MambaPrefillCheckpointMetadata(
+        checkpoint_offsets=torch.tensor(offsets),
+        state_indices=torch.tensor(checkpoint_slots),
+        offsets=offsets,
+    )
+    without_checkpoint = run(qk, delayed, 1, prefill_lens, [1, 2, 3])
+    with_checkpoint = run(qk, delayed, 1, prefill_lens, [1, 2, 3], checkpoint)
+
+    starts = [1, 1 + prefill_lens[0]]
+    for start, offset, slot in zip(starts, offsets, checkpoint_slots):
+        rows = slice(start, start + offset)
+        stopped = run(qk[rows], delayed[rows], 0, [offset], [7])
+        for state, stopped_state, plain in zip(
+            with_checkpoint, stopped, without_checkpoint
+        ):
+            torch.testing.assert_close(state[slot], stopped_state[7], rtol=0, atol=0)
+            state[slot] = plain[slot]
+    for state, plain in zip(with_checkpoint, without_checkpoint):
+        torch.testing.assert_close(state, plain, rtol=0, atol=0)

@@ -6,7 +6,11 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    RoutedScaleMode,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -18,7 +22,7 @@ from .activation import beam_silu_mul
 
 
 class BeamMLP(nn.Module):
-    """Dense SwiGLU MLP for the ``dense`` entries of ``mlp_layer_types``."""
+    """Dense SwiGLU MLP for the `dense` entries of `mlp_layer_types`."""
 
     def __init__(
         self,
@@ -58,7 +62,7 @@ class BeamMLP(nn.Module):
 
 
 class BeamSparseMoeBlock(nn.Module):
-    """Grouped sigmoid ``noaux_tc`` MoE with normal finalized output."""
+    """Grouped sigmoid `noaux_tc` MoE with normal finalized output."""
 
     def __init__(
         self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
@@ -104,7 +108,7 @@ class BeamSparseMoeBlock(nn.Module):
                 if config.routed_scaling_factor is not None
                 else 1.0
             ),
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,

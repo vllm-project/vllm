@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cgroup memory readers and SHM allocation preflight checks."""
 
+import os
 import sys
 from io import StringIO
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ def _clear_cgroup_cache():
 
 
 def _stub_files(monkeypatch, files: dict):
-    """Stub ``open()`` for a fixed set of paths; ``None`` -> OSError."""
+    """Stub `open()` for a fixed set of paths; `None` -> OSError."""
     real_open = open
 
     def fake_open(path, *args, **kwargs):
@@ -223,6 +224,27 @@ def test_visible_memory_node_assigned_ids_are_limited_to_allowed_nodes(
     assert cru.get_visible_memory_node([1, 4]) == [1]
 
 
+def test_worker_memory_nodes_keep_available_assigned_nodes(six_numa_nodes):
+    assert cru.get_worker_memory_nodes([2, 3]) == [2, 3]
+
+
+def test_worker_memory_nodes_raise_when_assigned_nodes_are_missing(
+    six_numa_nodes, monkeypatch
+):
+    """DP=2 x TP=2 on a 2-node host assigns DP rank 1 nodes [2, 3]. The worker
+    must stop with an error that names the cause, not an IndexError."""
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    assert cru.get_visible_memory_node([2, 3]) == []
+    with pytest.raises(ValueError, match="VLLM_CPU_SIM_MULTI_NUMA"):
+        cru.get_worker_memory_nodes([2, 3])
+
+
+def test_worker_memory_nodes_sim_multi_numa_shares_nodes(six_numa_nodes, monkeypatch):
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    monkeypatch.setenv("VLLM_CPU_SIM_MULTI_NUMA", "1")
+    assert cru.get_worker_memory_nodes([2, 3]) == [0, 1]
+
+
 def test_visible_memory_node_sim_multi_numa_ignores_assigned_ids(
     six_numa_nodes, monkeypatch
 ):
@@ -267,3 +289,83 @@ def test_omp_manager_binds_each_dp_rank_to_its_assigned_node(monkeypatch):
     assert rank0 and rank1
     assert rank0 <= set(range(8))
     assert rank1 <= set(range(8, 16))
+
+
+def test_omp_manager_sim_multi_numa_requires_auto_binding(monkeypatch):
+    """Explicit binds with VLLM_CPU_SIM_MULTI_NUMA stop with a message, not a
+    bare AssertionError."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        omp,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: True, get_cpu_architecture=lambda: CpuArchEnum.X86
+        ),
+    )
+    monkeypatch.setenv("VLLM_CPU_OMP_THREADS_BIND", "0-3|8-11")
+    monkeypatch.setenv("VLLM_CPU_SIM_MULTI_NUMA", "1")
+    parallel_config = SimpleNamespace(
+        local_world_size=2,
+        data_parallel_rank_local=0,
+        _api_process_count=1,
+        assigned_physical_gpu_ids=[0, 1],
+    )
+    with pytest.raises(AssertionError, match="VLLM_CPU_OMP_THREADS_BIND=auto"):
+        omp.OMPProcessManager(
+            SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
+        )
+
+
+def _iomp_manager(monkeypatch):
+    """OMPProcessManager for one worker bound to CPUs 0-3, with Intel OpenMP."""
+    monkeypatch.setattr(
+        omp,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: True, get_cpu_architecture=lambda: CpuArchEnum.X86
+        ),
+    )
+    monkeypatch.setenv("LD_PRELOAD", "/opt/venv/lib/libiomp5.so")
+    monkeypatch.setenv("VLLM_CPU_OMP_THREADS_BIND", "0-3")
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    parallel_config = SimpleNamespace(
+        local_world_size=1,
+        data_parallel_rank_local=None,
+        _api_process_count=1,
+        assigned_physical_gpu_ids=None,
+    )
+    return omp.OMPProcessManager(
+        SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
+    )
+
+
+@pytest.mark.parametrize("unset", [None, ""], ids=["missing", "empty"])
+def test_omp_envs_set_kmp_defaults(monkeypatch, unset):
+    for key in ("KMP_BLOCKTIME", "KMP_TPAUSE"):
+        if unset is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, unset)
+    manager = _iomp_manager(monkeypatch)
+    with manager.configure_omp_envs(rank=0, local_rank=0):
+        assert os.environ["KMP_AFFINITY"] == (
+            "granularity=fine,explicit,proclist=[0,1,2,3]"
+        )
+        assert os.environ["KMP_BLOCKTIME"] == "5"
+        assert os.environ["KMP_TPAUSE"] == "0"
+    # The previous state (missing or empty) is restored.
+    assert os.environ.get("KMP_BLOCKTIME") == unset
+    assert os.environ.get("KMP_TPAUSE") == unset
+
+
+def test_omp_envs_keep_user_kmp_settings(monkeypatch):
+    """KMP_BLOCKTIME / KMP_TPAUSE exported by the user reach the worker."""
+    monkeypatch.setenv("KMP_BLOCKTIME", "0")
+    monkeypatch.setenv("KMP_TPAUSE", "1")
+    manager = _iomp_manager(monkeypatch)
+    with manager.configure_omp_envs(rank=0, local_rank=0):
+        assert os.environ["KMP_BLOCKTIME"] == "0"
+        assert os.environ["KMP_TPAUSE"] == "1"
+        assert os.environ["OMP_NUM_THREADS"] == "4"
+    assert os.environ["KMP_BLOCKTIME"] == "0"
+    assert os.environ["KMP_TPAUSE"] == "1"

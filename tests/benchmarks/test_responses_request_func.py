@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the ``openai-responses`` backend of ``vllm bench serve``.
+"""Tests for the `openai-responses` backend of `vllm bench serve`.
 
 The Responses stream differs from Chat Completions in ways the benchmark client
-has to get right: every SSE message is labelled with an ``event:`` line,
+has to get right: every SSE message is labelled with an `event:` line,
 reasoning and output text arrive as separate token-bearing events, and a
-request ends with ``response.completed`` rather than with its last token. These
+request ends with `response.completed` rather than with its last token. These
 tests drive the real request function against a local SSE server so the
 resulting latency and usage numbers are covered end to end.
 """
@@ -40,10 +40,10 @@ GAP_FINALIZE = 0.3
 
 
 def sse(event_type: str, payload: dict) -> bytes:
-    """Frame one event the way ``/v1/responses`` does, with an ``event:`` line.
+    """Frame one event the way `/v1/responses` does, with an `event:` line.
 
-    ``ensure_ascii=False`` matches the server, whose pydantic
-    ``model_dump_json`` emits non-ASCII characters unescaped.
+    `ensure_ascii=False` matches the server, whose pydantic
+    `model_dump_json` emits non-ASCII characters unescaped.
     """
     data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
     return f"event: {event_type}\ndata: {data}\n\n".encode()
@@ -108,7 +108,7 @@ async def _serve(
     seen: dict | None = None,
     **request_kwargs,
 ) -> RequestFuncOutput:
-    """Run the request function against a server replaying ``script``.
+    """Run the request function against a server replaying `script`.
 
     Args:
         script: Byte strings to write, interleaved with floats to sleep for.
@@ -116,7 +116,7 @@ async def _serve(
         chunk_size: If set, split every write into chunks of this many bytes to
             emulate fragmented transport.
         seen: If given, populated with the request payload.
-        request_kwargs: Extra fields for the ``RequestFuncInput``.
+        request_kwargs: Extra fields for the `RequestFuncInput`.
 
     """
 
@@ -429,9 +429,11 @@ def test_multi_line_data_payload_is_joined_with_newlines():
     """The SSE spec allows one payload to span several `data:` lines."""
     script: list[bytes | float] = [
         PREAMBLE,
-        b"event: response.output_text.delta\n"
-        b'data: {"type": "response.output_text.delta",\n'
-        b'data:  "delta": "ok"}\n\n',
+        (
+            b"event: response.output_text.delta\n"
+            b'data: {"type": "response.output_text.delta",\n'
+            b'data:  "delta": "ok"}\n\n'
+        ),
         usage_event(5, 1),
     ]
     output = run(script)
@@ -501,7 +503,7 @@ def test_mid_stream_error_is_not_reported_as_success():
 
 
 def test_data_only_framing_is_still_parsed():
-    """Some proxies drop the ``event:`` line and forward only ``data:``."""
+    """Some proxies drop the `event:` line and forward only `data:`."""
     script: list[bytes | float] = [
         b'data: {"type": "response.output_text.delta", "delta": "ok"}\n\n',
         usage_event(5, 1),

@@ -10,6 +10,8 @@ from fastapi import Request
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
@@ -18,10 +20,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
@@ -38,15 +41,16 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
+    first_content_token_ts: float | None = None,
 ) -> PerRequestMetrics:
-    """Build per-request timing metrics from ``RequestStateStats``.
+    """Build per-request timing metrics from `RequestStateStats`.
 
-    ``generation_time_ms`` is the decode interval only (first output token to
+    `generation_time_ms` is the decode interval only (first output token to
     last output token); it excludes both queue wait and prefill/TTFT.
-    ``tokens_per_second`` is overall output throughput: all generated tokens
+    `tokens_per_second` is overall output throughput: all generated tokens
     over the inference interval (scheduling to last output token), so it counts
-    the prefill/TTFT phase and is not simply the reciprocal of ``mean_itl_ms``.
-    Each field is left ``None`` when the timestamps it depends on are
+    the prefill/TTFT phase and is not simply the reciprocal of `mean_itl_ms`.
+    Each field is left `None` when the timestamps it depends on are
     unavailable.
     """
     if metrics is None:
@@ -58,6 +62,7 @@ def build_per_request_timing_metrics(
     last_token_ts = metrics.last_token_ts
 
     time_to_first_token_ms: float | None = None
+    time_to_first_content_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
@@ -65,6 +70,13 @@ def build_per_request_timing_metrics(
 
     if scheduled_ts > 0 and first_token_ts > 0:
         time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
+
+    if (
+        scheduled_ts > 0
+        and first_content_token_ts is not None
+        and first_content_token_ts > 0
+    ):
+        time_to_first_content_token_ms = (first_content_token_ts - scheduled_ts) * 1000
 
     if first_token_ts > 0 and last_token_ts > 0:
         generation_time_ms = (last_token_ts - first_token_ts) * 1000
@@ -83,6 +95,7 @@ def build_per_request_timing_metrics(
 
     return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
+        time_to_first_content_token_ms=time_to_first_content_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
@@ -94,7 +107,7 @@ def build_spec_decoding_metrics(
     final_res: "RequestOutput | None",
 ) -> SpeculativeDecodingMetrics | None:
     """Build per-request spec-decode acceptance metrics from the single output
-    sequence, or ``None`` when unavailable (metrics disabled, or no sequence
+    sequence, or `None` when unavailable (metrics disabled, or no sequence
     yet).
 
     Only meaningful for single-sequence requests; callers suppress it for n>1.
@@ -229,16 +242,30 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
     @staticmethod
     def _get_priority(
-        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        request: (
+            ChatCompletionRequest
+            | CompletionRequest
+            | ResponsesRequest
+            | GenerateRequest
+        ),
         raw_request: Request | None,
     ) -> int:
         if raw_request is not None:
             priority = raw_request.headers.get(PRIORITY_HEADER)
             if priority is not None:
                 try:
-                    return int(priority)
+                    value = int(priority)
                 except ValueError:
                     pass
+                else:
+                    if not PRIORITY_MIN <= value <= PRIORITY_MAX:
+                        raise VLLMValidationError(
+                            f"{PRIORITY_HEADER} must be between {PRIORITY_MIN} "
+                            f"and {PRIORITY_MAX}.",
+                            parameter="priority",
+                            value=value,
+                        )
+                    return value
         return request.priority
 
     async def _with_kv_transfer_rejection_cleanup(
@@ -334,8 +361,8 @@ def chat_top_logprobs_limit(
 ) -> int | None:
     """How many of a position's logprob candidates `/v1/chat/completions`
     returns, in the engine's order (sampled token first): the first
-    ``top_logprobs``, none when it is unset, and all of them (``None``) for
-    ``top_logprobs=-1`` or ``logprob_token_ids`` (``return_all``). Shared with
+    `top_logprobs`, none when it is unset, and all of them (`None`) for
+    `top_logprobs=-1` or `logprob_token_ids` (`return_all`). Shared with
     chat derender so the two cannot drift."""
     if return_all or top_logprobs == -1:
         return None
@@ -346,9 +373,9 @@ def completion_top_logprobs_limit(
     logprobs: int | None, return_all: bool = False
 ) -> int | None:
     """How many of a position's logprob candidates `/v1/completions` returns:
-    the first ``logprobs + 1`` (the OpenAI completions convention), and all of
-    them (``None``) for ``logprobs=-1``, ``logprob_token_ids`` (``return_all``)
-    or when ``logprobs`` is unset. Shared with completions derender so the two
+    the first `logprobs + 1` (the OpenAI completions convention), and all of
+    them (`None`) for `logprobs=-1`, `logprob_token_ids` (`return_all`)
+    or when `logprobs` is unset. Shared with completions derender so the two
     cannot drift."""
     if return_all or logprobs is None or logprobs == -1:
         return None

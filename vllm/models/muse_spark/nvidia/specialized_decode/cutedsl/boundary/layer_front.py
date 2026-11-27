@@ -4,7 +4,7 @@
 into the FP32 stream (and the aux state) and the layer's pre_qkv_proj_norm of
 the stream into the attention input.
 
-Uses the row norm of ``common/row_norm.py``, bit for bit with the stock norm.
+Uses the row norm of `common/row_norm.py`, bit for bit with the stock norm.
 With PDL the kernel releases its dependents right after its wait; the QKV front
 waits for this grid before it reads the attention input.
 """
@@ -18,11 +18,11 @@ from ..common.row_norm import H, RowNorm, row_norm_constants
 
 class LayerFront:
     """The first layer's front: what the stock forward does with the embedded
-    tokens ``x`` before the QKV front, bitwise.
+    tokens `x` before the QKV front, bitwise.
 
-    ``run(x, stream, out, aux)`` writes ``stream = x.float()``, ``aux =
-    stream`` (an aux layer) and ``out = norm(stream)`` in BF16, where ``norm``
-    is the layer's pre_qkv_proj_norm on its fused-kernel path. ``x`` is BF16
+    `run(x, stream, out, aux)` writes `stream = x.float()`, `aux =
+    stream` (an aux layer) and `out = norm(stream)` in BF16, where `norm`
+    is the layer's pre_qkv_proj_norm on its fused-kernel path. `x` is BF16
     (the Omni class's eager embedding) or FP32 (the text class's in-graph
     embedding). Both input dtypes' kernels compile at construction (before
     CUDA graph capture); then it is graph-capturable and allocates nothing.
@@ -58,7 +58,7 @@ class LayerFront:
         return front
 
     def warm_up(self, device: torch.device, rows: int) -> None:
-        """Run both input dtypes' kernels once at ``rows`` rows (before CUDA
+        """Run both input dtypes' kernels once at `rows` rows (before CUDA
         graph capture)."""
         stream = torch.empty(rows, H, dtype=torch.float32, device=device)
         out = torch.empty(rows, H, dtype=torch.bfloat16, device=device)

@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Declarative configuration for model tool-call and reasoning formats.
 
-Each model format is described by a :class:`ParserEngineConfig` that specifies:
+Each model format is described by a `ParserEngineConfig` that specifies:
 
 * **terminals** – literal strings or regex patterns that delimit the format
-  (e.g. ``<tool_call>``, ``</think>``).
+  (e.g. `<tool_call>`, `</think>`).
 * **token_id_terminals** – terminals that should be matched by token ID
   rather than (or in addition to) text.
 * **transitions** – a state machine mapping
-  ``(state, terminal) → (new_state, events_to_emit)`` that drives semantic
+  `(state, terminal) → (new_state, events_to_emit)` that drives semantic
   event generation during streaming.
-* **content_events** – what :class:`EventType` to emit for plain content
+* **content_events** – what `EventType` to emit for plain content
   (non-terminal text) in each state.
 """
 
@@ -63,7 +63,7 @@ class ParserEngineConfig:
     The engine feeds terminals from the incremental lexer into the
     transition table and emits the corresponding semantic events.
     Content tokens (text between terminals) are classified by the
-    current state via ``content_events``.
+    current state via `content_events`.
     """
 
     name: str
@@ -148,7 +148,7 @@ class ParserEngineConfig:
             )
 
     def terminal_literal(self, name: str) -> str | None:
-        """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
+        """Canonical spelling of terminal *name*, or `None` if undeclared."""
         value = self.terminals.get(name)
         if isinstance(value, tuple):
             return value[0] if value else None

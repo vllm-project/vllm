@@ -11,7 +11,7 @@ from typing import Generic, TypeVar
 _T = TypeVar("_T")
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MonitoredValues(Generic[_T]):
     values: list[_T] = dataclasses.field(default_factory=list)
     trace_stacks: list[str] = dataclasses.field(default_factory=list)

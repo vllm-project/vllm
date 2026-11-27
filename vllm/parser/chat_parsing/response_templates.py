@@ -33,7 +33,7 @@ from .content_parsers import CONTENT_PARSERS, validate_transform_strings
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ResponseTemplateField:
     name: str
     open_re: Any
@@ -51,7 +51,7 @@ class ResponseTemplateField:
     transform_each: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class ResponseTemplate:
     defaults: dict
     fields: dict[str, ResponseTemplateField]
