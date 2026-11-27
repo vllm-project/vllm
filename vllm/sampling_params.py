@@ -314,7 +314,8 @@ class SamplingParams(
     `None` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
-    be in (0, 1]. Set to 1 to consider all tokens."""
+    be in [0, 1]. Set to 1 to consider all tokens, or 0 to consider only the
+    most likely token."""
     top_k: int = 0
     """Controls the number of top tokens to consider. Set to 0 (or -1) to
     consider all tokens."""
@@ -636,6 +637,11 @@ class SamplingParams(
 
         self._verify_args()
 
+        if self.top_p == 0.0:
+            # The limit of nucleus sampling: keep only the most likely token.
+            self.top_p = 1.0
+            self.top_k = 1
+
         if (
             envs.VLLM_BATCH_INVARIANT
             and self.temperature >= _SAMPLING_EPS
@@ -706,9 +712,9 @@ class SamplingParams(
                 parameter="temperature",
                 value=self.temperature,
             )
-        if not 0.0 < self.top_p <= 1.0:
+        if not 0.0 <= self.top_p <= 1.0:
             raise VLLMValidationError(
-                f"top_p must be in (0, 1], got {self.top_p}.",
+                f"top_p must be in [0, 1], got {self.top_p}.",
                 parameter="top_p",
                 value=self.top_p,
             )

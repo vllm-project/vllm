@@ -731,7 +731,7 @@ mod tests {
             (
                 "top_p",
                 SamplingParams {
-                    top_p: Some(0.0),
+                    top_p: Some(1.5),
                     ..SamplingParams::default()
                 },
             ),

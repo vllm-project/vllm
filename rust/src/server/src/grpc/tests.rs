@@ -1549,7 +1549,7 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
     )
     .await;
 
-    for top_p in [0.0, 2.0] {
+    for top_p in [-0.1, 2.0] {
         let status = client
             .generate(pb::GenerateRequest {
                 request_id: "test-invalid-sampling".to_string(),

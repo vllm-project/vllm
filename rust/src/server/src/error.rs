@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn error_response_names_error_class_and_status_code() {
         let errors = [
-            ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
+            ApiError::invalid_request("top_p must be in [0, 1].", Some("top_p")),
             ApiError::model_not_found("missing", vec!["base".to_string(), "alias".to_string()]),
             ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1", None),
@@ -279,7 +279,7 @@ mod tests {
             .map(|error| serde_json::to_string(&error.to_error_response()).unwrap())
             .join("\n");
         expect![[r#"
-            {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
+            {"error":{"message":"top_p must be in [0, 1].","type":"BadRequestError","param":"top_p","code":400}}
             {"error":{"message":"The model `missing` does not exist. Valid aliases: base, alias.","type":"NotFoundError","param":"model","code":404}}
             {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
