@@ -869,8 +869,9 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             if not rocm_aiter_ops.supports_fp8_block_silu_limit():
                 raise ValueError(
                     f"MXFP4 to block FP8 with swiglu_limit={limit} requires AITER "
-                    "with FP8 blockscale SiLU clamping (ROCm/aiter#7019). "
-                    "Upgrade AITER or remove this online quantization target."
+                    "v0.1.30 or newer for FP8 blockscale SiLU clamping "
+                    "(ROCm/aiter#7019). Upgrade AITER or remove this online "
+                    "quantization target."
                 )
         super().set_requantization_source(source_method)
 
