@@ -708,13 +708,3 @@ def selective_state_update(
             USE_RS_ROUNDING=enable_stochastic_rounding,
             PHILOX_ROUNDS=cache_philox_rounds,
         )
-
-
-from vllm.platforms import current_platform  # noqa: E402
-
-if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
-        selective_state_update as selective_state_update_cpu,
-    )
-
-    selective_state_update = selective_state_update_cpu  # type: ignore

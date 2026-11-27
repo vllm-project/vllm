@@ -17,9 +17,6 @@ from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    initialize_mamba_ssu_backend,
-)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
@@ -405,11 +402,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             slot_mapping_enabled=slot_mapping_enabled,
             sliding_window_reach=sliding_window_reach,
-        )
-        initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config,
-            self.kv_cache_config,
-            use_replayssm=self.cache_config.use_replayssm,
         )
         if self.cache_config.kv_sharing_fast_prefill:
             self.fast_prefill = FastPrefillHelper()
@@ -912,15 +904,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def prepare_dummy_attn(
-        self, input_batch: InputBatch, valid_state_slots: bool = False
+        self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
-        if valid_state_slots:
-            state_slots = torch.arange(
-                1, input_batch.num_reqs + 1, dtype=torch.int32, device=self.device
-            )
-            for block_table in block_tables:
-                block_table[:, 0].copy_(state_slots)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
@@ -1000,7 +986,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
-        valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
@@ -1043,9 +1028,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                 block_tables = None
                 slot_mappings = None
             else:
-                block_tables, slot_mappings = self.prepare_dummy_attn(
-                    input_batch, valid_dummy_state_slots
-                )
+                block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             if self.lora_config is not None:
                 num_active_loras = self.lora_config.max_loras
         else:

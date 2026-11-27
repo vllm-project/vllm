@@ -152,7 +152,8 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/config/mamba.py
-    - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+    - vllm/model_executor/layers/linear_attention/mamba2/decode/
+    - vllm/model_executor/layers/linear_attention/replayssm/
     - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
     - vllm/v1/worker/replayssm_utils.py
     - tests/kernels/mamba/test_ssu_dispatch.py

@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    flashinfer_replayssm_autotune_supported,
+from vllm.v1.worker.replayssm_utils import (
+    replayssm_state,
+    uses_replayssm,
+    uses_ring_trackers,
 )
 
 if TYPE_CHECKING:
@@ -18,78 +20,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _replayssm_autotune_kwargs(
-    runner: "GPUModelRunner",
-    max_token_prefill_kwargs: dict[str, Any],
-) -> tuple[int, dict[str, Any]] | None:
-    config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
-        return None
-    if not flashinfer_replayssm_autotune_supported():
-        logger.info_once(
-            "Skipping FlashInfer ReplaySSM autotuning because "
-            "flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner "
-            "is unavailable."
-        )
-        return None
-    from vllm.v1.worker.extensible_kv_cache import num_committable_kv_blocks
-
-    query_len = runner.decode_query_len
-    # Block 0 is the null block; the dummy slots must be committed memory.
-    max_num_reqs = min(
-        runner.scheduler_config.max_num_seqs,
-        runner.max_num_tokens // query_len,
-        num_committable_kv_blocks(runner) - 1,
-    )
-    if max_num_reqs <= 0:
-        logger.warning_once(
-            "Skipping FlashInfer ReplaySSM autotuning because no non-padding "
-            "state slot is available."
-        )
-        return None
-
-    decode_kwargs = {
-        **max_token_prefill_kwargs,
-        "num_tokens": max_num_reqs * query_len,
-        "uniform_decode": True,
-        "valid_dummy_state_slots": True,
-    }
-    return max_num_reqs, decode_kwargs
-
-
 @contextmanager
-def _temporary_replayssm_autotune_state(
-    runner: "GPUModelRunner",
-    max_num_reqs: int,
-    *,
-    prepare_dummy_block_tables: bool = True,
-) -> Generator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-
+def _zero_state_slots_after(layers: Iterable[Any], num_slots: int) -> Generator[None]:
+    """Zero the Mamba layers' state slots 1..num_slots, and ReplaySSM trackers,
+    once warmup has run on them."""
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
-    for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
-            continue
-        assert module.replayssm_buffer_len is not None
-        ring_start = module._replayssm_ring_start
-        prev_num_accepted = module._replayssm_prev_num_accepted
-        for tensor in module.kv_cache:
+    for layer in layers:
+        for tensor in layer.kv_cache:
             if tensor.numel():
                 # Overlaid groups may start at the same address with different
                 # widths. Preserve each bounded view; clearing twice is harmless.
                 reset_tensors.append(tensor)
-        for tensor in (ring_start, prev_num_accepted):
-            if tensor.numel():
-                reset_trackers.setdefault(tensor.data_ptr(), tensor)
+        if uses_replayssm(layer):
+            state = replayssm_state(layer)
+            for tensor in (state.ring_start, state.prev_num_accepted):
+                if tensor.numel():
+                    reset_trackers.setdefault(tensor.data_ptr(), tensor)
 
     try:
         yield
     finally:
-        if prepare_dummy_block_tables:
-            runner.block_tables.get_dummy_block_tables(max_num_reqs)
         for tensor in reset_tensors:
-            tensor[1 : max_num_reqs + 1].zero_()
+            tensor[1 : num_slots + 1].zero_()
         for tensor in reset_trackers.values():
             tensor.zero_()
 
@@ -97,7 +50,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_replayssm_trackers:
+    if not config.cache_config.use_replayssm:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,
@@ -108,7 +61,6 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     if num_slots <= 0:
         return
 
-    from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.core.kv_cache_utils import (
         is_mamba_group,
         is_mamba_prefix_caching_group,
@@ -123,11 +75,9 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         mixers = [
             layer
             for name in group.layer_names
-            if isinstance(
-                layer := config.compilation_config.static_forward_context[name],
-                MambaBase,
+            if uses_ring_trackers(
+                layer := config.compilation_config.static_forward_context[name]
             )
-            and layer.use_replayssm_trackers
         ]
         if not mixers:
             continue
@@ -149,15 +99,15 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         return
 
     ensure_kv_cache_blocks(runner, 1 + num_slots)
-    with _temporary_replayssm_autotune_state(
-        runner, num_slots, prepare_dummy_block_tables=False
-    ):
+    all_mixers = [mixer for mixers, _, _ in grouped for mixer in mixers]
+    with _zero_state_slots_after(all_mixers, num_slots):
         for mixers, _, _ in grouped:
             for mixer in mixers:
                 for state in mixer.kv_cache:
                     state[1 : num_slots + 1].zero_()
-                mixer._replayssm_ring_start.zero_()
-                mixer._replayssm_prev_num_accepted.zero_()
+                state = replayssm_state(mixer)
+                state.ring_start.zero_()
+                state.prev_num_accepted.zero_()
 
         context = ReplaySSMModelContext.create(
             grouped, runner.max_num_reqs, materialize_prefixes=prefix_caching
@@ -198,19 +148,36 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         )
 
 
-def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
-    from vllm.v1.worker.extensible_kv_cache import ensure_kv_cache_blocks
+def mamba_ssu_autotune_warmup(runner: "GPUModelRunner") -> None:
+    """Let each Mamba decode kernel that tunes do so at the largest decode
+    batch, on distinct committed state slots."""
+    from vllm.v1.worker.extensible_kv_cache import (
+        ensure_kv_cache_blocks,
+        num_committable_kv_blocks,
+    )
 
-    max_token_prefill_kwargs = {
-        "num_tokens": runner.scheduler_config.max_num_batched_tokens,
-        "skip_eplb": True,
-        "is_profile": True,
-        "randomize_inputs": True,
-    }
-    autotune = _replayssm_autotune_kwargs(runner, max_token_prefill_kwargs)
-    if autotune is None:
+    forward_context = runner.vllm_config.compilation_config.static_forward_context
+    layers = [
+        layer
+        for layer in forward_context.values()
+        if (kernel := getattr(layer, "ssu_kernel", None)) is not None
+        and kernel.needs_autotune()
+    ]
+    if not layers:
         return
-    max_num_reqs, decode_kwargs = autotune
-    ensure_kv_cache_blocks(runner, 1 + max_num_reqs)
-    with _temporary_replayssm_autotune_state(runner, max_num_reqs):
-        runner._dummy_run(**decode_kwargs)
+    # Block 0 is the null block; the slots must be committed memory.
+    num_reqs = min(
+        runner.scheduler_config.max_num_seqs,
+        runner.max_num_tokens // runner.decode_query_len,
+        num_committable_kv_blocks(runner) - 1,
+    )
+    if num_reqs <= 0:
+        logger.warning_once(
+            "Skipping Mamba decode kernel autotuning because no non-padding "
+            "state slot is available."
+        )
+        return
+    ensure_kv_cache_blocks(runner, 1 + num_reqs)
+    with _zero_state_slots_after(layers, num_reqs):
+        for layer in layers:
+            layer.ssu_kernel.autotune(layer, num_reqs)

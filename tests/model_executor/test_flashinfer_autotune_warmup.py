@@ -376,7 +376,7 @@ def test_flashinfer_autotune_lifecycle(
 
     monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
     monkeypatch.setattr(warmup, "_run_flashinfer_autotune_dummy_runs", events.dummy)
-    monkeypatch.setattr(warmup, "replayssm_autotune_warmup", events.replayssm)
+    monkeypatch.setattr(warmup, "mamba_ssu_autotune_warmup", events.replayssm)
     monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", events.kimi)
     monkeypatch.setattr(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
@@ -713,7 +713,7 @@ def autotune_run(monkeypatch, tmp_path):
         monkeypatch.setattr(
             warmup, "_run_flashinfer_autotune_dummy_runs", run.dummy_runs
         )
-        monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
+        monkeypatch.setattr(warmup, "mamba_ssu_autotune_warmup", lambda runner: None)
         monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
         return run
 

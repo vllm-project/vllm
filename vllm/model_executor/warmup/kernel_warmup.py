@@ -44,7 +44,7 @@ from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
-    replayssm_autotune_warmup,
+    mamba_ssu_autotune_warmup,
     replayssm_lifecycle_warmup,
 )
 from vllm.model_executor.warmup.watermark_sample_warmup import (
@@ -695,7 +695,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
                 _run_flashinfer_autotune_mm_encoder(runner)
-            replayssm_autotune_warmup(runner)
+            mamba_ssu_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
         set_autotune_process_group(None)
