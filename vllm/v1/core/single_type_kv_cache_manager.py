@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.gc_utils import untracked_list
@@ -13,10 +13,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    get_block_hash,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -32,11 +34,15 @@ from vllm.v1.kv_cache_interface import (
     get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+# Sentinel value in `MambaManager._tips` marking a cached tip that has already
+# been extended once (retained as a one-turn rollback fallback).
+_FALLBACK_TIP: Final = BlockHash(b"")
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -735,6 +741,10 @@ class SingleTypeKVCacheManager(ABC):
 
     def cache_blocks_on_free(self, request: Request) -> None:
         """Cache blocks that are only retained once the request is freed."""
+        return None
+
+    def reset_prefix_cache(self) -> None:
+        """Reset any per-manager prefix-cache metadata."""
         return None
 
     @classmethod
@@ -1951,6 +1961,34 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Tracks Mamba tip chains (None = root tip, BlockHash = t-1
+            # fallback, _FALLBACK_TIP = already extended once). Shared
+            # junctions and fork points are popped to stay in normal LRU.
+            self._tips: dict[BlockHash, BlockHash | None] = {}
+            self._req_hit: dict[str, BlockHash] = {}
+            self._req_tip: dict[str, tuple[int, BlockHash]] = {}
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if (
+            self.enable_caching
+            and new_computed_blocks
+            and new_computed_blocks[-1].block_hash is not None
+        ):
+            self._req_hit[request_id] = get_block_hash(
+                new_computed_blocks[-1].block_hash
+            )
 
     @classmethod
     def find_longest_cache_hit(
@@ -2443,6 +2481,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self._req_chunk_ranges.pop(request_id, None)
             self._mid_block_states.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._req_hit.pop(request_id, None)
+            self._req_tip.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2502,6 +2542,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
                 if self.prefix_caching:
+                    self._record_tip(request.request_id, block)
                     assert block.block_hash_num_tokens is not None
                     # Offer every retained boundary with its exact block.
                     # The connector filters against its save window, which may
@@ -2540,43 +2581,110 @@ class MambaManager(SingleTypeKVCacheManager):
         idx = processed_tokens // self.block_size - 1
         if idx < num_prompt_tokens // self.block_size:
             return None
-        checkpoint = self._checkpoints.get(request_id)
-        if (
-            checkpoint is not None
-            and checkpoint[1] == idx
-            and checkpoint[0] != (idx + 1) * self.block_size
-        ):
-            # A resumed prefill exported an off-boundary checkpoint into it.
+        if idx in self._mid_block_states.get(request_id, {}):
+            # A resumed prefill left a state other than the block end in it.
             return None
         return idx
 
     def cache_blocks_on_free(self, request: Request) -> None:
-        """Cache the held latest decode-crossed boundary state, so a follow-up
-        turn resumes there."""
-        if not self.keep_decode_resume_state:
+        """Cache the held latest decode-crossed boundary state and deprioritize
+        superseded states."""
+        if self.keep_decode_resume_state:
+            blocks = self.req_to_blocks.get(request.request_id, [])
+            idx = self._decode_resume_block_idx(
+                request.request_id,
+                max(0, request.num_computed_tokens - request.num_in_flight_tokens),
+                request.num_prompt_tokens,
+            )
+            num_hashed_tokens = (
+                len(request.block_hashes) * self.block_pool.hash_block_size
+            )
+            if (
+                idx is not None
+                and idx < len(blocks)
+                and blocks[idx].block_hash is None
+                and num_hashed_tokens >= (idx + 1) * self.block_size
+            ):
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=idx,
+                    num_full_blocks=idx + 1,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                )
+                self._record_tip(request.request_id, blocks[idx])
+        if self.enable_caching:
+            self._deprioritize_superseded_state(request)
+
+    def _record_tip(self, request_id: str, block: KVCacheBlock) -> None:
+        if block.block_hash is None or block.block_hash_num_tokens is None:
             return
-        blocks = self.req_to_blocks.get(request.request_id, [])
-        idx = self._decode_resume_block_idx(
-            request.request_id,
-            max(0, request.num_computed_tokens - request.num_in_flight_tokens),
-            request.num_prompt_tokens,
-        )
-        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
-        if (
-            idx is None
-            or idx >= len(blocks)
-            or blocks[idx].block_hash is not None
-            or num_hashed_tokens < (idx + 1) * self.block_size
+        prev = self._req_tip.get(request_id)
+        if prev is None or block.block_hash_num_tokens > prev[0]:
+            self._req_tip[request_id] = (
+                block.block_hash_num_tokens,
+                get_block_hash(block.block_hash),
+            )
+
+    def _deprioritize_superseded_state(self, request: Request) -> None:
+        hit_hash = self._req_hit.pop(request.request_id, None)
+        tip = self._req_tip.pop(request.request_id, None)
+        if request.status not in (
+            RequestStatus.FINISHED_STOPPED,
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_REPETITION,
         ):
             return
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=blocks,
-            num_cached_blocks=idx,
-            num_full_blocks=idx + 1,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
+
+        pool = self.block_pool
+        gids = [self.kv_cache_group_id]
+        tips = self._tips
+
+        align = self.cache_hit_alignment_tokens
+        j_idx = (
+            request.shared_prefix_boundary // align * align // pool.hash_block_size - 1
         )
+        junction_hash = (
+            request.block_hashes[j_idx]
+            if 0 <= j_idx < len(request.block_hashes)
+            else None
+        )
+        if junction_hash is not None:
+            tips.pop(junction_hash, None)
+
+        tip_hash = tip[1] if tip is not None else None
+        if tip_hash is None or tip_hash in (hit_hash, junction_hash):
+            return
+
+        if hit_hash is None or hit_hash not in tips:
+            tips[tip_hash] = None
+        elif (prev := tips[hit_hash]) == _FALLBACK_TIP:
+            # Shared fork point: stop tracking so it stays in normal LRU.
+            tips.pop(hit_hash)
+            tips[tip_hash] = None
+        else:
+            tips[hit_hash] = _FALLBACK_TIP
+            tips[tip_hash] = hit_hash
+            if (
+                prev is not None
+                and tips.pop(prev, None) is not None
+                and (stale := pool.get_cached_block(prev, gids))
+            ):
+                pool.deprioritize_blocks(stale)
+
+        if len(tips) > pool.num_gpu_blocks:
+            self._tips = {
+                h: v
+                for h, v in tips.items()
+                if pool.get_cached_block(h, gids) is not None
+            }
+
+    def reset_prefix_cache(self) -> None:
+        if self.prefix_caching:
+            self._tips.clear()
+            self._req_hit.clear()
+            self._req_tip.clear()
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
@@ -2626,7 +2734,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
-            return self.block_pool.cache_partial_block(
+            partial_hash = self.block_pool.cache_partial_block(
                 request=request,
                 block=checkpoint_block,
                 num_tokens=checkpoint_position,
@@ -2634,6 +2742,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_size=self.block_size,
                 replace_existing_hashes=True,
             )
+            if partial_hash is not None:
+                self._record_tip(request.request_id, checkpoint_block)
+            return partial_hash
         if num_tokens <= 0 or num_tokens % hash_block_size != 0:
             return None
         latest_prompt_hash_boundary = get_reusable_prefix_length(
@@ -2672,6 +2783,8 @@ class MambaManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        if partial_hash is not None:
+            self._record_tip(request.request_id, source_block)
         if partial_hash is not None and num_tokens % self.block_size:
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
