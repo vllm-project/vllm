@@ -1352,14 +1352,161 @@ _ENGRAM_WEIGHT_RE = re.compile(
 )
 
 
+_O_DIRECT_ALIGN = 4096
+# Each in-flight row read is a blocking thread with its own bounce buffer. Cap
+# them where InstantTensor's io_uring depth is far higher (512 at TP1); 64 x the
+# default 8 MiB chunk bounds the buffers at 512 MiB per rank.
+_ROW_READER_MAX_THREADS = 64
+_INSTANTTENSOR_BUFFERED_BACKENDS = {"AIO_BUFFERED", "URING_BUFFERED", "MMAP"}
+
+
+class _ParallelRowReader:
+    """Reads a row range of one safetensors tensor into host memory.
+
+    `threads` workers issue `O_DIRECT` reads (buffered if not `direct_io`),
+    each through one reused aligned bounce buffer of `chunk_bytes`, so staging
+    memory stays bounded however many rows are read. Attached as `row_reader`
+    to the CPU tensor yielded for an Engram table and valid only while the
+    consumer handles that item; a row-sharded consumer then reads only its own
+    rows.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        offset: int,
+        row_bytes: int,
+        num_rows: int,
+        threads: int = _ROW_READER_MAX_THREADS,
+        chunk_bytes: int = 8 << 20,
+        direct_io: bool = True,
+    ):
+        assert chunk_bytes > _O_DIRECT_ALIGN and chunk_bytes % _O_DIRECT_ALIGN == 0
+        self.path = path
+        self.offset = offset
+        self.row_bytes = row_bytes
+        self.num_rows = num_rows
+        self.threads = threads
+        self.chunk_bytes = chunk_bytes
+        self.direct_io = direct_io
+        self.usable = True
+
+    def copy_rows_into(self, dst: torch.Tensor, row_start: int) -> None:
+        if not self.usable:
+            raise RuntimeError("row reader used after its item was consumed")
+        rows = dst.shape[0]
+        if not 0 <= row_start <= self.num_rows - rows:
+            raise ValueError(
+                f"rows [{row_start}, {row_start + rows}) outside [0, {self.num_rows})"
+            )
+        if (
+            dst.device.type != "cpu"
+            or not dst.is_contiguous()
+            or dst.nbytes != rows * self.row_bytes
+        ):
+            raise ValueError("destination must be contiguous host rows")
+        if rows == 0:
+            return
+        start = time.perf_counter()
+        self._read(
+            dst.data_ptr(),
+            self.offset + row_start * self.row_bytes,
+            dst.nbytes,
+            direct=self.direct_io,
+        )
+        elapsed = time.perf_counter() - start
+        logger.debug(
+            "Read %.2f GiB of %s in %.2f s",
+            dst.nbytes / 2**30,
+            os.path.basename(self.path),
+            elapsed,
+        )
+
+    def _read(self, dst_addr: int, begin: int, total: int, direct: bool = True) -> None:
+        import ctypes
+        import errno
+        import mmap
+
+        o_direct = getattr(os, "O_DIRECT", 0) if direct else 0
+        try:
+            fd = os.open(self.path, os.O_RDONLY | o_direct)
+        except OSError as e:
+            if not o_direct or e.errno != errno.EINVAL:
+                raise
+            return self._read(dst_addr, begin, total, direct=False)
+        align = _O_DIRECT_ALIGN
+        # Each chunk starts with an alignment prefix of less than `align`.
+        span = self.chunk_bytes - align
+        num_chunks = -(-total // span)
+        chunks = iter(range(num_chunks))
+        lock = threading.Lock()
+
+        def worker() -> None:
+            # Anonymous mmaps are page aligned, as O_DIRECT requires.
+            buf = mmap.mmap(-1, self.chunk_bytes)
+            view = memoryview(buf)
+            anchor = ctypes.c_char.from_buffer(buf)
+            buf_addr = ctypes.addressof(anchor)
+            try:
+                while True:
+                    with lock:
+                        i = next(chunks, None)
+                    if i is None:
+                        return
+                    done = i * span
+                    n = min(span, total - done)
+                    aligned = (begin + done) & ~(align - 1)
+                    prefix = begin + done - aligned
+                    end = (prefix + n + align - 1) & ~(align - 1)
+                    got = 0
+                    while got < prefix + n:
+                        with view[got:end] as target:
+                            r = os.preadv(fd, [target], aligned + got)
+                        if r <= 0:
+                            raise OSError(f"short read of {self.path} at {aligned}")
+                        got += r
+                    # ctypes releases the GIL, so the copies run in parallel.
+                    ctypes.memmove(dst_addr + done, buf_addr + prefix, n)
+            finally:
+                del anchor
+                view.release()
+                buf.close()
+
+        try:
+            workers = min(self.threads, num_chunks)
+            with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+                for future in [pool.submit(worker) for _ in range(workers)]:
+                    future.result()
+        except OSError as e:
+            # Some filesystems accept O_DIRECT at open but reject the reads.
+            if not o_direct or e.errno != errno.EINVAL:
+                raise
+            self._read(dst_addr, begin, total, direct=False)
+        finally:
+            os.close(fd)
+
+
+def _safetensors_data_offsets(path: str) -> tuple[dict[str, Any], int]:
+    with open(path, "rb") as f:
+        header_size = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(header_size))
+    return header, 8 + header_size
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
     *,
     load_engram_on_cpu: bool = False,
+    is_unused_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Load with InstantTensor, optionally mapping Engram tables on CPU."""
+    """Load with InstantTensor, optionally mapping Engram tables on CPU.
+
+    Tensors accepted by `is_unused_weight` are not read. The rule must depend
+    only on the name, so every rank reads the same tensors and loading stays
+    collective. CPU tables carry a `_ParallelRowReader` as `row_reader`.
+    """
     try:
         import instanttensor
     except ImportError as e:
@@ -1383,11 +1530,14 @@ def instanttensor_weights_iterator(
 
     gpu_weight_names: list[str] = []
     cpu_weights: dict[str, list[str]] = {}
+    skipped_unused = False
     for path in hf_weights_files:
         with safe_open(path, framework="pt") as metadata:
             for name in metadata.keys():  # noqa: SIM118
+                if is_unused_weight is not None and is_unused_weight(name):
+                    skipped_unused = True
                 # Engram tables can exceed device memory before TP sharding.
-                if load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
+                elif load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
                     cpu_weights.setdefault(path, []).append(name)
                 else:
                     gpu_weight_names.append(name)
@@ -1398,13 +1548,34 @@ def instanttensor_weights_iterator(
         should_skip_weight(name, empty_expert_ids) for name in gpu_weight_names
     )
     tensor_filter: list[str] | None = None
-    if cpu_weights or filter_experts:
-        process_group = None
+    if cpu_weights or filter_experts or skipped_unused:
         tensor_filter = [
             name
             for name in gpu_weight_names
             if not should_skip_weight(name, local_expert_ids)
         ]
+    if filter_experts:
+        # Collective loading needs the same tensor_filter on every rank.
+        process_group = None
+
+    if cpu_weights:
+        # Resolve, without loading, the backend, chunk size and I/O depth
+        # InstantTensor picks for the CPU tables' files, and read their rows
+        # the same way, one thread per in-flight read.
+        io_config = instanttensor.safe_open(
+            list(cpu_weights),
+            framework="pt",
+            device=current_platform.current_device(),
+            process_group=process_group,
+            load_now=False,
+            tensor_filter=[],
+            tensor_name_match_mode="exact",
+        )
+        direct_io = io_config.backend.name not in _INSTANTTENSOR_BUFFERED_BACKENDS
+        # The chunk holds a sub-page alignment prefix, so keep at least two pages.
+        chunk_pages = max(-(-io_config.chunk_size // _O_DIRECT_ALIGN), 2)
+        chunk_bytes = chunk_pages * _O_DIRECT_ALIGN
+        threads = min(io_config.io_depth, _ROW_READER_MAX_THREADS)
 
     if gpu_weight_names:
         # copy=True keeps tensors valid after InstantTensor reuses its buffer.
@@ -1435,9 +1606,24 @@ def instanttensor_weights_iterator(
                 yield name, tensor
 
     for path, names in cpu_weights.items():
+        header, data_start = _safetensors_data_offsets(path)
         with safe_open(path, framework="pt", device="cpu") as f:
             for name in names:
-                yield name, f.get_tensor(name)
+                tensor = f.get_tensor(name)
+                begin, end = header[name]["data_offsets"]
+                num_rows = tensor.shape[0] if tensor.dim() else 1
+                reader = _ParallelRowReader(
+                    path,
+                    data_start + begin,
+                    (end - begin) // num_rows,
+                    num_rows,
+                    threads,
+                    chunk_bytes,
+                    direct_io,
+                )
+                tensor.row_reader = reader
+                yield name, tensor
+                reader.usable = False
 
 
 def pt_weights_iterator(

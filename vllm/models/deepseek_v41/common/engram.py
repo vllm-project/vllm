@@ -505,6 +505,18 @@ def _engram_head_shard_weight_loader(
     """Load this rank's complete head buckets. ue8m0 scales arrive as
     float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
     part_rows = param.shape[0]
+    # Read only this rank's rows when the loader provides a row reader.
+    reader = getattr(loaded_weight, "row_reader", None)
+    if (
+        reader is not None
+        and reader.usable
+        and param.device.type == "cpu"
+        and param.data.is_contiguous()
+        and loaded_weight.shape[1:] == param.shape[1:]
+        and loaded_weight.element_size() == param.element_size()
+    ):
+        reader.copy_rows_into(param.data, param.engram_vocab_start)
+        return
     if loaded_weight.dtype == torch.float8_e8m0fnu:
         loaded_weight = loaded_weight.view(torch.uint8)
     shard = loaded_weight.narrow(0, param.engram_vocab_start, part_rows)

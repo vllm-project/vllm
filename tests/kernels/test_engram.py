@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -17,6 +18,10 @@ from vllm.model_executor.model_loader.reload import (
     finish_reload,
     record_metadata_for_reloading,
     start_reload,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    _ParallelRowReader,
+    _safetensors_data_offsets,
 )
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
@@ -843,14 +848,21 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 @pytest.mark.parametrize(
-    "cpu_offload,sort_rows", [(False, False), (True, False), (True, True)]
+    "cpu_offload,sort_rows,row_reader",
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
 )
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_engram_head_shards_reconstruct_checkpoint(
-    cpu_offload, sort_rows, tp_size, monkeypatch
+    cpu_offload, sort_rows, row_reader, tp_size, monkeypatch, tmp_path
 ):
     """Keep complete buckets and reconstruct head order, including TP padding,
-    whether or not the host lookup sorts its rows by table offset."""
+    whether or not the host lookup sorts its rows by table offset, and when
+    host rows are read through the loader's row reader."""
     if sort_rows:
         monkeypatch.setattr(
             engram_ops, "_engram_lookup_thresholds", lambda _: (0, None)
@@ -869,6 +881,19 @@ def test_engram_head_shards_reconstruct_checkpoint(
         start += size
     ids = hashes[:, 1]
     expected = _reference_lookup(weight.cuda(), scales.cuda(), ids, 0, num_rows)
+    loaded_weight, loaded_scales = weight, scales.view(torch.float8_e8m0fnu)
+    if row_reader:
+        # The tensors are zeros, so only rows read from the file can match.
+        path = str(tmp_path / "engram.safetensors")
+        save_file({"weight": weight, "scales": scales}, path)
+        header, data_start = _safetensors_data_offsets(path)
+        loaded_weight = torch.zeros_like(weight)
+        loaded_scales = torch.zeros_like(scales).view(torch.float8_e8m0fnu)
+        for name, tensor in (("weight", loaded_weight), ("scales", loaded_scales)):
+            begin, end = header[name]["data_offsets"]
+            tensor.row_reader = _ParallelRowReader(
+                path, data_start + begin, (end - begin) // len(tensor), len(tensor)
+            )
     monkeypatch.setattr(
         engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
@@ -882,10 +907,8 @@ def test_engram_head_shards_reconstruct_checkpoint(
             layer = ParallelEngramEmbedding(
                 num_rows + 7, dim, head_sizes, cpu_offload=cpu_offload
             )
-        layer.weight.weight_loader(layer.weight, weight)
-        layer.weight_scale_inv.weight_loader(
-            layer.weight_scale_inv, scales.view(torch.float8_e8m0fnu)
-        )
+        layer.weight.weight_loader(layer.weight, loaded_weight)
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, loaded_scales)
         out = torch.empty(
             len(ids),
             layer.part_n_hash_cols,

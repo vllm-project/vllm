@@ -357,6 +357,7 @@ class DefaultModelLoader(BaseModelLoader):
                     load_engram_on_cpu=bool(
                         engram_config and engram_config.cpu_offload
                     ),
+                    is_unused_weight=source.is_unused_weight,
                 )
             else:
                 if extra_config.get("enable_multithread_load"):
