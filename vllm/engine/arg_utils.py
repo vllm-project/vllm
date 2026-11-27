@@ -576,6 +576,7 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    prompt_embeds_hash_threads: int | None = CacheConfig.prompt_embeds_hash_threads
     prefix_cache_retention_interval: int | None = get_field(
         CacheConfig, "prefix_cache_retention_interval"
     )
@@ -1416,6 +1417,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
+        )
+        cache_group.add_argument(
+            "--prompt-embeds-hash-threads", **cache_kwargs["prompt_embeds_hash_threads"]
         )
         cache_group.add_argument(
             "--prefix-cache-retention-interval",
@@ -2340,6 +2344,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            prompt_embeds_hash_threads=self.prompt_embeds_hash_threads,
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,

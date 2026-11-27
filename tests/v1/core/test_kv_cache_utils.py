@@ -6,7 +6,7 @@ import importlib
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import numpy as np
 import pytest
@@ -33,6 +33,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.config.cache import PrefixCachingHashAlgo
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.lora.request import LoRARequest
@@ -43,7 +44,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.hashing import (
+    get_hash_fn_by_name,
+    sha256,
+    sha256_cbor,
+    xxhash,
+    xxhash_cbor,
+)
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -375,6 +382,8 @@ def make_request(
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
+    prompt_is_token_ids: list[bool] | None = None,
+    num_prompt_embeds_hash_threads: int = 1,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -400,9 +409,13 @@ def make_request(
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(
-            block_size, hash_fn, num_hash_lookahead_tokens
+            block_size,
+            hash_fn,
+            num_hash_lookahead_tokens,
+            num_prompt_embeds_hash_threads,
         ),
         prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=prompt_is_token_ids,
     )
 
 
@@ -2297,6 +2310,104 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         )
     )
     assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize(
+    ("setting", "num_local_engines", "expected"),
+    [(None, 1, 8), (None, 16, 4), (3, 1, 3), (32, 16, 32)],
+)
+def test_prompt_embeds_hash_threads_setting_overrides_the_default(
+    monkeypatch, setting, num_local_engines, expected
+):
+    """`prompt_embeds_hash_threads` sets the thread count as given; unset, up
+    to 8 threads share the node's CPUs with the other local engine cores."""
+    monkeypatch.setattr(kv_cache_utils, "available_cpu_count", lambda: 64)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(enable_prompt_embeds=True),
+        cache_config=CacheConfig(prompt_embeds_hash_threads=setting),
+    )
+    vllm_config.parallel_config.data_parallel_size_local = num_local_engines
+
+    assert kv_cache_utils.num_prompt_embeds_hash_threads(vllm_config) == expected
+
+
+@pytest.mark.parametrize("hash_algo", get_args(PrefixCachingHashAlgo))
+@pytest.mark.parametrize("mixed_prompt", [False, True])
+@pytest.mark.parametrize("num_lookahead", [0, 1])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_parallel_prompt_embeds_hashing_matches_sequential(
+    hash_algo: str,
+    mixed_prompt: bool,
+    num_lookahead: int,
+    dtype: torch.dtype,
+):
+    """Hashing prompt embeds on the thread pool must not change any block hash,
+    including blocks hashed later as the request grows. bfloat16 has no numpy
+    dtype, so its bytes are exported through a uint8 view."""
+    hash_fn = get_hash_fn_by_name(hash_algo)
+    block_size = 16
+    num_prompt_tokens = 64 * block_size + 5
+    prompt_embeds = torch.randn(num_prompt_tokens, 2048, dtype=dtype)
+    block_nbytes = block_size * prompt_embeds[:1].nbytes
+    assert block_nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES
+    assert prompt_embeds.nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES
+    prompt_token_ids = prompt_is_token_ids = None
+    if mixed_prompt:
+        prompt_token_ids = list(range(num_prompt_tokens))
+        prompt_is_token_ids = [i % 3 == 0 for i in range(num_prompt_tokens)]
+
+    sequential, parallel = (
+        make_request(
+            request_id=str(num_threads),
+            prompt_token_ids=prompt_token_ids,
+            block_size=block_size,
+            hash_fn=hash_fn,
+            prompt_embeds=prompt_embeds,
+            num_hash_lookahead_tokens=num_lookahead,
+            prompt_is_token_ids=prompt_is_token_ids,
+            num_prompt_embeds_hash_threads=num_threads,
+        )
+        for num_threads in (1, 4)
+    )
+    assert len(parallel.block_hashes) == 64
+    assert parallel.block_hashes == sequential.block_hashes
+
+    for request in (sequential, parallel):
+        request.append_output_token_ids(list(range(2 * block_size)))
+    assert len(parallel.block_hashes) == 66
+    assert parallel.block_hashes == sequential.block_hashes
+
+
+def test_parallel_prompt_embeds_hashing_skips_non_contiguous(monkeypatch):
+    """A tensor that is not CPU-contiguous takes the per-block path, so hashing
+    copies one block at a time instead of materializing the whole tensor."""
+    block_size = 16
+    num_prompt_tokens = 64 * block_size
+    # Transposed storage: a non-contiguous (num_prompt_tokens, 2048) view.
+    prompt_embeds = torch.randn(2048, num_prompt_tokens, dtype=torch.float16).t()
+    assert not prompt_embeds.is_contiguous()
+    copied_rows: list[int] = []
+    tensor_data = kv_cache_utils.tensor_data
+
+    def recording_tensor_data(tensor: torch.Tensor) -> memoryview:
+        copied_rows.append(len(tensor))
+        return tensor_data(tensor)
+
+    monkeypatch.setattr(kv_cache_utils, "tensor_data", recording_tensor_data)
+    sequential, parallel = (
+        make_request(
+            request_id=str(num_threads),
+            prompt_token_ids=None,
+            block_size=block_size,
+            hash_fn=sha256,
+            prompt_embeds=prompt_embeds,
+            num_prompt_embeds_hash_threads=num_threads,
+        )
+        for num_threads in (1, 4)
+    )
+
+    assert parallel.block_hashes == sequential.block_hashes
+    assert max(copied_rows) <= block_size
 
 
 def test_unpadded_page_size_includes_per_token_head_scales():

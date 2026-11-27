@@ -8,7 +8,9 @@ import math
 import os
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import cache
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -25,6 +27,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import available_cpu_count
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
@@ -674,6 +678,97 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [("prompt_embeds", embeds_hash)]
 
 
+# Hash prompt embeds on the thread pool only when the new blocks hold at least
+# this many bytes in total and per block. Below them, thread dispatch and GIL
+# handoffs between blocks cost about as much as the threads save.
+PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES = 4 << 20
+PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES = 32 << 10
+# Default cap when `--prompt-embeds-hash-threads` is unset. Empirically, hashing
+# scales nearly linearly to 8 threads. Measured on Threadripper 3970X and Xeon 8480+
+MAX_PROMPT_EMBEDS_HASH_THREADS = 8
+
+
+def _parallel_prehash_pays_off(
+    block_ranges: list[tuple[int, int]], row_nbytes: int
+) -> bool:
+    """Whether hashing these blocks on the thread pool beats hashing them one at
+    a time. Below the thresholds, dispatch and GIL handoffs cost more than the
+    threads save."""
+    if len(block_ranges) < 2:
+        return False
+    start, end = block_ranges[0]
+    block_nbytes = (end - start) * row_nbytes
+    return (
+        block_nbytes >= PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES
+        and len(block_ranges) * block_nbytes >= PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES
+    )
+
+
+def num_prompt_embeds_hash_threads(vllm_config: VllmConfig) -> int:
+    """Threads to hash prompt embeds with: `prompt_embeds_hash_threads` if set,
+    else up to MAX_PROMPT_EMBEDS_HASH_THREADS, sharing this node's usable CPUs
+    with the other local data-parallel engine cores. They are busy only while a
+    large prompt is hashed."""
+    if not vllm_config.model_config.enable_prompt_embeds:
+        return 1
+    if (num_threads := vllm_config.cache_config.prompt_embeds_hash_threads) is not None:
+        return num_threads
+    num_local_engines = max(1, vllm_config.parallel_config.data_parallel_size_local)
+    num_cpus = available_cpu_count() // num_local_engines
+    return max(1, min(MAX_PROMPT_EMBEDS_HASH_THREADS, num_cpus))
+
+
+@cache
+def _prompt_embeds_hash_pool(num_threads: int) -> ThreadPoolExecutor:
+    """One pool per process (an engine core builds one block hasher), created on
+    first use so deployments without large prompt embeds never start threads.
+    Its idle threads are joined when the process exits."""
+    return ThreadPoolExecutor(num_threads, thread_name_prefix="prompt_embeds_hash")
+
+
+class _PromptEmbedsBlockPrehasher:
+    """Hashes the prompt embeds of many blocks in parallel into the request's
+    per-block cache that `_gen_prompt_embeds_extra_hash_keys` reads.
+
+    `hashlib` releases the GIL while hashing large buffers, so the threads
+    scale. Each task hashes a contiguous run of blocks to amortize dispatch.
+    """
+
+    def __init__(self, num_threads: int):
+        self.num_threads = num_threads
+
+    def prehash(self, request: Request, block_ranges: list[tuple[int, int]]) -> None:
+        prompt_embeds = request.prompt_embeds
+        assert prompt_embeds is not None
+        if not (prompt_embeds.is_cpu and prompt_embeds.is_contiguous()):
+            # tensor_data would copy the whole tensor, the per-block path
+            # copies one block at a time.
+            return
+
+        cached = request._prompt_embeds_per_block_hashes
+        todo = [r for r in block_ranges if r not in cached]
+        if not _parallel_prehash_pays_off(todo, prompt_embeds[:1].nbytes):
+            return
+
+        # The bytes `_gen_prompt_embeds_extra_hash_keys` hashes, sliced without
+        # torch ops because they re-acquire the GIL, which serializes the threads.
+        data = tensor_data(prompt_embeds)
+        row_nbytes = data.nbytes // len(prompt_embeds)
+
+        def hash_blocks(ranges: list[tuple[int, int]]) -> list[bytes]:
+            return [
+                hashlib.sha256(data[start * row_nbytes : end * row_nbytes]).digest()
+                for start, end in ranges
+            ]
+
+        # A few runs per thread even out threads that land on busier cores.
+        chunk_size = cdiv(len(todo), 4 * self.num_threads)
+        chunks = [todo[i : i + chunk_size] for i in range(0, len(todo), chunk_size)]
+        pool = _prompt_embeds_hash_pool(self.num_threads)
+        for ranges, digests in zip(chunks, pool.map(hash_blocks, chunks)):
+            cached.update(zip(ranges, digests))
+
+
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[tuple[Any, ...] | None, int]:
@@ -1014,6 +1109,7 @@ def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
     num_hash_lookahead_tokens: int = 0,
+    num_prompt_embeds_hash_threads: int = 1,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -1028,7 +1124,16 @@ def get_request_block_hasher(
     depends on, so it is emitted only once those tokens exist. The block tokens
     stay the hashed tokens; the extra keys become `(E, *tokens)`, where `E`
     covers the block and those tokens.
+
+    With `num_prompt_embeds_hash_threads` > 1, the prompt embeds of large
+    batches of new blocks are hashed on a lazily created pool of that many
+    threads. The digests, and so the block hashes, are the same.
     """
+    embeds_prehasher = (
+        _PromptEmbedsBlockPrehasher(num_prompt_embeds_hash_threads)
+        if num_prompt_embeds_hash_threads > 1
+        else None
+    )
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
@@ -1048,6 +1153,21 @@ def get_request_block_hasher(
                     start_token_idx,
                     start_token_idx + hash_block_size,
                 )
+
+        if embeds_prehasher is not None and request.prompt_embeds is not None:
+            embeds_end = min(num_tokens, len(request.prompt_embeds))
+            embeds_hash_span = hash_block_size + num_hash_lookahead_tokens
+            embeds_prehasher.prehash(
+                request,
+                [
+                    (start, start + embeds_hash_span)
+                    for start in range(
+                        start_token_idx,
+                        embeds_end - hash_block_size + 1,
+                        hash_block_size,
+                    )
+                ],
+            )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None

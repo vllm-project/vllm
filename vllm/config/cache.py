@@ -286,6 +286,12 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional `xxhash` package."""
+    prompt_embeds_hash_threads: int | None = Field(default=None, ge=1)
+    """Threads the engine core uses to hash the prompt embeddings of large
+    prompts for prefix caching. `None` picks up to 8, sharing this node's usable
+    CPUs with the other local data-parallel engine cores; 1 hashes them one
+    block at a time. More threads hash long prompts faster, but take CPUs from
+    the API servers and other engine cores while they run."""
     prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. `0` retains only semantic checkpoints, including the latest
@@ -432,6 +438,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            "prompt_embeds_hash_threads",
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",

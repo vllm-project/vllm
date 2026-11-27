@@ -263,6 +263,7 @@ class EngineCore:
                 hash_block_size,
                 caching_hash_fn,
                 vllm_config.num_hash_lookahead_tokens,
+                kv_cache_utils.num_prompt_embeds_hash_threads(vllm_config),
             )
             self.prefix_hash_config = PrefixHashConfig(
                 hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
