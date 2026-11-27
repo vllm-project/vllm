@@ -681,7 +681,18 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
+    top_logprobs: list[dict[str, float] | None] = Field(
+        default_factory=list,
+        description=(
+            "Per position, the returned candidates keyed by their decoded text. "
+            "Candidates that decode to the same string share one entry, e.g. "
+            "byte-fallback tokens that each hold part of a multi-byte character "
+            '(Thai, CJK or emoji text) all decode to "". The entry keeps the '
+            "highest logprob among them (on a tie, the token at that position). "
+            "Set `return_tokens_as_token_ids` to get one entry per candidate, "
+            "keyed by `token_id:{id}`."
+        ),
+    )
 
 
 class CompletionResponseChoice(OpenAIBaseModel):

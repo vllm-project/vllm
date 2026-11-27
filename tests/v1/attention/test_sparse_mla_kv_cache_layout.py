@@ -105,7 +105,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
     )
     specs = {"mla": spec, "indexer": index_spec}
     group = KVCacheGroup.from_layers({"mla": layer_config, "indexer": index_config})
-    cache = get_kv_cache_config_from_groups(config, [group], 2**20)
+    cache = get_kv_cache_config_from_groups(config, [group], num_blocks=16)
     views = allocate_kv_cache(cache, torch.device(device), layout)
     register = MagicMock()
     monkeypatch.setattr(

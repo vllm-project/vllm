@@ -240,9 +240,12 @@ class TestBytesPerBlockProbe:
 
         pure_c = _pool_bytes_per_block(vc, groups)
         vc.cache_config.num_gpu_blocks_override = 500
-        probed_c = _pool_bytes_per_block_from_builder(
-            DefaultKVCacheConfigBuilder(), vc, groups
+        builder = DefaultKVCacheConfigBuilder()
+        assert (
+            builder.get_kv_cache_config_from_groups(vc, groups, num_blocks=1).num_blocks
+            == 1
         )
+        probed_c = _pool_bytes_per_block_from_builder(builder, vc, groups)
         assert probed_c == pure_c
         assert vc.cache_config.num_gpu_blocks_override == 500
 
