@@ -165,6 +165,18 @@ class WorkerBase:
         """Collect finished KV transfers for the next model output."""
         return
 
+    def probe_forward(self) -> str | None:
+        """Readiness probe for `/health_generate`: run a dummy forward pass and
+        wait for it to complete on the device.
+
+        Returns:
+            None if the probe passed, else the error. Errors are returned, not
+            raised, so the executor reads every worker's reply and its reply
+            queues stay in step.
+
+        """
+        return f"{type(self).__name__} does not implement probe_forward"
+
     def notify_kv_cache_ready(self) -> None:
         """Finish startup device work before notifying the worker connector."""
         if has_kv_transfer_group():

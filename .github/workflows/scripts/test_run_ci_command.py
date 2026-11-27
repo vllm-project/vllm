@@ -1402,6 +1402,34 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("running 2 failed step", github.comments[0])
         self.assertIn("Buildkite CI #122", github.comments[0])
 
+    def test_ci_retry_new_head_leaves_shard_coverage_check_to_ci_infra(self) -> None:
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        source_build = {
+            "commit": "old-commit",
+            "created_at": "2026-11-25T18:00:00Z",
+            "finished_at": "2026-11-25T20:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        buildkite = FakeBuildkite(
+            [[], [source_build]],
+            [
+                [
+                    {"state": "failed", "step_key": key, "type": "script"}
+                    for key in ("examples", "runtime-shard-coverage-check")
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(
+            json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]), ["examples"]
+        )
+
     def test_ci_retry_new_head_accepts_finished_build_left_blocked(self) -> None:
         # The "Run more tests" picker leaves a finished build in state blocked.
         github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
@@ -2459,19 +2487,62 @@ class RocmImageCacheTest(unittest.TestCase):
         (promote,) = ci.created_builds
         self.assertEqual(promote["env"]["ROCM_PROMOTE_PR"], "42")
 
-    def test_status_of_a_running_build_waits_for_the_end(self) -> None:
-        # Buildkite posts failure as soon as a job fails.
+    def test_a_job_status_of_a_running_build_reconciles_its_pr(self) -> None:
+        # The cache check's own status: its build is still running.
         github = FakeRocmGitHub()
-        build = rocm_build(state="failing", finished_at=None)
+        build = rocm_build(state="running", finished_at=None)
         ci = FakeRocmBuildkite([build], {10: [REFRESH_PASSED]})
         event = {
             "sha": "fedcba9876543210",
-            "target_url": "https://buildkite.com/vllm/ci/builds/10",
+            "target_url": "https://buildkite.com/vllm/ci/builds/10#01a2106f-eff0",
         }
 
         handle_buildkite_status(event, github, ci, FakeRocmBuildkite(), set())
 
-        self.assertEqual(ci.created_builds, [])
+        (promote,) = ci.created_builds
+        self.assertEqual(promote["env"]["ROCM_PROMOTE_PR"], "42")
+
+    def test_a_promote_is_judged_by_its_cache_job(self) -> None:
+        """The promote job's status wakes the bot before its build finishes."""
+        running = promote_build(state="running", finished_at=None)
+        cache_job = {"id": "c", "step_key": ROCM_CACHE_STEP_KEY, "created_at": "4"}
+        cases = {
+            "passed": ({**cache_job, "state": "passed", "finished_at": "5"}, 1),
+            "retry pending": ({**cache_job, "state": "scheduled"}, 0),
+        }
+        for name, (job, retried) in cases.items():
+            with self.subTest(name):
+                github = FakeRocmGitHub()
+                ci = head_ci([gate_job()], running)
+                ci.jobs[501] = [job]
+                event = {
+                    "sha": "merge-base-of-fedcba9876543210",
+                    "target_url": "https://buildkite.com/vllm/ci/builds/501#c",
+                }
+
+                handle_buildkite_status(event, github, ci, FakeRocmBuildkite(), set())
+
+                self.assertEqual(len(ci.retried_jobs), retried)
+                self.assertEqual(ci.created_builds, [])
+
+    def test_the_workflow_listens_to_the_cache_jobs_statuses(self) -> None:
+        """ci-infra posts each job's status as `ci/step: <label>`, emoji
+        dropped; renaming either step must update rocm-image-cache.yml."""
+        steps, label = {}, ""
+        for line in (REPO_ROOT / ROCM_CACHE_YAML).read_text().splitlines():
+            name, _, value = line.strip().removeprefix("- ").partition(":")
+            if name == "label":
+                label = value.strip().strip("\"'")
+            elif name == "key":
+                steps[value.strip()] = label
+        for key in (ROCM_CACHE_CHECK_KEY, ROCM_CACHE_STEP_KEY):
+            words = steps[key].split()
+            label = " ".join(w for w in words if not (w[0] == w[-1] == ":"))
+            context = "'ci/step: " + label.replace("'", "''") + "'"
+            for workflow in ("rocm-image-cache.yml", "_reusable-rocm-image-cache.yml"):
+                with self.subTest(key=key, workflow=workflow):
+                    text = (REPO_ROOT / ".github/workflows" / workflow).read_text()
+                    self.assertIn(f"github.event.context == {context}", text)
 
     def test_status_of_a_promote_build_retries_its_prs_check(self) -> None:
         github = FakeRocmGitHub()

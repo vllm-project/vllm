@@ -7,11 +7,13 @@ import pytest
 import torch
 
 from vllm.model_executor.models.qwen3_xpress import XPressRefinerHead
+from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 
 V, H, B, R = 61, 32, 8, 16
+DEVICE = torch.device(current_platform.device_type)
 
 
 # Serving stores L*tril + I and drops the residual; training stores raw L and adds it.
@@ -79,19 +81,22 @@ def test_fused_buffers_refilled_in_place():
 # one returns the refined logits the online acceptance estimator reads. Those
 # must be the logits the draft was picked from. The fused kernels are the only
 # implementation, so this runs where they do: on a GPU, at the serving dtype.
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs CUDA, ROCm or XPU",
+)
 @pytest.mark.parametrize("topc", [0, 16])
 def test_jacobi_is_deterministic(topc: int):
     dtype = torch.bfloat16
-    head = _head(device="cuda", dtype=dtype)
+    head = _head(device=DEVICE, dtype=dtype)
     head.topc = topc
-    head.fold_from_raw_(torch.randn(R, B, B, dtype=dtype, device="cuda") * 0.3)
+    head.fold_from_raw_(torch.randn(R, B, B, dtype=dtype, device=DEVICE) * 0.3)
     head.process_weights_after_loading()
     torch.manual_seed(13)
-    base = torch.randn(2, B, V, dtype=dtype, device="cuda")
-    h = torch.randn(2, B, H, dtype=dtype, device="cuda")
-    anchor = torch.randint(0, V, (2,), device="cuda")
-    tok_am1 = torch.randint(0, V, (2,), device="cuda")
+    base = torch.randn(2, B, V, dtype=dtype, device=DEVICE)
+    h = torch.randn(2, B, H, dtype=dtype, device=DEVICE)
+    anchor = torch.randint(0, V, (2,), device=DEVICE)
+    tok_am1 = torch.randint(0, V, (2,), device=DEVICE)
 
     first, no_logits = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
     second, logits = head.jacobi_refine_greedy(
@@ -114,9 +119,12 @@ _RANK, _MLP_HIDDEN, _BLOCK = 256, 512, 16
 
 
 def _fused_mlp_tiles() -> list[tuple[int, int]]:
-    if not torch.cuda.is_available():
+    if current_platform.is_xpu() and torch.xpu.is_available():
+        smem = torch.xpu.get_device_properties(0).local_mem_size
+    elif current_platform.is_cuda_alike() and torch.cuda.is_available():
+        smem = get_max_shared_memory_bytes()
+    else:
         return []
-    smem = get_max_shared_memory_bytes()
     tiles = []
     for stages in (1, 2, 3):
         fit = [ht for ht in (64, 32, 16) if (3 * stages + 1) * _RANK * ht * 2 <= smem]
@@ -124,7 +132,10 @@ def _fused_mlp_tiles() -> list[tuple[int, int]]:
     return tiles
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs CUDA, ROCm or XPU",
+)
 @pytest.mark.parametrize("kc", [None, _RANK // 2, _RANK // 4])
 @pytest.mark.parametrize(
     "do_mlp,rc,ht,num_stages",
@@ -147,24 +158,24 @@ def test_latent_pass_matches_reference(
         block_size=_BLOCK,
         rank=_RANK,
         mlp_hidden=_MLP_HIDDEN,
-    ).to(device="cuda", dtype=torch.bfloat16)
+    ).to(device=DEVICE, dtype=torch.bfloat16)
     with torch.no_grad():
         # At the default init the MLP adds only ~5% to its input, below what the
         # tolerance can tell apart; doubling its weights makes it ~45%.
         for w in (head.mlp_gate.weight, head.mlp_up.weight, head.mlp_down.weight):
             w.mul_(2)
-    head.fold_from_raw_(torch.randn(_RANK, _BLOCK, _BLOCK, device="cuda") * 0.3)
+    head.fold_from_raw_(torch.randn(_RANK, _BLOCK, _BLOCK, device=DEVICE) * 0.3)
     head.process_weights_after_loading()
     ref_head = copy.deepcopy(head).float()
     buf = head._fused_buf
-    blk = torch.randint(0, v, (n, _BLOCK), device="cuda")
-    tok_am1 = torch.randint(0, v, (n,), device="cuda")
-    hcache = ref_head.hidden_cache(torch.randn(n, _BLOCK, 64, device="cuda"))
+    blk = torch.randint(0, v, (n, _BLOCK), device=DEVICE)
+    tok_am1 = torch.randint(0, v, (n,), device=DEVICE)
+    hcache = ref_head.hidden_cache(torch.randn(n, _BLOCK, 64, device=DEVICE))
     prev = torch.cat([tok_am1[:, None], blk[:, :-1]], dim=1)
     expected = ref_head._refine_latent(prev, hcache)[:, 1:]
 
     xh = (hcache @ ref_head.in_proj.weight[:, : 2 * _RANK].t()).bfloat16()
-    lat = torch.empty(n, _BLOCK - 1, _RANK, dtype=torch.bfloat16, device="cuda")
+    lat = torch.empty(n, _BLOCK - 1, _RANK, dtype=torch.bfloat16, device=DEVICE)
     kernels.xpress_latent_pass(
         blk,
         tok_am1,
@@ -191,7 +202,9 @@ def test_latent_pass_matches_reference(
 
 
 def _head(
-    seed: int = 0, device: str = "cpu", dtype: torch.dtype = torch.float64
+    seed: int = 0,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype = torch.float64,
 ) -> XPressRefinerHead:
     torch.manual_seed(seed)
     head = XPressRefinerHead(

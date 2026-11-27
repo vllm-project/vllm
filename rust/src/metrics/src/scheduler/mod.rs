@@ -10,7 +10,7 @@
 //! The `SchedulerStats` envelope stays with the engine protocol, which also
 //! routes on it; the engine client hands each group its part.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
@@ -38,7 +38,8 @@ pub use kv_connector::KvConnectorHandles;
 use kv_connector::KvConnectorMetrics;
 pub use kv_connector::{
     KvConnectorStats, MooncakeRecord, MooncakeStats, MooncakeTransferStats, MultiConnectorStats,
-    NixlStats, SimpleCpuOffloadData, SimpleCpuOffloadStats, UmbpOperationCounts, UmbpStats,
+    NixlStats, OffloadingSample, OffloadingStats, SimpleCpuOffloadData, SimpleCpuOffloadStats,
+    UmbpOperationCounts, UmbpStats,
 };
 pub use log_stats::{
     CudagraphLogKey, CudagraphStats, SchedulerLogStatsAccumulator, SchedulerLogStatsInterval,
@@ -74,6 +75,9 @@ pub struct SchedulerMetrics {
 
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
+    /// Device name the text logs print before `KV cache usage` (`GPU`, `CPU`,
+    /// ...), set once from the engines' ready response.
+    kv_cache_device: OnceLock<String>,
 }
 
 impl SchedulerMetrics {
@@ -89,7 +93,20 @@ impl SchedulerMetrics {
             kv_cache_residency: KvCacheResidencyMetrics::register(registry, buckets),
             kv_connector: KvConnectorMetrics::register(registry),
             log_stats: Family::default(),
+            kv_cache_device: OnceLock::new(),
         }
+    }
+
+    /// Set the device name of the text logs. The registry is process-global and
+    /// serves one deployment, whose engines share one device, so only the first
+    /// call takes effect.
+    pub fn set_kv_cache_device(&self, device: String) {
+        let _ = self.kv_cache_device.set(device);
+    }
+
+    /// The device name of the text logs, `GPU` until set.
+    pub fn kv_cache_device(&self) -> &str {
+        self.kv_cache_device.get().map_or("GPU", String::as_str)
     }
 
     /// Resolve all fixed-label scheduler metrics for one engine.
@@ -127,4 +144,18 @@ pub struct SchedulerStatsHandles {
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     pub log_stats: SchedulerLogStatsAccumulator,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Metrics;
+
+    #[test]
+    fn kv_cache_device_is_gpu_until_set_and_set_once() {
+        let metrics = Metrics::new();
+        assert_eq!(metrics.scheduler.kv_cache_device(), "GPU");
+        metrics.scheduler.set_kv_cache_device("CPU".to_string());
+        metrics.scheduler.set_kv_cache_device("XPU".to_string());
+        assert_eq!(metrics.scheduler.kv_cache_device(), "CPU");
+    }
 }
