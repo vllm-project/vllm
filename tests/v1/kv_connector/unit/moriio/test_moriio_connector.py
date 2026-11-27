@@ -151,6 +151,8 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
@@ -170,6 +172,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_abort = {}
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
@@ -328,12 +331,7 @@ def create_vllm_config(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=False,
     )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="bfloat16", seed=42)
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
@@ -1337,6 +1335,7 @@ def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_ra
     # One TP rank per stage, so stage s sits at offset s.
     assert worker.side_channel_port == 12347 + pp_rank
     assert worker.notify_port == 12348 + pp_rank
+    assert worker.moriio_engine is not None
     assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
 
 

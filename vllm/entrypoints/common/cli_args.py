@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
@@ -176,7 +177,7 @@ class BaseFrontendArgs:
     `--enable-log-requests`. Output text and finish reasons are logged at INFO,
     while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
-    """If set to False, output deltas will not be logged. Relevant only if 
+    """If set to False, output deltas will not be logged. Relevant only if
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
@@ -234,6 +235,13 @@ class BaseFrontendArgs:
     """
     fingerprint_value: str | None = None
     """Literal fingerprint string used when `--fingerprint-mode=custom`."""
+    max_tokenize_tokens: int | None = None
+    """Maximum number of tokens allowed in `/tokenize`, `/detokenize`, and
+    `/v1/messages/count_tokens` requests. Defaults to `VLLM_MAX_TOKENIZE_TOKENS`
+    if set, otherwise `max(max_model_len * 2, 131072)`. Set to `<= 0` to
+    disable the limit.
+    Currently enforced on standard template rendering paths
+    in the Python frontend (GPT-OSS Harmony rendering is not yet covered)."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -296,6 +304,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    mm_tensor_refs_config: MMTensorRefsConfig | None = None
+    """Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    processed multimodal tensors that clients upload to an S3-compatible store.
+    Requires `--enable-scale-out` or `--tokens-only`. Off by default. Example:
+    `'{"s3_allowed_uri_prefix": "s3://bucket/prefix"}'`."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -422,10 +435,15 @@ class FrontendArgs(BaseFrontendArgs):
 
 def resolve_default_chat_template_kwargs(
     args: argparse.Namespace,
+    tokenizer_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    """Resolve renderer defaults, including the dedicated Cohere format flag.
+
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
+    """
     kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
+    if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
         kwargs.setdefault("cohere_format", args.cohere_format)
     return kwargs
 
@@ -564,6 +582,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if getattr(args, "mm_tensor_refs_config", None) is not None and not (
+        getattr(args, "enable_scale_out", False) or getattr(args, "tokens_only", False)
+    ):
+        raise ValueError(
+            "Error: --mm-tensor-refs-config requires --enable-scale-out or "
+            "--tokens-only, which serve /inference/v1/generate"
+        )
 
     # SSE keep-alive interval must be zero (disabled) or a positive integer.
     if getattr(args, "sse_keep_alive_interval", 0) < 0:

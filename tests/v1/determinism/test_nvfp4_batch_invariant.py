@@ -18,11 +18,6 @@ from vllm.platforms import current_platform
 # FLASH_ATTN is CUDA-only.
 E2E_BACKENDS = ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(torch, "float8_e4m3fn"),
-    reason="NVFP4 tests require torch.float8_e4m3fn support.",
-)
-
 NVFP4_TEST_MODEL = os.getenv(
     "VLLM_TEST_NVFP4_MODEL", "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4"
 )

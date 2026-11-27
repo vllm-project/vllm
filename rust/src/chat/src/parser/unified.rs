@@ -3,7 +3,7 @@
 
 //! Unified parser registration and selection boundary for `vllm-chat`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::unified::{
     BeamUnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser,
@@ -12,6 +12,7 @@ pub use vllm_parser::unified::{
 };
 use vllm_tokenizer::DynTokenizer;
 
+use crate::error::BoxedError;
 use crate::parser::ParserFactory;
 use crate::request::ChatTool;
 
@@ -26,18 +27,21 @@ pub mod names {
     /// Alias of [`MUSE`]: the parser name of the original Muse Spark plugin.
     pub const MUSE_SPARK: &str = "musespark";
 
-    /// Executes the checkpoint's Hugging Face `response_template`. Registered for
-    /// name resolution only: it is built from the model's template, never by its
-    /// registry constructor.
+    /// Executes the checkpoint's Hugging Face `response_template`; built from the
+    /// model's template, never by the parser's named constructor.
     pub const HF: &str = "hf";
     /// Beam checkpoints: [`HF`] with Beam's tool-call grammar, built from the
     /// model's template the same way.
     pub const BEAM: &str = "beam";
 }
 
-/// Constructor signature for one registered unified parser implementation.
-type UnifiedParserCreator =
-    fn(&[ChatTool], DynTokenizer) -> vllm_parser::unified::Result<Box<dyn UnifiedParser>>;
+/// Constructor signature for one registered unified parser implementation,
+/// given the model's `response_template` or why it is unavailable.
+type UnifiedParserCreator = fn(
+    &[ChatTool],
+    DynTokenizer,
+    &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+) -> std::result::Result<Box<dyn UnifiedParser>, BoxedError>;
 
 /// Registry and model matcher for unified parsers.
 pub type UnifiedParserFactory = ParserFactory<UnifiedParserCreator>;
@@ -61,10 +65,22 @@ impl UnifiedParserFactory {
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
         factory.register_parser::<MuseUnifiedParser>(names::MUSE);
-        factory.register_parser::<MuseUnifiedParser>(names::MUSE_SPARK);
+        factory.register_alias(names::MUSE_SPARK, names::MUSE);
         // Opt-in only: no model patterns map to it.
-        factory.register_parser::<HfUnifiedParser>(names::HF);
-        factory.register_parser::<BeamUnifiedParser>(names::BEAM);
+        factory.register_creator(names::HF, |tools, tokenizer, response_template| {
+            Ok(Box::new(HfUnifiedParser::new(
+                response_template.clone()?,
+                tools,
+                tokenizer,
+            )))
+        });
+        factory.register_creator(names::BEAM, |tools, tokenizer, response_template| {
+            Ok(Box::new(BeamUnifiedParser::new(
+                response_template.clone()?,
+                tools,
+                tokenizer,
+            )))
+        });
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
@@ -84,15 +100,17 @@ impl UnifiedParserFactory {
     where
         T: UnifiedParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(name, |tools, tokenizer, _| Ok(T::create(tools, tokenizer)?))
     }
 
-    /// Construct a parser from an exact name.
+    /// Construct a parser from an exact name, given the model's
+    /// `response_template` or why it is unavailable.
     pub fn create(
         &self,
         name: &str,
         tools: &[ChatTool],
         tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
     ) -> crate::Result<Box<dyn UnifiedParser>> {
         let creator = self.creator(name).ok_or_else(|| crate::Error::ParserUnavailableByName {
             kind: "unified",
@@ -100,10 +118,12 @@ impl UnifiedParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
-            kind: "unified",
-            name: name.to_string(),
-            error: error.into(),
+        creator(tools, tokenizer, response_template).map_err(|error| {
+            crate::Error::ParserInitialization {
+                kind: "unified",
+                name: name.to_string(),
+                error,
+            }
         })
     }
 }
@@ -114,7 +134,7 @@ mod tests {
 
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::{UnifiedParserFactory, names};
+    use super::{HfTemplateError, UnifiedParserFactory, names};
 
     fn tokenizer() -> TestTokenizer {
         TestTokenizer::new()
@@ -127,6 +147,8 @@ mod tests {
             .with_regular_token("<|message_model|>", 200001)
             .with_regular_token("<|content_text|>", 200004)
             .with_regular_token("<|content_thinking|>", 200008)
+            .with_regular_token("<|end_message|>", 200010)
+            .with_regular_token("<|content_invoke_tool_json|>", 200049)
     }
 
     #[test]
@@ -138,7 +160,14 @@ mod tests {
             factory.resolve_name_for_model("google/gemma-4-27b-it"),
             Some(names::GEMMA4)
         );
-        factory.create(names::GEMMA4, &[], Arc::new(tokenizer())).unwrap();
+        factory
+            .create(
+                names::GEMMA4,
+                &[],
+                Arc::new(tokenizer()),
+                &Err(HfTemplateError::Missing),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -150,7 +179,14 @@ mod tests {
             factory.resolve_name_for_model("thinkingmachines/Inkling"),
             Some(names::INKLING)
         );
-        factory.create(names::INKLING, &[], Arc::new(inkling_tokenizer())).unwrap();
+        factory
+            .create(
+                names::INKLING,
+                &[],
+                Arc::new(inkling_tokenizer()),
+                &Err(HfTemplateError::Missing),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -167,7 +203,14 @@ mod tests {
             factory.resolve_name_for_model("moonshotai/Kimi-K3"),
             Some(names::KIMI_K3)
         );
-        factory.create(names::KIMI_K3, &[], Arc::new(tokenizer)).unwrap();
+        factory
+            .create(
+                names::KIMI_K3,
+                &[],
+                Arc::new(tokenizer),
+                &Err(HfTemplateError::Missing),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -195,7 +238,14 @@ mod tests {
             None
         );
         for name in [names::MUSE, names::MUSE_SPARK] {
-            factory.create(name, &[], Arc::new(tokenizer.clone())).unwrap();
+            factory
+                .create(
+                    name,
+                    &[],
+                    Arc::new(tokenizer.clone()),
+                    &Err(HfTemplateError::Missing),
+                )
+                .unwrap();
             let explicit = crate::ParserSelection::Explicit(name.to_owned());
             crate::parser::validate_parser_overrides(&explicit, &explicit).unwrap();
         }
@@ -227,6 +277,13 @@ mod tests {
             factory.resolve_name_for_model("tencent/Hy4-preview"),
             Some(names::HY_V4)
         );
-        factory.create(names::HY_V4, &[], Arc::new(tokenizer)).unwrap();
+        factory
+            .create(
+                names::HY_V4,
+                &[],
+                Arc::new(tokenizer),
+                &Err(HfTemplateError::Missing),
+            )
+            .unwrap();
     }
 }

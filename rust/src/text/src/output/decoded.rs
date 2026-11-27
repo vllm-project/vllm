@@ -25,7 +25,9 @@ use crate::error::Error;
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextDecodeOptions {
-    pub skip_special_tokens: bool,
+    /// `None` takes the model's generation-config default when the request is
+    /// lowered, and `true` without one.
+    pub skip_special_tokens: Option<bool>,
     pub include_stop_str_in_output: bool,
     pub stop_strings: Option<Vec<String>>,
     /// Minimum number of tokens to generate before stop-string checking kicks
@@ -34,14 +36,14 @@ pub struct TextDecodeOptions {
     pub min_tokens: u32,
     /// Whether to detokenize the output. When false, the output is never
     /// decoded: text and logprob token strings stay empty.
-    /// `TextRequest::validate` rejects stop strings in that case.
+    /// [`TextDecodeOptions::validate`] rejects stop strings in that case.
     pub detokenize: bool,
 }
 
 impl Default for TextDecodeOptions {
     fn default() -> Self {
         Self {
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
@@ -50,7 +52,41 @@ impl Default for TextDecodeOptions {
     }
 }
 
+const MAX_STOP_STRINGS_ENV: &str = "VLLM_MAX_STOP_STRINGS";
+const DEFAULT_MAX_STOP_STRINGS: usize = 4;
+
+fn max_stop_strings() -> usize {
+    std::env::var(MAX_STOP_STRINGS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MAX_STOP_STRINGS)
+}
+
 impl TextDecodeOptions {
+    /// Validate stop-string and detokenize invariants.
+    pub fn validate(&self, request_id: &str) -> crate::Result<()> {
+        if let Some(stops) = self.stop_strings.as_ref() {
+            if stops.iter().any(String::is_empty) {
+                return Err(Error::EmptyStopString {
+                    request_id: request_id.to_owned(),
+                });
+            }
+            let max = max_stop_strings();
+            if stops.len() > max {
+                return Err(Error::TooManyStopStrings {
+                    count: stops.len(),
+                    max,
+                });
+            }
+            if !self.detokenize && !stops.is_empty() {
+                return Err(Error::StopStringsRequireDetokenize {
+                    request_id: request_id.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// If we are excluding stop strings from output, we need to buffer
     /// the output so that we don't return the beginning of a stop string
     /// when streaming the outputs.
@@ -97,6 +133,8 @@ pub struct Finished {
 /// updates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SampledDelta {
+    /// Engine output-batch timestamp, on the same clock as `RequestTimestamps`.
+    pub timestamp: f64,
     /// Token IDs produced by this engine update, after stop-string truncation.
     pub token_ids: Vec<u32>,
     /// Per-position logprobs aligned with `token_ids`, when requested.
@@ -212,7 +250,7 @@ pub async fn decoded_text_event_stream(
             let dec = match text_tokenizer {
                 Some(tokenizer) => tokenizer.create_decode_stream(
                     prompt_token_ids,
-                    decode_options.skip_special_tokens,
+                    decode_options.skip_special_tokens.unwrap_or(true),
                     decode_options.min_bytes_to_buffer(),
                 ),
                 None => Box::new(TokenOnlyDecoder),
@@ -373,6 +411,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: sampled_token_ids,
                     logprobs: sampled_logprobs,
                     sampling_mask: sampled_sampling_mask,
@@ -400,6 +439,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: new_token_ids,
                     logprobs: decoded_logprobs,
                     sampling_mask: new_sampling_mask,
@@ -578,6 +618,7 @@ mod tests {
                 attributions: attributions.into_iter().collect(),
             },
             sampled: SampledDelta {
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids: sampled_token_ids,
                 logprobs: None,
                 sampling_mask: None,
@@ -855,7 +896,7 @@ mod tests {
                 tokenizer,
                 stream::iter([Ok(output)]),
                 TextDecodeOptions {
-                    skip_special_tokens,
+                    skip_special_tokens: Some(skip_special_tokens),
                     ..Default::default()
                 },
                 false,

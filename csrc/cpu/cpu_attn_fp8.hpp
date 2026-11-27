@@ -14,19 +14,6 @@ typedef uint32_t __attribute__((__may_alias__)) u32_alias_t;
 typedef uint16_t __attribute__((__may_alias__)) u16_alias_t;
 typedef float __attribute__((__may_alias__)) f32_alias_t;
 
-// Reference scalar dequant — used to verify vectorized AMX dequant.
-inline float fp8e4m3_to_float_scalar(uint8_t b, float scale) noexcept {
-  // NaN encoding in E4M3
-  if ((b & 0x7F) == 0x7F) return std::numeric_limits<float>::quiet_NaN();
-  uint32_t b_u32 = static_cast<uint32_t>(b);
-  uint32_t sign = (b_u32 & 0x80) << 24;
-  uint32_t payload = (b_u32 & 0x7F) << 20;
-  uint32_t bits = sign | payload;
-  float b_f32_unscaled = *reinterpret_cast<const f32_alias_t*>(&bits);
-  float b_f32_scaled = b_f32_unscaled * scale * 0x1p120f;
-  return b_f32_scaled;
-}
-
 template <int mantissa_bits>
 inline uint8_t float_to_fp8_scalar(float v, float inv_scale) noexcept {
   constexpr int bias = mantissa_bits == 3 ? 7 : 15;

@@ -104,7 +104,6 @@ def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
@@ -1410,7 +1409,7 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     chat_template = get_chat_template_fallback_path("openvla", model_name)
     assert chat_template is not None
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{"role": "user", "content": "pick up the red block"}]
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -1420,7 +1419,6 @@ def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [prompt for _ in questions]
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=512,
         limit_mm_per_prompt={modality: 1},
     )
@@ -1442,12 +1440,11 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={modality: 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [
         [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
     ]
@@ -1507,7 +1504,6 @@ def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
     )
 
     placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
@@ -1987,6 +1983,7 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
+        trust_remote_code=True,
         max_model_len=16384,
         limit_mm_per_prompt={modality: 1},
     )
@@ -2208,6 +2205,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
+    "deepseek_ocr2",
     "deepseek_vl_v2",
     "ernie45_vl",
     "minicpmv2_5_vl",

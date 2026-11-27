@@ -108,6 +108,7 @@ def run_multi_audio_test(
         model,
         dtype=dtype,
         enforce_eager=True,
+        trust_remote_code=True,
         limit_mm_per_prompt={
             "audio": max((len(audio) for _, audio in prompts_and_audios))
         },
@@ -185,6 +186,7 @@ def test_variable_length_audio_batching(
         MODEL_NAME,
         dtype=dtype,
         enforce_eager=True,
+        trust_remote_code=True,
         limit_mm_per_prompt={"audio": 1},
     ) as vllm_model:
         # Generate for all prompts in a single batch

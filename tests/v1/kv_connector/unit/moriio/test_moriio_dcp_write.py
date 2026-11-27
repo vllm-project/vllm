@@ -179,7 +179,7 @@ def _worker(
     worker._region_session_index = None
     worker.layer_name_to_local_kv_cache_metadata = {name: [b""] for name in caches}
     worker._record_slice_layouts(caches)
-    worker.shutdown = lambda: None
+    worker.shutdown = lambda: None  # type: ignore[method-assign]
     return worker
 
 
@@ -379,7 +379,7 @@ def _run_write(
                 {**message, **(message_fields or {})}
             )
 
-        worker._get_built_session = get_built_session
+        worker._get_built_session = get_built_session  # type: ignore[method-assign]
         info = RemoteAllocInfo(
             block_ids=[list(decode_blocks)], num_skip_blocks=num_skip_blocks
         )
@@ -522,8 +522,9 @@ def _handshake_worker(is_producer: bool, handshake) -> MoRIIOConnectorWorker:
     worker.use_mla = True
     worker._has_mamba = False
     worker.layer_to_spec = {}
+    worker._transfer_layer_names = {f"mla{i}" for i in range(4)}
     worker.moriio_config = SimpleNamespace(backend="xgmi", transfer_timeout=30.0)
-    worker._moriio_handshake = handshake
+    worker._moriio_handshake = handshake  # type: ignore[method-assign]
     worker._handshake_lock = threading.RLock()
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_futures = {}
@@ -536,7 +537,7 @@ def _handshake_worker(is_producer: bool, handshake) -> MoRIIOConnectorWorker:
     worker._invalid_block_ids = set()
     worker._reqs_to_send = {}
     worker.tp_group = SimpleNamespace(cpu_group=None)
-    worker.shutdown = lambda: None
+    worker.shutdown = lambda: None  # type: ignore[method-assign]
     return worker
 
 
@@ -580,7 +581,7 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
     def send_notify(transfer_id, ip, port, message_type, message_fields=None):
         sent.append((transfer_id, port, message_type, message_fields))
 
-    wrapper.send_notify = send_notify
+    wrapper.send_notify = send_notify  # type: ignore[method-assign]
     worker.moriio_wrapper = wrapper
     writer = worker._writer = make_moriio_writer(worker)
     tasks = []
@@ -591,7 +592,7 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
         if writer.schedule_write(task):
             tasks.append(task)
 
-    worker._write_blocks_for_req = write_blocks
+    worker._write_blocks_for_req = write_blocks  # type: ignore[method-assign]
     metadata = MoRIIOConnectorMetadata()
     metadata.reqs_to_save["req"] = _req_meta("decode", tp_size=4)
 
@@ -610,7 +611,7 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
     written = []
     if targets_connected:
         worker.remote_moriio_metadata = dict.fromkeys(handshakes)
-        worker._get_built_session = lambda engine_id: ([engine_id], None)
+        worker._get_built_session = lambda engine_id: ([engine_id], None)  # type: ignore[method-assign]
         writer._prepare_transfer_plan = lambda *args, **kwargs: SimpleNamespace(
             transfer_sizes=[64]
         )
@@ -646,14 +647,14 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
 def test_unconnected_fan_in_writer_tells_the_owning_rank_how_many_write():
     worker = _handshake_worker(True, _refuse)
     worker.tp_rank, worker.world_size, worker._has_mamba = 1, 2, True
-    worker._is_mamba_layer = lambda layer_name: True
+    worker._is_mamba_layer = lambda layer_name: True  # type: ignore[method-assign]
     wrapper = _wrapper()
     sent = []
 
     def send_notify(transfer_id, ip, port, message_type, message_fields=None):
         sent.append((port, message_type, message_fields))
 
-    wrapper.send_notify = send_notify
+    wrapper.send_notify = send_notify  # type: ignore[method-assign]
     worker.moriio_wrapper = wrapper
     writer = make_moriio_writer(worker)
     task = _write_task("kda0", [5, 6], worker._write_tp_mapping(1))
@@ -709,10 +710,10 @@ def test_read_refusal_fails_the_requests_on_every_tp_rank(
     worker = _handshake_worker(False, handshake)
     worker._has_mamba = has_mamba
     reads = []
-    worker._read_blocks_for_req = lambda req_id, meta: reads.append(
+    worker._read_blocks_for_req = lambda req_id, meta: reads.append(  # type: ignore[method-assign]
         (req_id, meta.local_block_ids)
     )
-    worker._await_reads_issued_this_step = lambda: None
+    worker._await_reads_issued_this_step = lambda: None  # type: ignore[method-assign]
     metadata = MoRIIOConnectorMetadata()
     metadata.reqs_to_recv["req"] = _req_meta("prefill", tp_size=2)
 

@@ -27,6 +27,7 @@ from functools import cached_property
 import PIL
 import torch
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -401,6 +402,7 @@ class OvisProcessor(ProcessorMixin):
                 # pick the partition with maximum covering_ratio and break the tie using #sub_images
                 return sorted(all_grids, key=lambda x: (-x[1], x[0][0] * x[0][1]))[0][0]
 
+        image = to_pil_image(image)
         if do_convert_rgb:
             image = convert_image_mode(image, "RGB")
 

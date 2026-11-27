@@ -4,7 +4,6 @@
 
 import itertools
 import socket
-import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -104,9 +103,14 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         )
 
 
-def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
+class _DecodeScheduler(MoRIIOConnectorScheduler):
+    notified: list[dict]
+    released: list[int]
+
+
+def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
     """A decode scheduler that records its notifications, or sends them."""
-    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler = _DecodeScheduler.__new__(_DecodeScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
     scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
@@ -117,6 +121,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler._global_dp_rank = 0
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
@@ -167,8 +172,8 @@ def _decode_params(shape, pp_size, tp_size, host="10.0.0.1", notify_port=NOTIFY_
     if shape == "returned by prefill":
         # What the prefill's request_finished returns, forwarded as is.
         _, params = MoRIIOConnectorScheduler.request_finished(
-            _prefill_scheduler(pp_size, tp_size, host, notify_port),  # type: ignore[arg-type]
-            SimpleNamespace(  # type: ignore[arg-type]
+            _prefill_scheduler(pp_size, tp_size, host, notify_port),
+            SimpleNamespace(
                 request_id="req",
                 kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
                 status=RequestStatus.FINISHED_LENGTH_CAPPED,
@@ -222,6 +227,7 @@ def test_decode_allocation_notifies_both_tp_ranks_on_remote_dp1():
     scheduler = _decode_scheduler()
     scheduler.tp_size = 1
     request = create_request(request_id=7, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         transfer_id="tA",
         remote_host="10.0.0.1",
@@ -479,16 +485,12 @@ def test_stage_failure_fails_the_transfer_once_every_stage_reported():
 
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:
     sent = []
-    wrapper = SimpleNamespace(
-        lock=threading.Lock(),
-        done_req_ids=[],
-        done_remote_allocate_req_dict={},
-        waiting_for_transfer_complete=lambda statuses: None,
-        _mark_transfer_terminal_locked=lambda transfer_id: None,
-        send_notify=lambda *args, message_type, message_fields=None: sent.append(
-            message_fields
-        ),
-    )
+    wrapper = MoRIIOWrapper()
+
+    def send_notify(*args, message_type, message_fields=None):
+        sent.append(message_fields)
+
+    wrapper.send_notify = send_notify  # type: ignore[method-assign]
     writer = make_moriio_writer(
         SimpleNamespace(
             moriio_wrapper=wrapper, tp_rank=0, pp_rank=pp_rank, pp_size=pp_size

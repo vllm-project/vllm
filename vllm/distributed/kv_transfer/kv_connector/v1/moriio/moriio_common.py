@@ -18,6 +18,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.parallel_state import (
     get_pipeline_model_parallel_rank,
@@ -63,6 +64,14 @@ class MoRIIOTransferAck(NamedTuple):
 
 
 @dataclass(slots=True)
+class WriteTransferState:
+    """Submission gate shared by queued tasks; not a transport fence."""
+
+    submit_started: bool = False
+    cancelled: bool = False
+
+
+@dataclass(slots=True)
 class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
@@ -82,6 +91,7 @@ class WriteTask:
     tp_mapping: "MoRIIOWriteTPMapping | None" = None
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
+    transfer_state: WriteTransferState | None = None
 
 
 @dataclass(slots=True)
@@ -484,6 +494,18 @@ class MoRIIOConfig:
         )
 
 
+def supports_zero_submit_abort(
+    local_tp_size: int, remote_tp_size: int, pp_size: int = 1
+) -> bool:
+    """Admission shared by scheduler retention and worker cancellation.
+
+    Unknown peer TP (0) follows the existing homogeneous-TP convention.
+    Heterogeneous-TP and pipeline-parallel transfers have several writers per
+    decode rank, so they retain their pre-existing behavior.
+    """
+    return pp_size == 1 and remote_tp_size in (0, local_tp_size)
+
+
 class MoRIIOConstants:
     """Constants for MoRIIO connector."""
 
@@ -601,20 +623,40 @@ class ReqMeta:
     # Per-pod DP size; 0 means fallback to remote_dp_size.
     remote_dp_size_local: int = 0
 
+    transfer_state: WriteTransferState | None = None
+
+
+@dataclass
+class MoRIIOConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    blocks_to_zero: set[int]
+
+    def aggregate(
+        self, other: KVConnectorWorkerMetadata
+    ) -> "MoRIIOConnectorWorkerMetadata":
+        assert isinstance(other, MoRIIOConnectorWorkerMetadata)
+        return MoRIIOConnectorWorkerMetadata(self.blocks_to_zero | other.blocks_to_zero)
+
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_abort: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.order_reads_after_compute_stream = False
+        self.unzeroed_read_block_ids: set[int] = set()
 
     def __repr__(self):
         return (
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
+            f"reqs_to_abort={self.reqs_to_abort}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"order_reads_after_compute_stream="
+            f"{self.order_reads_after_compute_stream}, "
+            f"unzeroed_read_block_ids={self.unzeroed_read_block_ids}"
         )
 
     def add_new_req(

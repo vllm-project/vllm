@@ -44,14 +44,16 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
+ROCM_GFX942 = False
 ROCM_GFX950 = False
 ROCM_GFX1250 = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
+    ROCM_GFX942 = on_gfx942()
     ROCM_GFX950 = on_gfx950()
     ROCM_GFX1250 = on_gfx1250()
 
@@ -1716,6 +1718,7 @@ class RocmBackendConfig(TypedDict):
     requires_aiter: bool
     requires_gfx950: bool
     requires_gfx1250: NotRequired[bool]
+    requires_gfx942: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
 
@@ -2238,6 +2241,252 @@ def test_aiter_mxfp4_moe_pad_masks_only_padding(
     torch.testing.assert_close(padded, unpadded, atol=1e-2, rtol=1e-2)
 
 
+ROCM_MXFP8_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
+    "AITER_TRITON_MXFP8_MXFP8": {
+        "activation": "SILU",
+        "rtol": 1e-2,
+        "percent": 0.99,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "requires_gfx942": True,
+    },
+}
+
+
+def _mxfp8_moe_reference(
+    x: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    apply_router_weight_on_input: bool,
+    activation,
+) -> torch.Tensor:
+    """`torch_experts` on dequantized weights, except the intermediate
+    activation is rounded to MXFP8 before the second GEMM, like the kernel."""
+    from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    out = torch.zeros(x.shape[0], w2.shape[1], dtype=torch.float32, device=x.device)
+    for k in range(topk_ids.shape[1]):
+        for e in topk_ids[:, k].unique().tolist():
+            rows = (topk_ids[:, k] == e).nonzero().flatten()
+            gate = topk_weights[rows, k].float().unsqueeze(1)
+            xe = x[rows].float() * gate if apply_router_weight_on_input else x[rows]
+            h = (xe.float() @ w13[e].float().T).to(torch.bfloat16)
+            act = h.new_empty(h.shape[0], h.shape[1] // 2)
+            apply_moe_activation(activation, act, h)
+            act = mxfp8_dequantize(*mxfp8_e4m3_quantize(act)).float()
+            y = act @ w2[e].float().T
+            out[rows] += y if apply_router_weight_on_input else y * gate
+    return out.to(x.dtype)
+
+
+@pytest.mark.parametrize("backend_name", list(ROCM_MXFP8_BACKEND_CONFIGS.keys()))
+@pytest.mark.parametrize(
+    "routing_method_name,activation_name,topk,apply_router_weight_on_input",
+    [
+        ("Renormalize", "SILU", 4, False),
+        ("RenormalizeNaive", "SILU", 4, False),
+        ("MiniMax2", "SILU", 4, False),
+        ("DeepSeekV3", "SILU", 4, False),
+        ("Renormalize", "SWIGLUOAI", 4, False),
+        ("MiniMax2", "SILU", 1, True),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 37, 300])
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+@torch.inference_mode()
+def test_rocm_mxfp8_moe_oracle(
+    backend_name: str,
+    routing_method_name: str,
+    activation_name: str,
+    topk: int,
+    apply_router_weight_on_input: bool,
+    num_tokens: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MXFP8 counterpart of `test_rocm_mxfp4_moe_oracle`: the oracle picks the
+    backend and the assembled kernel matches `_mxfp8_moe_reference` on the
+    dequantized weights, routed by vLLM's top-k functions."""
+    config = ROCM_MXFP8_BACKEND_CONFIGS[backend_name]
+    if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
+        pytest.skip(f"Backend {backend_name} requires AITER")
+    if config.get("requires_gfx942") and not ROCM_GFX942:
+        pytest.skip(f"Backend {backend_name} requires GFX942")
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        convert_to_fp8_moe_kernel_format,
+        make_fp8_moe_kernel,
+        make_fp8_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsSink,
+    )
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        fused_topk,
+    )
+    from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        grouped_topk,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+
+    # w13 is [E, 768, 512] and w2 is [E, 512, 384]: non-square on purpose.
+    num_experts, hidden_size, intermediate_size = 16, 512, 384
+    routing_method = RoutingMethodType[routing_method_name]
+    activation = MoEActivation[activation_name]
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=routing_method,
+        max_num_tokens=512,
+    )
+    backend, experts_cls = select_mxfp8_moe_backend(moe_config)
+    assert backend == Fp8MoeBackend[backend_name]
+
+    def quantize(*shape: int) -> tuple[torch.Tensor, torch.Tensor]:
+        w = torch.randn(*shape, dtype=torch.bfloat16, device=device) / shape[-1] ** 0.5
+        w_q, w_s = mxfp8_e4m3_quantize(w.view(-1, shape[-1]))
+        return w_q.view(shape), w_s.view(torch.uint8).view(*shape[:-1], -1)
+
+    w13_q, w13_s = quantize(num_experts, 2 * intermediate_size, hidden_size)
+    w2_q, w2_s = quantize(num_experts, hidden_size, intermediate_size)
+    # The conversion rewrites the weights in place; dequantize them first.
+    w13_dq = mxfp8_dequantize(w13_q.clone(), w13_s).to(torch.bfloat16)
+    w2_dq = mxfp8_dequantize(w2_q.clone(), w2_s).to(torch.bfloat16)
+    w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        backend, torch.nn.Module(), w13_q, w2_q, w13_s, w2_s, None, None
+    )
+    quant_config = make_fp8_moe_quant_config(
+        fp8_backend=backend,
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        a1_scale=None,
+        a2_scale=None,
+        block_shape=[1, 32],
+    )
+
+    # MXFP8-representable input, so the kernel's input quantization is exact.
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
+    x = mxfp8_dequantize(*mxfp8_e4m3_quantize(x)).to(torch.bfloat16)
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    routing_kwargs: dict = {}
+    if routing_method in (RoutingMethodType.DeepSeekV3, RoutingMethodType.MiniMax2):
+        groups = 4 if routing_method == RoutingMethodType.DeepSeekV3 else 1
+        routing_kwargs = dict(
+            num_expert_group=groups,
+            topk_group=min(groups, 2),
+            e_score_correction_bias=0.1 * torch.randn(num_experts, device=device),
+            routed_scaling_factor=2.5,
+        )
+        topk_weights, topk_ids = grouped_topk(
+            x, router_logits, topk, True, scoring_func="sigmoid", **routing_kwargs
+        )
+    else:
+        topk_weights, topk_ids, _ = fused_topk(x, router_logits, topk, True)
+
+    captured: list[torch.Tensor] = []
+    sink = RoutedExpertsSink(moe_config, lambda ids: captured.append(ids.clone()))
+    with set_current_vllm_config(VllmConfig()):
+        kernel = make_fp8_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=moe_config,
+            experts_cls=experts_cls,
+            fp8_backend=backend,
+        )
+        assert kernel.is_monolithic
+        out = kernel.apply_monolithic(
+            hidden_states=x,
+            w1=w13,
+            w2=w2,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            routing_sink=sink,
+            **routing_kwargs,
+        )
+        ref = _mxfp8_moe_reference(
+            x,
+            w13_dq,
+            w2_dq,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            activation,
+        )
+
+    check_accuracy(ref, out, atol=1e-2, rtol=config["rtol"], percent=config["percent"])
+    # Routed-experts capture reports the experts the reference routed to.
+    assert len(captured) == 1
+    torch.testing.assert_close(
+        captured[0].long().sort(-1).values, topk_ids.long().sort(-1).values
+    )
+
+
+def test_mxfp8_e4m3fn_to_e4m3fnuz_keeps_values():
+    """The fn -> fnuz weight conversion of gfx942 MXFP8 MoE is value-exact."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+        mxfp8_e4m3fn_to_e4m3fnuz,
+    )
+
+    gen = torch.Generator().manual_seed(0)
+    bits = torch.randint(-128, 128, (4, 64, 64), dtype=torch.int8, generator=gen)
+    bits[(bits & 0x7F) == 0x7F] = 0  # drop e4m3fn NaN encodings
+    bits[0, 0, :8] = -128  # 0x80 is -0 in fn, NaN in fnuz
+    w = bits.view(torch.float8_e4m3fn)
+    scale = torch.randint(100, 150, (4, 64, 2), dtype=torch.uint8, generator=gen)
+    scale[0, 0, 0], scale[0, 0, 1], scale[1, 0, 0] = 253, 254, 255
+
+    ref = dequant_mxfp8_to_bf16(w.clone(), scale).float()
+    w_fnuz, s_fnuz = mxfp8_e4m3fn_to_e4m3fnuz(w.clone(), scale)
+    assert w_fnuz.dtype == torch.float8_e4m3fnuz
+    assert not (w_fnuz.view(torch.int8) == -128).any()
+
+    got = (
+        w_fnuz.float().view(4, 64, 2, 32)
+        * torch.exp2(s_fnuz.float() - 127).unsqueeze(-1)
+    ).view(4, 64, 64)
+    finite = (s_fnuz != 255).repeat_interleave(32, dim=-1)
+    torch.testing.assert_close(got[finite], ref[finite], atol=0, rtol=0)
+    # 253 -> 254 stays finite; 254 and 255 cannot be bumped and become NaN.
+    assert s_fnuz[0, 0, 0] == 254
+    assert s_fnuz[0, 0, 1] == 255 and s_fnuz[1, 0, 0] == 255
+
+
 # -----------------------------------------------------------------------------
 # MXFP4 size-rounding tests
 # -----------------------------------------------------------------------------
@@ -2503,6 +2752,81 @@ def test_aiter_mxfp4_monolithic_expert_parallel_support(
         assert "parallel config" in reason
 
 
+_DP = {"tp_size": 2, "dp_size": 2}
+_DP_EP = {"dp_size": 2, "ep_size": 2, "use_ep": True}
+
+
+@pytest.mark.parametrize(
+    "parallel,activation,has_hash_routing,gfx1250,rejection",
+    [
+        (_DP, "SWIGLUOAI", False, False, None),
+        (_DP_EP, "SWIGLUOAI", False, False, None),
+        (
+            {**_DP_EP, "all2all_backend": "deepep_high_throughput"},
+            "SWIGLUOAI",
+            False,
+            False,
+            "parallel config",
+        ),
+        (_DP, "SWIGLUOAI", True, False, "hash routing"),
+        (_DP_EP, "SILU", False, True, "gfx1250"),
+    ],
+    ids=["dp", "dp_ep_ag_rs", "dp_ep_deepep", "dp_hash_routing", "ep_silu_gfx1250"],
+)
+def test_aiter_w4a16_monolithic_data_parallel_support(
+    monkeypatch: pytest.MonkeyPatch,
+    parallel: dict,
+    activation: str,
+    has_hash_routing: bool,
+    gfx1250: bool,
+    rejection: str | None,
+):
+    """DP attention reaches W4A16 through the naive allgather/reduce-scatter
+    prepare/finalize, so it is supported with and without EP. A dispatching
+    all2all, hash routing under DP (`input_ids` are not gathered) and EP with
+    SILU on gfx1250 (the a8w4 fallback takes no `expert_map`) are rejected."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+    )
+
+    experts_cls = AiterW4A16ExpertsMonolithic
+    monkeypatch.setattr(experts_cls, "_supports_current_device", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: gfx1250)
+    config = make_dummy_moe_config(
+        num_experts=256,
+        experts_per_token=6,
+        hidden_dim=4096,
+        intermediate_size=2048,
+        activation=MoEActivation[activation],
+    )
+    config = replace(
+        config,
+        routing_method=RoutingMethodType.Renormalize,
+        has_hash_routing=has_hash_routing,
+        moe_parallel_config=replace(config.moe_parallel_config, **parallel),
+    )
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        config,
+        kMxfp4Static,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported is (rejection is None), reason
+    if rejection is not None:
+        assert reason is not None and rejection in reason
+
+
 @pytest.mark.parametrize(
     "all2all_backend",
     [
@@ -2757,24 +3081,28 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
-# The emulation dequantizes only the experts a batch routes to, as long as they
-# are at most a quarter of the local experts, and must give the same output as
-# the full dequantization of every expert.
+# The emulation dequantizes only the batch's distinct experts, one per slot:
+# with the fused MXFP4 kernel (bf16) for any batch, else by gathering them when
+# the batch has at most a quarter as many top-k slots as experts. It must give
+# the same output as the full dequantization, never read an unused slot, sync
+# with the host on no path, and stay correct when a CUDA graph captured on one
+# routing replays another.
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "topk_ids, num_routed",
+    "topk_ids",
     [
-        # 5 of 32 experts: only those are dequantized.
-        ([[30, 2], [2, 17], [9, 30], [17, 4]], 5),
-        # 9 of 32, past a quarter: every expert is dequantized.
-        ([[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]], 32),
-        # One token: the capture-safe sort() path.
-        ([[30, 2]], 2),
+        # 5 distinct experts of 32 in 8 slots.
+        [[30, 2], [2, 17], [9, 30], [17, 4]],
+        # 10 slots, past a quarter of the experts.
+        [[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]],
+        # One token.
+        [[30, 2]],
     ],
 )
 @torch.inference_mode()
 def test_emulation_routed_dequant_moe_forward_is_bit_identical(
-    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], num_routed: int
+    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], dtype: torch.dtype
 ):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
@@ -2784,6 +3112,7 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         RoutingMethodType,
         mxfp4_w4a16_moe_quant_config,
     )
+    from vllm.model_executor.layers.fused_moe.experts import ocp_mx_emulation_moe
     from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
         OCP_MXQuantizationEmulationTritonExperts,
     )
@@ -2800,18 +3129,26 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
 
     num_experts, topk = 32, 2
     hidden_size, intermediate_size = 256, 256
-    dtype, device = torch.bfloat16, "cuda:0"
+    device = "cuda:0"
 
     torch.manual_seed(0)
     w13, w13_scale = mxfp4_quantize(
         torch.randn(
-            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+            num_experts,
+            2 * intermediate_size,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
         )
         / 8
     )
     w2, w2_scale = mxfp4_quantize(
         torch.randn(
-            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            dtype=torch.bfloat16,
+            device=device,
         )
         / 8
     )
@@ -2820,6 +3157,10 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
 
     topk_ids_t = torch.tensor(topk_ids, dtype=torch.int32, device=device)
     num_tokens = topk_ids_t.size(0)
+    num_slots = min(topk_ids_t.numel(), num_experts)
+    fused = dtype == torch.bfloat16
+    routed_path = fused or num_slots <= num_experts // 4
+    num_routed = num_slots if routed_path else num_experts
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     topk_weights = torch.softmax(
         torch.randn(num_tokens, topk, device=device), dim=-1
@@ -2837,8 +3178,19 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         "_dequantize_weights",
         recording_dequantize,
     )
+    dequant_routed = ocp_mx_emulation_moe.dequant_routed_mxfp4
 
-    def run():
+    def poisoning_dequant_routed(w, w_scale, used):
+        out = dequant_routed(w, w_scale, used)
+        dequantized.append(used.numel())
+        unused = (used < 0).view(-1, *[1] * (out.dim() - 1))
+        return out.masked_fill_(unused, float("nan"))
+
+    monkeypatch.setattr(
+        ocp_mx_emulation_moe, "dequant_routed_mxfp4", poisoning_dequant_routed
+    )
+
+    def make_kernel():
         moe_config = FusedMoEConfig(
             num_experts=num_experts,
             experts_per_token=topk,
@@ -2857,44 +3209,125 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
             w1_scale=w13_scale, w2_scale=w2_scale
         )
         with set_current_vllm_config(VllmConfig()):
-            kernel = make_mxfp4_moe_kernel(
+            return make_mxfp4_moe_kernel(
                 moe_quant_config=quant_config,
                 moe_config=moe_config,
                 mxfp4_backend=Mxfp4MoeBackend.EMULATION,
                 experts_cls=OCP_MXQuantizationEmulationTritonExperts,
                 routing_tables=None,
             )
-            return kernel.apply(
-                hidden_states=hidden_states,
-                w1=w13,
-                w2=w2,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids_t,
-                activation=MoEActivation.SILU,
-                global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
 
+    def apply(kernel, ids):
+        return kernel.apply(
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    def run(ids=topk_ids_t):
+        kernel = make_kernel()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            return apply(kernel, ids)
+        finally:
+            torch.cuda.set_sync_debug_mode(0)
+
+    # Importing quark copies lookup tables to the GPU once; warm up outside the
+    # sync check.
+    import quark.torch.kernel.mx  # noqa: F401
+
+    apply(make_kernel(), topk_ids_t)
+    dequantized.clear()
     routed = run()
     assert dequantized == [num_routed, num_routed]
-    # Under graph capture only the single-token path stays routed.
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+
+    # Capture on the parametrized routing and replay another one: a bijection
+    # moves every slot, and the last token repeats the first token's experts.
+    replay_ids = (topk_ids_t * 7 + 3) % num_experts
+    replay_ids[-1] = replay_ids[0]
+    kernel = make_kernel()
+    static_ids = topk_ids_t.clone()
+    apply(kernel, static_ids)
     dequantized.clear()
-    captured = run()
-    num_captured = num_routed if num_tokens == 1 else num_experts
-    assert dequantized == [num_captured, num_captured]
-    # Full-dequant reference.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_out = apply(kernel, static_ids)
+    assert dequantized == [num_routed, num_routed]
+    static_ids.copy_(replay_ids)
+    graph.replay()
+    replayed = graph_out.clone()
+
+    # Full-dequant references.
     monkeypatch.setattr(
         OCP_MXQuantizationEmulationTritonExperts,
-        "_routed_experts",
-        staticmethod(lambda topk_ids, num_experts: None),
+        "_dequantize_routed",
+        lambda *args: None,
     )
     dequantized.clear()
     full = run()
     assert dequantized == [num_experts, num_experts]
     assert torch.equal(routed, full)
-    assert torch.equal(captured, full)
+    assert torch.equal(replayed, run(replay_ids))
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+def test_dequant_routed_mxfp4_matches_quark_on_every_code_and_scale():
+    """Every packed byte under every e8m0 scale, incl. 0 (subnormal) and 255."""
+    from quark.torch.kernel import mx
+
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
+        dequant_routed_mxfp4,
+    )
+
+    # Row r holds all 256 packed bytes under scale r (16 bytes per scale).
+    codes = torch.arange(256, dtype=torch.uint8, device="cuda").repeat(256, 1)
+    scales = codes[0].view(-1, 1).expand(256, 16).contiguous()
+    w = torch.stack([codes, codes.flip(0)])
+    scale = torch.stack([scales, scales.flip(0)])
+    used = torch.tensor([1, -1, 0], dtype=torch.int32, device="cuda")
+    out = dequant_routed_mxfp4(w, scale, used)
+    ref = mx.dq_mxfp4(w, scale, torch.bfloat16)
+    for got, want in ((out[0], ref[1]), (out[2], ref[0])):
+        # NaN payloads (0 * inf under scale 255) differ by GPU; bits elsewhere.
+        nan = want.isnan()
+        assert torch.equal(got.isnan(), nan)
+        assert torch.equal(got.view(torch.int16)[~nan], want.view(torch.int16)[~nan])
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "topk_ids, num_experts, used, local_ids",
+    [
+        # One top-1 token.
+        ([[5]], 8, [5], [[0]]),
+        # Repeats and a -1 padding row.
+        (
+            [[7, 0], [0, 2], [-1, -1]],
+            8,
+            [0, 2, 7, -1, -1, -1],
+            [[2, 0], [0, 1], [-1, -1]],
+        ),
+        # An id past the experts is dropped like -1.
+        ([[1, 2, 3, 4]], 4, [1, 2, 3, -1], [[0, 1, 2, -1]]),
+    ],
+)
+def test_dedup_routed_experts(topk_ids, num_experts, used, local_ids, ids_dtype):
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
+        dedup_routed_experts,
+    )
+
+    got_used, got_local = dedup_routed_experts(
+        torch.tensor(topk_ids, dtype=ids_dtype, device="cuda"), num_experts
+    )
+    assert got_used.tolist() == used
+    assert got_local.tolist() == local_ids and got_local.dtype == ids_dtype
 
 
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)

@@ -87,6 +87,7 @@ from .utils import (
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
@@ -195,9 +196,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        # INC/AutoRound decides per layer whether the routed gate is quantized
+        # (Intel/Qwen3-Coder-Next-int4-AutoRound stores it as int4); other
+        # formats keep the historical unquantized gate.
+        gate_quant_config = (
+            quant_config
+            if quant_config is not None and quant_config.get_name() == "inc"
+            else None
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
+            quant_config=gate_quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -673,10 +683,13 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str):
             return Qwen3NextDecoderLayer(
@@ -870,11 +883,14 @@ class Qwen3NextForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

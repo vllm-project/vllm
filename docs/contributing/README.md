@@ -54,7 +54,7 @@ To rebuild only the Rust frontend binary:
 If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
-uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu132
 ```
 
 Then install the necessary build dependencies from `requirements/build/cuda.txt`, skipping `torch` as it was installed in the previous step:
@@ -289,6 +289,13 @@ three times, limited in turn to web search, GitHub, and a local checkout (before
 merge: the docs preview and the PR branch). If it cannot find and quote the
 docs, fix the docs.
 
+Some reference tables are generated from source at docs build time, e.g.
+attention backends (`docs/mkdocs/gen_files/generate_attention_backends.py`) and
+quantization methods, schemes, and linear kernels
+(`docs/mkdocs/gen_files/generate_quantization_tables.py`). Do not copy their
+contents into prose; write around the `--8<-- "gen:..."` marker in the tracked
+page instead.
+
 ### Adding or Changing Kernels
 
 When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
@@ -371,11 +378,14 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
-  `tools/vllm-rocm/therock_wheels.py` fails `pre-commit` until a maintainer
-  with write access comments `/ci rocm cache`, which starts a CI build that only
-  copies the ROCm stack, runtime and test-deps images the PR's CI built into
-  `rocm/vllm-ci`, so `main` reuses them after the merge, or `/ci rocm nocache`
-  to skip that. Then re-run the failed `pre-commit` check.
+  `tools/vllm-rocm/therock_wheels.py` can merge only once its new ROCm base
+  image is cached for `main`, which its `ROCm image cache` CI step checks. A
+  maintainer comments `/ci run`, or a trusted reviewer approves the commit and
+  comments `/ci run`, and when that commit's CI build finishes, the bot caches
+  the image and retries the step. If `main` changes those files after the PR's
+  merge base, the step fails until the PR merges `main`. A PR that changes how
+  `.buildkite/scripts/rocm/build.sh` keys the image is not cached: `main`
+  rebuilds it after the merge.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

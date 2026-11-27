@@ -262,9 +262,12 @@ class SdmaCopyEngines:
         peer_full: int,
         words: int,
         peer_pci: tuple[int, int, int],
+        cross_node: bool,
     ) -> None:
         """`words`: this rank's uncached shared-buffer bytes for `sent` and
-        the step-number sources; `peer_pci`: the next stage's PCI address."""
+        the step-number sources; `peer_pci`: the next stage's PCI address.
+        The peer must be on this node (`cross_node` false)."""
+        assert not cross_node, "PP SDMA copies need one node"
         props = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         )

@@ -118,3 +118,69 @@ def test_non_noop_slice_preserved():
         # The slice should remain (not a no-op).
         assert backend.op_count(torch.ops.aten.slice.Tensor) == 1
         assert backend.op_count(torch.ops.aten.slice_scatter.default) == 1
+
+
+def test_view_chain_eliminated():
+    """View chains collapse like reshape chains. Inductor turns Dynamo's views
+    into reshapes, but vLLM IR lowering traces impls in as aten.view; a leftover
+    view round-trip blocks Inductor fusions (e.g. QK-norm + RoPE)."""
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    def f(x):
+        a = x * 2
+        b = a.view(-1, 32, 128).view(-1, 4096).view(-1, 32, 128)
+        c = a.view(8, 4096)
+        return b + 1, c + 1
+
+    x = torch.randn(8, 4096)
+    gm = make_fx(f, tracing_mode="fake")(x)
+    view = torch.ops.aten.view.default
+    assert len(gm.graph.find_nodes(op="call_function", target=view)) == 4
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(eliminate_noops=True),
+        )
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        NoOpEliminationPass(vllm_config)(gm.graph)
+    gm.recompile()
+
+    assert len(gm.graph.find_nodes(op="call_function", target=view)) == 1
+    torch.testing.assert_close(gm(x), f(x))
+
+
+def test_copying_reshape_not_bypassed():
+    """After IR lowering the graph may hold in-place ops. A reshape of a
+    non-contiguous tensor copies, so a later view must keep reading the mutated
+    copy instead of being rebound to the base."""
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    def f(x):
+        a = x.t().reshape(32)
+        a.add_(1)
+        return a.view(8, 4)
+
+    x = torch.randn(4, 8)
+    gm = make_fx(f, tracing_mode="fake", pre_dispatch=True)(x)
+    (reshape,) = gm.graph.find_nodes(
+        op="call_function", target=torch.ops.aten.reshape.default
+    )
+    (view,) = gm.graph.find_nodes(
+        op="call_function", target=torch.ops.aten.view.default
+    )
+    # As in lowered graphs, read the mutated tensor via its producer node.
+    view.update_arg(0, reshape)
+    gm.recompile()
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(eliminate_noops=True),
+        )
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        NoOpEliminationPass(vllm_config, graph_may_mutate=True)(gm.graph)
+    gm.recompile()
+
+    assert view.args[0] is reshape
+    torch.testing.assert_close(gm(x), f(x))

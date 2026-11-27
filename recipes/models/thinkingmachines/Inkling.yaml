@@ -4,7 +4,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Natively multimodal 1T-parameter MoE from Thinking Machines Lab — text/image/audio in, text out, up to 1M context — with relative attention, short convolution, and shared expert sinks."
   date_added: 2026-07-15
-  date_updated: 2026-08-04
+  date_updated: 2026-11-17
   tasks:
     - multimodal
   performance_headline: "380 tok/s/user with MTP8 (mean acceptance length 4.5) and 140 tok/s/user without MTP on 4× GB200 GPUs"
@@ -19,7 +19,6 @@ meta:
 model:
   model_id: "thinkingmachines/Inkling-NVFP4"
   min_vllm_version: "0.26.0"
-  nightly_required: true
   install:
     docker:
     pip:
@@ -268,7 +267,7 @@ guide: |
 
   - **Hardware:** NVIDIA Hopper (H200/H20) or Blackwell for NVFP4 and BF16;
     AMD MI300X, MI325X, or MI355X with TP4 for MXFP4.
-  - **vLLM:** Nightly wheels (Day-0 support just landed).
+  - **vLLM:** 0.26.0 or newer.
   - **Parallelism:** 1T parameters requires multi-GPU. The featured configuration is 4x GB200
     (`--tensor-parallel-size 4`) for the NVFP4 variant. On Hopper, NVFP4 uses TP8 on H200;
     the BF16 variant needs multi-node.
