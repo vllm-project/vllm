@@ -20,7 +20,6 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::future;
-use thiserror_ext::AsReport as _;
 use tracing_futures::Instrument as _;
 use vllm_text::{
     CollectedTextOutput, FinishReason, Prompt, PromptTruncation, PromptTruncationLimit,
@@ -30,7 +29,9 @@ use vllm_text::{
 use self::types::{
     GenerativeScoringItemResult, GenerativeScoringRequest, GenerativeScoringResponse,
 };
-use crate::error::{ApiError, bail_invalid_request, engine_error, server_error, text_submit_error};
+use crate::error::{
+    ApiError, bail_invalid_request, engine_error, server_error, text_request_error,
+};
 use crate::routes::openai::utils::types::Usage;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
@@ -76,7 +77,7 @@ pub async fn generative_scoring(
     let tokenize = |prompt: Prompt, add_special_tokens: bool| match prompt {
         Prompt::Text(prompt) => tokenizer
             .encode(&prompt, add_special_tokens)
-            .map_err(|error| text_submit_error("failed to tokenize input", error.into())),
+            .map_err(|error| text_request_error("failed to tokenize input", error.into())),
         Prompt::TokenIds(token_ids) => Ok(token_ids),
     };
     let query_token_ids = tokenize(query, add_special_tokens)?;
@@ -125,7 +126,7 @@ pub async fn generative_scoring(
                 arrival_time: None,
             };
             text.request_processor().prepare(text_request).map_err(|error| {
-                text_submit_error("failed to prepare generative scoring request", error)
+                text_request_error("failed to prepare generative scoring request", error)
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -134,14 +135,11 @@ pub async fn generative_scoring(
     let outputs = future::try_join_all(prepared.into_iter().map(|prepared| async {
         let mut streams =
             text.generate_prepared_n(prepared, NonZeroU32::MIN).await.map_err(|error| {
-                text_submit_error("failed to submit generative scoring request", error)
+                text_request_error("failed to submit generative scoring request", error)
             })?;
         let stream = streams.pop().expect("one output stream per sample");
         stream.collect_output().await.map_err(|error| {
-            server_error!(
-                "failed to collect generative scoring response: {}",
-                error.to_report_string()
-            )
+            text_request_error("failed to collect generative scoring response", error)
         })
     }))
     .instrument(request_span)

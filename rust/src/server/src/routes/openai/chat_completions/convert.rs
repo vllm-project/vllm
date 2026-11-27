@@ -12,7 +12,7 @@ use vllm_chat::{
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, chat_request_error, text_request_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
@@ -85,7 +85,7 @@ pub(super) fn prepare_chat_request(
         request.truncate_prompt_tokens,
         request.truncation_side,
     )
-    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
+    .map_err(|error| text_request_error("invalid prompt truncation", error))?;
 
     let request_id = format!("chatcmpl-{}", ctx.request_id);
     let response_model = lora_resolution.response_model();
@@ -158,7 +158,7 @@ pub(super) fn prepare_chat_request(
         request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+    .map_err(|error| chat_request_error("failed to resolve request tools", error))?;
 
     #[expect(deprecated)]
     let max_tokens = request.max_completion_tokens.or(request.max_tokens);
