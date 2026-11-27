@@ -3114,10 +3114,9 @@ def init_mla_context_partial(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate the running context partial over all prefill tokens.
 
-    Laid out like the chunk partials so the final whole-batch merge against the
-    suffix partial sees matching head strides. Callers whose backend honors an
-    `out` tensor already know that layout and can allocate directly, pairing it
-    with `neutralize_empty_context_partials`.
+    Callers whose backend honors an `out` tensor already know the output layout
+    and can allocate directly, pairing it with
+    `neutralize_empty_context_partials`.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),

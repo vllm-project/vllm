@@ -86,6 +86,8 @@ def merge_attn_states(
     For tokens that have prefix context (token index < prefill_tokens_with_context),
     the prefix and suffix partial outputs are combined as a weighted sum.
     For tokens without prefix context, the suffix output is copied directly.
+    The output tensors may have different token and head strides, but their
+    final dimension must be contiguous.
 
     Args:
         output: Output tensor of shape [NUM_TOKENS, NUM_HEADS, HEAD_SIZE].
@@ -111,14 +113,6 @@ def merge_attn_states(
             When provided, output must be FP8 dtype.
 
     """
-    # Both the CUDA and Triton kernels derive the suffix head stride from
-    # prefix_output, so suffix_output must share the same head stride.
-    assert prefix_output.stride(1) == suffix_output.stride(1), (
-        "merge_attn_states requires prefix_output and suffix_output to have "
-        f"matching head strides, got {prefix_output.stride(1)} and "
-        f"{suffix_output.stride(1)}"
-    )
-
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
     # does not support FP8 dtype for inputs, fallback to use Triton kernel.
     # However, when output_scale is provided, the inputs are still BF16/FP16
