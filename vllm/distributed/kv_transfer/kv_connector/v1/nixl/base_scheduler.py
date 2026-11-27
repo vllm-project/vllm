@@ -4,6 +4,7 @@
 
 import threading
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -13,6 +14,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    clip_ssm_state_blocks,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -32,15 +34,15 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -95,11 +97,17 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
+        self._bounded_replay = any(
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
+        )
+
+        # Set by `bind_kv_cache_manager`, see `_num_prefill_backoff_tokens`.
+        self._kv_cache_manager: KVCacheManager
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -108,6 +116,9 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Payloads the listener serves; a republish after a wake-up updates them.
+        self._handshake_data: dict[tuple[int, int], bytes] = {}
+        self._registration_generation = 0
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -129,12 +140,14 @@ class NixlBaseConnectorScheduler:
         # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
+        # Requests tracked since the last heartbeat round, sent right away.
+        self._new_heartbeat_reqs: set[tuple[EngineId, ReqId]] = set()
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -148,16 +161,11 @@ class NixlBaseConnectorScheduler:
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            g.manager_config.params.num_speculative_blocks
+            if isinstance(g.manager_config.params, MambaManager.Params)
             else None
             for g in kv_cache_config.transfer_groups
         ]
-        # Only "all" mode keeps a state per block position; the other modes
-        # keep a single running state in the last non-speculative slot.
-        self._ssm_state_slots_are_positional = (
-            vllm_config.cache_config.mamba_cache_mode == "all"
-        )
 
         # Threshold to decide whether to compute kv cache locally
         # or pull from a remote node: minimum number of remote
@@ -231,18 +239,26 @@ class NixlBaseConnectorScheduler:
                 dcp_size=dcp_size,
                 pp_size=pp_size,
             )
-        self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
+        info = self._heartbeat_by_engine[remote_engine_id]
+        info.req_ids.add(remote_request_id)
+        expiry = params.get("remote_blocks_expiry_time")
+        extension = params.get("remote_lease_extension")
+        if expiry is not None and extension:
+            info.leases[remote_request_id] = (expiry, extension)
         self._heartbeat_req_engine[request.request_id] = (
             remote_engine_id,
             remote_request_id,
         )
+        self._new_heartbeat_reqs.add((remote_engine_id, remote_request_id))
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
         if key := self._heartbeat_req_engine.pop(req_id, None):
+            self._new_heartbeat_reqs.discard(key)
             engine_id, remote_id = key
             if info := self._heartbeat_by_engine.get(engine_id):
                 info.req_ids.discard(remote_id)
+                info.leases.pop(remote_id, None)
                 if not info.req_ids:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
@@ -257,13 +273,11 @@ class NixlBaseConnectorScheduler:
         out-of-window blocks only prior to the `request_finished_all_groups`
         hook.
 
-        SSM groups keep only their state-bearing slots: the trailing
-        speculative scratch slots always go, and in single-state cache modes
-        so does everything before the running state (null placeholders and
-        the previous step's superseded state). "all" mode keeps its remaining
-        slots, which the worker pairs position-wise.
+        SSM groups keep only their state-bearing slot: the trailing
+        speculative scratch slots and everything before the running state
+        (null placeholders and the previous step's superseded state) go.
 
-        Use this at every block-id exchange point. Pass ``clip_ssm=False``
+        Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
@@ -288,11 +302,7 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                if n_spec := min(n_spec_blocks, len(blocks) - 1):
-                    blocks = blocks[:-n_spec]
-                if not self._ssm_state_slots_are_positional:
-                    # Never empty: downstream reads that as a full prefix hit.
-                    blocks = blocks[-1:]
+                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
             clipped.append(blocks)
         return tuple(clipped)
 
@@ -305,7 +315,6 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
 
         """
-        encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -313,12 +322,16 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            encoded = encoder.encode(rank_metadata)
+            if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
+                # Peers must handshake again to load the changed registration.
+                self._registration_generation += 1
+            self._handshake_data[(pp_rank, tp_rank)] = encoded
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
                 tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                str(len(self._handshake_data[(pp_rank, tp_rank)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -327,7 +340,7 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
                 args=(
-                    encoded_data,
+                    self._handshake_data,
                     ready_event,
                     self._stop_event,
                     self.side_channel_host,
@@ -386,42 +399,111 @@ class NixlBaseConnectorScheduler:
         """Trailing prompt tokens the prefiller must not compute; the decoder
         recomputes them locally.
 
-        Mamba needs h(N-1) so the decoder can derive h(N) itself. Multi-module
+        Mamba needs h(N-1) so the decoder can derive h(N) itself. DSV41's sliding
+        window under bounded replay is not replayed after a P/D load, so it must
+        be laid out for the token the decoder recomputes. Multi-module
         MTP needs to keep its whole lookahead window off of the prefiller, which
         would otherwise embed the unverified drafts in the MTP layer's KV cache. The
         decoder would never rebuild them, because the update is sized by the rejection
         count, which is zero for the first decode.
         """
         return max(
-            1 if self._has_mamba else 0,
-            self.vllm_config.num_prefill_lookahead_tokens - 1,
+            1 if self._has_mamba or self._bounded_replay else 0,
+            self.vllm_config.num_reprefillable_tokens,
         )
 
-    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
-        will recompute locally."""
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        self._kv_cache_manager = kv_cache_manager
+
+    def _num_prefill_backoff_tokens(self, num_prompt_tokens: int) -> int:
+        """Trailing prompt tokens the prefiller skips and the decoder
+        recomputes: `_prefill_backoff()`, widened for a prefix-cached Mamba
+        model down to the last checkpoint a local prefill would cache. P then
+        backs off up to one block and sends a state that sits on a checkpoint;
+        D recomputes the tail and caches that state, so later D-local turns of
+        the conversation hit it."""
         backoff = self._prefill_backoff()
-        if backoff and num_prompt_tokens > backoff:
-            return num_prompt_tokens - backoff
-        return num_prompt_tokens
+        if backoff and num_prompt_tokens <= backoff:
+            return 0
+        # A prefill of n tokens checkpoints at or below n - 1; shift n so the
+        # cut also clears a wider backoff window (multi-module MTP).
+        checkpoint = self._kv_cache_manager.get_state_checkpoint_tokens(
+            num_prompt_tokens - backoff + 1
+        )
+        if checkpoint > 0:
+            return num_prompt_tokens - checkpoint
+        return backoff
+
+    def _get_remote_prefill_token_count(self, request: "Request") -> int:
+        """D-side only. The number of prompt tokens to load from the prefiller:
+        the prompt minus `_num_prefill_backoff_tokens()`, mirroring P's cut.
+
+        In pull mode P also reports its count in `remote_num_tokens`, which
+        wins when the two sides disagree (e.g. a heterogeneous P that cuts at
+        a different Mamba checkpoint); that only costs a prefix-cache entry.
+        Push mode registers D's blocks before P finishes, so it relies on the
+        mirrored cut alone."""
+        num_prompt_tokens = len(request.prompt_token_ids or [])
+        backoff = self._prefill_backoff()
+        max_tokens = (
+            num_prompt_tokens - backoff
+            if backoff and num_prompt_tokens > backoff
+            else num_prompt_tokens
+        )
+        if request.skip_reading_external_kv:
+            # P doesn't truncate these, see `_truncate_request_for_prefill`.
+            return max_tokens
+        expected = num_prompt_tokens - self._num_prefill_backoff_tokens(
+            num_prompt_tokens
+        )
+        params = request.kv_transfer_params or {}
+        remote_num_tokens = params.get("remote_num_tokens")
+        if not remote_num_tokens or remote_num_tokens == expected:
+            return expected
+        if remote_num_tokens <= max_tokens or not self._has_mamba:
+            # Attention KV is valid for any prefix of what P computed, and a
+            # recurrent state is valid exactly at P's count.
+            logger.warning_once(
+                "Prefiller stopped at %d of %d prompt tokens, but this decoder "
+                "expected %d; outputs are correct but the transferred state may "
+                "not be prefix-cached. Check that P and D run the same vLLM "
+                "version, block size and speculative config.",
+                remote_num_tokens,
+                num_prompt_tokens,
+                expected,
+            )
+            return min(remote_num_tokens, max_tokens)
+        # The recurrent state sits past the tokens this decoder must recompute
+        # and can't be rewound.
+        logger.warning_once(
+            "Prefiller computed %d of %d prompt tokens, more than this decoder "
+            "can load (%d) for a recurrent model; recomputing the prompt "
+            "locally. Check that P and D agree on the speculative config.",
+            remote_num_tokens,
+            num_prompt_tokens,
+            max_tokens,
+        )
+        return 0
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
-        so the prefiller stops short of what the decoder recomputes locally.
-        For Mamba that is the single token needed to yield h(N-1); for
-        multi-module MTP it is the drafter's whole lookahead window.
+        """P-side only: drop the trailing `_num_prefill_backoff_tokens()`
+        prompt tokens so the prefiller stops short of what the decoder
+        recomputes locally. For Mamba that is the single token needed to yield
+        h(N-1), or the tail past a prefix-cache checkpoint; for multi-module
+        MTP it is the drafter's whole lookahead window.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        backoff = self._prefill_backoff()
+        backoff = self._num_prefill_backoff_tokens(request.num_prompt_tokens)
         params = request.kv_transfer_params
         if (
             backoff
             and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > backoff
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
@@ -433,6 +515,11 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def _build_save_meta(
@@ -511,6 +598,18 @@ class NixlBaseConnectorScheduler:
             if now - self._last_heartbeat_time >= self._heartbeat_interval:
                 self._last_heartbeat_time = now
                 meta.heartbeat_by_engine = self._heartbeat_by_engine
+            elif self._new_heartbeat_reqs:
+                # Renew new requests' leases now rather than at the next round:
+                # a router may have held the request for most of its lease.
+                for engine_id, remote_id in self._new_heartbeat_reqs:
+                    info = self._heartbeat_by_engine[engine_id]
+                    if (new := meta.heartbeat_by_engine.get(engine_id)) is None:
+                        new = replace(info, req_ids=set(), leases={})
+                        meta.heartbeat_by_engine[engine_id] = new
+                    new.req_ids.add(remote_id)
+                    if lease := info.leases.get(remote_id):
+                        new.leases[remote_id] = lease
+            self._new_heartbeat_reqs.clear()
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()

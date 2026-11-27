@@ -280,10 +280,10 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 
 !!! warning "You must know your adapter's layout"
     Under `--enable-mixed-moe-lora-format`, vLLM trusts whatever
-    `is_3d_lora_weight` the caller declares — it does **not** inspect the
-    checkpoint to verify. A wrong declaration will load weights into the
-    wrong stacked buffers and silently produce garbage outputs, with no
-    error at load time. Confirm the layout before serving:
+    `is_3d_lora_weight` the caller declares. Loading checks reject fused 3D
+    expert weights routed to a 2D wrapper without the required flags, but
+    do not validate every layout mismatch. A wrong declaration can still
+    cause loading failures or incorrect outputs. Confirm the layout before serving:
 
     - **2D (per-expert, megatron-style)** → set `is_3d_lora_weight: false`.
       Adapter keys look like `...experts.{idx}.gate_proj.lora_A.weight`,
@@ -298,6 +298,11 @@ When `--enable-mixed-moe-lora-format` is **not** set, `is_3d_lora_weight`
 is ignored: vLLM picks the wrapper from the base model's
 `is_3d_moe_weight` and the adapter is required to match. The field is
 also ignored for non-MoE models.
+
+For a model using a 2D MoE wrapper (such as Qwen3-MoE), loading fused 3D
+expert adapter weights requires both `enable_mixed_moe_lora_format=True`
+on the engine and `is_3d_lora_weight=True` on the request. Otherwise, adapter
+loading raises a `ValueError` naming these settings before activation.
 
 ## LoRA model lineage in model card
 
@@ -428,11 +433,21 @@ vLLM supports PEFT sequence-classification adapters that save a complete, single
 
 See [classification_with_lora_offline.py](../../examples/pooling/classify/classification_with_lora_offline.py) for an offline classification example using a LoRA adapter.
 
-This support has the following limitations:
+To batch adapters with different `num_labels`, set the maximum number of labels:
 
-- All adapters in one engine must have the same `num_labels` and hidden size as the base classification head. An incompatible adapter is rejected when it is loaded.
-- A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
-- Token-classification adapters are not supported by this feature.
+```bash
+vllm serve model --enable-lora --max-lora-cls-labels 8
+```
+
+The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
+
+A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
+
+## Token-Classification LoRA Adapters
+
+For token-classification models that support LoRA, use `pooling_task="token_classify"` with `LLM.encode`.
+
+Classification heads support LoRA A/B weights (matching the base head's output size) or `modules_to_save=["classifier"]`. Full heads follow the [sequence-classification configuration](#sequence-classification-lora-adapters) above, including `max_lora_cls_labels` for different label counts.
 
 ## Using Tips
 
@@ -465,4 +480,17 @@ vllm serve model --enable-lora --lora-target-modules o_proj
 vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
-When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+`--lora-target-modules` is an explicit allowlist for module names or suffixes such as `o_proj`, `qkv_proj`, and `gate_proj`. When set, this list takes precedence over `--enable-lora-embedding-modules`.
+
+### Embedding Modules
+
+By default, LoRA skips embedding modules (input embeddings and `lm_head`), so vLLM allocates no LoRA buffers for them.
+Use `--enable-lora-embedding-modules` to enable both alongside the default modules. The Python `LLM` argument is `enable_lora_embedding_modules=True`.
+
+```bash
+vllm serve model --enable-lora --enable-lora-embedding-modules
+```
+
+If an adapter contains weights for an embedding module excluded by default, vLLM logs a warning, skips those weights, and applies the remaining enabled weights. Use an explicit `--lora-target-modules` list for finer control, such as enabling input embedding LoRA without `lm_head`.
+
+Enabling `lm_head` LoRA through either option disables prompt scoring for the deployment. Requests using `prompt_logprobs` (including `0`) or `prompt_logprob_token_ids` receive a validation error. This restriction also applies to base-model requests because they can be batched with LoRA requests. Input embedding LoRA supports prompt scoring when `lm_head` LoRA is disabled.

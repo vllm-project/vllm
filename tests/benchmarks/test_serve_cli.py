@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 import urllib3
+from prometheus_client.parser import text_string_to_metric_families
 
 from ..utils import RemoteOpenAIServer
 
@@ -125,6 +126,47 @@ def test_bench_serve(server):
 
 
 @pytest.mark.benchmark
+def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
+    """The ready check and warmups resend the first prompt; they must not leave it
+    in the prefix cache."""
+    command = [
+        "vllm",
+        "bench",
+        "serve",
+        "--host",
+        server.host,
+        "--port",
+        str(server.port),
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        "256",
+        "--random-output-len",
+        "4",
+        "--num-prompts",
+        "3",
+        "--max-concurrency",
+        "1",
+        "--num-warmups",
+        "2",
+        "--ready-check-timeout-sec",
+        "60",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    print(result.stdout)
+    print(result.stderr)
+
+    assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    counters: dict[str, float] = {}
+    metrics = requests.get(server.url_for("metrics")).text
+    for family in text_string_to_metric_families(metrics):
+        for sample in family.samples:
+            counters[sample.name] = counters.get(sample.name, 0.0) + sample.value
+    assert counters["vllm:prefix_cache_queries_total"] > 0
+    assert counters["vllm:prefix_cache_hits_total"] == 0
+
+
+@pytest.mark.benchmark
 def test_bench_serve_insecure(ssl_server):
     """Test --insecure flag with an HTTPS server using a self-signed certificate."""
     base_url = f"https://{ssl_server.host}:{ssl_server.port}"
@@ -141,12 +183,16 @@ def test_bench_serve_insecure(ssl_server):
         "--num-prompts",
         "5",
         "--insecure",
+        "--probe-request-rate",
+        "5",
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    # Probes use their own session, which must also honor --insecure.
+    assert "Probe requests completed" in result.stdout
 
 
 @pytest.mark.benchmark

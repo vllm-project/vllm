@@ -10,10 +10,10 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
-    RenderedPrompt, SamplingParams,
+    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatRole,
+    ChatTextBackend, ChatTool, ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions,
+    ParserSelection, RenderedPrompt, ResolvedParsers, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -22,14 +22,17 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_prompt_token_ids, spawn_mock_engine_task,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
     TextBackend,
 };
+use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -113,6 +116,12 @@ fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
 
+/// Encode `text` with the fake chat tokenizer, so markers spelled in full are
+/// their dedicated tokens, as the model emits them.
+fn token_ids(text: &str) -> Vec<u32> {
+    fake_chat_tokenizer().encode(text, false).unwrap()
+}
+
 fn bytes_with_special_stop_token(bytes: &[u8]) -> Vec<u32> {
     let mut token_ids = bytes_to_token_ids(bytes);
     token_ids.push(SPECIAL_STOP_TOKEN_ID);
@@ -141,7 +150,7 @@ async fn connect_chat_llm_with_ipc(
     .await
     .unwrap();
     ChatLlm::from_shared_backend(
-        Llm::new(client).with_request_id_randomization(false),
+        EngineCoreLlm::new(client).with_request_id_randomization(false),
         backend,
     )
 }
@@ -151,6 +160,7 @@ struct FakeChatBackend {
     has_template: bool,
     model_id: String,
     tokenizer: DynTokenizer,
+    parsers: ResolvedParsers,
 }
 
 fn fake_chat_tokenizer() -> TestTokenizer {
@@ -172,33 +182,73 @@ impl fmt::Debug for FakeChatBackend {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self {
-            has_template: true,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
-        }
+        Self::with_model_id("test-model")
     }
 
     fn without_template() -> Self {
         Self {
             has_template: false,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
+            ..Self::new()
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
+        let model_id = model_id.into();
+        let tokenizer: DynTokenizer = Arc::new(fake_chat_tokenizer());
+        let parsers = resolve_parsers(
+            &model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         Self {
             has_template: true,
-            model_id: model_id.into(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
+            model_id,
+            tokenizer,
+            parsers,
         }
     }
 
+    /// Use `tokenizer`, resolving `auto` parser selections against it.
     fn with_tokenizer(mut self, tokenizer: DynTokenizer) -> Self {
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         self.tokenizer = tokenizer;
         self
     }
+
+    fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &self.tokenizer,
+            tool_call_parser,
+            reasoning_parser,
+        );
+        self
+    }
+}
+
+fn resolve_parsers(
+    model_id: &str,
+    tokenizer: &DynTokenizer,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> ResolvedParsers {
+    ResolvedParsers::new(
+        model_id,
+        Arc::clone(tokenizer),
+        &tool_call_parser,
+        &reasoning_parser,
+    )
+    .unwrap()
 }
 
 impl TextBackend for FakeChatBackend {
@@ -219,16 +269,21 @@ impl ChatBackend for FakeChatBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
-            &self.model_id,
-            self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &self.parsers,
             options.tool_strict_level,
         )?))
+    }
+
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        self.parsers.tool_call_parser_name()
+    }
+
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        self.parsers.reasoning_parser_name()
     }
 }
 
@@ -239,6 +294,10 @@ impl ChatRenderer for FakeChatBackend {
         }
 
         let mut prompt = String::new();
+        if !request.tools().is_empty() {
+            let names = request.tools().iter().map(|tool| tool.name.as_str());
+            prompt.push_str(&format!("tools: {}\n", names.collect::<Vec<_>>().join(",")));
+        }
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
@@ -297,6 +356,7 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
             "required": ["city"],
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context = vllm_chat::ResolvedToolContext::new(
         &request.messages,
@@ -326,9 +386,7 @@ async fn chat_streams_text_events() {
                 // more fields here in the future
                 assert_eq!(
                     String::from_utf8(
-                        request
-                            .prompt_token_ids
-                            .clone()
+                        decode_prompt_token_ids(&request)
                             .unwrap()
                             .into_iter()
                             .map(|id| id as u8)
@@ -631,7 +689,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
+        vllm_chat::Error::InvalidContinueFinalMessage { .. }
     ));
 }
 
@@ -821,24 +879,14 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
-                            request_output(
-                                "chat-reasoning",
-                                bytes_to_token_ids(b"<think>"),
-                                None,
-                                None,
-                            ),
+                            request_output("chat-reasoning", token_ids("<think>"), None, None),
                             request_output(
                                 "chat-reasoning",
                                 bytes_to_token_ids(b"reason "),
                                 None,
                                 None,
                             ),
-                            request_output(
-                                "chat-reasoning",
-                                bytes_to_token_ids(b"more</think>"),
-                                None,
-                                None,
-                            ),
+                            request_output("chat-reasoning", token_ids("more</think>"), None, None),
                             request_output(
                                 "chat-reasoning",
                                 bytes_to_token_ids(b"answer"),
@@ -972,7 +1020,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
                     RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-collect",
-                            bytes_to_token_ids(b"<think>inner</think>outer"),
+                            token_ids("<think>inner</think>outer"),
                             Some(EngineCoreFinishReason::Length),
                             None,
                         )],
@@ -1011,7 +1059,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
     );
     assert_eq!(
         message.usage.output_token_count,
-        "<think>inner</think>outer".len()
+        token_ids("<think>inner</think>outer").len()
     );
     // 5 tokens for "inner"; markers are excluded.
     assert_eq!(message.usage.reasoning_tokens, 5);
@@ -1039,7 +1087,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
                         outputs: vec![
                             request_output(
                                 "chat-reasoning-disabled",
-                                bytes_to_token_ids(b"<think>"),
+                                token_ids("<think>"),
                                 None,
                                 None,
                             ),
@@ -1051,7 +1099,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
                             ),
                             request_output(
                                 "chat-reasoning-disabled",
-                                bytes_to_token_ids(b"more</think>"),
+                                token_ids("more</think>"),
                                 None,
                                 None,
                             ),
@@ -1074,15 +1122,16 @@ async fn chat_explicitly_disables_reasoning_parser() {
         },
     );
 
-    let backend: Arc<dyn ChatTextBackend> =
-        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(
+        FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")
+            .with_parser_selections(ParserSelection::Auto, ParserSelection::None),
+    );
     let chat = connect_chat_llm_with_ipc(
         EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
-    .await
-    .with_reasoning_parser(ParserSelection::None);
+    .await;
 
     let message = chat
         .chat(sample_request("chat-reasoning-disabled"))
@@ -1119,7 +1168,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                         outputs: vec![
                             request_output(
                                 "chat-tool",
-                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                token_ids("<think>Need tool.</think>"),
                                 None,
                                 None,
                             ),
@@ -1228,7 +1277,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                         outputs: vec![
                             request_output(
                                 "chat-final-only-tool",
-                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                token_ids("<think>Need tool.</think>"),
                                 None,
                                 None,
                             ),
@@ -1344,8 +1393,13 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     let mut request = sample_request("chat-logprobs");
     request.sampling_params.logprobs = Some(1);
     request.sampling_params.prompt_logprobs = Some(1);
+    request.return_prompt_text = true;
 
     let mut stream = chat.chat(request.clone()).await.unwrap();
+    assert_eq!(
+        stream.prompt_text(),
+        Some("system: You are terse.\nuser: Say hi\nassistant:")
+    );
     match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
             prompt_token_ids,
@@ -1431,6 +1485,10 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     let collected = chat.chat(request).await.unwrap().collect_message().await.unwrap();
     assert_eq!(collected.message.text(), "Hi");
     assert_eq!(
+        collected.prompt_text.as_deref(),
+        Some("system: You are terse.\nuser: Say hi\nassistant:")
+    );
+    assert_eq!(
         collected.prompt_logprobs,
         Some(DecodedPromptLogprobs {
             first_token_id: b's' as u32,
@@ -1499,88 +1557,6 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_rejects_unknown_tool_parser_before_engine_request() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-chat-tool-no-model".to_vec();
-    let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
-            Box::pin(async move {
-                assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
-                    "chat request should fail before any engine request is sent"
-                );
-            })
-        });
-
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
-    let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new_single(handshake_address),
-        &ipc,
-        backend,
-    )
-    .await
-    .with_tool_call_parser(ParserSelection::Explicit(
-        "definitely_missing_tool_parser".into(),
-    ));
-    let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
-        Ok(_) => panic!("unknown explicit tool parser should fail"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        vllm_chat::Error::ParserUnavailableByName { name, .. }
-        if name == "definitely_missing_tool_parser"
-    ));
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    chat.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-chat-reasoning-no-model".to_vec();
-    let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
-            Box::pin(async move {
-                assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
-                    "chat request should fail before any engine request is sent"
-                );
-            })
-        });
-
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
-    let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new_single(handshake_address),
-        &ipc,
-        backend,
-    )
-    .await
-    .with_reasoning_parser(ParserSelection::Explicit(
-        "definitely_missing_reasoning_parser".into(),
-    ));
-    let error = match chat.chat(sample_request("chat-reasoning-no-model")).await {
-        Ok(_) => panic!("unknown explicit reasoning parser should fail"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        vllm_chat::Error::ParserUnavailableByName { name, .. }
-        if name == "definitely_missing_reasoning_parser"
-    ));
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    chat.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -1595,14 +1571,15 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
             })
         });
 
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(
+        FakeChatBackend::new().with_parser_selections(ParserSelection::None, ParserSelection::Auto),
+    );
     let chat = connect_chat_llm_with_ipc(
         EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
-    .await
-    .with_tool_call_parser(ParserSelection::None);
+    .await;
     let error = match chat.chat(sample_tool_request("chat-tool-parser-disabled")).await {
         Ok(_) => panic!("tool requests should fail when tool parsing is disabled"),
         Err(error) => error,
@@ -1616,4 +1593,48 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     chat.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn processor_excludes_request_tools_for_tool_choice_none_when_configured() {
+    let tool = |name: &str| ChatTool {
+        name: name.to_string(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+        strict: None,
+        defer_loading: None,
+    };
+    let render = async |tool_choice, exclude| {
+        let mut request = sample_request("exclude-tools");
+        request.messages.insert(
+            0,
+            ChatMessage::developer("Dynamic tools.", Some(vec![tool("lookup")])),
+        );
+        request.tool_context = ResolvedToolContext::new(
+            &request.messages,
+            vec![tool("get_weather")],
+            Some(tool_choice),
+            true,
+        )
+        .unwrap();
+        let processor = ChatRequestProcessor::new(Arc::new(FakeChatBackend::new()), None, None)
+            .with_exclude_tools_when_tool_choice_none(exclude);
+        let text_request = processor.prepare_for_tokenization(request).await.unwrap();
+        let Prompt::Text(prompt) = text_request.prompt else {
+            panic!("expected a text prompt");
+        };
+        prompt.lines().next().unwrap().to_string()
+    };
+
+    // Like Python, tools stay in the prompt for `none` unless the server opts out.
+    assert_eq!(
+        render(ChatToolChoice::None, false).await,
+        "tools: get_weather,lookup"
+    );
+    // Opting out drops request-level tools only; message-scoped ones belong to the history.
+    assert_eq!(render(ChatToolChoice::None, true).await, "tools: lookup");
+    assert_eq!(
+        render(ChatToolChoice::Auto, true).await,
+        "tools: get_weather,lookup"
+    );
 }

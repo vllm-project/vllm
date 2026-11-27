@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable
 import regex as re
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
@@ -47,9 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 
 from .hy_v3 import HYV3DecoderLayer
 from .utils import (
@@ -59,7 +56,7 @@ from .utils import (
 )
 
 
-def _is_moe(config: PretrainedConfig) -> bool:
+def _is_moe(config: PreTrainedConfig) -> bool:
     return bool(
         getattr(config, "num_experts", None)
         and (
@@ -69,7 +66,7 @@ def _is_moe(config: PretrainedConfig) -> bool:
     )
 
 
-def _get_cla_factor(config: PretrainedConfig) -> int:
+def _get_cla_factor(config: PreTrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
     return getattr(config, "cla_share_factor", 1)
@@ -78,7 +75,7 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
 class HYV3SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -93,7 +90,7 @@ class HYV3SharedHead(nn.Module):
 class HYV3MultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,
@@ -214,8 +211,6 @@ class HYV3MTP(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.sampler = Sampler()
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -236,14 +231,6 @@ class HYV3MTP(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def _split_qkv_weight(self, qkv: torch.Tensor):
         num_attention_heads = self.config.num_attention_heads

@@ -14,34 +14,47 @@ user cannot pre-plant a malicious socket at a predictable path.
 import glob
 import json
 import os
-import pickle
 import socket
 import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
+from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+    StorageRecord,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    _LEN_STRUCT,
+    _recv_exact,
+)
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    format_socket_role_suffix,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
+from vllm.utils.network_utils import split_host_port
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
-_LEN_STRUCT = struct.Struct("!Q")
-# Sanity bound for a single message. IPC handles are tiny; only small
-# non-CUDA tensors are ever shipped by value.
-MAX_MSG_SIZE = 1 << 34
+# Bound for one JSON message on the remote D2D control plane. A remote peer
+# is authenticated before any payload is decoded, so that plane must not be
+# pickle: recv_msg would deserialize attacker-controlled bytes before the
+# token is ever compared. JSON carries everything a cross-host seed needs:
+# warmup cache tables, the flat cache-key dataclass, storage manifests, and
+# an RDMA seed (a session string plus integer regions).
+MAX_JSON_MSG_SIZE = 1 << 26
 
 
 def _current_uid() -> int:
@@ -68,8 +81,8 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
-    platforms (e.g. XPU) would silently ship every tensor by value instead.
+    Only CUDA/ROCm storages get a real IPC handle from `TensorEntry`; other
+    platforms (e.g. XPU) would silently ship every storage by value instead.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
@@ -85,6 +98,23 @@ def check_ipc_platform_support() -> None:
     )
 
 
+def check_weight_cache_loader_support(
+    vllm_config: VllmConfig, model_config: ModelConfig, *, is_draft: bool
+) -> None:
+    """Reject deployments a weight cache loader cannot serve (platform, EPLB, role)."""
+    check_ipc_platform_support()
+    if vllm_config.parallel_config.enable_eplb:
+        raise ValueError("The weight cache loader does not support EPLB.")
+    spec = vllm_config.speculative_config
+    inferred = spec is not None and model_config is spec.draft_model_config
+    if inferred != is_draft:
+        raise CacheConfigMismatchError(
+            f"Weight cache role mismatch: loading "
+            f"{'draft' if inferred else 'target'} model but the loader was "
+            f"configured for the {'draft' if is_draft else 'target'} group"
+        )
+
+
 # The daemon transfers post processed weights directly
 def check_ipc_quant_support(model: torch.nn.Module) -> None:
     """Hard-error unless every quant method supports pre-processed weights.
@@ -94,7 +124,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
 
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
-            ``supports_pre_processed_weights``.
+            `supports_pre_processed_weights`.
 
     """
     for name, module in model.named_modules():
@@ -128,9 +158,23 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_uuid: str, socket_dir: str | None = None) -> str:
-    directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_uuid=gpu_uuid))
+def get_socket_path(
+    gpu_uuid: str,
+    socket_dir: str | None = None,
+    *,
+    is_draft: bool = False,
+) -> str:
+    """Socket path of a daemon group; `is_draft=False` is the target.
+
+    The GPU uuid is hashed to keep the name well under the AF_UNIX path
+    limit (~108 bytes) even with the draft role suffix.
+    """
+    gpu_id = safe_hash(gpu_uuid.encode()).hexdigest()
+    name = SOCKET_NAME_TEMPLATE.format(
+        gpu_uuid=gpu_id,
+        role=format_socket_role_suffix(is_draft),
+    )
+    return os.path.join(get_socket_dir(socket_dir), name)
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -149,7 +193,7 @@ def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None
 def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
     """Verify a directory is a real dir owned by us and not world/group readable.
 
-    When ``strict_perms`` is False the group/world permission bits are not
+    When `strict_perms` is False the group/world permission bits are not
     checked; this is used for directories the operator explicitly configured
     (they own the trust decision), while the auto-derived per-user directory is
     always checked strictly.
@@ -210,12 +254,39 @@ def verify_peer_is_owner(conn: socket.socket) -> None:
         raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
-def _hash_quant_config(quant_config: Any) -> str:
-    if quant_config is None:
-        return ""
+def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> str:
     if hasattr(quant_config, "to_dict"):
         quant_config = quant_config.to_dict()
-    payload = json.dumps(quant_config, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "checkpoint": quant_config,
+            "runtime": normalize_value(runtime_quant_config),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
+def hash_rope_parameters(model_config: ModelConfig) -> str:
+    """Fingerprint the text RoPE parameters used to construct cached buffers."""
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
@@ -255,7 +326,7 @@ def hash_checkpoint(model: str) -> str | None:
     return hasher.hexdigest()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WeightCacheKey:
     """Fingerprint of the cached weights.
 
@@ -270,12 +341,52 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    rope_parameters_hash: str
+    kv_cache_dtype: str
+    kv_cache_dtype_skip_layers: tuple[str, ...]
     revision: str | None
     vllm_version: str
+    pp_size: int = 1
+    pp_rank: int = 0
+    is_draft: bool = False
+    """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
+    moe_backend: str = "auto"
+    """Kernel backends pick the processed weight layout (e.g. shuffled or
+    repacked), so weights processed for one backend are wrong for another."""
+    linear_backend: str = "auto"
+    linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    language_model_only: bool = False
+    mm_encoder_only: bool = False
+    mm_disabled_modalities: tuple[str, ...] = ()
+    """With the two flags above, decides which components (e.g. the vision
+    tower) are built; skipped ones are absent from the daemon's export."""
+    engram_cpu_offload: bool = False
+    engram_embedding_across_dp: bool = False
+    indexer_kv_dtype: str = "auto"
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        cache_config: CacheConfig,
+        pp_size: int = 1,
+        pp_rank: int = 0,
+        is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
+        kernel_config: KernelConfig | None = None,
+        engram_cpu_offload: bool = False,
+        engram_embedding_across_dp: bool = False,
+        indexer_kv_dtype: str = "auto",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -292,16 +403,48 @@ class WeightCacheKey:
         arch = ",".join(getattr(hf_config, "architectures", None) or [])
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
+        kernel_config = kernel_config or KernelConfig()
+        linear_backend_per_quant = tuple(
+            sorted((kernel_config.linear_backend_per_quant or {}).items())
+        )
+        mm_config = model_config.multimodal_config
+        mm_limits = mm_config.limit_per_prompt if mm_config else {}
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            pp_size=pp_size,
+            pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
-            quant_config_hash=_hash_quant_config(quant_config),
+            quant_config_hash=_hash_quant_config(
+                quant_config=quant_config,
+                runtime_quant_config=model_config.quantization_config,
+            ),
+            rope_parameters_hash=hash_rope_parameters(model_config),
+            kv_cache_dtype=cache_config.cache_dtype,
+            kv_cache_dtype_skip_layers=tuple(
+                sorted(set(cache_config.kv_cache_dtype_skip_layers))
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
+            moe_backend=kernel_config.moe_backend,
+            linear_backend=kernel_config.linear_backend,
+            linear_backend_per_quant=linear_backend_per_quant,
+            language_model_only=bool(mm_config and mm_config.language_model_only),
+            mm_encoder_only=bool(mm_config and mm_config.mm_encoder_only),
+            mm_disabled_modalities=tuple(
+                sorted(m for m, opts in mm_limits.items() if opts.count == 0)
+            ),
+            engram_cpu_offload=engram_cpu_offload,
+            engram_embedding_across_dp=engram_embedding_across_dp,
+            indexer_kv_dtype=indexer_kv_dtype,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -312,57 +455,50 @@ class WeightCacheKey:
         ]
 
 
-@dataclass
-class TensorEntry:
-    """A single cached tensor.
+class WeightCacheState(NamedTuple):
+    """Consumer-side DTO decoded from a daemon's get_state response."""
 
-    CUDA tensors are exported as `torch.multiprocessing` reduction args
-    (CUDA IPC handles); non-CUDA tensors are shipped by value.
-    """
-
-    kind: str
-    """Either "param" or "buffer"."""
-    ipc_args: tuple | None = None
-    cpu_tensor: torch.Tensor | None = None
-
-    @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
-        tensor = tensor.detach()
-        if tensor.is_cuda:
-            _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
-
-    def rebuild(self, device_index: int) -> torch.Tensor:
-        if self.ipc_args is None:
-            assert self.cpu_tensor is not None
-            return self.cpu_tensor
-        args = list(self.ipc_args)
-        # Index 6 of the args from reduce_tensor is the device index. It must
-        # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings.
-        args[6] = device_index
-        return rebuild_cuda_tensor(*args)
+    manifest: dict
+    """Logical tensor views over the imported storages."""
+    storages: list[StorageRecord]
+    """Storage records rebuilt on the consumer's device."""
+    aliases: dict[str, str]
+    """Duplicate (tied) weight names aliased to their canonical tensor."""
+    attrs: dict[str, bool]
+    """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
-def send_msg(sock: socket.socket, obj: Any) -> None:
-    payload = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+def parse_seed_address(address: str) -> str | tuple[str, int]:
+    """Split a seed address into a Unix socket path or a `(host, port)`."""
+    if "/" in address or ":" not in address:
+        return os.path.expanduser(address)
+    return split_host_port(address)
+
+
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
     sock.sendall(_LEN_STRUCT.pack(len(payload)))
     sock.sendall(payload)
 
 
-def recv_msg(sock: socket.socket) -> Any:
-    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
-    if length > MAX_MSG_SIZE:
-        raise ValueError(f"Message size {length} exceeds limit {MAX_MSG_SIZE}")
-    return pickle.loads(_recv_exact(sock, length))
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    """Receive one JSON message.
 
+    Args:
+        sock: Connected socket.
+        max_size: Largest payload accepted.
+        deadline: `time.monotonic()` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
-    buf = bytearray()
-    while len(buf) < num_bytes:
-        chunk = sock.recv(num_bytes - len(buf))
-        if not chunk:
-            raise ConnectionError("Socket closed while receiving message")
-        buf.extend(chunk)
-    return bytes(buf)
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))

@@ -8,10 +8,35 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::SamplingLimits;
 
+const MAX_NUM_BAD_WORDS_ENV: &str = "VLLM_MAX_NUM_BAD_WORDS";
+const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
+const MAX_BAD_WORDS_TOTAL_TOKENS_ENV: &str = "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS";
+const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
+
 #[derive(Debug, Error)]
 pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
+    #[error("bad_words_token_ids must not contain empty sequences")]
+    EmptyBadWordSequence,
+    #[error("bad_words cannot contain an empty string.")]
+    EmptyBadWord,
+    #[error("bad_words entries must tokenize to at least one token.")]
+    EmptyBadWordTokenization,
+    #[error("Too many bad words: {count}. The max number is {max}.")]
+    TooManyBadWords {
+        parameter: Option<&'static str>,
+        count: usize,
+        max: usize,
+    },
+    #[error("Too many bad words after tokenization: {count}. The max number is {max}.")]
+    TooManyTokenizedBadWords { count: usize, max: usize },
+    #[error("Too many total bad word tokens: {count}. The max is {max}.")]
+    TooManyBadWordTokens {
+        parameter: Option<&'static str>,
+        count: usize,
+        max: usize,
+    },
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -21,6 +46,22 @@ pub enum TokenIdsError {
         token_ids: Vec<u32>,
         vocab_size: usize,
     },
+}
+
+impl TokenIdsError {
+    /// The canonical request parameter name for this validation error.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::EmptyAllowedTokenIds => Some("allowed_token_ids"),
+            Self::EmptyBadWordSequence => Some("bad_words_token_ids"),
+            Self::EmptyBadWord
+            | Self::EmptyBadWordTokenization
+            | Self::TooManyTokenizedBadWords { .. } => Some("bad_words"),
+            Self::TooManyBadWords { parameter, .. }
+            | Self::TooManyBadWordTokens { parameter, .. } => *parameter,
+            Self::OutOfVocab { parameter, .. } => Some(parameter),
+        }
+    }
 }
 
 fn validate_param(
@@ -43,24 +84,78 @@ fn validate_param(
     })
 }
 
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+}
+
+/// The per-request cap on bad-word sequences.
+pub(super) fn max_num_bad_words() -> usize {
+    env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
+}
+
+/// Mirrors Model Runner V2's per-request bad-words buffer limits:
+/// <https://github.com/vllm-project/vllm/blob/a956a8126e6bd184cb0a6b8f7318fe4717675c2f/vllm/v1/worker/gpu/sample/bad_words.py#L40-L66>
+fn validate_bad_words_limits(
+    bad_words_token_ids: &[Vec<u32>],
+    parameter: Option<&'static str>,
+) -> Result<(), TokenIdsError> {
+    let count = bad_words_token_ids.len();
+    let max = max_num_bad_words();
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWords {
+            parameter,
+            count,
+            max,
+        });
+    }
+
+    let count = bad_words_token_ids.iter().map(Vec::len).sum();
+    let max = env_limit(
+        MAX_BAD_WORDS_TOTAL_TOKENS_ENV,
+        DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
+    );
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWordTokens {
+            parameter,
+            count,
+            max,
+        });
+    }
+
+    Ok(())
+}
+
 /// Validate that pre-tokenized prompt IDs are within the engine-visible prompt
 /// vocabulary range.
+///
+/// Only multimodal placeholders may exceed the model vocabulary: the engine
+/// replaces them before the embedding lookup. A prompt without multimodal
+/// inputs is embedded in full, so tokenizer-only IDs (e.g. Kimi's reserved
+/// tokens) are rejected. Python widens the bound for every request to a
+/// multimodal model (`BaseRenderer.validate_token_ids`).
 pub(crate) fn validate_prompt_token_ids(
     prompt_token_ids: &[u32],
+    has_multimodal_inputs: bool,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    validate_param(
-        "prompt",
-        prompt_token_ids.iter().copied(),
-        limits.prompt_token_vocab_size(),
-    )
+    let vocab_size = if has_multimodal_inputs {
+        limits.tokenizer_vocab_size.max(limits.model_vocab_size)
+    } else {
+        limits.model_vocab_size
+    };
+    validate_param("prompt", prompt_token_ids.iter().copied(), vocab_size)
 }
 
 /// Validate that token IDs in text sampling parameters are within their
 /// parameter-specific vocabulary ranges.
+///
+/// `raw_bad_words_count` is the prefix length of `params.bad_words_token_ids`
+/// that came from pre-tokenized `bad_words_token_ids` (the remainder came from
+/// tokenizing string `bad_words`).
 pub(crate) fn validate_vocab_range(
     params: &EngineCoreSamplingParams,
     limits: &SamplingLimits,
+    raw_bad_words_count: usize,
 ) -> Result<(), TokenIdsError> {
     validate_param(
         "stop_token_ids",
@@ -72,10 +167,12 @@ pub(crate) fn validate_vocab_range(
         if token_ids.is_empty() {
             return Err(TokenIdsError::EmptyAllowedTokenIds);
         }
+        // The engine writes these IDs as columns of a logits mask sized by the
+        // model vocabulary, like `stop_token_ids` and `logit_bias`.
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
@@ -96,9 +193,24 @@ pub(crate) fn validate_vocab_range(
     }
 
     if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
+        let (raw, tokenized) = bad_words_token_ids.split_at(raw_bad_words_count);
+        if raw.iter().any(Vec::is_empty) {
+            return Err(TokenIdsError::EmptyBadWordSequence);
+        }
+        let limit_param = match (!raw.is_empty(), !tokenized.is_empty()) {
+            (true, false) => Some("bad_words_token_ids"),
+            (false, true) => Some("bad_words"),
+            _ => None,
+        };
+        validate_bad_words_limits(bad_words_token_ids, limit_param)?;
+        validate_param(
+            "bad_words_token_ids",
+            raw.iter().flatten().copied(),
+            limits.tokenizer_vocab_size,
+        )?;
         validate_param(
             "bad_words",
-            bad_words_token_ids.iter().flatten().copied(),
+            tokenized.iter().flatten().copied(),
             limits.tokenizer_vocab_size,
         )?;
     }

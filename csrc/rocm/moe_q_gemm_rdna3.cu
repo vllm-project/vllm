@@ -57,16 +57,6 @@ __forceinline__ __device__ bf16_t tzero<bf16_t>() {
   return __float2bfloat16(0.0f);
 }
 
-__forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-  float result = 0.0f;
-  const half2* a2_ptr = (const half2*)a_ptr;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
-  }
-  return result;
-}
-
 __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
                                                    half2 v23) {
   unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
@@ -177,7 +167,8 @@ __global__ void moe_gemm_q4_kernel_rdna3(
                 "BLOCK_KN_SIZE must equal THREADS_X");
 
   // For bf16 M=1, we can skip LDS and read A from global (same as dense).
-  // fp16 always needs LDS due to the dot22_8_f indexing pattern.
+  // fp16 always needs LDS: the exact-factored inner loop indexes
+  // block_a[m][a_off] directly.
   constexpr bool USE_LDS_A = (BLOCK_SIZE_M > 1) || std::is_same<T, half>::value;
 
   const int offset_m_base = token_block * BLOCK_SIZE_M;
@@ -211,8 +202,10 @@ __global__ void moe_gemm_q4_kernel_rdna3(
   int qk = offset_k / 8;
   const uint32_t* b_ptr = expert_weights + qk * size_n + n;
 
-  // Per-column dequant constants (4 columns per thread)
-  half2 z1z16_h[4][2], y1y16_h[4][2];
+  // Per-column dequant constants (4 columns per thread). fp16 uses the
+  // exact factored form (fp32 y/z pairs, no baked bias — see
+  // qdq_4_rdna3.cuh); bf16 keeps fp32 scalars as before.
+  float yf_h[4][2], zf_h[4][2];
   float z_b_f[4], y_b_f[4];
 
   // GPTQv1: zero_offset = 1
@@ -228,8 +221,8 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     if constexpr (std::is_same<T, half>::value) {
   #pragma unroll
       for (int i = 0; i < 4; ++i) {
-        gptq_rdna3::prep_zero_scale_fp16((uint32_t)(zeros[i] + zero_offset),
-                                         scales[i], z1z16_h[i], y1y16_h[i]);
+        gptq_rdna3::prep_zero_scale_fp16_f32((uint32_t)(zeros[i] + zero_offset),
+                                             scales[i], yf_h[i], zf_h[i]);
       }
     } else {
   #pragma unroll
@@ -266,29 +259,42 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     }
     b_ptr += 4 * size_n;
 
+    // fp16 exact factored form: activation sums per row, split by nibble
+    // slot, accumulated across the 32-K round; the z correction is applied
+    // once after the j loop (see qdq_4_rdna3.cuh).
+    float sum_lo[BLOCK_SIZE_M] = {}, sum_hi[BLOCK_SIZE_M] = {};
+
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
       if constexpr (std::is_same<T, half>::value) {
-        // fp16 path: dequant via bit-trick, dot via v_dot2_f32_f16
-        half2 dq[4][4];
-        gptq_rdna3::dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0], z1z16_h[0],
-                                        y1y16_h[0]);
-        gptq_rdna3::dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1], z1z16_h[1],
-                                        y1y16_h[1]);
-        gptq_rdna3::dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2],
-                                        y1y16_h[2]);
-        gptq_rdna3::dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3],
-                                        y1y16_h[3]);
+        // fp16 path: magic values without bias, dots via v_dot2_f32_f16,
+        // the (y, z) correction applied in fp32 (qdq_4_rdna3.cuh).
+        half2 qm[4][4];
+        gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].x, qm[0]);
+        gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].y, qm[1]);
+        gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].z, qm[2]);
+        gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].w, qm[3]);
+
+        const half2 ones = gptq_rdna3::ones_half2_fp16();
 
   #pragma unroll
         for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-          const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
-          block_c[m][0] += dot22_8_f(dq[0], a_ptr);
-          block_c[m][1] += dot22_8_f(dq[1], a_ptr);
-          block_c[m][2] += dot22_8_f(dq[2], a_ptr);
-          block_c[m][3] += dot22_8_f(dq[3], a_ptr);
+          const half2* a2 = reinterpret_cast<const half2*>(&block_a[m][a_off]);
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[0], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[1], ones, sum_hi[m], false);
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[2], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[3], ones, sum_hi[m], false);
+  #pragma unroll
+          for (int c = 0; c < 4; ++c) {
+            float pl = 0.0f, ph = 0.0f;
+            pl = __builtin_amdgcn_fdot2(qm[c][0], a2[0], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][1], a2[1], ph, /*clamp=*/false);
+            pl = __builtin_amdgcn_fdot2(qm[c][2], a2[2], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][3], a2[3], ph, /*clamp=*/false);
+            block_c[m][c] += yf_h[c][0] * pl + yf_h[c][1] * ph;
+          }
         }
       } else if constexpr (BLOCK_SIZE_M == 1) {
         // bf16 M=1: v_dot2_f32_bf16 with InstCombine-defeating opacity
@@ -412,6 +418,18 @@ __global__ void moe_gemm_q4_kernel_rdna3(
                 __fmaf_rn(y_b_f[col], partial,
                           __fmaf_rn(z_b_f[col], sum_a[m], block_c[m][col]));
           }
+        }
+      }
+    }
+
+    if constexpr (std::is_same<T, half>::value) {
+      // z is a group constant and sum_a is complete for this round: apply
+      // the fp16 z correction once per round (see qdq_4_rdna3.cuh).
+  #pragma unroll
+      for (int m = 0; m < BLOCK_SIZE_M; ++m) {
+  #pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          block_c[m][c] += zf_h[c][0] * sum_lo[m] + zf_h[c][1] * sum_hi[m];
         }
       }
     }
@@ -587,6 +605,10 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
   int size_k = (int)a.size(1);
   int size_n = (int)b_q_weight.size(2);
   int groups = (int)b_scales.size(1);
+  TORCH_CHECK(size_k % (groups * 32) == 0,
+              "group size (K/groups = ", size_k / groups,
+              ") must be a multiple of 32: the kernel checks group "
+              "transitions at 32-K granularity");
 
   // Per-expert strides
   int expert_weight_stride = (int)(b_q_weight.size(1) * b_q_weight.size(2));

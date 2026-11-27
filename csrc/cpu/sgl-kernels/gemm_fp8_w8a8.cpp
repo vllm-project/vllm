@@ -772,6 +772,7 @@ inline __m128i cvtfp32_fp8e4m3(__m512& src) {
   return _mm512_cvtepi32_epi8(packed);
 }
 
+#ifdef CPU_CAPABILITY_AVX10_2
 __attribute__((target("avx10.2"))) inline __m128i cvtfp32_fp8e4m3_avx10_2(__m512& src) {
   __m256i f16_vec = _mm512_cvt_roundps_ph(src, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
   return _mm256_cvtph_hf8(_mm256_castsi256_ph(f16_vec));
@@ -805,6 +806,7 @@ __attribute__((target("avx10.2"))) void quantize_bf16_block_avx10_2(
     _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i + 16), fp8_vec2);
   }
 }
+#endif  // CPU_CAPABILITY_AVX10_2
 
 std::tuple<at::Tensor, at::Tensor> _quantize_fp8e4m3_bf16_per_tensor_no_scale(const at::Tensor& t) {
   constexpr float quant_max = 448.0f;  // torch.finfo(torch.float8_e4m3fn).max
@@ -861,10 +863,12 @@ std::tuple<at::Tensor, at::Tensor> _quantize_fp8e4m3_bf16_per_tensor_no_scale(co
       scale_data[c] = scale_val;
 
       // Step 3: Scale and clamp using AVX512 (reuse the same loop structure)
+#ifdef CPU_CAPABILITY_AVX10_2
       if (avx10_2_available()) {
         quantize_bf16_block_avx10_2(channel_src, quant_dst, elements_per_channel, scale_reciprocal);
         continue;
       }
+#endif
       i = 0;
       const __m512 scale_recip_vec = _mm512_set1_ps(scale_reciprocal);
       const __m512 quant_max_vec = _mm512_set1_ps(quant_max);
@@ -939,10 +943,12 @@ _quantize_fp8e4m3_bf16_per_tensor_with_scale(const at::Tensor& t, at::Tensor& sc
       const at::BFloat16* src_data = t_bf16.data_ptr<at::BFloat16>() + c * elements_per_channel;
       at::Float8_e4m3fn* quant_t_data = quant_t.data_ptr<at::Float8_e4m3fn>() + c * elements_per_channel;
 
+#ifdef CPU_CAPABILITY_AVX10_2
       if (avx10_2_available()) {
         quantize_bf16_block_avx10_2(src_data, quant_t_data, elements_per_channel, scale_reciprocal);
         continue;
       }
+#endif
 
       int64_t i = 0;
       // Process 32 elements at a time using AVX512
@@ -1003,54 +1009,6 @@ at::Tensor fp8_scaled_mm_with_quant(
                                                      : _quantize_fp8e4m3(act, channelwise, act_scales);
   auto input = std::get<0>(quant_act);
   auto input_scales = std::get<1>(quant_act);
-  int64_t N = weight.dim() == 4 ? weight.size(0) * weight.size(-1) : weight.size(0);
-  int act_quant_mode = input_scales.numel() == 1                                ? PER_TENSOR
-                       : input_scales.numel() == input.numel() / input.size(-1) ? PER_ROW
-                                                                                : PER_GROUP;
-  int wei_quant_mode = weight_scales.numel() == 1 ? PER_TENSOR : weight_scales.numel() == N ? PER_ROW : PER_GROUP;
-  // Case to fall back
-  if (weight.dim() == 2) {
-    TORCH_CHECK(
-        act_quant_mode != PER_GROUP && wei_quant_mode != PER_GROUP,
-        "FP8 linear: Per-group quantization is not supported in the fallback path");
-    auto y_fp32 = at::linear(input.to(at::kFloat).mul_(input_scales), weight.to(at::kFloat).mul_(weight_scales), bias);
-    return y_fp32.to(output_dtype);
-  }
-
-  static bool cpublas_can_pack = cpublas_could_pack();
-  auto out_sizes = input.sizes().vec();
-  out_sizes.back() = N;
-  auto output = at::empty(out_sizes, input.options().dtype(output_dtype));
-
-#define AT_DISPATCH_FP8_LINEAR_KERNEL(OUT_DTYPE, CAN_PACK, A_QUANT_MODE, B_QUANT_MODE, ...) \
-  AT_DISPATCH_BOOL_NO_RETURN(                                                               \
-      CAN_PACK,                                                                             \
-      "cpublas_can_pack",                                                                   \
-      can_pack,                                                                             \
-      AT_DISPATCH_QUANT_MODE_NO_RETURN(                                                     \
-          A_QUANT_MODE,                                                                     \
-          "act_quant_mode",                                                                 \
-          a_quant_mode,                                                                     \
-          AT_DISPATCH_QUANT_MODE_NO_RETURN(                                                 \
-              B_QUANT_MODE,                                                                 \
-              "wei_quant_mode",                                                             \
-              b_quant_mode,                                                                 \
-              AT_DISPATCH_OUT_TYPES(OUT_DTYPE, "out_dtype", __VA_ARGS__))))
-
-  AT_DISPATCH_FP8_LINEAR_KERNEL(output_dtype, cpublas_can_pack, act_quant_mode, wei_quant_mode, [&]() {
-    _float8_linear_impl<out_t, can_pack, a_quant_mode, b_quant_mode>(
-        input, input_scales, weight, weight_scales, bias, output);
-  });
-  return output;
-}
-
-at::Tensor float8_linear_impl(
-    const at::Tensor& input,
-    const at::Tensor& input_scales,
-    const at::Tensor& weight,
-    const at::Tensor& weight_scales,
-    const std::optional<at::Tensor>& bias,
-    at::ScalarType output_dtype) {
   int64_t N = weight.dim() == 4 ? weight.size(0) * weight.size(-1) : weight.size(0);
   int act_quant_mode = input_scales.numel() == 1                                ? PER_TENSOR
                        : input_scales.numel() == input.numel() / input.size(-1) ? PER_ROW

@@ -36,7 +36,7 @@ import torch
 import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -58,7 +58,6 @@ from vllm.model_executor.layers.resampler import (
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -116,7 +115,13 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -468,7 +473,7 @@ class Resampler4_5(Resampler2_5):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
+def get_version_by_config(config: PreTrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -713,6 +718,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         version = self.get_model_version()
 
         if version == (2, 0) or version == (2, 5):
+            if max_slice_nums is not None:
+                image_processor = self.get_image_processor(
+                    max_slice_nums=max_slice_nums
+                )
             return image_processor.get_slice_image_placeholder(image_size)
 
         return image_processor.get_slice_image_placeholder(
@@ -786,7 +795,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
         return num_video_tokens_total
 
@@ -798,6 +809,16 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_num = self.get_video_max_slice_num()
         return ImageSize(width=image_size, height=image_size * max_slice_num)
 
+    def get_video_size_and_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> tuple[ImageSize, int]:
+        return (
+            self.get_video_frame_size_with_most_features(),
+            self.get_num_frames_with_most_features(seq_len, mm_counts.get("video", 0)),
+        )
+
     def get_max_video_frames(self, max_tokens: int) -> int:
         num_frame_tokens = self.get_max_video_frame_tokens()
         num_frames = max_tokens // num_frame_tokens
@@ -806,15 +827,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self.get_max_video_frames(seq_len - max_image_tokens)
+        max_total_frames = self.get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -852,9 +869,8 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_videos = mm_counts.get("video", 0)
 
         image_width, image_height = self.info.get_image_size_with_most_features()
-        video_width, video_height = self.info.get_video_frame_size_with_most_features()
-        num_video_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+        (video_width, video_height), num_video_frames = (
+            self.info.get_video_size_and_frames_with_most_features(seq_len, mm_counts)
         )
 
         video_overrides = mm_options.get("video")
@@ -867,7 +883,11 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 num_video_frames = min(num_video_frames, video_overrides.num_frames)
             if video_overrides.width or video_overrides.height:
                 video_frame_overrides = ImageDummyOptions(
-                    count=video_overrides.count,
+                    count=(
+                        video_overrides.count
+                        if video_overrides.count is not None
+                        else 999
+                    ),
                     width=video_overrides.width,
                     height=video_overrides.height,
                 )
@@ -892,10 +912,17 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
+    def get_image_prompt_texts(
+        self,
+        image_size: ImageSize,
+        image_idx: int = 0,
+        *,
+        max_slice_nums: int | None = None,
+    ) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
+            max_slice_nums=max_slice_nums,
         )
 
     def get_video_prompt_texts(self, image_size: ImageSize, num_frames: int) -> str:
@@ -1116,7 +1143,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             return PromptUpdateDetails.select_token_ids(
                 cached_encode(
                     tokenizer,
-                    self.get_image_prompt_texts(image_size, item_idx),
+                    self.get_image_prompt_texts(
+                        image_size,
+                        item_idx,
+                        max_slice_nums=self.info.get_image_processor(
+                            **hf_processor_mm_kwargs
+                        ).max_slice_nums,
+                    ),
                     add_special_tokens=False,
                 ),
                 unk_token_ids,
@@ -1235,7 +1268,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
-        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # `PreTrainedConfig.tie_word_embeddings` defaults to True; we cannot
         # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
         # and config class
         self.config = config
@@ -1425,7 +1458,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -1483,7 +1516,7 @@ def _mcpmv_normalize_tgt_sizes(
     tgt_sizes: torch.Tensor | list[torch.Tensor],
     slice_counts: list[int],
 ) -> torch.Tensor:
-    """Normalize tgt_sizes to shape ``(total_slices, 2)``."""
+    """Normalize tgt_sizes to shape `(total_slices, 2)`."""
     if isinstance(tgt_sizes, list):
         if not tgt_sizes:
             tgt_sizes = torch.zeros((0, 2), dtype=torch.long)
@@ -1516,7 +1549,7 @@ def _mcpmv_pack_flat_pixels(
     patch_size: int,
     tgt_sizes: torch.Tensor,
 ) -> torch.Tensor:
-    """Pack slice tensors into a fixed ``(max_num_slices, 3*H*W)`` buffer."""
+    """Pack slice tensors into a fixed `(max_num_slices, 3*H*W)` buffer."""
     import torch.nn.functional as F
 
     flat_dim = 3 * pixel_height * pixel_width
@@ -1579,7 +1612,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return th * tw
 
     def _mcpmv_patch_grid_keys(self) -> tuple[tuple[int, int], ...]:
-        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
+        """Ordered patch-grid keys `(nb_h, nb_w)` for the capture axis."""
         max_side = int(self.vpm.embeddings.image_size) // int(
             self.vpm.embeddings.patch_size
         )
@@ -1662,9 +1695,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return int(
             info.get_num_frames_with_most_features(
                 seq_len=self.vllm_config.model_config.max_model_len,
-                mm_counts={
-                    "video": self.multimodal_config.get_limit_per_prompt("video")
-                },
+                num_videos=self.multimodal_config.get_limit_per_prompt("video"),
             )
         )
 
@@ -1911,8 +1942,8 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        """Eager encoder path; returns ``(total_tokens, embed_dim)`` like
-        ``encoder_cudagraph_forward``.
+        """Eager encoder path; returns `(total_tokens, embed_dim)` like
+        `encoder_cudagraph_forward`.
         """
         mm_kwargs_no_flat = {
             k: v
@@ -1957,7 +1988,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2058,7 +2089,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2119,6 +2150,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=None,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2150,11 +2182,13 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return Qwen2ForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return init_vllm_registered_model(
+            vllm_config, prefix=prefix, architectures=["Qwen2ForCausalLM"]
+        )
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2217,6 +2251,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2255,7 +2290,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2316,6 +2351,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2354,7 +2390,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2420,6 +2456,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)

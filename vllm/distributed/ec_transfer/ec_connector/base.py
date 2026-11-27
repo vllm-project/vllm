@@ -25,6 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
         PromMetric,
         PromMetricT,
     )
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -110,6 +112,18 @@ class ECConnectorBase(ABC):
         """
         return None
 
+    def reset(self) -> None:
+        """Invalidate connector-side encoder cache bookkeeping.
+
+        Called from `Scheduler.reset_encoder_cache` after the
+        EncoderCacheManager is cleared, and from the worker
+        `reset_encoder_cache` path after the local encoder cache is
+        cleared. The default is a no-op; connectors that mirror local
+        cache residency must drop that state so a later request cannot
+        skip a necessary Load or Encode.
+        """
+        return
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -168,7 +182,7 @@ class ECConnectorBase(ABC):
         """Start loading the cache from the connector into vLLM's encoder cache.
 
         This method loads the encoder cache based on metadata provided by the scheduler.
-        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        It is called before `gather_mm_embeddings` for the EC Connector. For EC,
         the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:
@@ -235,9 +249,29 @@ class ECConnectorBase(ABC):
         """
         return None
 
+    def take_events(self) -> Iterable["ECCacheEvent"]:
+        """Take the encoder cache events collected since the last call.
+
+        Returns:
+            New encoder cache events. Connectors that do not publish events
+            return nothing.
+
+        """
+        return ()
+
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def on_new_request(self, request: "Request") -> None:
+        """Notify the connector after a new request is queued."""
+        return
+
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        """Provide a read-only query for each input's cached embedding count."""
+        return
 
     @abstractmethod
     def has_cache_item(
@@ -257,7 +291,9 @@ class ECConnectorBase(ABC):
         pass
 
     def ensure_cache_available(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
     ) -> bool:
         """Ensure encoder cache items are available for the given request.
         May initiate asynchronous transfers for items not yet local.
@@ -272,6 +308,12 @@ class ECConnectorBase(ABC):
 
         """
         return True
+
+    def requires_encoder_cache_readmission(
+        self, request: "Request", input_id: int
+    ) -> bool:
+        """Whether an evicted runner hit needs another admission check."""
+        return False
 
     def start_save_caches(self, **kwargs: Any) -> None:
         """Prepare this step's outbound pushes before the model runs."""

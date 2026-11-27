@@ -24,7 +24,6 @@ NEEDS_CLEAN_ENTRY = frozenset(
         "test_deepgemm.py",
         "test_grouped_topk.py",
         "test_mxfp4_moe.py",
-        "test_shared_fused_moe_routed_transform.py",
         "test_silu_mul_per_token_group_quant_fp8_colmajor.py",
         "test_situ_mul_fp8_quant.py",
     }
@@ -46,7 +45,7 @@ def subtests(request):
 def should_do_global_cleanup_after_test() -> bool:
     """Drop the per-test global cleanup for this directory.
 
-    A full ``gc.collect()`` plus an emptied caching allocator after each of the
+    A full `gc.collect()` plus an emptied caching allocator after each of the
     ~1450 small kernel tests per shard costs more than the tests themselves.
     The tests that depend on isolation get a clean state on entry instead, in
     the hook below.
@@ -54,10 +53,23 @@ def should_do_global_cleanup_after_test() -> bool:
     return False
 
 
+_last_path = None
+
+
 def pytest_runtest_setup(item):
     # Not tryfirst: the skipping plugin evaluates skip marks in a tryfirst
     # hook, so tests about to be skipped never reach this, while fixture setup
     # still runs afterwards.
-    if item.path.name in NEEDS_CLEAN_ENTRY:
+    global _last_path
+    # Runtime sharding reorders files between builds, so every file also
+    # starts clean: no file inherits the GPU memory another file left cached.
+    new_file = item.path != _last_path
+    _last_path = item.path
+    if (
+        new_file
+        or item.path.name in NEEDS_CLEAN_ENTRY
+        or "dist_init" in item.fixturenames
+        or getattr(item.obj, "_uses_single_rank_groups", False)
+    ):
         reset_workspace_manager()
         cleanup_dist_env_and_memory()

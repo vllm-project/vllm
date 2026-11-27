@@ -13,11 +13,11 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
+    assert_never,
 )
 
 import numpy as np
 import torch
-from typing_extensions import assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
@@ -534,6 +534,16 @@ ModalityDataParser: TypeAlias = Callable[
 ]
 
 
+def _convert_pil_frames(frames: HfVideoItem) -> HfVideoItem:
+    """Convert PIL video frames to RGB, as is done for PIL images."""
+    if not isinstance(frames, list):
+        return frames
+    return [
+        convert_image_mode(frame, "RGB") if isinstance(frame, PILImage.Image) else frame
+        for frame in frames
+    ]
+
+
 class MultiModalDataParser:
     """Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
@@ -641,7 +651,7 @@ class MultiModalDataParser:
         if isinstance(audio, np.ndarray):
             return audio, None
         if isinstance(audio, torch.Tensor):
-            return audio.numpy(), None
+            return audio.detach().cpu().numpy(), None
 
         assert_never(audio)
 
@@ -653,9 +663,10 @@ class MultiModalDataParser:
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
         if isinstance(video, tuple):
-            return video
+            frames, metadata = video
+            return _convert_pil_frames(frames), metadata
         if isinstance(video, list):
-            return np.array(video), None
+            return np.array(_convert_pil_frames(video)), None
         if isinstance(video, (np.ndarray, torch.Tensor)):
             # Tensors pass through untouched: HF video processors accept them
             # directly, and device tensors (e.g. NVDEC-decoded frames) must
@@ -664,15 +675,57 @@ class MultiModalDataParser:
 
         assert_never(video)
 
+    def _parse_audio_embedding_data(
+        self, data: dict[str, torch.Tensor]
+    ) -> DictEmbeddingItems:
+        counts = data.get("audio_num_tokens")
+        if (
+            not isinstance(counts, torch.Tensor)
+            or counts.dtype not in (torch.int32, torch.int64)
+            or counts.ndim not in (1, 2)
+            or (counts.ndim == 2 and counts.shape[1] != 1)
+            or not torch.all(counts > 0)
+        ):
+            raise ValueError(
+                "audio_num_tokens must contain one positive integer per audio"
+            )
+
+        counts = counts.flatten()
+        if "audio_embeds" in data:
+            embeds = data["audio_embeds"]
+            if len(embeds) != len(counts) or any(
+                len(embedding) != count for embedding, count in zip(embeds, counts)
+            ):
+                raise ValueError("audio_num_tokens does not match audio_embeds")
+
+        required, optional = self.embedding_field_sets("audio")
+        return DictEmbeddingItems(
+            {**data, "audio_num_tokens": counts},
+            modality="audio",
+            required_fields=required,
+            optional_fields=optional,
+            fields_factory=lambda _: {
+                "audio_embeds": MultiModalFieldConfig.batched("audio"),
+                "audio_num_tokens": MultiModalFieldConfig.batched(
+                    "audio", keep_on_cpu=True
+                ),
+            },
+        )
+
     def _parse_audio_data(
         self,
-        data: ModalityData[AudioItem],
+        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if data is None:
             return None
 
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
+
+        if isinstance(data, dict) and "audio_num_tokens" in self.embedding_fields.get(
+            "audio", {}
+        ):
+            return self._parse_audio_embedding_data(data)
 
         data_items: list[AudioItem | None]
         if (
@@ -734,6 +787,14 @@ class MultiModalDataParser:
             for item in data_items
         ]
 
+        data_items = [
+            np.ascontiguousarray(item)
+            if isinstance(item, np.ndarray)
+            and any(stride < 0 for stride in item.strides)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
@@ -779,6 +840,8 @@ class MultiModalDataParser:
                 metadata_lst.append(None)
                 continue
             video, metadata = self._get_video_with_metadata(data_item)
+            if isinstance(video, np.ndarray) and any(s < 0 for s in video.strides):
+                video = np.ascontiguousarray(video)
             if self.video_needs_metadata:
                 if metadata is None:
                     raise ValueError(

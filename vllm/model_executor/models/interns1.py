@@ -12,10 +12,10 @@ from typing import Annotated, Literal, TypeAlias, TypedDict
 import regex as re
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, InternVLProcessor, PretrainedConfig
+from transformers import BatchFeature, InternVLProcessor, PreTrainedConfig
 from transformers.activations import ACT2FN
-from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
-    GotOcr2ImageProcessorFast,
+from transformers.models.got_ocr2.image_processing_got_ocr2 import (
+    GotOcr2ImageProcessor,
 )
 from transformers.models.internvl.video_processing_internvl import (
     InternVLVideoProcessor,
@@ -202,7 +202,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         processor: InternVLProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
+        image_processor: GotOcr2ImageProcessor = processor.image_processor
 
         num_image_patches = image_processor.get_number_of_image_patches(
             image_height,
@@ -270,16 +270,12 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
         processor = self.get_hf_processor()
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // processor.image_seq_length
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
+        max_total_frames = seq_len // processor.image_seq_length
+        max_frames_per_video = max_total_frames // max(num_videos, 1)
 
         return max(max_frames_per_video, 1)
 
@@ -303,7 +299,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         config = self.info.get_hf_config()
@@ -603,7 +599,6 @@ class InternS1ForConditionalGeneration(
             )
 
         self.img_context_token_id: int | None = None
-        self.video_context_token_id: int | None = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -612,7 +607,7 @@ class InternS1ForConditionalGeneration(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -625,7 +620,7 @@ class InternS1ForConditionalGeneration(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         return InternS1MultiModalProjector(config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -713,7 +708,6 @@ class InternS1ForConditionalGeneration(
             video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
-        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             h, w = self.config.vision_config.image_size

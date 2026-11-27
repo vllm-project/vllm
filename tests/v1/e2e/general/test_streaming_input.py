@@ -26,8 +26,11 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        reason="V1 currently only supported on CUDA, ROCm and XPU.",
+        allow_module_level=True,
+    )
 
 # Use a small model that doesn't require authentication for fast tests
 MODEL = "facebook/opt-125m"
@@ -259,7 +262,7 @@ async def test_streaming_input_cancel_output_stream(engine: AsyncLLM):
 
     # Collect a few outputs then cancel
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             if outputs_received >= 5:
                 # Cancel by breaking out of the loop (generator will be GC'd)
@@ -323,6 +326,37 @@ async def test_streaming_input_close_signals_completion(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_close_while_paused(engine: AsyncLLM):
+    """A pause rejects new requests only: closing an open session's input while
+    a `wait` pause drains it still completes the session normally."""
+    close_input = asyncio.Event()
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt="What is 2 + 2? The answer is")
+        await close_input.wait()
+
+    output_gen = engine.generate(
+        input_generator(), get_sampling_params(max_tokens=200), "test_close_paused"
+    )
+    try:
+        first = await asyncio.wait_for(anext(output_gen), timeout=60)
+        pause = asyncio.create_task(
+            engine.pause_generation(mode="wait", clear_cache=False)
+        )
+        # The pause has reached the engine, and the session is still running.
+        assert await asyncio.wait_for(engine.is_paused(), timeout=60)
+        close_input.set()
+        outputs, _ = await asyncio.wait_for(collect_outputs(output_gen), timeout=60)
+        await asyncio.wait_for(pause, timeout=60)
+    finally:
+        await engine.resume_generation()
+
+    num_tokens = sum(len(out.outputs[0].token_ids) for out in [first, *outputs])
+    assert num_tokens == 200
+    assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
     """Test that aborting the session cancels queued inputs.
 
@@ -353,7 +387,7 @@ async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
     output_gen = engine.generate(many_inputs_generator(), sampling_params, request_id)
 
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             # Cancel after receiving some outputs
             if outputs_received >= 10:
@@ -491,7 +525,7 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
 async def test_streaming_input_empty_generator(engine: AsyncLLM):
     """Test behavior when the input generator yields nothing.
 
-    An empty generator should still produce a finished output.
+    An empty generator should finish without producing output.
     """
     request_id = "test_empty_generator"
     sampling_params = get_sampling_params(max_tokens=10)
@@ -505,9 +539,7 @@ async def test_streaming_input_empty_generator(engine: AsyncLLM):
     async for output in engine.generate(empty_generator(), sampling_params, request_id):
         outputs.append(output)
 
-    # Should still get a finished marker
-    assert len(outputs) >= 1, "Should receive at least one output"
-    assert outputs[-1].finished, "Should have a finished output"
+    assert outputs == []
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -595,6 +627,61 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
         params_stop = SamplingParams(max_tokens=10, stop=["stop"])
         async for _ in engine.generate(dummy_generator(), params_stop, "test_stop"):
             pass
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_overflow_chunk_dropped_session_continues(
+    engine: AsyncLLM,
+):
+    """A chunk that would overflow max_model_len gets an empty "length" turn
+    and a later chunk that fits continues the session (#62707)."""
+    request_id = "test_overflow_dropped"
+    sampling_params = get_sampling_params(max_tokens=10)
+
+    # max_model_len is 2048: the second chunk overflows, the third fits.
+    first_chunk = "hello " * 1500
+    overflow_chunk = "world " * 700
+    fitting_chunk = " The end is near and"
+
+    first_turn_done = asyncio.Event()
+    finish_count = 0
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=first_chunk)
+        yield StreamingInput(prompt=overflow_chunk)
+        await first_turn_done.wait()
+        yield StreamingInput(prompt=fitting_chunk)
+
+    outputs: list[RequestOutput] = []
+    full_text = ""
+
+    async def consume() -> None:
+        nonlocal finish_count, full_text
+        async for output in engine.generate(
+            input_generator(), sampling_params, request_id
+        ):
+            outputs.append(output)
+            if output.outputs and output.outputs[0].text:
+                full_text += output.outputs[0].text
+            if output.outputs and output.outputs[0].finish_reason is not None:
+                finish_count += 1
+                if finish_count == 1:
+                    first_turn_done.set()
+
+    await asyncio.wait_for(consume(), timeout=180)
+
+    assert finish_count == 3
+    assert outputs[-1].finished
+    assert len(full_text) > 0
+    empty_turns = [
+        out
+        for out in outputs
+        if out.outputs
+        and out.outputs[0].finish_reason == "length"
+        and not out.outputs[0].text
+    ]
+    assert len(empty_turns) == 1, "the dropped chunk must end one empty reply"
+    assert not engine.output_processor.has_unfinished_requests()
 
 
 @pytest.mark.asyncio(loop_scope="module")

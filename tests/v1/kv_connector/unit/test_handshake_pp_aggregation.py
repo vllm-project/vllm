@@ -84,11 +84,10 @@ def _run_engine_core_handshake(
         engine_core_module, "maybe_attach_gc_debug_callback", lambda: None
     )
     monkeypatch.setattr(engine_core_module, "enable_envs_cache", lambda: None)
-    monkeypatch.setattr(engine_core_module, "get_hash_fn_by_name", lambda name: None)
-    monkeypatch.setattr(engine_core_module, "init_none_hash", lambda hash_fn: None)
     monkeypatch.setattr(
-        engine_core_module, "get_request_block_hasher", lambda *args: None
+        engine_core_module.kv_cache_utils, "NONE_HASH", None, raising=False
     )
+    monkeypatch.setattr(engine_core_module.kv_cache_utils, "_NONE_HASH_SEED", None)
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_rank_local=0),
@@ -96,10 +95,13 @@ def _run_engine_core_handshake(
             get_scheduler_cls=lambda: _FakeScheduler,
             enable_chunked_prefill=False,
             async_scheduling=False,
+            prefill_schedule_interval=1,
         ),
         speculative_config=None,
         ec_transfer_config=None,
+        is_mm_encoder_only=False,
         max_concurrent_batches=1,
+        num_hash_lookahead_tokens=0,
         model_config=SimpleNamespace(
             runner_type="generate",
             is_diffusion=False,
@@ -107,11 +109,11 @@ def _run_engine_core_handshake(
         ),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
-            prefix_caching_hash_algo="builtin",
+            prefix_caching_hash_algo="sha256",
         ),
     )
 
-    engine_core_module.EngineCore(vllm_config, _FakeExecutor, log_stats=False)
+    engine_core_module.EngineCore(vllm_config, _FakeExecutor, collect_stats=False)
     assert _FakeExecutor.last_instance is not None
     return _FakeExecutor.last_instance
 

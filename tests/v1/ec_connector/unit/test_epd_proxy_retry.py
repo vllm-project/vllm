@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Body handling across the EPD proxy's decode retries.
 
-Exercises the REAL helpers loaded from the ``examples/`` proxy, so a future
+Exercises the REAL helpers loaded from the `examples/` proxy, so a future
 change to them is what these tests catch.
 """
 
 import asyncio
+import copy
 import importlib.util
 import sys
 from pathlib import Path
@@ -18,6 +19,9 @@ import msgspec
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+
+from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.processing.inputs import ProcessorInputs
 
 PROXY_REL = "examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py"
 
@@ -87,6 +91,82 @@ class _EncoderSession:
         return _EncoderResponse(self._replies.pop(0))
 
 
+@pytest.mark.parametrize("second_type", ["image_url", "audio_url", "input_audio"])
+@pytest.mark.parametrize("transfer", ["example", "nixl", "mooncake"])
+def test_partial_audio_metadata_falls_back_with_all_transfers(
+    proxy, monkeypatch, second_type, transfer
+):
+    """Never mix metadata-only audio with raw media, or lose EC identities."""
+    import copy
+
+    seen = []
+    reported = {}
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            body = msgspec.json.decode(data)
+            seen.append(body)
+            item = body["messages"][0]["content"][0]
+            mm_hash = item["uuid"] + "-processed"
+            entry: dict[str, Any] = {
+                "metadata": {"audio_feature_lengths": [100]} if len(seen) == 1 else {},
+                "item_indices": [0],
+            }
+            if transfer == "nixl":
+                entry.update(peer_host="encoder", peer_port=1234, size_bytes=4096)
+            reported[mm_hash] = entry
+            return _EncoderResponse({mm_hash: entry})
+
+    second = (
+        {"type": second_type, "input_audio": {"data": "large", "format": "wav"}}
+        if second_type == "input_audio"
+        else {"type": second_type, second_type: {"url": "large"}}
+    )
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "small"},
+                        "uuid": "user-audio",
+                    },
+                    second,
+                ],
+            }
+        ],
+        "mm_processor_kwargs": {"sampling_rate": 16000},
+    }
+    original = copy.deepcopy(body)
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    consumer = "tcp://consumer:1" if transfer == "mooncake" else None
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    assert body == original
+    assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
+    content = prepared["messages"][0]["content"]
+    assert [item["type"] for item in content] == ["audio_url", second_type]
+    assert content[0]["uuid"] == "user-audio"
+    for item, encoded in zip(content, seen):
+        assert item == encoded["messages"][0]["content"][0]
+    params = prepared["ec_transfer_params"]
+    for mm_hash, entry in reported.items():
+        assert params[mm_hash] == entry
+    if transfer == "mooncake":
+        assert params["ec_items"] == [
+            {
+                "mm_hash": mm_hash,
+                "transfer_id": encoded["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+            for mm_hash, encoded in zip(reported, seen)
+        ]
+
+
 @pytest.mark.parametrize("no_rewrite", [False, True])
 @pytest.mark.parametrize(
     "batch_size, expected_sizes", [(0, [3, 3]), (1, [1] * 6), (2, [2, 2, 1, 1])]
@@ -117,6 +197,10 @@ def test_image_batches_preserve_item_identity(
                     },
                 )
                 entry["item_indices"].append(index)
+                # Mooncake aggregates by hash, retaining the last occurrence's ID.
+                entry["transfer_id"] = body["ec_transfer_params"]["ec_items"][index][
+                    "transfer_id"
+                ]
             # Response ordering must not affect the image-to-metadata mapping.
             return _EncoderResponse(dict(reversed(list(params.items()))))
 
@@ -159,8 +243,10 @@ def test_image_batches_preserve_item_identity(
             assert item["image_url"]["url"] in (
                 {"A", "C"} if url.startswith("http://e0/") else {"A", "D", "F"}
             )
-    assert [meta[i]["image_grid_thw"][-1] for i in range(6)] == list(map(ord, images))
-    assert [meta[i]["ec_mm_hash"] for i in range(6)] == [
+    assert [meta[i][0]["metadata"]["image_grid_thw"][-1] for i in range(6)] == list(
+        map(ord, images)
+    )
+    assert [meta[i][0]["mm_hash"] for i in range(6)] == [
         x + "-processed" for x in images
     ]
     assert handles["A-processed"]["peer_port"] == 1234
@@ -187,6 +273,50 @@ def test_image_batches_preserve_item_identity(
     assert [
         ECMooncakeScheduler._request_transfer_id(request, i) for i in range(len(images))
     ] == expected_transfers
+
+
+@pytest.mark.parametrize("consumer", [None, "tcp://consumer:1"])
+@pytest.mark.parametrize("has_indices", [False, True])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_audio_in_video_accepts_single_video_feature(
+    proxy, monkeypatch, consumer, has_indices, has_metadata
+):
+    """A video-only encoder can ignore use_audio_in_video without breaking decode."""
+    seen = []
+    metadata = {"video_grid_thw": [1, 2, 4]} if has_metadata else {}
+    entry: dict[str, Any] = {"modality": "video", "metadata": metadata}
+    if has_indices:
+        entry["item_indices"] = [0]
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            seen.append(msgspec.json.decode(data))
+            return _EncoderResponse({"video-hash": entry})
+
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    video = {"type": "video_url", "video_url": {"url": "video-only"}}
+    body = {
+        "messages": [{"role": "user", "content": [video]}],
+        "mm_processor_kwargs": {"use_audio_in_video": True},
+    }
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    content = prepared["messages"][0]["content"]
+    expected = (
+        {"type": "video_embeds", "video_embeds": metadata} if has_metadata else video
+    )
+    assert content == [{**expected, "uuid": proxy.content_uuid(video)}]
+    if consumer is not None:
+        assert prepared["ec_transfer_params"]["ec_items"] == [
+            {
+                "mm_hash": "video-hash",
+                "transfer_id": seen[0]["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+        ]
 
 
 def test_batch_rejects_ambiguous_metadata(proxy, monkeypatch):
@@ -492,13 +622,21 @@ def test_pooled_connections_are_retired_before_the_server_closes_them(
 
 @pytest.mark.parametrize(
     "no_rewrite, transfer",
-    [(False, None), (True, None), (False, "push"), (False, "handle")],
+    [
+        (False, None),
+        (True, None),
+        (False, "push"),
+        (True, "push"),
+        (False, "handle"),
+    ],
 )
-def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
-    """Keep raw video and neighboring images, but never discard transfer handles."""
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_video_audio_rewrite(proxy, monkeypatch, no_rewrite, transfer, has_metadata):
+    """One video publishes two features; forward both even on raw fallback."""
     import copy
 
     from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
     video = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
     images = [{"type": "image_url", "image_url": {"url": key}} for key in ("A", "B")]
@@ -509,8 +647,23 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     original = copy.deepcopy(body)
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
-        [SimpleNamespace(identifier=key, data=None) for key in ("video", "audio")], None
+        [
+            MultiModalFeatureSpec(
+                data=None,
+                modality=key,
+                identifier=key,
+                mm_position=PlaceholderRange(offset=0, length=0),
+            )
+            for key in ("video", "audio")
+        ],
+        SimpleNamespace(fields_for=lambda _: set()),
     )
+    if has_metadata:
+        video_metadata["video"]["metadata"] = {
+            "video_grid_thw": [4, 2, 2],
+            "second_per_grid_ts": [0.5],
+        }
+        video_metadata["audio"]["metadata"] = {"audio_feature_lengths": [100]}
     if transfer == "handle":
         video_metadata["audio"]["transfer_id"] = "reservation"
     image_metadata = {
@@ -524,26 +677,425 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     monkeypatch.setattr(proxy, "encode_session", replies)
     consumer = "tcp://consumer:1" if transfer == "push" else None
     preparation = proxy.prepare_for_decode(body, "r", ["http://e0"], "", consumer)
-    if transfer:
-        with pytest.raises(proxy.HTTPException, match="cannot be matched"):
-            asyncio.run(preparation)
-        return
-
     prepared, _, _ = asyncio.run(preparation)
     assert body == original
     assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
     final = prepared["messages"][0]["content"]
-    assert final[1] == video
     handles = prepared["ec_transfer_params"]
-    assert not video_metadata.keys() & handles.keys()
+    assert all(handles[key] == value for key, value in video_metadata.items())
     if no_rewrite:
         assert final == original["messages"][0]["content"]
-        assert "ec_items" not in handles
+        if consumer is None:
+            assert "ec_items" not in handles
+        else:
+            assert {entry["mm_hash"] for entry in handles["ec_items"]} == {
+                "A",
+                "B",
+                "video",
+                "audio",
+            }
+    elif not has_metadata:
+        assert [item["type"] for item in final] == [
+            "image_url",
+            "video_url",
+            "image_url",
+        ]
+        assert final[1]["uuid"] == proxy.content_uuid(video)
+        assert {entry["mm_hash"] for entry in handles["ec_items"]} == {
+            "A",
+            "B",
+            "video",
+            "audio",
+        }
     else:
+        assert [item["type"] for item in final] == [
+            "image_embeds",
+            "video_embeds",
+            "image_embeds",
+        ]
+        assert final[1] == {
+            "type": "video_embeds",
+            "video_embeds": video_metadata["video"]["metadata"],
+            "audio_embeds": video_metadata["audio"]["metadata"],
+            "uuid": proxy.content_uuid(video),
+        }
         for position, image, key in ((0, images[0], "A"), (2, images[1], "B")):
             assert final[position] == {
                 "type": "image_embeds",
                 "image_embeds": image_metadata[key]["metadata"],
                 "uuid": proxy.content_uuid(image),
             }
-        assert [item["mm_hash"] for item in handles["ec_items"]] == ["A", "B"]
+        assert [item["mm_hash"] for item in handles["ec_items"]] == [
+            "A",
+            "video",
+            "audio",
+            "B",
+        ]
+
+
+def _vid(url: str) -> dict[str, Any]:
+    return {"type": "video_url", "video_url": {"url": url}}
+
+
+def _img(url: str) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+class _FanoutSession:
+    """Record each encoder child body; reply with one entry per item."""
+
+    def __init__(self, seen: list):
+        self._seen = seen
+
+    async def post(self, url, data=None, headers=None):
+        body = msgspec.json.decode(data)
+        self._seen.append((url, body))
+        params: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(body["messages"][0]["content"]):
+            media = item.get("video_url") or item.get("image_url") or {}
+            entry = params.setdefault(
+                media["url"],
+                {"metadata": {"video_grid_thw": [1, 2, 3]}, "item_indices": []},
+            )
+            entry["item_indices"].append(index)
+        return _EncoderResponse(params)
+
+
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+def test_fanout_slices_per_video_kwargs(proxy, monkeypatch, nested):
+    """A child carries the per-video element of the videos it holds.
+
+    The unsliced list made every encoder child sample with the first
+    element and publish under a hash the consumer never looks up.
+    """
+    seen: list = []
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    scoped = {
+        "do_sample_frames": True,
+        "num_frames": [16, 32],
+        "fps": [2.0, 4.0],
+        "size": [420, 420],
+    }
+    kwargs = {"videos_kwargs": dict(scoped)} if nested else dict(scoped)
+    body = {
+        "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
+        "mm_processor_kwargs": kwargs,
+        "media_io_kwargs": {"video": {"fps": 12}},
+    }
+    original = copy.deepcopy(body)
+    asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0"], "r", enable_per_video_kwargs_slicing=True
+        )
+    )
+    assert body == original
+
+    by_url = {b["messages"][0]["content"][0]["video_url"]["url"]: b for _, b in seen}
+    assert len(by_url) == 2
+    for url, num_frames, fps in (("a", [16], [2.0]), ("b", [32], [4.0])):
+        child = by_url[url]["mm_processor_kwargs"]
+        scope = child["videos_kwargs"] if nested else child
+        assert scope["num_frames"] == num_frames
+        assert scope["fps"] == fps
+        assert scope["do_sample_frames"] is True
+        assert scope["size"] == [420, 420]
+        assert by_url[url]["media_io_kwargs"] == {"video": {"fps": 12}}
+
+
+def test_fanout_keeps_scalar_and_unrelated_kwargs(proxy, monkeypatch):
+    """Only known per-video lists are partitioned."""
+    seen: list = []
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    kwargs = {"videos_kwargs": {"fps": 2.0, "size": [420, 420]}}
+    body = {
+        "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
+        "mm_processor_kwargs": kwargs,
+    }
+    asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0"], "r", enable_per_video_kwargs_slicing=True
+        )
+    )
+    assert len(seen) == 2
+    for _, child in seen:
+        assert child["mm_processor_kwargs"] == kwargs
+
+
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+def test_fanout_keeps_kwargs_for_image_only_request(proxy, monkeypatch, nested):
+    """Without videos there is no per-video partition to perform."""
+    seen: list = []
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    kwargs: dict[str, Any] = {"num_frames": [16, 32]}
+    if nested:
+        kwargs = {"videos_kwargs": kwargs}
+    body = {
+        "messages": [{"role": "user", "content": [_img("a"), _img("b")]}],
+        "mm_processor_kwargs": kwargs,
+    }
+    original = copy.deepcopy(body)
+    asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0", "http://e1"], "r", enable_per_video_kwargs_slicing=True
+        )
+    )
+    assert len(seen) == 2
+    for _, child in seen:
+        assert child["mm_processor_kwargs"] == kwargs
+    assert body == original
+
+
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+def test_fanout_interleaved_media_and_two_encoders(proxy, monkeypatch, nested):
+    """Video positions count videos only; image children preserve all kwargs."""
+    seen: list = []
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    kwargs = {"do_sample_frames": True, "num_frames": [16, 32]}
+    if nested:
+        kwargs = {"videos_kwargs": kwargs}
+    body = {
+        "messages": [
+            {"role": "user", "content": [_img("x"), _vid("a")]},
+            {"role": "user", "content": [_vid("b"), _img("y")]},
+        ],
+        "mm_processor_kwargs": kwargs,
+    }
+    original = copy.deepcopy(body)
+    asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0", "http://e1"], "r", enable_per_video_kwargs_slicing=True
+        )
+    )
+    assert body == original
+
+    for _, batch in seen:
+        videos = [
+            i for i in batch["messages"][0]["content"] if i["type"] == "video_url"
+        ]
+        images = [
+            i for i in batch["messages"][0]["content"] if i["type"] == "image_url"
+        ]
+        scope = batch["mm_processor_kwargs"]
+        if nested:
+            scope = scope["videos_kwargs"]
+        if videos:
+            # One video per child; position among the request's two videos.
+            expected = [16] if videos[0]["video_url"]["url"] == "a" else [32]
+            assert scope["num_frames"] == expected
+            assert not images
+        else:
+            assert batch["mm_processor_kwargs"] == kwargs
+    covered = {
+        (i["type"], (i.get("video_url") or i.get("image_url"))["url"])
+        for _, b in seen
+        for i in b["messages"][0]["content"]
+    }
+    assert covered == {
+        ("image_url", "x"),
+        ("video_url", "a"),
+        ("video_url", "b"),
+        ("image_url", "y"),
+    }
+
+
+def test_fanout_rejects_short_per_video_list(proxy, monkeypatch):
+    """An undersized per-video list fails fast instead of slicing garbage."""
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession([]))
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    kwargs = {"videos_kwargs": {"do_sample_frames": True, "num_frames": [16]}}
+    body = {
+        "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
+        "mm_processor_kwargs": kwargs,
+    }
+    with pytest.raises(proxy.HTTPException) as exc:
+        asyncio.run(
+            proxy.fanout_encoder_primer(
+                body, ["http://e0"], "r", enable_per_video_kwargs_slicing=True
+            )
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("scoped_value", [[16, 32], 16])
+def test_fanout_preserves_scoped_precedence(proxy, scoped_value):
+    """Only the effective list is sliced; a shadowed short list is legal."""
+    kwargs = {"num_frames": [99], "videos_kwargs": {"num_frames": scoped_value}}
+    original = copy.deepcopy(kwargs)
+    for index in range(2):
+        child = proxy._slice_mm_processor_kwargs(kwargs, [index])
+        expected = [scoped_value[index]] if isinstance(scoped_value, list) else 16
+        assert child == {
+            "num_frames": [99],
+            "videos_kwargs": {"num_frames": expected},
+        }
+    image = proxy._slice_mm_processor_kwargs(kwargs, [])
+    assert image == kwargs
+    assert kwargs == original
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("short", [False, True])
+def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, short):
+    """Without opt-in, even image children keep the original kwargs."""
+    seen: list = []
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    values = [16] if short else [16, 32]
+    kwargs: dict[str, Any] = {"num_frames": values}
+    if nested:
+        kwargs = {"videos_kwargs": kwargs}
+    body = {
+        "messages": [{"role": "user", "content": [_vid("a"), _img("x"), _vid("b")]}],
+        "mm_processor_kwargs": kwargs,
+    }
+    original = copy.deepcopy(body)
+    asyncio.run(proxy.fanout_encoder_primer(body, ["http://e0"], "r"))
+    assert len(seen) == 3
+    assert all(child["mm_processor_kwargs"] == kwargs for _, child in seen)
+    assert body == original
+
+    def hashes(uuids, options):
+        inputs = ProcessorInputs(
+            prompt=[],
+            mm_data_items=MultiModalDataItems(
+                {"video": VideoProcessorItems([None] * len(uuids))}
+            ),
+            mm_uuid_items={"video": uuids},
+            hf_processor_mm_kwargs=options,
+        )
+        return inputs.get_mm_hashes("base-hash-model", "sha256")["video"]
+
+    videos = [_vid("a"), _vid("b")]
+    uuids = [proxy.content_uuid(video) for video in videos]
+    parent_hashes = hashes(uuids, kwargs)
+    for _, child in seen:
+        item = child["messages"][0]["content"][0]
+        if item["type"] != "video_url":
+            continue
+        index = uuids.index(item["uuid"])
+        child_hash = hashes([item["uuid"]], child["mm_processor_kwargs"])[0]
+        assert child_hash == parent_hashes[index]
+        if not short:
+            sliced = proxy._slice_mm_processor_kwargs(kwargs, [index])
+            assert hashes([item["uuid"]], sliced)[0] != parent_hashes[index]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("enabled", "kwargs", "invalid"),
+    [
+        (True, {"num_frames": [16]}, True),
+        (True, {"videos_kwargs": {"num_frames": [16]}}, True),
+        (True, {"fps": [2.0]}, True),
+        (True, {"videos_kwargs": {"fps": [2.0]}}, True),
+        (True, {"num_frames": [16, 32]}, False),
+        (True, {"num_frames": [99], "videos_kwargs": {"num_frames": [16, 32]}}, False),
+        (False, {"num_frames": [16]}, False),
+        (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False),
+    ],
+)
+async def test_per_video_kwargs_http_validation(
+    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid
+):
+    """Reject invalid opted-in requests before ASGI response headers or fan-out."""
+    seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
+    expected = b"data: [DONE]\n\n" if stream else b'{"choices": []}'
+
+    async def backend(request):
+        stage = request.match_info["stage"]
+        seen[stage].append(await request.json())
+        if stage in ("encode", "prefill"):
+            return web.json_response({})
+        return web.Response(
+            body=expected,
+            content_type="text/event-stream" if stream else "application/json",
+        )
+
+    backend_app = web.Application()
+    backend_app.router.add_post("/{stage}/v1/chat/completions", backend)
+    async with TestServer(backend_app) as server:
+        for stage, field in (
+            ("encode", "e_urls"),
+            ("prefill", "p_urls"),
+            ("decode", "d_urls"),
+        ):
+            monkeypatch.setattr(
+                proxy.app.state,
+                field,
+                [str(server.make_url(f"/{stage}"))],
+                raising=False,
+            )
+        monkeypatch.setattr(proxy.app.state, "d_ec_urls", [], raising=False)
+        monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
+        monkeypatch.setitem(
+            proxy.app.state._state, "enable_per_video_kwargs_slicing", enabled
+        )
+        monkeypatch.setattr(proxy, "NO_REWRITE", True)
+        target_app = proxy.app
+        if dynamic:
+            monkeypatch.setenv("ADMIN_API_KEY", "test-key")
+            target_app = proxy.build_app(
+                proxy.EPDProxyConfig(
+                    probe_interval=0, enable_per_video_kwargs_slicing=enabled
+                )
+            )
+        body = {
+            "model": "served-model-alias",
+            "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
+            "mm_processor_kwargs": kwargs,
+            "stream": stream,
+        }
+        await proxy.on_startup()
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=target_app, raise_app_exceptions=False
+                ),
+                base_url="http://proxy",
+            ) as client:
+                if dynamic:
+                    for stage in ("encode", "prefill", "decode"):
+                        registered = await client.post(
+                            "/instances",
+                            headers={"X-API-Key": "test-key"},
+                            json={
+                                "role": stage,
+                                "url": str(server.make_url(f"/{stage}")),
+                            },
+                        )
+                        assert registered.status_code == 200
+                response = await client.post("/v1/chat/completions", json=body)
+        finally:
+            await proxy.on_shutdown()
+
+    if invalid:
+        assert response.status_code == 400
+        assert "entries, one per video" in response.json()["detail"]
+        assert seen == {"encode": [], "prefill": [], "decode": []}
+    else:
+        assert response.status_code == 200
+        assert response.content == expected
+        assert len(seen["encode"]) == 2
+        assert len(seen["prefill"]) == len(seen["decode"]) == 1
+        for stage in ("prefill", "decode"):
+            assert seen[stage][0]["mm_processor_kwargs"] == kwargs
+        for child in seen["encode"]:
+            url = child["messages"][0]["content"][0]["video_url"]["url"]
+            index = 0 if url == "a" else 1
+            actual = child["mm_processor_kwargs"]
+            if enabled:
+                if "videos_kwargs" in kwargs:
+                    assert actual == {
+                        "num_frames": [99],
+                        "videos_kwargs": {"num_frames": [[16, 32][index]]},
+                    }
+                else:
+                    assert actual == {"num_frames": [[16, 32][index]]}
+            else:
+                assert actual == kwargs

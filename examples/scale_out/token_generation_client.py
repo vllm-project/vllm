@@ -3,6 +3,8 @@
 """Call a token-in/token-out server started with:
 
 vllm serve Qwen/Qwen3-0.6B --enable-scale-out
+
+Fields and DP rank routing: docs/serving/online_serving/token_in_token_out.md
 """
 
 import httpx

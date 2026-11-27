@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
     SequenceFeatureExtractor,
     SiglipVisionConfig,
@@ -123,7 +123,7 @@ class Phi4MMImageEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
         model_dir: str = "",
@@ -163,7 +163,6 @@ class Phi4MMImageEncoder(nn.Module):
         self.use_hd_transform = True
         self.with_learnable_separator = True
         self.hd_transform_order = "sub_glb"
-        self.freeze_img_processor = False
         self.crop_size = 448
 
         # image token compression
@@ -885,14 +884,14 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if not hf_data:
+        if not mm_data:
             return processed_data
 
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
@@ -903,13 +902,13 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         ]
         processed_data["num_img_tokens"] = num_img_tokens
 
-        audios = hf_data.get("audios", [])
+        audios = mm_data.get("audios", [])
         assert isinstance(audios, list)
         audio_features = processed_data.get("input_audio_embeds")
         if audio_features is None:
             return processed_data
 
-        sr = self.info.get_feature_extractor(**hf_kwargs).sampling_rate
+        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
         feature_sizes = [
             self.info.get_audio_num_frames(len(audio), sr) for audio, _ in audios
         ]
@@ -1297,7 +1296,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

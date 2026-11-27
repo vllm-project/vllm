@@ -7,8 +7,9 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -29,11 +30,59 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
+
+logger = init_logger(__name__)
+
+
+def dsv4_swa_replay_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether DeepSeek-V4 rebuilds its sliding-window state by replay.
+
+    ROCm only, and only when the KV connector asks for it (UMBP with
+    `rebuild_sliding_window: true`): the SWA cache and compressor states then
+    stay out of prefix caching, so the connector stores just the compressed KV
+    and the scheduler recomputes the last window of every hit. The ROCm sparse
+    SWA metadata clamps the window at `replay_start`. Unlike DeepSeek-V4.1,
+    V4 needs about `sliding_window * num_layers` replayed tokens for an exact
+    window state, so the one-window replay is an approximation.
+    """
+    if not current_platform.is_rocm():
+        return False
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return False
+    from vllm.distributed.kv_transfer.kv_connector.factory import (
+        KVConnectorFactory,
+    )
+
+    connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+    if not connector_cls.requests_sliding_window_replay(kv_transfer_config):
+        return False
+    blockers = []
+    if not vllm_config.cache_config.swa_bounded_replay:
+        blockers.append("--no-swa-bounded-replay")
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        blockers.append("prefill context parallelism")
+    if blockers:
+        logger.warning_once(
+            "DeepSeek-V4 SWA bounded replay: disabled (%s); %s stores every "
+            "KV cache group, including the sliding-window cache and "
+            "compressor states.",
+            ", ".join(blockers),
+            kv_transfer_config.kv_connector,
+        )
+        return False
+    logger.info_once(
+        "DeepSeek-V4 SWA bounded replay: enabled; %s stores the compressed KV "
+        "only, and the sliding-window cache and compressor states stay out of "
+        "prefix caching and are rebuilt by recomputing each hit's last window.",
+        kv_transfer_config.kv_connector,
+    )
+    return True
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -66,7 +115,7 @@ class CompressorBackend(AttentionBackend):
         return "CompressorBackend"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @classmethod
@@ -94,9 +143,8 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
-        self.block_size = mla_spec.block_size
+        assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
+        self.block_size = self.kv_cache_spec.block_size
 
         self.token_to_req_indices = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
@@ -176,18 +224,25 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
         # full-cache rows share state pages with contiguous KV pages, so padding
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
-        return SlidingWindowMLASpec(  # only has one vector instead of K + V
+        spec = MLAAttentionSpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.state_dim,
             dtype=self.dtype,
-            sliding_window=self.sliding_window,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+        )
+        return SlidingWindowManager.layer_config(
+            spec,
+            sliding_window=self.sliding_window,
+            # The SWA replay (>= 128 tokens from a 256-aligned hit) rewrites
+            # the C4 overlap and any partial C128 group before they are read.
+            rebuilt_by_replay=dsv4_swa_replay_enabled(vllm_config),
         )
 
     def forward(self): ...
@@ -196,13 +251,21 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
     Owns the linear / norm / state-cache / ape state and the shared forward
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
-    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    (`compress_norm_rope_store_triton`) by default, except for the NVIDIA
     head_dim=512 path which uses the CuTeDSL compressor kernels for better
     performance.
     """
@@ -267,7 +330,14 @@ class DeepseekCompressor(nn.Module):
             requires_grad=False,
         )
 
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        # CPU packs the weight for its GEMM and frees the raw copy, so it keeps
+        # the quant-method forward and upcasts the BF16 output itself.
+        kv_score_linear = (
+            MergedColumnParallelLinear
+            if current_platform.is_cpu()
+            else DeepseekV4CompressorKVScoreLinear
+        )
+        self.fused_wkv_wgate = kv_score_linear(
             self.hidden_size,
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,
@@ -373,10 +443,7 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
-        token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
-        num_actual = slot_mapping.shape[0]
-        block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
@@ -408,15 +475,43 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
-        # full graph cannot branch on per-step CPU metadata after capture
+        # A captured graph would replay the capture batch's skip decision.
         if (
             current_platform.is_cuda()
             and self.head_dim == 512
             and self.compress_ratio == 128
-            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and not torch.cuda.is_current_stream_capturing()
             and state_metadata.c128_boundary is False
         ):
             return
+
+        self._compress_norm_rope_store(
+            state_metadata,
+            state_cache,
+            state_width,
+            positions,
+            rotary_emb,
+            attn_metadata,
+            pdl_kwargs,
+        )
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        """Compress the saved states and write K to the cache; a platform
+        subclass overrides it to write its own cache layout."""
+        token_to_req_indices = state_metadata.token_to_req_indices
+        slot_mapping = state_metadata.slot_mapping
+        num_actual = slot_mapping.shape[0]
+        block_table = state_metadata.block_table
+        block_size = state_metadata.block_size
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -465,11 +560,12 @@ class DeepseekCompressor(nn.Module):
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
                 "compress_scratch": self._compress_scratch,
+                "fp8_scale": fp8_scale,
             }
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
-            extra_kwargs = {}
+            extra_kwargs = {"fp8_scale": fp8_scale}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,

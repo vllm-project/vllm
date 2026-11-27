@@ -4,11 +4,10 @@
 
 from collections.abc import Sequence
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeAlias
 
 from typing_extensions import override
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
@@ -37,6 +36,29 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+ShmHandle: TypeAlias = tuple[int, int, list[int]]
+
+
+def _get_shm_handle(mm_item: MultiModalKwargsItem) -> ShmHandle | None:
+    if "address" not in mm_item:
+        return None
+    if "monotonic_id" not in mm_item or "signature" not in mm_item:
+        raise ValueError("Missing SHM handle signature for cache key.")
+
+    address = mm_item["address"].data
+    monotonic_id = mm_item["monotonic_id"].data
+    signature = mm_item["signature"].data
+    if (
+        type(address) is not int
+        or not 0 <= address < 2**64
+        or type(monotonic_id) is not int
+        or not 0 <= monotonic_id < 2**32
+        or not isinstance(signature, list)
+    ):
+        raise ValueError("Invalid SHM handle signature for cache key.")
+
+    return address, monotonic_id, signature
+
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     """The cache which is used on P0 when SHM caching is enabled.
@@ -57,7 +79,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=mm_config.mm_shm_cache_buffer_name,
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -98,8 +120,12 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             self._total += 1
 
             address, monotonic_id = self._shm_cache.get_cached(mm_hash)
+            signature = self._shm_cache.get_signature(mm_hash)
             prompt_updates = self._p0_cache[mm_hash]
-            return self.address_as_item(address, monotonic_id), prompt_updates
+            return (
+                self.address_as_item(address, monotonic_id, signature),
+                prompt_updates,
+            )
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
         item, prompt_updates = mm_item
@@ -108,12 +134,16 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
         try:
             address, monotonic_id = self._shm_cache.put(mm_hash, item)
+            signature = self._shm_cache.get_signature(mm_hash)
             # Try to remove dangling items if p0 cache is too large.
             if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
                 self.remove_dangling_items()
 
             self._p0_cache[mm_hash] = prompt_updates
-            return self.address_as_item(address, monotonic_id), prompt_updates
+            return (
+                self.address_as_item(address, monotonic_id, signature),
+                prompt_updates,
+            )
         except ValueError as e:
             # `put` raises ValueError either for an oversize item or for a
             # duplicate key (concurrent insert); the latter is benign so we
@@ -139,9 +169,27 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
-        """Touch the item in shared memory cache to prevent eviction.
-        Increments writer_flag on sender side."""
+        """Touch the item in shared memory cache to prevent eviction."""
         self._shm_cache.touch(mm_hash)
+
+    @override
+    def release_sender_touches(self) -> None:
+        self._shm_cache.release_touches()
+
+    @override
+    def validate_input_item(
+        self,
+        mm_item: MultiModalKwargsItem,
+        mm_hash: str,
+    ) -> None:
+        if (handle := _get_shm_handle(mm_item)) is not None:
+            address, monotonic_id, signature = handle
+            self._shm_cache.verify_signature(
+                mm_hash,
+                address,
+                monotonic_id,
+                signature,
+            )
 
     @override
     def clear_cache(self) -> None:
@@ -171,6 +219,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         self,
         address: int,
         monotonic_id: int,
+        signature: list[int],
     ) -> MultiModalKwargsItem:
         addr_elem = MultiModalFieldElem(
             data=address,
@@ -181,7 +230,18 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             field=MultiModalBatchedField(),
         )
 
-        return MultiModalKwargsItem({"address": addr_elem, "monotonic_id": id_elem})
+        signature_elem = MultiModalFieldElem(
+            data=signature,
+            field=MultiModalBatchedField(),
+        )
+
+        return MultiModalKwargsItem(
+            {
+                "address": addr_elem,
+                "monotonic_id": id_elem,
+                "signature": signature_elem,
+            }
+        )
 
 
 class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
@@ -205,7 +265,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=mm_config.mm_shm_cache_buffer_name,
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -235,10 +295,9 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_hash: str,
     ) -> MultiModalKwargsItem:
         assert mm_item is not None, f"Expected an address item for {mm_hash=}"
-        if "address" in mm_item:
-            address = cast(int, mm_item["address"].data)
-            monotonic_id = cast(int, mm_item["monotonic_id"].data)
-            return self._shm_cache.get(address, monotonic_id)
+        if (handle := _get_shm_handle(mm_item)) is not None:
+            address, monotonic_id, signature = handle
+            return self._shm_cache.get(address, monotonic_id, signature, mm_hash)
 
         return mm_item
 
@@ -248,13 +307,16 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_hash: str,
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
-        """Touch the item in shared memory cache to prevent eviction.
-        Increments reader_count on receiver side."""
+        """Validate the item's handle in shared memory cache."""
         assert mm_item is not None
-        if "address" in mm_item:
-            address = cast(int, mm_item["address"].data)
-            monotonic_id = cast(int, mm_item["monotonic_id"].data)
-            self._shm_cache.touch(mm_hash, address=address, monotonic_id=monotonic_id)
+        if (handle := _get_shm_handle(mm_item)) is not None:
+            address, monotonic_id, signature = handle
+            self._shm_cache.touch(
+                mm_hash,
+                address=address,
+                monotonic_id=monotonic_id,
+                signature=signature,
+            )
 
     @override
     def clear_cache(self) -> None:

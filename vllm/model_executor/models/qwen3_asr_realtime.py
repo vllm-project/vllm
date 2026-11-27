@@ -58,7 +58,6 @@ class Qwen3ASRRealtimeBuffer:
     """
 
     def __init__(self, sampling_rate: int, segment_duration_s: float = 5.0):
-        self._sampling_rate = sampling_rate
         self._segment_size = int(segment_duration_s * sampling_rate)
 
         self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * sampling_rate
@@ -120,6 +119,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         )
 
         audio_data = audios[0]
+        assert audio_data is not None
         audio_feature_lengths = audio_data.get("audio_feature_lengths")
         if audio_feature_lengths is not None:
             if isinstance(audio_feature_lengths.data, torch.Tensor):

@@ -1,4 +1,4 @@
-<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)
+<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
 
 You are a helpful assistant.
 
@@ -28,7 +28,7 @@ Otherwise, output directly after </think> with tool calls or final response.
 {"name": "search", "description": "Search the web for information", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "num_results": {"type": "integer", "description": "Number of results to return"}}, "required": ["query"]}}
 
 You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
-<｜User｜>What's the weather in Beijing?<｜Assistant｜><think>The user wants to know the weather in Beijing. I should use the get_weather tool.</think>
+<｜User｜>What's the weather like in Beijing?<｜Assistant｜><think>The user wants the weather in Beijing. I should call get_weather.</think>
 
 <｜DSML｜ calls>
 <｜DSML｜ invoke name="get_weather">

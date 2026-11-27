@@ -141,7 +141,7 @@ class MsgpackEncoder:
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
 
-    When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will be
+    When a `oob_tensor_consumer` is provided, tensors (CUDA and CPU) will be
     offered to it for out-of-band handling.
     """
 
@@ -315,7 +315,7 @@ class MsgpackDecoder:
     Note that unlike vanilla `msgspec` Decoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    ``oob_tensor_provider`` must be used when an OOBTensorConsumer is used on the
+    `oob_tensor_provider` must be used when an OOBTensorConsumer is used on the
     encoder side.
     """
 
@@ -509,13 +509,13 @@ def run_method(
 
 
 class PydanticMsgspecMixin:
-    """Make a ``msgspec.Struct`` compatible with Pydantic for both
+    """Make a `msgspec.Struct` compatible with Pydantic for both
     **validation** (JSON/dict -> Struct) and **serialization**
     (Struct -> JSON-safe dict).
 
-    Subclasses may set ``__pydantic_msgspec_exclude__`` (a ``set[str]``)
+    Subclasses may set `__pydantic_msgspec_exclude__` (a `set[str]`)
     to list non-underscore field names that should also be stripped from
-    serialized output.  Fields whose names start with ``_`` are always
+    serialized output.  Fields whose names start with `_` are always
     excluded automatically.
     """
 
@@ -532,7 +532,7 @@ class PydanticMsgspecMixin:
         called on every validation.
         """
         msgspec_fields = {f.name: f for f in msgspec.structs.fields(source_type)}
-        type_hints = get_type_hints(source_type)
+        type_hints = get_type_hints(source_type, include_extras=True)
 
         # Build the Pydantic typed_dict_field for each msgspec field
         fields = {}
@@ -605,9 +605,9 @@ class PydanticMsgspecMixin:
     @staticmethod
     def _serialize_msgspec(value: Any) -> Any:
         """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
-        private (``_``-prefixed) and explicitly excluded fields.
+        private (`_`-prefixed) and explicitly excluded fields.
 
-        Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
+        Uses `msgspec.to_builtins` which respects `omit_defaults=True`,
         so only fields that differ from their declared defaults are included.
         """
         raw = msgspec.to_builtins(value)

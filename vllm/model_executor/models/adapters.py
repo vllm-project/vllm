@@ -14,6 +14,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
+    InvalidSentenceTransformersModulePath,
+    get_sentence_transformers_module_file,
     try_get_dense_modules,
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -28,6 +30,24 @@ if TYPE_CHECKING:
 _T = TypeVar("_T", bound=nn.Module)
 
 logger = init_logger(__name__)
+
+# Load formats whose weight iterators yield tensors that are never reused
+_OWNED_TENSOR_LOAD_FORMATS = frozenset(
+    {
+        "auto",
+        "hf",
+        "safetensors",
+        "mistral",
+        "pt",
+        "npcache",
+        "instanttensor",
+        "tensorizer",
+        "sharded_state",
+        "modelexpress",
+        "runai_streamer",
+        "runai_streamer_sharded",
+    }
+)
 
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
@@ -62,6 +82,8 @@ def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
         return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+    except InvalidSentenceTransformersModulePath:
+        raise
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -75,7 +97,9 @@ def _load_dense_weights(
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
     for filename in ["model.safetensors", "pytorch_model.bin"]:
-        file_path = f"{folder}/{filename}" if folder else filename
+        file_path = get_sentence_transformers_module_file(
+            model_config.model, folder, filename
+        )
 
         try:
             file_bytes = get_hf_file_bytes(
@@ -190,9 +214,14 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             target_prefix = ""
 
             seen_weights = list[tuple[str, torch.Tensor]]()
+            owned = (
+                self.vllm_config.load_config.load_format in _OWNED_TENSOR_LOAD_FORMATS
+            )
             for name, loaded_weight in weights:
                 # Clone because the iterator may reuse the tensor buffer
-                seen_weights.append((name, loaded_weight.clone()))
+                seen_weights.append(
+                    (name, loaded_weight if owned else loaded_weight.clone())
+                )
 
                 lookup_name = name
                 if hf_to_vllm_mapper is not None:
@@ -226,8 +255,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                     self._get_name(),
                 )
 
-            # Lazy chain so buffer-reusing weight iterators (e.g.
-            # runai_streamer) are consumed one tensor at a time.
+            # Lazy chain so buffer-reusing weight iterators are consumed
+            # one tensor at a time.
             mapped_weights = (
                 (target_prefix + name, weight)
                 for name, weight in itertools.chain(seen_weights, weights)
@@ -284,22 +313,22 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PretrainedConfig.num_labels`` is derived from ``id2label``, which always
+    `PreTrainedConfig.num_labels` is derived from `id2label`, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
-    ``num_labels`` from ``get_text_config()`` silently returns that default and
+    `num_labels` from `get_text_config()` silently returns that default and
     builds a score head of the wrong size.
 
     Prefer the top-level config whenever it declares a label space of its own,
-    mirroring the ``classifier_from_token`` / ``method`` lookups in
-    ``as_seq_cls_model``.
+    mirroring the `classifier_from_token` / `method` lookups in
+    `as_seq_cls_model`.
     """
     if text_config is hf_config:
         return hf_config.num_labels
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    if hf_config.num_labels != PretrainedConfig().num_labels:
+    if hf_config.num_labels != PreTrainedConfig().num_labels:
         return hf_config.num_labels
     return text_config.num_labels
 
@@ -467,7 +496,7 @@ def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
             ):
                 return candidate
 
-    for name, child in model.named_children():
+    for _, child in model.named_children():
         child_name = type(child).__name__
         if ("ForCausalLM" in child_name or "LMHead" in child_name) and hasattr(
             child, "model"
@@ -539,7 +568,7 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -608,7 +637,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.

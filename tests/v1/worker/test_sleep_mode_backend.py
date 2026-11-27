@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only unit tests for the sleep-mode backend abstraction (RFC #34303).
 
-These cover the registry/factory contract and capability flags. They do not
-touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/test_cumem.py``.
+These cover the registry/factory contract and worker dispatch. They do not
+touch CUDA - the `cumem` suspend/resume path is exercised end-to-end on GPU
+in `tests/basic_correctness/memory/`.
 """
 
 import pytest
@@ -20,44 +20,42 @@ def test_cumem_is_the_default_registered_backend():
     backend_cls = SleepModeBackendFactory.get_backend_class("cumem")
     assert backend_cls is CuMemBackend
     assert issubclass(backend_cls, SleepModeBackend)
-
-
-def test_cumem_capability_flags():
-    # cumem leaves communicators untouched but does not preserve compiled
-    # artifacts, graphs, or durable state - these flags are what the executor and
-    # /health introspect to decide reinit / persistence behavior.
     assert CuMemBackend.is_supported() is True
-    assert CuMemBackend.preserves_communicators() is True
-    assert CuMemBackend.preserves_compiled_artifacts() is False
-    assert CuMemBackend.preserves_graphs_with_communicators() is False
-    assert CuMemBackend.supports_durable_storage() is False
-
-
-def test_new_backend_starts_in_running_state():
     # Constructing a backend must not touch the GPU; only suspend/resume do.
-    assert CuMemBackend().state() == "RUNNING"
+    assert isinstance(CuMemBackend(), CuMemBackend)
 
 
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
 def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
-    """Comm walkers run around sleep/wake only when explicitly enabled."""
+    """Comm walkers run around sleep/wake only when explicitly enabled. The
+    model's loader is told before memory is freed and after it is restored."""
     from types import SimpleNamespace
 
+    from torch import nn
+
+    from vllm.model_executor.model_loader.base_loader import bind_model_loader
     from vllm.v1.worker.gpu_worker import Worker
 
     calls: list[tuple[str, object]] = []
 
     class Backend:
-        def suspend(self, level: int = 1) -> None:
-            calls.append(("backend.suspend", level))
+        def suspend(self, discardable=()) -> None:
+            calls.append(("backend.suspend", set(discardable)))
 
         def resume(self, tags: list[str] | None = None) -> None:
             calls.append(("backend.resume", tuple(tags) if tags else None))
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
-    worker._sleep_saved_buffers = {}
-    worker._sleep_saved_draft_buffers = {}
+    model = nn.Module()
+    bind_model_loader(
+        model,
+        SimpleNamespace(
+            on_sleep=lambda level: calls.append(("loader.on_sleep", level)),
+            on_wake_up=lambda tags: calls.append(("loader.on_wake_up", tuple(tags))),
+        ),
+    )
+    worker.model_runner = SimpleNamespace(extensible_kv_cache=None, model=model)
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=enable_nccl_comm_suspend)
     )
@@ -76,11 +74,13 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     worker.sleep(level=1)
     worker.wake_up(tags=["weights"])
 
-    expected = [
-        ("backend.suspend", 1),
+    expected: list[tuple[str, object]] = [
+        ("loader.on_sleep", 1),
+        ("backend.suspend", set()),
         ("comms.suspend", None),
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
+        ("loader.on_wake_up", ("weights",)),
     ]
     if not enable_nccl_comm_suspend:
         expected = [c for c in expected if not c[0].startswith("comms.")]
@@ -112,30 +112,16 @@ def test_third_party_backend_registration_and_resolution():
         )
         resolved = SleepModeBackendFactory.get_backend_class(name)
         assert resolved is DummyBackend
-        assert resolved.supports_durable_storage() is True
+        assert resolved.is_supported() is True
     finally:
         SleepModeBackendFactory._registry.pop(name, None)
 
 
-def test_suspend_resume_state_transitions():
-    """Lifecycle state advances RUNNING -> SUSPENDED -> RUNNING without GPU."""
-    backend = DummyBackend()
-    assert backend.state() == "RUNNING"
-    backend.suspend(level=1)
-    assert backend.state() == "SUSPENDED"
-    backend.resume()
-    assert backend.state() == "RUNNING"
-
-
 class DummyBackend(SleepModeBackend):
-    """A no-GPU backend used to exercise lifecycle + registration in CPU tests."""
+    """A no-GPU backend used to exercise registration in CPU tests."""
 
-    def suspend(self, level: int = 1) -> None:
-        self._state = "SUSPENDED"
+    def suspend(self, discardable=()) -> None:
+        pass
 
     def resume(self, tags: list[str] | None = None) -> None:
-        self._state = "RUNNING"
-
-    @classmethod
-    def supports_durable_storage(cls) -> bool:
-        return True
+        pass

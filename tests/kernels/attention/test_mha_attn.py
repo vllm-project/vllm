@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
-from vllm.platforms.rocm import RocmPlatform, on_mi3xx
+from vllm.platforms.rocm import RocmPlatform, on_cdna, on_mi3xx
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
@@ -58,11 +58,22 @@ def test_mha_attn_platform(default_vllm_config, device: str):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
-        ):
-            attn = MMEncoderAttention(16, 64, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        cases = [(False, AttentionBackendEnum.FLASH_ATTN)]
+        if on_cdna():
+            cases.append((True, AttentionBackendEnum.ROCM_AITER_FA))
+        for aiter_mha_enabled, expected_backend in cases:
+            with (
+                patch(
+                    "vllm.model_executor.models.vision.current_platform",
+                    RocmPlatform(),
+                ),
+                patch(
+                    "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled",
+                    return_value=aiter_mha_enabled,
+                ),
+            ):
+                attn = MMEncoderAttention(16, 64, scale=1)
+                assert attn.attn_backend == expected_backend
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
@@ -130,12 +141,7 @@ VAR_SEQ_LENS = [
 NUM_HEADS = [1, 16]
 NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
-# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
-DTYPES = (
-    [torch.half, torch.bfloat16, torch.float]
-    if not current_platform.is_rocm()
-    else [torch.half, torch.bfloat16]
-)
+DTYPES = [torch.half, torch.bfloat16, torch.float]
 CUDA_DEVICES = ["cuda"]
 
 
@@ -277,7 +283,7 @@ def test_mha_attn_varlen_forward_flashinfer(
     # Override vllm config so get_vit_attn_backend returns FLASHINFER (simulates
     # --mm-encoder-attn-backend=FLASHINFER).
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     minimal_model_config = type(
         "MinimalModelConfig",
         (),
@@ -376,7 +382,7 @@ def test_mha_attn_varlen_forward_aiter_fp8(
     torch.set_default_dtype(dtype)
 
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     minimal_model_config = type(
         "MinimalModelConfig",
         (),
@@ -442,7 +448,7 @@ def test_mha_attn_varlen_forward_aiter_fp8(
 )
 def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     vllm_config.model_config = type(
         "MinimalModelConfig",
         (),
@@ -468,7 +474,7 @@ def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
 )
 def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     vllm_config.model_config = type(
         "MinimalModelConfig",
         (),

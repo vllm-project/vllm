@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark vLLM Kimi-K3 AttnRes kernels on NVIDIA Blackwell.
+r"""Benchmark vLLM Kimi-K3 AttnRes kernels on NVIDIA Blackwell.
 
 The benchmark uses a zero delta so repeated in-place launches remain stable.
 
 Example:
-
-.. code-block:: console
-
-    .venv/bin/python benchmarks/kernels/benchmark_kimi_k3_attn_res.py \
-      --output /tmp/attn_res.json
+```console
+.venv/bin/python benchmarks/kernels/benchmark_kimi_k3_attn_res.py \
+  --output /tmp/attn_res.json
+```
 
 """
 
@@ -34,7 +33,7 @@ MAX_BLOCKS = 8
 EPS = 1e-5
 
 
-@dataclass
+@dataclass(slots=True)
 class Inputs:
     prefix: torch.Tensor
     delta: torch.Tensor
@@ -44,7 +43,7 @@ class Inputs:
     output_norm_weight: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class Result:
     num_tokens: int
     num_blocks: int

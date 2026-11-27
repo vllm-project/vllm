@@ -5,7 +5,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-def maybe_prepare_dcp_local_seq_lens(
+def prepare_dcp_local_seq_lens(
     dcp_local_seq_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     num_reqs: int,
@@ -16,8 +16,7 @@ def maybe_prepare_dcp_local_seq_lens(
     num_reqs_padded: int | None = None,
 ) -> torch.Tensor | None:
     """Populate caller-owned storage and return its padded view, or None without DCP."""
-    if dcp_size == 1:
-        return None
+    assert dcp_size > 1
 
     max_num_reqs = dcp_local_seq_lens.shape[0]
     BLOCK_SIZE = 128
@@ -69,6 +68,7 @@ def cp_local_slot(
     positions,
     block_numbers,
     block_size,
+    block_stride,
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -77,9 +77,9 @@ def cp_local_slot(
     """Return rank-local KV slots, or PAD_ID for positions not owned by this rank."""
     block_offsets = positions % (block_size * CP_SIZE)
     if CP_SIZE == 1:
-        return block_numbers * block_size + block_offsets
+        return block_numbers * block_stride + block_offsets
     is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
     rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
     remainder = block_offsets % CP_INTERLEAVE
     local_offsets = rounds * CP_INTERLEAVE + remainder
-    return tl.where(is_local, block_numbers * block_size + local_offsets, PAD_ID)
+    return tl.where(is_local, block_numbers * block_stride + local_offsets, PAD_ID)

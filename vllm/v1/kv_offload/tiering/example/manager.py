@@ -10,17 +10,20 @@ TieringOffloadingManager without requiring actual storage or network backends.
 
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfo,
+    ConfigInfoMapping,
     LookupResult,
     Medium,
     OffloadKey,
     ReqContext,
-    RequestOffloadingContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -32,6 +35,17 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
     from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
+
+
+@dataclass(frozen=True, slots=True)
+class ExampleTierInfo(ConfigInfo):
+    """Config facts of one ExampleSecondaryTierManager.
+
+    A field name is the label name. A secondary tier needs no name of its own
+    for the tier, because the tier label tells the series of the tiers apart.
+    """
+
+    example_info: int
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
@@ -51,6 +65,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         tier_type: str,
         custom_param: int = 0,
         backpressure_detector: "BackpressureDetector | None" = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
         """Initialize the example secondary tier.
 
@@ -60,6 +75,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             tier_type: Name identifying this tier type.
             custom_param: Dummy parameter demonstrating custom args.
             backpressure_detector: Optional backpressure detector.
+            access_mode: Direction(s) in which this tier may transfer data;
+                the tiering manager skips lookups and stores it cannot serve.
 
         """
         super().__init__(
@@ -67,7 +84,10 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
             backpressure_detector=backpressure_detector,
+            access_mode=access_mode,
         )
+
+        self._config_info = ExampleTierInfo(example_info=custom_param)
 
         logger.info(
             "ExampleSecondaryTierManager initialized with custom_param=%d", custom_param
@@ -80,6 +100,15 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         self.completed_jobs: list[JobResult] = []
         assert primary_kv_view.strides is not None
         self._chunk_size = primary_kv_view.strides[0]
+
+    @classmethod
+    @override
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        return ExampleTierInfo.config_info_keys()
+
+    @override
+    def config_info(self) -> ConfigInfoMapping:
+        return self._config_info.as_config_info()
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -164,10 +193,6 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
-
-    @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
 
     @override
     def drain_jobs(self) -> None:

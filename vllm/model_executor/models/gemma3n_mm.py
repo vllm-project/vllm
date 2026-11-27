@@ -15,7 +15,7 @@ from transformers.models.gemma3n import (
     Gemma3nTextConfig,
     Gemma3nVisionConfig,
 )
-from transformers.models.siglip import SiglipImageProcessorFast
+from transformers.models.siglip import SiglipImageProcessor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -68,10 +68,6 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-# This should be based on model config but we hardcode them for now.
-TOKENS_PER_IMAGE = 256
-TOKENS_PER_AUDIO = 188
-
 
 class Gemma3nImagePixelInputs(TensorSchema):
     """Dimensions:
@@ -116,7 +112,7 @@ def batch_audio_features(
     """
     if isinstance(input_features, torch.Tensor):
         assert isinstance(input_features_mask, torch.Tensor)
-        return input_features.squeeze(1), input_features_mask.squeeze(1)
+        return input_features, input_features_mask
 
     assert isinstance(input_features_mask, list)
     max_len = max(features.shape[0] for features in input_features)
@@ -173,11 +169,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "audio": None}
-
-    def get_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Mapping[str, int] | None:
-        return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
 
     def get_image_repl(
         self,
@@ -239,7 +230,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
             processor.feature_extractor
         )
         audio_len = audio_feature_extractor.fft_length
-        image_processor: SiglipImageProcessorFast = processor.image_processor
+        image_processor: SiglipImageProcessor = processor.image_processor
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
 
@@ -793,6 +784,15 @@ class Gemma3nForConditionalGeneration(
                 multimodal_embeddings.extend(audio_embeddings)
         return multimodal_embeddings
 
+    def _per_layer_embeddings_on(self, device: torch.device) -> torch.Tensor:
+        # A plain attribute, not a buffer, so the IPC weight cache never shares
+        # this per-step scratch; reallocate if the model was moved after init.
+        if self.per_layer_embeddings.device != device:
+            self.per_layer_embeddings = torch.zeros_like(
+                self.per_layer_embeddings, device=device
+            )
+        return self.per_layer_embeddings
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -811,9 +811,9 @@ class Gemma3nForConditionalGeneration(
                 self.config.text_config.num_hidden_layers,
                 self.config.text_config.hidden_size_per_layer_input,
             )
-            self.per_layer_embeddings[: per_layer_inputs.shape[0]].copy_(
-                per_layer_inputs
-            )
+            self._per_layer_embeddings_on(per_layer_inputs.device)[
+                : per_layer_inputs.shape[0]
+            ].copy_(per_layer_inputs)
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -842,12 +842,14 @@ class Gemma3nForConditionalGeneration(
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
         if inputs_embeds is not None:
-            num_tokens = inputs_embeds.shape[0]
+            hidden_states = inputs_embeds
         elif intermediate_tensors is not None:
-            num_tokens = intermediate_tensors["hidden_states"].shape[0]
+            hidden_states = intermediate_tensors["hidden_states"]
         else:
             raise ValueError("inputs_embeds is required on the first PP rank")
-        per_layer_inputs = self.per_layer_embeddings[:num_tokens]
+        per_layer_inputs = self._per_layer_embeddings_on(hidden_states.device)[
+            : hidden_states.shape[0]
+        ]
 
         hidden_states = self.language_model.model(
             input_ids,

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
+from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -13,29 +15,33 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     DTYPE,
     HEAD_SIZE,
     NUM_KV_HEADS,
+    _make_lookahead_config,
 )
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
 )
 
 
 def _make_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     fa_layers = ["layer0"]
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    groups = [KVCacheGroupSpec(fa_layers, spec)]
+    groups = [make_kv_cache_group(fa_layers, spec)]
     size = _BYTES_PER_BLOCK * num_blocks
     tensors = [
         KVCacheTensor(
@@ -76,6 +82,52 @@ def _make_connector(
     return connector
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("supported", [False, True])
+def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
+    num_lookahead = 5
+    config = _make_lookahead_config(num_lookahead)
+    children = [
+        {
+            "kv_connector": "SimpleCPUOffloadConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"num_cpu_blocks": 8},
+        },
+        {
+            "kv_connector": "SimpleCPUOffloadConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"num_cpu_blocks": 8},
+        }
+        if supported
+        else _lookahead_connector_config(False),
+    ]
+    children[0] = {
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"connectors": [children[0]]},
+    }
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": children},
+    )
+    config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+    connector = KVConnectorFactory.create_connector(
+        config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+    )
+    assert isinstance(connector, MultiConnector)
+    nested = connector.sub_connectors[0]
+    assert isinstance(nested, MultiConnector)
+    child = nested.sub_connectors[0]
+    assert isinstance(child, SimpleCPUOffloadConnector)
+    # An unsupported sibling only warns; the lookahead stays.
+    assert config.num_hash_lookahead_tokens == num_lookahead
+    assert child.scheduler_manager is not None
+    coord = child.scheduler_manager.cpu_coordinator
+    assert coord.block_pool.num_hash_lookahead_tokens == num_lookahead
+
+
 def test_disk_mode_rejects_non_positive_capacity() -> None:
     """Disk mode with disk_capacity_bytes <= 0 raises ValueError.
 
@@ -95,13 +147,13 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
 
 def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     """A paged full-attention group beside a per-request ring group."""
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    ring = CircularBufferSpec(
+    ring = AttentionSpec(
         block_size=6, num_kv_heads=1, head_size=32, head_size_v=0, dtype=DTYPE
     )
     return KVCacheConfig(
@@ -121,8 +173,8 @@ def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attn"], full),
-            KVCacheGroupSpec(["ring"], ring),
+            make_kv_cache_group(["attn"], full),
+            make_kv_cache_group(["ring"], ring, CircularBufferManager),
         ],
     )
 
@@ -141,9 +193,11 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
         kv_cache_config=_make_ring_kv_cache_config(),
     )
     scheduler = connector.scheduler_manager
+    assert scheduler is not None
     assert scheduler.fa_gidx == 0
     cpu_groups = scheduler.cpu_kv_cache_config.kv_cache_groups
-    assert [g.kv_cache_spec.prefix_cacheable for g in cpu_groups] == [True, False]
+    assert [g.prefix_cacheable for g in cpu_groups] == [True, False]
     # Only the paged group takes part in CPU-side hit lookup.
+    assert isinstance(scheduler.cpu_coordinator, HybridKVCacheCoordinator)
     attention_groups = scheduler.cpu_coordinator.attention_groups
     assert [g.group_ids for g in attention_groups] == [[0]]

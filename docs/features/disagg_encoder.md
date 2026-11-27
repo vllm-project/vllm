@@ -45,9 +45,10 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
 ### ECMooncakeConnector
 
 **ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
-See the [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
-for a complete 1 Encoder instance + 1 PD instance setup, including the producer and
-consumer `--ec-transfer-config` settings and proxy configuration.
+See the [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md) for
+producer/consumer `--ec-transfer-config`, proxy `--ec-consumer-zmq-addrs`, and
+transport options. The [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
+is a complete 1 Encoder instance + 1 PD instance setup.
 
 With vLLM and Mooncake installed, run the example from the repository root:
 
@@ -61,6 +62,30 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Audio inputs
+
+The Python EPD proxy also rewrites audio in `/v1/chat/completions` into
+metadata-only references for Qwen2-Audio, AudioFlamingo3, Ultravox,
+Qwen2.5-Omni, and Qwen3-Omni. The encoder publishes `audio_num_tokens`
+(the placeholder token count of each audio) together with any feature
+lengths the model needs; the consumer uses them to reconstruct the audio
+placeholders and receives the embeddings through its EC connector without
+repeating audio preprocessing.
+
+Qwen2.5-Omni and Qwen3-Omni also support videos with an embedded audio track
+using `mm_processor_kwargs={"use_audio_in_video": true}` in the request. Start
+both instances with `--trust-request-mm-kwargs` only for trusted clients.
+The proxy keeps one
+`video_embeds` content part per video, with an additional `audio_embeds` payload
+for its audio track. Both features share the source UUID but retain their own
+EC hashes and transfer handles. Audio lengths and video timing reconstruct the
+interleaved placeholders and M-RoPE positions without decoding the media again.
+If any item lacks metadata, the entire audio/video request falls back to raw
+media rather than mixing raw and metadata-only inputs.
+
+This does not add `/v1/audio/transcriptions` or realtime routes to the example
+proxy.
+
 ---
 
 ## 3  Test Script
@@ -70,7 +95,38 @@ see [Cross-encoder output reuse](cross_encoder_cache.md).
 
 Please refer to the directories `tests/v1/ec_connector`
 
-## 4  Development
+## 4  Encoder cache events
+
+Encoder cache (EC) events mirror [KV cache events](kv_offloading_usage.md) so a
+router or cache-aware orchestrator can tell which instances already hold the
+encoder output for a given multimodal input. Events are keyed by the multimodal
+hash (`mm_hash`) and use the same ZMQ publisher and replay buffer as KV events.
+
+Enable them on the scheduler with `--ec-events-config`:
+
+```bash
+vllm serve <model> \
+  --ec-events-config '{"enable_ec_cache_events": true, "publisher": "zmq", "topic": "ec-events"}'
+```
+
+The default endpoint is `tcp://*:6558`. Like KV events, the port is shifted up
+by the data-parallel rank; the block starts 1000 ports above the 5557/5558 KV
+events block, so both streams can be enabled at once on hosts with up to 1000
+DP ranks without an explicit `endpoint`.
+
+The event types are `ECStored(mm_hashes, medium)`, `ECRemoved(mm_hashes,
+medium)` and `AllECCleared()`, delivered in an `ECEventBatch`. The GPUs of the
+scheduler's own encoder cache report `medium="GPU"`; a connector that offloads
+encoder outputs adds its own events through `ECConnectorBase.take_events()`.
+Local GPU cache events are published even when no EC connector is configured.
+
+Events are off by default and use the `null` publisher when disabled. Subscribe
+the same way as for KV events, decoding `ECEventBatch` from
+`vllm.distributed.ec_transfer.ec_events`; see
+[kv_events_subscriber.py](../../examples/features/kv_events/kv_events_subscriber.py)
+for the ZMQ client loop.
+
+## 5  Development
 
 Disaggregated encoding is implemented by running two parts:
 

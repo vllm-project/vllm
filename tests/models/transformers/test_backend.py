@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from collections import Counter
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -13,18 +14,41 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PretrainedConfig
+from safetensors.torch import load_file, save_file
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForMultimodalLM,
+    PreTrainedConfig,
+    core_model_loading,
+)
+from transformers.conversion_mapping import WeightConverter, WeightRenaming
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.compilation.counter import compilation_counter
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.config.compilation import CompilationMode
+from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import Base, SplitWeights
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
-from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
+from vllm.model_executor.models.utils import (
+    StageMissingLayer,
+    WeightsMapper,
+    _model_to_pp_missing_layer_names,
+)
 
 from ...conftest import HfRunner, VllmRunner
-from ...utils import multi_gpu_test, prep_prompts
+from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
 from ..registry import HF_EXAMPLE_MODELS
 from ..utils import check_embeddings_close, check_logprobs_close
 
@@ -45,15 +69,9 @@ def count_modules(model, cls: type) -> int:
     return sum(isinstance(m, cls) for m in model.modules())
 
 
-def get_num_fused(model) -> tuple[int, int]:
-    from vllm.model_executor.layers.linear import (
-        MergedColumnParallelLinear,
-        QKVParallelLinear,
-    )
-
-    glu = count_modules(model, MergedColumnParallelLinear)
-    qkv = count_modules(model, QKVParallelLinear)
-    return glu, qkv
+def count_fusers(model) -> dict[str, int]:
+    counts = Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
+    return dict(counts)
 
 
 def check_implementation(
@@ -63,9 +81,11 @@ def check_implementation(
     model: str,
     kwargs_ref: dict[str, Any] | None = None,
     kwargs_test: dict[str, Any] | None = None,
-    num_fused: tuple[int, int] = (1, 1),
+    num_fused: dict[str, int] | None = None,
     **kwargs,
 ):
+    if num_fused is None:
+        num_fused = {"GLUFuser": 1, "QKVFuser": 1}
     if kwargs_ref is None:
         kwargs_ref = {}
     if kwargs_test is None:
@@ -81,10 +101,9 @@ def check_implementation(
         assert model_config.using_transformers_backend()
 
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
-        expected_glu, expected_qkv = num_fused
-        for num_glu, num_qkv in model_test.apply_model(get_num_fused):
-            assert num_glu == expected_glu * num_layers
-            assert num_qkv == expected_qkv * num_layers
+        expected = {name: n * num_layers for name, n in num_fused.items()}
+        for counts in model_test.apply_model(count_fusers):
+            assert {name: counts.get(name, 0) for name in expected} == expected
 
         tp_size = kwargs_test.get("tensor_parallel_size", 1)
         from vllm.model_executor.layers.attention import Attention
@@ -109,29 +128,105 @@ def check_implementation(
 
 
 @pytest.mark.parametrize(
-    "model,model_impl,num_fused",
+    "model,model_impl,num_fused,trust_remote_code",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1)),
-        ("hmellor/Ilama-3.2-1B", "auto", (1, 1)),  # CUSTOM CODE
-        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1)),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", None, False),
+        ("vllm-project/Ilama-3.2-1B", "auto", None, True),
+        ("allenai/OLMoE-1B-7B-0924", "transformers", {"QKVFuser": 1}, False),  # MoE
     ],
-)  # trust_remote_code=True by default
+)
 def test_models(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     example_prompts: list[str],
     model: str,
     model_impl: str,
-    num_fused: tuple[int, int],
+    num_fused: dict[str, int] | None,
+    trust_remote_code: bool,
 ) -> None:
     check_implementation(
         hf_runner,
         vllm_runner,
         example_prompts,
         model,
+        kwargs_ref={"trust_remote_code": trust_remote_code},
         num_fused=num_fused,
         model_impl=model_impl,
+        trust_remote_code=trust_remote_code,
     )
+
+
+@create_new_process_for_each_test("spawn")
+def test_compile_mm_encoder(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idefics3's encoder has an unannotated and a `torch.BoolTensor` input."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # One graph for the language model and one for the encoder
+    with (
+        compilation_counter.expect(num_models_seen=2),
+        vllm_runner(
+            "HuggingFaceTB/SmolVLM-256M-Instruct",
+            model_impl="transformers",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 1},
+            gpu_memory_utilization=0.5,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
+        ),
+    ):
+        pass
+
+
+def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
+    """EAGLE-3 runs on a composite VLM whose decoder records the aux hidden states."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    draft_config = AutoConfig.from_pretrained(model).text_config
+    draft_config.architectures = ["LlamaForCausalLMEagle3"]
+    draft_config.num_hidden_layers = 1
+    draft_config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        load_format="dummy",
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(tmp_path),
+            "num_speculative_tokens": 2,
+        },
+    ) as llm:
+        llm.generate_greedy(["Hello"], max_tokens=8)
+
+
+def test_infer_dynamic_arg_dims():
+    """Unannotated and tensor arguments are dynamic, unless a non-`None` default
+    means they are passed as a plain value (e.g. Gemma 4's `logits_to_keep=0`)."""
+
+    class Encoder(nn.Module):
+        def forward(
+            self,
+            pixel_values,
+            position_ids: torch.Tensor,
+            mask: torch.BoolTensor | None = None,
+            grid: tuple[int, int] = (1, 1),
+            tiles: list[torch.Tensor] | None = None,
+            use_cache=False,
+            logits_to_keep: int | torch.Tensor = 0,
+            **kwargs,
+        ):
+            pass
+
+    dynamic = ("pixel_values", "position_ids", "mask")
+    assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
+    assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
@@ -142,8 +237,28 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         vllm_runner,
         vllm_runner,
         prompts,
-        model="hmellor/tiny-random-Gemma2ForCausalLM",
+        model="vllm-project/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
+        kwargs_test=kwargs_test,
+    )
+
+
+def test_whole_graph_compile(
+    vllm_runner: type[VllmRunner], example_prompts: list[str]
+) -> None:
+    """Compiling attention and the KV-cache op into one Inductor graph must
+    match eager, so vllm:: ops have to receive eager strides."""
+    kwargs_ref = {"model_impl": "transformers", "max_model_len": 2048}
+    kwargs_test = {
+        **kwargs_ref,
+        "compilation_config": {"mode": 2, "backend": "inductor"},
+    }
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        example_prompts,
+        model="Qwen/Qwen3-0.6B",
+        kwargs_ref={**kwargs_ref, "enforce_eager": True},
         kwargs_test=kwargs_test,
     )
 
@@ -165,8 +280,8 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.has_device_capability(90):
-        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+    if not (current_platform.is_xpu() or current_platform.has_device_capability(90)):
+        pytest.skip("Attention sinks need FlashAttention 3, TRTLLM or XPU attention")
 
     model = "tiny-random/gpt-oss-bf16"
     with vllm_runner(
@@ -185,24 +300,11 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
-    import transformers
-    from packaging.version import Version
-
-    installed = Version(transformers.__version__)
-    required = Version("5.15.0.dev0")
-    if installed < required:
-        pytest.skip(
-            "MLA models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
-
-    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
+    model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
-    with vllm_runner(
-        model, model_impl="transformers", trust_remote_code=False, **kwargs
-    ) as model_test:
+    with vllm_runner(model, model_impl="transformers", **kwargs) as model_test:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
@@ -224,25 +326,36 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model, num_fused",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", None),
+        # Packed qkv_proj sliced with global offsets in the forward
+        ("microsoft/Phi-4-mini-instruct", {"PackedQKVFuser": 1}),
+    ],
+)
 def test_distributed(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     example_prompts,
+    model: str,
+    num_fused: dict[str, int] | None,
 ):
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
     check_implementation(
         hf_runner,
         vllm_runner,
         example_prompts,
-        "meta-llama/Llama-3.2-1B-Instruct",
+        model,
         kwargs_test=kwargs,
+        num_fused=num_fused,
     )
 
 
 @pytest.mark.parametrize(
     "model, quantization_kwargs",
     [
-        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+        ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )
@@ -260,7 +373,7 @@ def test_quantization(
         model,
         model_impl="auto",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
@@ -270,7 +383,7 @@ def test_quantization(
         model,
         model_impl="transformers",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
@@ -311,16 +424,12 @@ def test_embed_loading(vllm_runner, model):
 @pytest.mark.parametrize(
     "arch", ["TransformersEmbeddingModel", "TransformersForSequenceClassification"]
 )
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_pooling(
     hf_runner,
     vllm_runner,
     example_prompts,
     arch,
-    monkeypatch,
-    use_v2_model_runner,
 ):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     model = get_model(arch)
 
     vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
@@ -524,7 +633,7 @@ def replace_vocab_embeddings(model, **config_kwargs):
 
     stub = nn.Module()
     stub.model = model
-    stub.config = PretrainedConfig(
+    stub.config = PreTrainedConfig(
         vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
     embeddings = Base._vocab_embeddings(stub)
@@ -598,12 +707,14 @@ class MarkingStub(SupportsMultiModal, nn.Module):
     _pre_trained_model_classes = Base._pre_trained_model_classes
 
 
-def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
+def build_marked_model(
+    image_limit: int, video_limit: int = 0, skip_tokenizer_init: bool = False
+):
     """Build the HF model inside the marking context and return it."""
     model_config = ModelConfig(
         model=MULTIMODAL_MODEL,
         model_impl="transformers",
-        limit_mm_per_prompt={"image": image_limit},
+        limit_mm_per_prompt={"image": image_limit, "video": video_limit},
     )
     # Set after construction: building the config itself needs the tokenizer
     model_config.skip_tokenizer_init = skip_tokenizer_init
@@ -617,10 +728,15 @@ def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
     return stub.model
 
 
-@pytest.mark.parametrize(("image_limit", "skipped"), [(0, True), (4, False)])
-def test_tower_weights_skipped_when_modality_disabled(image_limit, skipped):
-    """`--limit-mm-per-prompt image=0` should drop the vision tower's weights."""
-    vision_tower = build_marked_model(image_limit).vision_tower
+@pytest.mark.parametrize(
+    ("image_limit", "video_limit", "skipped"),
+    [(0, 0, True), (4, 0, False), (0, 4, False)],
+)
+def test_tower_weights_skipped_when_modality_disabled(
+    image_limit, video_limit, skipped, tp_init
+):
+    """Only `--limit-mm-per-prompt image=0,video=0` drops the tower they share."""
+    vision_tower = build_marked_model(image_limit, video_limit).vision_tower
     assert isinstance(vision_tower, StageMissingLayer) is skipped
 
 
@@ -631,6 +747,16 @@ def test_marking_skipped_without_tokenizer():
     """
     vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
     assert not isinstance(vision_tower, StageMissingLayer)
+
+
+def test_missing_encoders_are_skipped():
+    """Gemma 4 31B has no audio tower, so `get_encoder` returns `None` for audio."""
+
+    class Model(nn.Module):
+        def get_encoder(self, modality: str) -> nn.Module | None:
+            return nn.Identity() if modality == "image" else None
+
+    assert MarkingStub()._find_encoder_classes(Model()) == {"image": nn.Identity}
 
 
 NUM_LAYERS = 4
@@ -698,8 +824,11 @@ def test_attention_layer_index_is_the_modules_own():
     attentions = [
         model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
     ]
-    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
-    assert all(fuser is not None for fuser in fusers)
+    fusers: list[AttentionFuser] = []
+    for attn in attentions:
+        fuser = AttentionFuser.match(None, attn)
+        assert fuser is not None
+        fusers.append(fuser)
     assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
 
     # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
@@ -709,17 +838,13 @@ def test_attention_layer_index_is_the_modules_own():
     assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
 
 
-def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+def test_attention_dispatch_is_required():
     """Models selected by the permissive registry fail clearly without dispatch."""
-    monkeypatch.setattr(
-        "vllm.model_executor.models.transformers.base.get_pp_indices",
-        lambda *_: (0, 1),
-    )
     model = SimpleNamespace(
         text_config=SimpleNamespace(num_hidden_layers=1),
-        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
         attention_fusers={},
         _get_attn_cls=lambda: None,
+        _pp_indices=lambda: (0, 1),
     )
 
     with pytest.raises(
@@ -788,3 +913,236 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+# The smallest sizes the fused MoE kernels accept
+MTP_HIDDEN_SIZE = 128
+MTP_MOE_KWARGS = dict(
+    vocab_size=128,
+    hidden_size=MTP_HIDDEN_SIZE,
+    intermediate_size=256,
+    moe_intermediate_size=128,
+    n_routed_experts=4,
+    num_experts_per_tok=2,
+)
+# Real layer counts, since the MTP weight patterns hard-code them
+MTP_MODELS = {
+    "glm4_moe": dict(
+        num_hidden_layers=46, num_attention_heads=2, num_key_value_heads=1, head_dim=64
+    ),
+    "deepseek_v3": dict(
+        num_hidden_layers=61,
+        num_attention_heads=16,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        first_k_dense_replace=1,
+        n_group=1,
+        topk_group=1,
+    ),
+}
+
+
+@pytest.mark.parametrize("model_type", MTP_MODELS)
+def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch):
+    """An MTP draft for a model following the Transformers MTP standard loads each
+    MTP layer appended to the target's checkpoint into `MtpModel`'s layout."""
+    kwargs = MTP_MODELS[model_type] | MTP_MOE_KWARGS
+    num_hidden_layers = kwargs.pop("num_hidden_layers")
+    num_mtp_layers = 2
+    hidden_size = MTP_HIDDEN_SIZE
+    config = AutoConfig.for_model(
+        model_type, num_hidden_layers=num_hidden_layers + num_mtp_layers, **kwargs
+    )
+    model_cls = AutoModelForCausalLM._model_mapping[type(config)]
+    config.architectures = [model_cls.__name__]
+    # These have one MTP layer, so register the second like Step-3.7 registers its own
+    monkeypatch.setattr(
+        model_cls,
+        "_keys_to_ignore_on_load_unexpected",
+        [rf"model\.layers\.{num_hidden_layers + 1}.*"]
+        + model_cls._keys_to_ignore_on_load_unexpected,
+    )
+    # Save the MTP layers as the last decoder layers, then add their MTP modules
+    model_cls(config).save_pretrained(tmp_path)
+    weights = load_file(tmp_path / "model.safetensors")
+    for i in range(num_hidden_layers, num_hidden_layers + num_mtp_layers):
+        for name, shape in {
+            "enorm.weight": (hidden_size,),
+            "hnorm.weight": (hidden_size,),
+            "eh_proj.weight": (hidden_size, 2 * hidden_size),
+            "shared_head.norm.weight": (hidden_size,),
+        }.items():
+            weights[f"model.layers.{i}.{name}"] = torch.randn(shape)
+    save_file(weights, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    config.num_hidden_layers = num_hidden_layers
+    config.num_nextn_predict_layers = num_mtp_layers
+    config.save_pretrained(tmp_path)
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersMoEForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+
+    assert len(model.model.layers) == num_mtp_layers
+    for k, layer in enumerate(model.model.layers):
+        mtp = f"model.layers.{num_hidden_layers + k}"
+        for ckpt_name, param_name in {
+            "enorm.weight": "enorm.weight",
+            "hnorm.weight": "hnorm.weight",
+            "eh_proj.weight": "eh_proj.weight",
+            "shared_head.norm.weight": "post_norm.weight",
+            "input_layernorm.weight": "mtp_block.input_layernorm.weight",
+            "self_attn.o_proj.weight": "mtp_block.self_attn.o_proj.weight",
+        }.items():
+            torch.testing.assert_close(
+                layer.get_parameter(param_name).cpu(),
+                weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
+            )
+
+
+def test_mtp_draft_for_multimodal_model(tmp_path, tp_init):
+    """A multimodal model, which is not an `AutoModelForCausalLM`, gets an MTP draft
+    from the MTP layers in its checkpoint (loading fails if any are missing)."""
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("GraniteDoclingForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
+    from transformers.modeling_layers import MtpModel
+
+    num_mtp_layers = 2
+    # With fewer decoder than MTP layers, `MtpModel` would rename `mtp.layers` too
+    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=2)
+    heads = dict(num_attention_heads=2, num_key_value_heads=2)
+    text_config = dict(vocab_size=128, pad_token_id=0, num_mtp_layers=num_mtp_layers)
+    config = AutoConfig.for_model(
+        "granite_docling",
+        text_config=sizes | heads | text_config,
+        vision_config=sizes | heads | dict(out_hidden_size=64),
+    )
+    main_model = AutoModelForMultimodalLM.from_config(config)
+    main_model.save_pretrained(tmp_path)
+    # Granite Docling stores MTP layer `k` under `mtp.layers.{k}`
+    weights = load_file(tmp_path / "model.safetensors")
+    for name, param in MtpModel(main_model, num_mtp_layers).named_parameters():
+        if name.startswith("layers."):
+            weights[f"mtp.{name.replace('.mtp_block.', '.')}"] = param.detach()
+    save_file(weights, tmp_path / "model.safetensors", {"format": "pt"})
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+    assert len(model.model.layers) == num_mtp_layers
+
+
+def test_init_parameters_keeps_declared_dtype_and_requires_grad():
+    """Meta parameters materialize in their own dtype, as with `from_pretrained`,
+    and an integer parameter, which cannot require grad, does not fail."""
+    with torch.device("meta"):
+        module = nn.Module()
+        module.fp32 = nn.Parameter(torch.empty(2))
+        module.fp8 = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        module.int8 = nn.Parameter(
+            torch.empty(2, dtype=torch.int8), requires_grad=False
+        )
+    stub = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+    )
+    Base.init_parameters(stub, module)
+
+    assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
+    assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
+    assert module.int8.dtype == torch.int8 and not module.int8.requires_grad
+
+
+def test_ignored_unexpected_patterns_match_renamed_keys():
+    """Like Transformers, `_keys_to_ignore_on_load_unexpected` matches renamed keys
+    and only drops weights nothing loads (A.X-K1's `post_mlp_layernorm` is renamed
+    into `mlp` and unused only on its dense layers)."""
+    stub = nn.Module()
+    stub.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    stub.layers[0].mlp = nn.Module()
+    stub.layers[0].mlp.post_norm = nn.RMSNorm(2)
+    stub.model = SimpleNamespace(_keys_to_ignore_on_load_unexpected=[r"mlp\.post_norm"])
+    stub.hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
+    )
+    weights = [(f"layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
+
+    kept = Base._drop_ignored_unexpected(stub, iter(weights))
+
+    assert [name for name, _ in kept] == ["layers.0.post_norm.weight"]
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+def test_split_weights_splits_fused_gqa_qkv():
+    """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
+    into each projection's size, matched before and named after the renamings. Like
+    in Transformers, a longer name that only starts with the pattern is not split,
+    and a quantization scale for the fused tensor is rejected, not split. The fused
+    tensor of a skipped module is left for the loader to drop."""
+    with torch.device("meta"):
+        model = nn.Module()
+        model.config = PreTrainedConfig()
+        model.self_attn = nn.Module()
+        model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
+        model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
+        model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
+        model.vision_tower = StageMissingLayer("vision_tower")
+    converter = WeightConverter(
+        source_patterns="query_key_value",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    mapper = WeightsMapper(
+        orig_to_new_renaming=[
+            WeightRenaming(r"^attention\.", "self_attn."),
+            WeightRenaming(r"^vision_model\.", "vision_tower."),
+        ]
+    )
+    fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+
+    weights = SplitWeights(converter, mapper, model)
+    # Cached by `id`, which a model freed by an earlier test may have had
+    _model_to_pp_missing_layer_names.pop(id(model), None)
+    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
+    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
+
+    assert list(pieces) == [
+        "attention.q_proj.weight",
+        "attention.k_proj.weight",
+        "attention.v_proj.weight",
+        "attention.query_key_value_norm.weight",
+    ]
+    split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
+    torch.testing.assert_close(torch.cat(split), fused)
+    assert [p.shape[0] for p in split] == [8, 2, 2]
+
+    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
+        list(weights([scale]))
+
+    skipped = ("vision_model.query_key_value.weight", fused)
+    assert list(weights([skipped])) == [skipped]

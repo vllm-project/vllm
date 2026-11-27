@@ -32,11 +32,9 @@ def torch_scaled_mm(
     out = torch.mm(a.to(torch.float32), b.to(torch.float32))
     out = scale_a * out
     out = scale_b.T * out
-    out = out.to(out_dtype)
     if bias is not None:
-        out = out + bias
-
-    return out
+        out = out + bias.float()
+    return out.to(out_dtype)
 
 
 def get_8bit_types():
@@ -125,6 +123,25 @@ def test_scaled_mm(
     torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
 
 
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+@pytest.mark.parametrize("use_heuristic", [True, False])
+def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_heuristic):
+    # The accumulator is 1 + 3 * 2**-10 and the bias 2**-8. Rounding to bf16
+    # first gives 1.0 (1 + 2**-8 is a tie, to even); adding first, 1 + 2**-7.
+    a = torch.ones((1, 32), device=device).to(in_dtype)
+    col = torch.tensor([64.0] * 16 + [2.0, 1.0] + [0.0] * 14, device=device)
+    b = col[:, None].expand(32, 16).to(in_dtype).contiguous()
+    scale_a = torch.ones((1, 1), device=device)
+    scale_b = torch.full((1, 1), 2**-10, device=device)
+    bias = torch.full((16,), 2**-8, device=device, dtype=torch.bfloat16)
+    args = (a, b, scale_a, scale_b, torch.bfloat16, bias)
+
+    out = triton_scaled_mm(*args, use_heuristic=use_heuristic)
+    expected = torch_scaled_mm(*args)
+    assert (expected == 1 + 2**-7).all()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 # TD operand loads must be bit-exact vs the plain masked-load path.
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
@@ -160,3 +177,56 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
     out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Asymmetric int8 activation quantization runs on CUDA-alike.",
+)
+@pytest.mark.parametrize("M", [1, 300])
+@pytest.mark.parametrize("static", [False, True])
+def test_triton_int8_linear_asymmetric_matches_exact(M, static):
+    # An outlier channel gives a large zero point whose term nearly cancels
+    # A_q @ B_q; subtracting it after rounding to bf16 loses the result.
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.kernels.linear.scaled_mm import (
+        Int8ScaledMMLinearLayerConfig,
+        TritonInt8ScaledMMLinearKernel,
+    )
+
+    set_random_seed(0)
+    N, K = 1024, 4096
+    names = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
+    config = Int8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=static, is_channelwise=True, input_symmetric=False
+    )
+    kernel = TritonInt8ScaledMMLinearKernel(config, names)
+    layer = torch.nn.Module()
+    layer.logical_widths = [N]
+    w = torch.randint(-128, 128, (N, K), dtype=torch.int8, device=device)
+    layer.weight = torch.nn.Parameter(w, requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(
+        0.01 * torch.rand((N, 1), device=device) + 1e-4, requires_grad=False
+    )
+    # Registered by the scheme's create_weights, filled after loading.
+    layer.register_parameter("azp_adj", None)
+    if static:
+        layer.input_scale = torch.nn.Parameter(
+            torch.tensor([0.05], device=device), requires_grad=False
+        )
+        layer.input_zero_point = torch.nn.Parameter(
+            torch.tensor([-100], dtype=torch.int8, device=device), requires_grad=False
+        )
+    kernel.process_weights_after_loading(layer)
+
+    x = torch.randn((M, K), device=device)
+    x[:, 0] = 30.0
+    x = x.to(torch.bfloat16)
+    out = kernel.apply_weights(layer, x)
+
+    w_q, w_s, i_s, i_zp, _ = kernel._get_layer_params(layer)
+    x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=False)
+    assert x_zp is not None
+    acc = (x_q.double() - x_zp.double()) @ w_q.double()
+    ref = x_s.double().reshape(-1, 1) * acc * w_s.double().T
+    torch.testing.assert_close(out, ref.to(out.dtype), rtol=2**-7, atol=0)

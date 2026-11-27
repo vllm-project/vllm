@@ -85,6 +85,8 @@ def forward(
 
 For reference, check out our [Llama implementation](../../../vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out [vllm/model_executor/models](../../../vllm/model_executor/models) for more examples.
 
+Adapting model-specific structure or boilerplate can keep architectures independent. Reuse shared layer implementations, such as Attention and MoE, where their contracts fit the model.
+
 ## 3. (Optional) Implement tensor parallelism and quantization support
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
@@ -124,16 +126,16 @@ With these two steps, interleaved sliding windows should work with the model.
 
 We consider 3 different scenarios:
 
-1. Models that use Mamba layers (either Mamba-1 or Mamba-2) but do not use attention layers.
-2. Models that combine Mamba layers (either Mamba-1 or Mamba-2) together with attention layers.
+1. Models that use Mamba-2 layers but do not use attention layers.
+2. Models that combine Mamba-2 layers together with attention layers.
 3. Models that combine Mamba-like mechanisms (e.g., Linear Attention, ShortConv) together with attention layers.
 
-For case (1), we recommend looking at the implementation of [`MambaForCausalLM`](../../../vllm/model_executor/models/mamba.py) (for Mamba-1) or [`Mamba2ForCausalLM`](../../../vllm/model_executor/models/mamba2.py) (for Mamba-2) as a reference.
+For case (1), we recommend looking at the implementation of [`Mamba2ForCausalLM`](../../../vllm/model_executor/models/mamba2.py) as a reference.
 The model should inherit protocol `IsAttentionFree` and also implement class methods `get_mamba_state_dtype_from_config` and `get_mamba_state_shape_from_config` to calculate the state shapes and data types from the config.
-For the mamba layers themselves, please use the [`MambaMixer`](../../../vllm/model_executor/layers/mamba/mamba_mixer.py) (for Mamba-1) or [`MambaMixer2`](../../../vllm/model_executor/layers/mamba/mamba_mixer2.py) (for Mamba-2) classes.
+For the mamba layers themselves, please use the [`MambaMixer2`](../../../vllm/model_executor/layers/mamba/mamba_mixer2.py) class.
 The model should also be added to the `MODELS_CONFIG_MAP` dictionary in [vllm/model_executor/models/config.py](../../../vllm/model_executor/models/config.py) to ensure that the runtime defaults are optimized.
 
-For case (2), we recommend using as a reference the implementation of [`JambaForCausalLM`](../../../vllm/model_executor/models/jamba.py) (for an example of a model that uses Mamba-1 and attention together) or [`NemotronHForCausalLM`](../../../vllm/model_executor/models/nemotron_h.py) (for an example of a model that uses Mamba-2 and attention together).
+For case (2), we recommend using as a reference the implementation of [`NemotronHForCausalLM`](../../../vllm/model_executor/models/nemotron_h.py).
 These models should follow the same instructions as case (1), but they should inherit protocol `IsHybrid` (instead of `IsAttentionFree`) and it is *not* necessary to add them to the `MODELS_CONFIG_MAP` (their runtime defaults will be inferred from the protocol).
 
 For case (3), we recommend looking at the implementation of [`Lfm2ForCausalLM`](../../../vllm/model_executor/models/lfm2.py) as a reference, which uses a custom "mamba-like" layer `ShortConv`.

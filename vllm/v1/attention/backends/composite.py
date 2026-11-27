@@ -116,14 +116,16 @@ class MMPrefixAttentionRouting(CompositeAttentionRouting):
 
 
 def _intersect_kernel_block_sizes(
-    first: type[AttentionBackend], second: type[AttentionBackend]
+    first: type[AttentionBackend],
+    second: type[AttentionBackend],
+    kv_cache_spec: KVCacheSpec | None = None,
 ):
     from vllm.v1.attention.backend import MultipleOf
 
     result: list[int | MultipleOf] = []
     seen: set[tuple[type, int]] = set()
-    for lhs in first.get_supported_kernel_block_sizes():
-        for rhs in second.get_supported_kernel_block_sizes():
+    for lhs in first.get_supported_kernel_block_sizes(kv_cache_spec):
+        for rhs in second.get_supported_kernel_block_sizes(kv_cache_spec):
             candidate: int | MultipleOf | None = None
             if isinstance(lhs, MultipleOf) and isinstance(rhs, MultipleOf):
                 candidate = MultipleOf(math.lcm(lhs.base, rhs.base))
@@ -295,11 +297,6 @@ def create_composite_attention_backend(
             )
             self.routing = routing_policy(layer_names, vllm_config)
 
-        def set_kernel_block_size(self, kernel_block_size):
-            super().set_kernel_block_size(kernel_block_size)
-            for builder in self._builders:
-                builder.set_kernel_block_size(kernel_block_size)
-
         @classmethod
         def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
             return min(
@@ -378,7 +375,9 @@ def create_composite_attention_backend(
             return CompositeAttentionMetadataBuilder
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ):
             if kernel_block_sizes:
                 return [
                     size
@@ -388,7 +387,9 @@ def create_composite_attention_backend(
                         for backend in (general_backend, causal_backend)
                     )
                 ]
-            return _intersect_kernel_block_sizes(general_backend, causal_backend)
+            return _intersect_kernel_block_sizes(
+                general_backend, causal_backend, kv_cache_spec
+            )
 
         @classmethod
         def supports_block_size(cls, block_size):

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -41,6 +43,14 @@ _CONCLUSION = {
     "skipped": "skipped",
     "not_run": "skipped",
 }
+
+
+# The relay rate-limits callbacks per repo over a sliding 60 s window
+# (RATE_LIMIT_PER_MIN in pytorch/test-infra), and a nightly has far more jobs
+# than that. Pace below the limit, and back off on a 429 for about a minute in
+# total so the last retry lands in a new window.
+_POST_INTERVAL_S = float(os.environ.get("CRCR_POST_INTERVAL_S", "0.65"))
+_RATE_LIMIT_BACKOFF_S = (2, 4, 8, 16, 32)
 
 
 def post(url: str, token: str, body: dict, timeout: int = 30) -> tuple[int, str]:
@@ -113,6 +123,12 @@ def main() -> int:
             ok += 1
             continue
         status, detail = post(args.callback_url, args.oidc_token, body)
+        for delay in _RATE_LIMIT_BACKOFF_S:
+            if status != 429:
+                break
+            time.sleep(delay)
+            status, detail = post(args.callback_url, args.oidc_token, body)
+        time.sleep(_POST_INTERVAL_S)
         if 200 <= status < 300:
             ok += 1
         else:

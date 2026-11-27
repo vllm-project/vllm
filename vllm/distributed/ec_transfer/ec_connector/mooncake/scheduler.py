@@ -20,8 +20,8 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    _get_encoder_cache_hidden_dim,
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    get_encoder_output_width,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
     _RESERVATION_TTL_SECONDS,
@@ -85,9 +85,7 @@ class ECMooncakeScheduler:
         self._is_consumer = config.is_consumer
         self._control_addr = config.control_addr
         self._push_wait_timeout = config.push_wait_timeout_s
-        self._encoder_cache_hidden_dim = (
-            _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
-        )
+        self._vllm_config = vllm_config
         self._model_config = vllm_config.model_config
         self._control_client = ControlClient(config.control_timeout_ms)
         self._control_executor = ThreadPoolExecutor(
@@ -410,7 +408,8 @@ class ECMooncakeScheduler:
             if record is not None:
                 self._scheduler_pending_work = True
                 all_ready = False
-            else:
+            elif getattr(request, "ec_transfer_params", None):
+                # Only requests with EC params expect a push.
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
                 self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
@@ -447,8 +446,10 @@ class ECMooncakeScheduler:
     def _encoder_output_spec(self, request: Any, index: int) -> TensorSpec:
         dtype = self._model_config.dtype
         assert isinstance(dtype, torch.dtype)
-        assert self._encoder_cache_hidden_dim is not None
-        shape = (request.get_num_encoder_embeds(index), self._encoder_cache_hidden_dim)
+        hidden_dim = get_encoder_output_width(
+            self._vllm_config, request.mm_features[index].modality
+        )
+        shape = (request.get_num_encoder_embeds(index), hidden_dim)
         return TensorSpec(shape, str(dtype), math.prod(shape) * dtype.itemsize)
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
@@ -468,7 +469,7 @@ class ECMooncakeScheduler:
                 )
 
     def update_state_after_free(self, request: Any, index: int) -> None:
-        if not self._is_consumer:
+        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
             return
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
@@ -525,7 +526,7 @@ class ECMooncakeScheduler:
         return self._scheduler_pending_work
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
-        if self._is_consumer:
+        if self._is_consumer and getattr(request, "ec_transfer_params", None):
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
@@ -554,6 +555,27 @@ class ECMooncakeScheduler:
         if not items:
             return False, None
         return False, items
+
+    def reset(self) -> None:
+        """Invalidate local encoder-cache bookkeeping after a cache reset.
+
+        `reset_encoder_cache` already clears EncoderCacheManager and the
+        worker encoder cache. `_local_cache` is only a mirror of that
+        cache; leaving it in place lets `ensure_cache_available` skip
+        Load and hit an encoder cache miss. Consumed READY/RESIDENT
+        records are expired so a later request cannot treat a consumed
+        `transfer_id` as a cache hit. Unconsumed AVAILABLE
+        reservations remain Load-able. This does not make in-flight
+        reset concurrency-safe.
+        """
+        self._local_cache.clear()
+        self._transfers.invalidate_local(time.monotonic())
+        self._scheduler_pending_work = False
+        self._pushes_to_prepare.clear()
+        self._prepared_push_transfer_ids.clear()
+        self._store_candidates.clear()
+        self._failed_saves.clear()
+        self._event_ready_shards.clear()
 
     def close(self) -> None:
         self._control_executor.shutdown(wait=True, cancel_futures=True)

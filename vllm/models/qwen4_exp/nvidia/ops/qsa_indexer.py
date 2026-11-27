@@ -10,6 +10,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import has_flashinfer_topk_varlen_gvr2
+from vllm.utils.math_utils import round_up
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -383,6 +385,7 @@ def _prefill_logits(
     page_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
+    logits_workspace: torch.Tensor,
     max_query_len: int,
     logits_width: int,
     query_offset: int,
@@ -392,10 +395,14 @@ def _prefill_logits(
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
     assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
+    assert logits_workspace.is_contiguous()
+    assert logits_workspace.numel() >= num_queries * logits_width
 
-    logits = torch.empty(
-        (num_queries, logits_width), dtype=torch.float32, device=q.device
+    # slice from pre-allocated workspace
+    logits = logits_workspace[: num_queries * logits_width].view(
+        num_queries, logits_width
     )
+
     # tuned on GB300
     if k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
@@ -468,6 +475,116 @@ def expand_qsa_block_indices(
     )
 
 
+def qsa_prefill_logits_width(
+    max_seq_len: int, compress_ratio: int, max_columns: int
+) -> int:
+    """Compressed columns any prefill row can score, rounded up to 64 for
+    the top-k kernels' row alignment."""
+    width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
+    return min(max(64, width), max_columns)
+
+
+# sparse_indexer_topk_backend values QSA supports; "auto" prefers gvr_2.
+QSA_TOPK_BACKENDS = ("auto", "flashinfer_gvr2", "cooperative", "persistent")
+
+
+def use_gvr2_topk(topk_backend: str, block_topk: int, width: int) -> bool:
+    """Whether _topk uses gvr_2. QSA logits are contiguous fp32, so only k
+    and the width can rule it out."""
+    if topk_backend not in ("auto", "flashinfer_gvr2"):
+        return False
+    supported = (
+        current_platform.is_device_capability_family(100)
+        and block_topk in (512, 1024, 2048)
+        and width % 4 == 0
+        and has_flashinfer_topk_varlen_gvr2()
+    )
+    if topk_backend == "flashinfer_gvr2" and not supported:
+        raise RuntimeError(
+            "sparse_indexer_topk_backend='flashinfer_gvr2' needs SM100, "
+            "FlashInfer gvr_2, k in (512, 1024, 2048) and a width divisible "
+            f"by 4; got k={block_topk}, width={width}"
+        )
+    return supported
+
+
+def warmup_gvr2_topk(
+    topk_backend: str,
+    block_topk: int,
+    decode_width: int,
+    max_decode_rows: int,
+    prefill_width: int,
+) -> None:
+    """Pre-compile gvr_2 for every serving geometry. Decode compiles per
+    exact width, prefill per pow2 width bucket, so prefill_width covers
+    every narrower chunk."""
+    from flashinfer.topk_varlen.kernels.gvr2_topk_host import (
+        warmup_prefill,
+        warmup_varlen,
+    )
+
+    if use_gvr2_topk(topk_backend, block_topk, decode_width):
+        warmup_varlen(
+            top_k=block_topk,
+            max_seq_len=decode_width,
+            num_rows_list=range(1, max_decode_rows + 1),
+            row_stride=decode_width,
+        )
+    if use_gvr2_topk(topk_backend, block_topk, prefill_width):
+        warmup_prefill(top_k=block_topk, max_cols=prefill_width)
+
+
+# Zero row_starts for the prefill kernel (QSA windows start at column 0).
+# Allocated at model init so serving only slices it.
+_gvr2_prefill_zero_starts: torch.Tensor | None = None
+
+
+def init_gvr2(max_num_tokens: int) -> None:
+    global _gvr2_prefill_zero_starts
+    if (
+        _gvr2_prefill_zero_starts is None
+        or _gvr2_prefill_zero_starts.numel() < max_num_tokens
+    ):
+        _gvr2_prefill_zero_starts = torch.zeros(
+            max_num_tokens, dtype=torch.int32, device="cuda"
+        )
+
+
+def _gvr2_topk(
+    logits: torch.Tensor,
+    visible_blocks: torch.Tensor,
+    block_topk: int,
+    block_indices: torch.Tensor,
+    prefill: bool,
+) -> None:
+    from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
+
+    # One request per token (next_n=1); visible blocks are already in
+    # compressed units. max_seq_len=width avoids a host sync.
+    row_starts = None
+    if prefill:
+        # The windowed kernel compiles per pow2 width bucket, not per exact
+        # width, which suits varying chunk widths.
+        num_tokens = logits.shape[0]
+        assert (
+            _gvr2_prefill_zero_starts is not None
+            and _gvr2_prefill_zero_starts.numel() >= num_tokens
+        ), "call init_gvr2(max_num_batched_tokens) first"
+        row_starts = _gvr2_prefill_zero_starts[:num_tokens]
+    # -1-fills tokens shorter than block_topk itself.
+    run_varlen(
+        logits,
+        None,
+        visible_blocks,
+        block_indices,
+        next_n=1,
+        compress_ratio=1,
+        max_seq_len=logits.shape[1],
+        top_k=block_topk,
+        row_starts=row_starts,
+    )
+
+
 def _topk(
     logits: torch.Tensor,
     visible_blocks: torch.Tensor,
@@ -475,14 +592,24 @@ def _topk(
     compress_ratio: int,
     block_indices: torch.Tensor,
     topk_workspace: torch.Tensor,
+    topk_backend: str,
+    prefill: bool,
 ) -> None:
-    # similar dispatch logic as DeepSeek indexer
+    # gvr_2 where it can run, else the cooperative/persistent chain.
     block_topk = token_topk // compress_ratio
-    use_cooperative_topk = (
+    if use_gvr2_topk(topk_backend, block_topk, logits.shape[1]):
+        _gvr2_topk(logits, visible_blocks, block_topk, block_indices, prefill)
+        return
+    cooperative_supported = (
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
         and current_platform.has_device_capability(90)
+        and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
+    )
+    # Explicit persistent forces it for decode; prefill keeps the chain.
+    use_cooperative_topk = cooperative_supported and (
+        prefill or topk_backend != "persistent"
     )
     topk_op = (
         torch.ops._C.cooperative_topk
@@ -508,20 +635,22 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
     Args:
-        q: Query tensor shaped ``[num_requests * decode_query_len, heads,
-            head_dim]``.
-        k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
-            head_dim]``.
-        page_table: Request block table shaped ``[num_requests, max_pages]``.
+        q: Query tensor shaped `[num_requests * decode_query_len, heads,
+            head_dim]`.
+        k_cache: Compressed key cache shaped `[blocks, page_size, 1,
+            head_dim]`.
+        page_table: Request block table shaped `[num_requests, max_pages]`.
         visible_blocks: Number of visible compressed blocks per query.
         token_topk: Number of logical tokens selected per query.
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
+        topk_backend: One of QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0
@@ -567,6 +696,8 @@ def qsa_select_paged_decode(
         compress_ratio,
         block_indices,
         torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+        topk_backend,
+        prefill=False,
     )
 
 
@@ -581,14 +712,15 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
     Args:
-        q: Packed prefill query tensor shaped ``[num_tokens, heads, head_dim]``.
-        k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
-            head_dim]``.
-        page_table: Block table shaped ``[num_requests, max_pages]``.
+        q: Packed prefill query tensor shaped `[num_tokens, heads, head_dim]`.
+        k_cache: Compressed key cache shaped `[blocks, page_size, 1,
+            head_dim]`.
+        page_table: Block table shaped `[num_requests, max_pages]`.
         query_start_loc: Packed prefill query offsets with a terminal offset.
             Offsets may share the base of a larger backing tensor.
         visible_blocks: Number of visible compressed blocks per query.
@@ -597,21 +729,25 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
+        topk_backend: One of QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     rows = q.shape[0]
-    # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
-    # columns. Round up to 64 to keep the logits row stride
-    # cooperative_topk-compatible.
-    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
-    logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
+    logits_width = qsa_prefill_logits_width(
+        max_seq_len, compress_ratio, page_table.shape[1] * k_cache.shape[1]
+    )
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+    # always allocate the worst case to avoid memory fragmentation.
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
+
+    budget_bytes = max(max_logits_bytes, page_table.shape[1] * k_cache.shape[1] * 4)
+    logits_workspace = q.new_empty(budget_bytes // 4, dtype=torch.float32)
+
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
@@ -625,6 +761,7 @@ def qsa_select_paged_prefill(
             page_table,
             query_start_loc,
             visible_blocks,
+            logits_workspace,
             max_query_len,
             logits_width,
             query_offset=query_start,
@@ -637,6 +774,8 @@ def qsa_select_paged_prefill(
             compress_ratio,
             block_indices[query_slice],
             topk_workspace,
+            topk_backend,
+            prefill=True,
         )
 
 

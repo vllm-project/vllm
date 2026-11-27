@@ -1,15 +1,15 @@
 {
-    "state-spaces/mamba-130m-hf": {
+    "vllm-project/mamba2-130m-hf": {
         "architectures": [
-            "MambaForCausalLM"
+            "Mamba2ForCausalLM"
         ],
-        "model_type": "mamba",
-        "text_model_type": "mamba",
+        "model_type": "mamba2",
+        "text_model_type": "mamba2",
         "hidden_size": 768,
         "total_num_hidden_layers": 24,
         "total_num_attention_heads": 0,
-        "head_size": 0,
-        "vocab_size": 50280,
+        "head_size": 64,
+        "vocab_size": 50288,
         "total_num_kv_heads": 0,
         "num_experts": 0,
         "is_deepseek_mla": false,
@@ -50,23 +50,6 @@
         "is_multimodal_model": true,
         "dtype": "torch.float32"
     },
-    "tiiuae/falcon-mamba-7b-instruct": {
-        "architectures": [
-            "FalconMambaForCausalLM"
-        ],
-        "model_type": "falcon_mamba",
-        "text_model_type": "falcon_mamba",
-        "hidden_size": 4096,
-        "total_num_hidden_layers": 64,
-        "total_num_attention_heads": 0,
-        "head_size": 0,
-        "vocab_size": 65024,
-        "total_num_kv_heads": 0,
-        "num_experts": 0,
-        "is_deepseek_mla": false,
-        "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
-    },
     "Zyphra/Zamba2-7B-instruct": {
         "architectures": [
             "Zamba2ForCausalLM"
@@ -79,23 +62,6 @@
         "head_size": 224,
         "vocab_size": 32000,
         "total_num_kv_heads": 32,
-        "num_experts": 0,
-        "is_deepseek_mla": false,
-        "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
-    },
-    "databricks/dbrx-instruct": {
-        "architectures": [
-            "DbrxForCausalLM"
-        ],
-        "model_type": "dbrx",
-        "text_model_type": "dbrx",
-        "hidden_size": 6144,
-        "total_num_hidden_layers": 40,
-        "total_num_attention_heads": 48,
-        "head_size": 128,
-        "vocab_size": 100352,
-        "total_num_kv_heads": 8,
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
@@ -135,7 +101,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_main_random": {
+    "vllm-project/deepseek_mtp_main_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
@@ -152,7 +118,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_draft_random": {
+    "vllm-project/deepseek_mtp_draft_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
@@ -347,7 +313,7 @@
         "text_model_type": "step3p5",
         "hidden_size": 4096,
         "total_num_hidden_layers": 45,
-        "total_num_attention_heads": 64,
+        "total_num_attention_heads": 96,
         "head_size": 128,
         "vocab_size": 128896,
         "total_num_kv_heads": 8,

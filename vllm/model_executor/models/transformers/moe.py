@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -33,12 +34,24 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     MoERunner,
     RoutedExperts,
+    RoutedScaleMode,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
-from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.model_executor.models.utils import (
+    WeightsMapper,
+    WeightsTransformFn,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
+    maybe_fuse_shared_experts,
+    maybe_prefix,
+)
+from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
 from .base import Base
@@ -50,7 +63,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class TransformersMoEState:
     topk_ids: torch.Tensor | None = None
     is_sequence_parallel: bool = False
@@ -126,7 +139,69 @@ direct_register_custom_op(
 )
 
 
+def _hf_topk_router_precomputed(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    moe_state: TransformersMoEState,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return `(topk_weights, topk_ids)` the HF block forward already computed:
+    weights arrive as `gating_output`, ids via `moe_state`."""
+    topk_weights = gating_output
+    topk_ids = moe_state.topk_ids
+    assert topk_ids is not None
+    # Handle all gather in expert parallel
+    if topk_ids.size(0) != hidden_states.size(0):
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+        is_sp = moe_state.is_sequence_parallel
+        group = get_ep_group() if is_sp else get_dp_group()
+        assert sizes[group.rank_in_group] == topk_ids.shape[0]
+        (topk_ids,) = group.all_gatherv([topk_ids], 0, sizes)
+    return topk_weights, topk_ids
+
+
+def _hf_topk_router(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    gate: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route with a Transformers gate returning `(_, topk_weights, topk_ids)`."""
+    _, topk_weights, topk_ids = gate(hidden_states)
+    return topk_weights, topk_ids
+
+
+def _fusable_shared_expert(
+    shared: nn.Module, intermediate_size: int, num_shared_experts: int
+) -> bool:
+    """Can `shared` run as `num_shared_experts` extra routed experts?
+
+    It must be a bias-free SiLU GLU as wide as that many routed experts, with the
+    projection names the routed experts' checkpoint mapping loads."""
+    glu = get_fuser(shared, GLUFuser)
+    if glu is None or glu.down_name is None:
+        return False
+    names = (glu.gate_name, glu.up_name, glu.down_name)
+    if names != ("gate_proj", "up_proj", "down_proj"):
+        return False
+    act = shared.get_submodule(glu.act_name)
+    if not (isinstance(act, nn.SiLU) or type(act).__name__ == "SiLUActivation"):
+        return False
+    gate, up, down = (shared.get_submodule(name) for name in names)
+    if any(getattr(linear, "bias", None) is not None for linear in (gate, up, down)):
+        return False
+    return gate.weight.shape[0] == intermediate_size * num_shared_experts
+
+
 class TransformersRoutedExperts(RoutedExperts):
+    _is_mixtral_format: bool | None = None
+    """Does the checkpoint use Mixtral style naming. `None` until weights are loaded."""
+
     def get_expert_mapping(
         self,
         ckpt_gate_proj_name: str | None = None,
@@ -142,10 +217,26 @@ class TransformersRoutedExperts(RoutedExperts):
         )
         mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
         if not include_fused:
+            # LoRA expects one triplet per expert, so only return the loaded naming
+            if self._is_mixtral_format is not None:
+                return mixtral_map if self._is_mixtral_format else common_map
             return common_map + mixtral_map
         common_fused, common_unfused = common_map[:3], common_map[3:]
         mixtral_fused, mixtral_unfused = mixtral_map[:3], mixtral_map[3:]
         return common_fused + mixtral_fused + common_unfused + mixtral_unfused
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return super().load_weights(self._detect_mixtral_format(weights))
+
+    def _detect_mixtral_format(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            uses_w123 = any(f".{w}." in f".{name}" for w in ("w1", "w2", "w3"))
+            self._is_mixtral_format = bool(self._is_mixtral_format) or uses_w123
+            yield name, weight
 
 
 class MoEMixin(MixtureOfExperts, Base):
@@ -156,7 +247,11 @@ class MoEMixin(MixtureOfExperts, Base):
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("5.0.0", "MoE models support")
+        model_type = vllm_config.model_config.hf_config.model_type
+        if model_type == "aria":
+            self.check_version("5.18.0", "Aria")
+        elif model_type == "axk1":
+            self.check_version("5.23.0", "A.X-K1")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -175,29 +270,65 @@ class MoEMixin(MixtureOfExperts, Base):
             moe_block.n_redundant_experts = self.num_redundant_experts
             moe_block.experts.update_expert_map()
 
+    def _fused_shared_expert_kwargs(
+        self,
+        fuser: MoEBlockFuser,
+        moe_block: nn.Module,
+        prefix: str,
+        intermediate_size: int,
+        fused_layers: dict[tuple[str, str], set[int]],
+    ) -> dict[str, Any] | None:
+        """`FusedMoE` kwargs running the block's shared expert as extra routed
+        experts (ROCm AITER), if it can.
+
+        Records the layer index in `fused_layers` under the block's
+        `(shared expert, experts)` names, relative to the layer."""
+        name = fuser.shared_name
+        if name is None or fuser.scoring_func is None:
+            return None
+        shared = getattr(moe_block, name)
+        if not _fusable_shared_expert(
+            shared, intermediate_size, self.num_shared_experts
+        ):
+            return None
+        # Checkpoint weights are matched to layers by their only index
+        parts = prefix.split(".")
+        indices = [i for i, part in enumerate(parts) if part.isdigit()]
+        if len(indices) != 1:
+            return None
+        if not resolve_layer_fused_shared_expert(self.quant_config, prefix, name):
+            return None
+        idx = indices[0]
+        block = ".".join(parts[idx + 1 :])
+        key = (maybe_prefix(block, name), maybe_prefix(block, "experts"))
+        fused_layers.setdefault(key, set()).add(int(parts[idx]))
+        setattr(moe_block, name, None)
+        moe_block.is_fused_shared_expert_enabled = True
+        return dict(
+            n_shared_experts=self.num_shared_experts,
+            fuse_shared_experts=True,
+            shared_expert_prefix=f"{prefix}.{name}",
+            shared_expert_gate=fuser.shared_expert_gate(moe_block, prefix),
+        )
+
     def recursive_replace(self):
         """Initialize the MoE layers."""
         experts_name = "experts"
         text_config = self.text_config
 
         # Positional arguments
-        num_experts = self.model_config.get_num_experts()
-        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
+        num_experts_names = CONFIG_FIELD_ALIASES["num_experts"]
+        num_experts = getattr_iter(text_config, num_experts_names, None)
+        top_k_names = CONFIG_FIELD_ALIASES["num_experts_per_token"]
+        top_k = getattr_iter(text_config, top_k_names, None)
         assert top_k is not None
         hidden_size = text_config.hidden_size
-        intermediate_size = getattr_iter(
-            text_config, ["moe_intermediate_size", "intermediate_size"], None
-        )
+        intermediate_size_names = CONFIG_FIELD_ALIASES["moe_intermediate_size"]
+        intermediate_size = getattr_iter(text_config, intermediate_size_names, None)
         assert intermediate_size is not None
 
-        num_shared_experts = getattr_iter(
-            text_config,
-            [
-                "n_shared_experts",  # DeepSeek, Docs, GLM
-                "moe_num_shared_experts",  # Aria, Ernie
-            ],
-            0,
-        )
+        num_shared_experts_names = CONFIG_FIELD_ALIASES["num_shared_experts"]
+        num_shared_experts = getattr_iter(text_config, num_shared_experts_names, 0)
 
         # Common kwargs
         norm_topk_prob = getattr(text_config, "norm_topk_prob", None)
@@ -205,10 +336,14 @@ class MoEMixin(MixtureOfExperts, Base):
         # Routed scaling factor kwargs
         routed_scaling_factor = getattr(text_config, "routed_scaling_factor", 1.0)
         # aiter applies routed_scaling_factor internally
-        apply_routed_scale_to_output = not rocm_aiter_ops.is_fused_moe_enabled()
+        routed_scale_mode = (
+            RoutedScaleMode.ROUTER
+            if rocm_aiter_ops.is_fused_moe_enabled()
+            else RoutedScaleMode.OUTPUT
+        )
         routed_scaling_factor_kwargs = dict(
             routed_scaling_factor=routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
         )
 
         # Dtype the router computes in, if it is not the activation dtype.
@@ -251,9 +386,13 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Down projections of shared experts consumed by FusedMoE
         shared_down_projs: list[tuple[nn.Module, str]] = []
+        fused_shared_layers: dict[tuple[str, str], set[int]] = {}
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
+            # Decoder layers are fused later, in `_pre_decoder_layer_replace`
+            if module is self._decoder_layers:
+                return
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 # Naive implementations will have experts as ModuleList
@@ -276,6 +415,9 @@ class MoEMixin(MixtureOfExperts, Base):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
+                    # Whether the expert weights are stored in transposed format.
+                    # Comes from Transformers `use_experts_implementation` decorator.
+                    is_transposed = getattr(experts, "is_transposed", False)
                     # If the config does not specify num_shared_experts, but
                     # the model has shared experts, we assume there is one.
                     if self.num_shared_experts == 0:
@@ -309,31 +451,27 @@ class MoEMixin(MixtureOfExperts, Base):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
+                        is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    fuser = MoEBlockFuser.match(moe_block, experts_name)
-                    # _maybe_apply_routed_scale_to_output edge case. Transformers
-                    # decoder layers do not compensate for dividing by scaling factor.
-                    reaches_fp16_trick = (
-                        routed_scaling_factor != 1.0
-                        and apply_routed_scale_to_output
-                        and self.model_config.dtype == torch.float16
-                        and fuser is not None
-                        and fuser.shared_name is not None
+                    fuser = MoEBlockFuser.match(
+                        moe_block, experts_name, routed_scaling_factor
                     )
-                    if reaches_fp16_trick:
-                        logger.warning_once(
-                            "%s could be fused but routing it in vLLM would apply "
-                            "`routed_scaling_factor` by dividing the shared expert "
-                            "output, which only fp16 overflow protection expects the "
-                            "decoder layer to compensate for. Falling back to routing "
-                            "in Transformers; run in bfloat16 to fuse it.",
-                            moe_block_cls,
-                        )
-                    if fuser is not None and not reaches_fp16_trick:
+                    if fuser is not None:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in MoERunner.
-                        shared_experts = fuser.shared_experts(moe_block, prefix)
+                        shared_experts = None
+                        fse_kwargs = self._fused_shared_expert_kwargs(
+                            fuser,
+                            moe_block,
+                            prefix,
+                            kwargs["intermediate_size"],
+                            fused_shared_layers,
+                        )
+                        if fse_kwargs is not None:
+                            kwargs |= fse_kwargs
+                        else:
+                            shared_experts = fuser.shared_experts(moe_block, prefix)
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
@@ -342,34 +480,52 @@ class MoEMixin(MixtureOfExperts, Base):
                                 down_name = glu_fuser.down_name
                                 if down_name is not None:
                                     shared_down_projs.append((hf_shared, down_name))
-                        # Prefer config, otherwise read it from fuser.
-                        router_dtype = config_router_dtype or fuser.router_dtype
-                        gate = fuser.gate(moe_block, prefix, router_dtype)
+                        if scoring_func := fuser.scoring_func:
+                            # Internal routing kwargs.
+                            # Prefer config, otherwise read it from fuser.
+                            router_dtype = config_router_dtype or fuser.router_dtype
+                            gate = fuser.gate(moe_block, prefix, router_dtype)
+                            kwargs |= dict(
+                                scoring_func=scoring_func,
+                                renormalize=(
+                                    layer_renormalize
+                                    if fuser.renormalize is None
+                                    else fuser.renormalize
+                                ),
+                                gate=gate,
+                            )
+                            if router_dtype is not None:
+                                kwargs["router_logits_dtype"] = router_dtype
+                            if use_grouped_topk:
+                                kwargs |= grouped_topk_routing_kwargs
+                            if routed_scaling_factor != 1.0:
+                                kwargs |= routed_scaling_factor_kwargs
+                            bias = getattr(gate, "e_score_correction_bias", None)
+                            if bias is not None:
+                                kwargs["e_score_correction_bias"] = bias
+                        else:
+                            # External routing kwargs
+                            kwargs |= dict(
+                                num_expert_group=num_expert_group,
+                                topk_group=topk_group,
+                                custom_routing_function=partial(
+                                    _hf_topk_router,
+                                    gate=getattr(moe_block, fuser.gate_name),
+                                ),
+                            )
+
                         kwargs |= dict(
-                            scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
                                 self.parallel_config.use_sequence_parallel_moe
                             ),
-                            gate=gate,
                             shared_experts=shared_experts,
                         )
-                        if router_dtype is not None:
-                            kwargs["router_logits_dtype"] = router_dtype
-                        if use_grouped_topk:
-                            kwargs |= grouped_topk_routing_kwargs
-                        if routed_scaling_factor != 1.0:
-                            kwargs |= routed_scaling_factor_kwargs
-                        bias = getattr(gate, "e_score_correction_bias", None)
-                        if bias is not None:
-                            kwargs["e_score_correction_bias"] = bias
                         fuser.rewrite_forward(moe_block)
-                        routed = "gate + experts"
-                        if fuser.shared_name:
-                            routed += " + shared experts"
                         logger.info_once(
-                            "Fused: %s (%s) -> MoERunner (internal routing)",
-                            routed,
+                            "Fused: gate + experts%s (%s) -> MoERunner (%s routing)",
+                            " + shared experts" if fuser.shared_name else "",
                             moe_block_cls,
+                            "external" if fuser.scoring_func is None else "internal",
                         )
                     else:
                         # MoE block forward is unmodified.
@@ -377,35 +533,11 @@ class MoEMixin(MixtureOfExperts, Base):
                         # We then smuggle the topk_ids in using a custom op.
                         moe_state = TransformersMoEState()
 
-                        def custom_routing_function(
-                            hidden_states: torch.Tensor,
-                            gating_output: torch.Tensor,
-                            topk: int,
-                            renormalize: bool,
-                            moe_state: TransformersMoEState,
-                        ):
-                            """Return `topk_weights` from `gating_output` and the
-                            `topk_ids` we stored in the layer earlier."""
-                            topk_weights = gating_output
-                            topk_ids = moe_state.topk_ids
-                            assert topk_ids is not None
-                            # Handle all gather in expert parallel
-                            if topk_ids.size(0) != hidden_states.size(0):
-                                dp_metadata = get_forward_context().dp_metadata
-                                assert dp_metadata is not None
-                                sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-                                assert sizes is not None
-                                is_sp = moe_state.is_sequence_parallel
-                                group = get_ep_group() if is_sp else get_dp_group()
-                                assert sizes[group.rank_in_group] == topk_ids.shape[0]
-                                (topk_ids,) = group.all_gatherv([topk_ids], 0, sizes)
-                            return topk_weights, topk_ids
-
                         kwargs |= dict(
                             num_expert_group=num_expert_group,
                             topk_group=topk_group,
                             custom_routing_function=partial(
-                                custom_routing_function, moe_state=moe_state
+                                _hf_topk_router_precomputed, moe_state=moe_state
                             ),
                             runner_cls=TransformersMoERunner,
                             runner_args={"moe_state": moe_state},
@@ -424,9 +556,25 @@ class MoEMixin(MixtureOfExperts, Base):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        self.num_moe_layers = len(self.moe_layers)
+        self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
         super().recursive_replace()
+        self.num_moe_layers = len(self.moe_layers)
+        # Validates and logs the per-layer shared expert fusion
+        moe_classes = tuple({type(moe_block) for moe_block in self.mlp_layers})
+        get_fused_shared_expert_layers(self.model, moe_classes, enable_eplb)
+        transforms: list[WeightsTransformFn] = [
+            partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=self.num_logical_experts,
+                n_shared_experts=self.num_shared_experts,
+                fused_shared_expert_layers=frozenset(layers),
+                ckpt_prefix=shared,
+                experts_prefix=experts,
+            )
+            for (shared, experts), layers in fused_shared_layers.items()
+        ]
+        self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=transforms)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:

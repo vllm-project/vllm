@@ -144,35 +144,6 @@ async def test_score_api_queries_str_n_documents_str_n(
 
 
 @pytest.mark.asyncio
-async def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
-
-    score_response = requests.post(
-        server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "documents": TEXTS_2,
-        },
-    )
-    score_response.raise_for_status()
-    score = ScoreResponse.model_validate(score_response.json())
-
-    assert score.id is not None
-    assert score.data is not None
-    assert len(score.data) == 2
-
-    vllm_outputs = [d.score for d in score.data]
-    hf_outputs = hf_model.predict(text_pairs).tolist()
-
-    for i in range(len(vllm_outputs)):
-        assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
-
-
-@pytest.mark.asyncio
 async def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -260,7 +231,17 @@ async def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_rerank_api_texts(server: RemoteOpenAIServer):
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"return_documents": True},
+        {"return_documents": False},
+        {"return_documents": None},
+    ],
+    ids=["default", "include-documents", "omit-documents", "null"],
+)
+async def test_rerank_api_texts(server: RemoteOpenAIServer, options):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -273,6 +254,7 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "query": query,
             "documents": documents,
+            **options,
         },
     )
     rerank_response.raise_for_status()
@@ -283,6 +265,11 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
     assert len(rerank.results) == 2
     assert rerank.results[0].relevance_score >= 0.9
     assert rerank.results[1].relevance_score <= 0.01
+    for result in rerank_response.json()["results"]:
+        if options.get("return_documents") is False:
+            assert "document" not in result
+        else:
+            assert result["document"]["text"] == documents[result["index"]]
 
 
 @pytest.mark.asyncio

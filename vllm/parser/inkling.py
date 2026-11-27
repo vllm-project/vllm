@@ -10,15 +10,15 @@ Inkling output format (every marker is a dedicated special token)::
         {"name":"get_weather","args":{"city":"SF"}}<|end_message|>
 
 Blocks are self-describing and may repeat in any order; sampling may
-also end a block with the standalone ``<|content_model_end_sampling|>``
-token. The tool-call payload is a single JSON object whose ``name`` is
-extracted by the engine's name-from-args path and whose ``args`` object
-is carved out of the wrapper by :func:`_inkling_arg_converter`.
+also end a block with the standalone `<|content_model_end_sampling|>`
+token. The tool-call payload is a single JSON object whose `name` is
+extracted by the engine's name-from-args path and whose `args` object
+is carved out of the wrapper by `_inkling_arg_converter`.
 
-Note the terminal *labels*: ``THINK_START``/``THINK_END`` are what the
-engine keys its reasoning plumbing on (``is_reasoning_end``,
-``count_reasoning_tokens``, initial-state seeding), so ``<|end_message|>``
-is labelled ``THINK_END`` here even though it ends every block kind —
+Note the terminal *labels*: `THINK_START`/`THINK_END` are what the
+engine keys its reasoning plumbing on (`is_reasoning_end`,
+`count_reasoning_tokens`, initial-state seeding), so `<|end_message|>`
+is labelled `THINK_END` here even though it ends every block kind —
 the transition table, not the label, carries the semantics.
 """
 
@@ -29,27 +29,53 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from xgrammar import StructuralTag
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    Format,
+    SequenceFormat,
+    StarFormat,
+    TokenFormat,
+)
+
 from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import structured_outputs_to_format
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
+from vllm.parser.utils import extract_json_member_object
+from vllm.renderers.inkling_encoding import (
+    AUDIO_END,
+    CONTENT_AUDIO_INPUT,
+    CONTENT_IMAGE,
+    CONTENT_INVOKE_TOOL_JSON,
+    CONTENT_INVOKE_TOOL_TEXT,
+    CONTENT_MODEL_END_SAMPLING,
+    CONTENT_TEXT,
+    CONTENT_THINKING,
+    CONTENT_TOOL_ERROR,
+    CONTENT_XML,
+    END_MESSAGE,
+    END_OF_TEXT,
+    MESSAGE_MODEL,
+    MESSAGE_SYSTEM,
+    MESSAGE_TOOL,
+    MESSAGE_USER,
+    continuation_prefix,
+)
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
-
-MESSAGE_MODEL = "<|message_model|>"
-CONTENT_TEXT = "<|content_text|>"
-CONTENT_THINKING = "<|content_thinking|>"
-CONTENT_INVOKE_TOOL_JSON = "<|content_invoke_tool_json|>"
-CONTENT_INVOKE_TOOL_TEXT = "<|content_invoke_tool_text|>"
-CONTENT_TOOL_ERROR = "<|content_tool_error|>"
-CONTENT_MODEL_END_SAMPLING = "<|content_model_end_sampling|>"
-END_MESSAGE = "<|end_message|>"
 
 INKLING_SPECIAL_TOKENS = (
     MESSAGE_MODEL,
@@ -62,111 +88,98 @@ INKLING_SPECIAL_TOKENS = (
     END_MESSAGE,
 )
 
-_WS = " \t\r\n"
-
-
-def _scan_json_value(raw: str, start: int) -> int | None:
-    """Return the end index (exclusive) of the JSON object starting at
-    ``raw[start]``, or ``None`` when the object is still unterminated."""
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(raw)):
-        ch = raw[i]
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return None
-
-
-def _args_value_span(raw: str) -> str | None:
-    """Extract the raw text span of the top-level ``"args"`` value from a
-    (possibly incomplete) ``{"name":...,"args":{...}}`` wrapper.
-
-    Returns the verbatim substring (prefix-stable across growing input,
-    which the engine's argument-delta diffing relies on), possibly an
-    unterminated object prefix; ``None`` when the value has not started.
-    Raises ``ValueError`` when the value is not a JSON object.
-    """
-    depth = 0
-    in_string = False
-    escape = False
-    string_start = -1
-    last_string: str | None = None
-    for i, ch in enumerate(raw):
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-                if depth == 1:
-                    last_string = raw[string_start + 1 : i]
-            continue
-        if ch == '"':
-            in_string = True
-            string_start = i
-        elif ch == ":" and depth == 1 and last_string == "args":
-            value_start = i + 1
-            while value_start < len(raw) and raw[value_start] in _WS:
-                value_start += 1
-            if value_start >= len(raw):
-                return None
-            if raw[value_start] != "{":
-                raise ValueError("Inkling tool call args must be a JSON object")
-            value_end = _scan_json_value(raw, value_start)
-            if value_end is None:
-                return raw[value_start:]
-            return raw[value_start:value_end]
-        elif ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-    return None
+# Every framing token; free text in a grammar never contains one.
+INKLING_CONTROL_TOKENS = (
+    END_OF_TEXT,
+    MESSAGE_USER,
+    MESSAGE_SYSTEM,
+    MESSAGE_TOOL,
+    CONTENT_IMAGE,
+    CONTENT_XML,
+    CONTENT_AUDIO_INPUT,
+    AUDIO_END,
+    *INKLING_SPECIAL_TOKENS,
+)
 
 
 def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the ``args`` object out of the tool-call JSON wrapper.
+    """Carve the `args` object out of the tool-call JSON wrapper.
 
-    Why a converter at all: the engine's ``tool_args_json`` machinery
+    Why a converter at all: the engine's `tool_args_json` machinery
     treats the *entire* TOOL_ARGS text as the tool arguments, but Inkling's
-    payload is the ``{"name":...,"args":{...}}`` wrapper — without a
-    converter, ``_compute_arg_delta`` streams the wrapper verbatim into
-    the OpenAI ``arguments`` field (``converter is None -> raw delta``,
-    unconditionally; ``stream_arg_deltas=False`` does not stop it).
-
-    Why a hand-rolled scanner instead of (partial) ``json.loads`` +
-    ``json.dumps``: the engine diffs successive converter outputs and
-    requires each to extend the previous one (``startswith``); a
-    violation silently drops argument deltas. Re-serialization changes
-    whitespace and closes unterminated structures differently across
-    ticks, so the only prefix-stable output is a verbatim substring of
-    the input. The scanner is also string/escape-aware so an ``"args"``
-    literal inside the name or a string value cannot mislead it, and it
-    still recovers a partial span when EOS truncates the wrapper (where
-    ``json.loads`` would fail).
+    payload is the `{"name":...,"args":{...}}` wrapper — without a
+    converter, `_compute_arg_delta` streams the wrapper verbatim into
+    the OpenAI `arguments` field (`converter is None -> raw delta`,
+    unconditionally; `stream_arg_deltas=False` does not stop it).
+    `extract_json_member_object` returns a prefix-stable verbatim
+    substring, which the engine's argument-delta diffing requires.
     """
-    span = _args_value_span(raw_args)
+    span = extract_json_member_object(raw_args, "args")
     if span is None:
         # No args value yet (streaming) or none at all (treat as empty).
         return "" if partial else "{}"
     return span
+
+
+def _inkling_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Extend the open trailing value of the `args` object until it closes.
+
+    `_inkling_arg_converter` returns a verbatim span of `raw_args`, so while
+    the last member value is open every delta appends to the converted JSON
+    as is: a string streams it, other values are held by the engine without
+    re-running the converter. Returns None before the value starts, so the
+    converter decides whether a string value may stream.
+    """
+    span = extract_json_member_object(raw_args, "args")
+    if span is None:
+        return None
+    depth = 0
+    in_string = escape = in_value = False
+    for ch in span:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif depth == 1 and ch in ":,":
+            in_value = ch == ":"
+    if depth < 1 or not in_value or span[-1] in ": \t\r\n":
+        return None
+    is_string = in_string and depth == 1
+
+    def extend(delta: str) -> str | None:
+        nonlocal depth, in_string, escape
+        for ch in delta:
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                    if is_string:
+                        return None
+            elif ch == '"':
+                in_string = True
+            elif ch in "{[":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+                if depth <= 1:
+                    return None
+            elif depth == 1 and ch in ", \t\r\n":
+                return None
+        return delta
+
+    return extend
 
 
 @functools.cache
@@ -253,11 +266,12 @@ def inkling_config() -> ParserEngineConfig:
             (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
     }
-    # Block-end terminals behave identically regardless of label. A
-    # closed tool block returns to CONTENT (Inkling has no section wrapper;
+    # A closed tool block returns to CONTENT (Inkling has no section wrapper;
     # blocks of any kind may follow), which also keeps the block-kind
     # and role tokens out of the engine's tool-terminal set so the
     # skip_tool_parsing reasoning pass still classifies reasoning.
+    # In a reasoning block, THINK_END defers REASONING_END to the next block
+    # opener so the function-name header is not emitted as content.
     for end in ("THINK_END", "END_SAMPLING"):
         transitions[(ParserState.CONTENT, end)] = Transition(
             ParserState.CONTENT,
@@ -265,7 +279,7 @@ def inkling_config() -> ParserEngineConfig:
         )
         transitions[(ParserState.REASONING, end)] = Transition(
             ParserState.CONTENT,
-            (EventType.REASONING_END,),
+            () if end == "THINK_END" else (EventType.REASONING_END,),
         )
         transitions[(ParserState.TOOL_ARGS, end)] = Transition(
             ParserState.CONTENT,
@@ -292,6 +306,7 @@ def inkling_config() -> ParserEngineConfig:
         token_id_terminals={},
         transitions=transitions,
         arg_converter=_inkling_arg_converter,
+        arg_value_extender=_inkling_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=True,
         strip_trailing_reasoning_whitespace=True,
@@ -312,11 +327,79 @@ class InklingParser(ParserEngine):
     ) -> None:
         kwargs.setdefault("parser_engine_config", inkling_config())
         super().__init__(tokenizer, tools, **kwargs)
+        # Inkling2 spells <|content_xml|> natively and has no audio tokens.
+        # Its prompts end between messages: the model opens its own turn.
+        vocab = self.vocab
+        self._is_inkling2 = CONTENT_XML in vocab and CONTENT_AUDIO_INPUT not in vocab
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Frame an Inkling2 JSON response format with the block grammar.
+
+        As in the reference, any number of free thinking blocks precede the
+        final text block, whose payload alone must match the JSON constraint;
+        the API then returns that payload as the content.
+        """
+        request = super().adjust_request(request)
+        if not self._is_inkling2:
+            return request
+        structured_outputs = request.extract_structured_outputs()
+        if structured_outputs is None or (
+            structured_outputs.json is None and not structured_outputs.json_object
+        ):
+            return request
+        if request.tools and request.tool_choice not in ("auto", "none", None):
+            # TODO: constrain required and named tool choices to tool calls.
+            return request
+        json_format = structured_outputs_to_format(structured_outputs)
+
+        vocab = self.vocab
+        model, text, thinking, end = (
+            TokenFormat(token=vocab[token])
+            for token in (MESSAGE_MODEL, CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE)
+        )
+        prefix = None
+        if isinstance(request, ChatCompletionRequest) and (
+            request.continue_final_message and request.messages
+        ):
+            prefix = continuation_prefix(request.messages[-1])
+        if prefix:
+            raise ValueError(
+                "Inkling JSON response formats cannot continue a nonempty "
+                "assistant message."
+            )
+        output_format: Format
+        if prefix is None:
+            excludes = [token for token in INKLING_CONTROL_TOKENS if token in vocab]
+            thinking_block = SequenceFormat(
+                elements=[model, thinking, AnyTextFormat(excludes=excludes), end]
+            )
+            output_format = SequenceFormat(
+                elements=[
+                    StarFormat(content=thinking_block),
+                    model,
+                    text,
+                    json_format,
+                    end,
+                ]
+            )
+        else:
+            output_format = SequenceFormat(elements=[json_format, end])
+        tag = StructuralTag(format=output_format)
+        grammar = StructuredOutputsParams(structural_tag=json.dumps(tag.model_dump()))
+        if isinstance(request, ChatCompletionRequest):
+            request.structured_outputs = grammar
+            request.response_format = None
+        else:
+            request._parser_structured_outputs = grammar
+        request._grammar_from_parser = True
+        return request
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Seed the initial parsing state from the prompt tail.
 
-        Mirrors the Rust parser's ``initialize()``: scanning the prompt
+        Mirrors the Rust parser's `initialize()`: scanning the prompt
         backwards, the last relevant special token decides whether generation
         continues inside a thinking block, a text block, a model message
         header, or between blocks.
@@ -342,18 +425,39 @@ class InklingParser(ParserEngine):
             if token_id in special_ids:
                 break
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        if self._is_inkling2:
+            return self._inkling2_is_reasoning_end(input_ids)
         vocab = self.vocab
-        thinking_id = vocab.get(CONTENT_THINKING)
-        text_id = vocab.get(CONTENT_TEXT)
-        model_id = vocab.get(MESSAGE_MODEL)
-        end_sampling_id = vocab.get(CONTENT_MODEL_END_SAMPLING)
+        reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
+        ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
+        i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
+        return i >= 0 and input_ids[i] in ended_ids
+
+    def _inkling2_is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        """Whether the latest block is a text block of a model message.
+
+        A prompt that ends between messages has not ended reasoning: the
+        model may open a thinking block.
+        """
+        vocab = self.vocab
+        text_id = vocab[CONTENT_TEXT]
+        block_ids = {
+            text_id,
+            vocab[CONTENT_THINKING],
+            vocab[CONTENT_MODEL_END_SAMPLING],
+        }
+        role_ids = {
+            vocab[token]
+            for token in (MESSAGE_MODEL, MESSAGE_USER, MESSAGE_SYSTEM, MESSAGE_TOOL)
+        }
+        latest_block = None
         for token_id in reversed(input_ids):
-            if token_id in (thinking_id, model_id):
-                return False
-            if token_id in (text_id, end_sampling_id):
-                return True
-        return False
+            if token_id in role_ids:
+                return latest_block == text_id and token_id == vocab[MESSAGE_MODEL]
+            if latest_block is None and token_id in block_ids:
+                latest_block = token_id
+        return latest_block == text_id
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab

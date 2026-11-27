@@ -8,7 +8,7 @@ for the ECCPUConnector.
 """
 
 import time
-from collections.abc import Collection
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -16,11 +16,13 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECCPUWorkerMetadata,
-    _get_encoder_cache_hidden_dim,
     create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
     EmbeddingCache,
+)
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    get_encoder_output_width,
 )
 from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
@@ -49,6 +51,8 @@ class ECCPUScheduler:
     """Scheduler delegate for the ECCPUConnector."""
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
+        self._vllm_config = vllm_config
+        self._encoder_cache_query: Callable[[Request, int], int | None] | None = None
         ec_config = vllm_config.ec_transfer_config
         assert ec_config is not None
         self._is_producer: bool = ec_config.is_ec_producer
@@ -61,8 +65,9 @@ class ECCPUScheduler:
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
         self._pending_saves: dict[str, list[int]] = {}
-        # mm_hash → (transfer_id, block IDs) to load from mmap→GPU this step.
-        self._pending_loads: dict[str, tuple[int, list[int]]] = {}
+        self._republish_candidates: dict[Request, list[int]] = {}
+        # mm_hash → (transfer_id, block IDs, shape) to load from mmap→GPU.
+        self._pending_loads: dict[str, tuple[int, list[int], tuple[int, int]]] = {}
 
         # Dispatched loads awaiting completion reports, keyed by transfer id:
         # transfer_id → (mm_hash, reports still outstanding). The pin taken at
@@ -108,14 +113,16 @@ class ECCPUScheduler:
         self._unrecoverable: set[str] = set()
         self._peer_host: str | None = None
         self._peer_port: int | None = None
-        # Model shape for size checks + compat hash; only set by
-        # _setup_nixl (the gate-off path never touches model_config).
-        self._dtype: torch.dtype | None = None
-        self._hidden_dim: int = 0
-        self._element_size: int = 0
+        dtype = vllm_config.model_config.dtype
+        assert isinstance(dtype, torch.dtype)
+        self._dtype = dtype
         self._ack_timeout_s: float = 0.0
         if self._nixl_enabled:
-            self._setup_nixl(vllm_config)
+            try:
+                self._setup_nixl(vllm_config)
+            except Exception:
+                self.shutdown()
+                raise
 
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
@@ -135,6 +142,7 @@ class ECCPUScheduler:
             ProducerSession,
         )
         from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+        from vllm.utils.network_utils import get_ip
         from vllm.version import __version__ as VLLM_VERSION
 
         if NixlWrapper is None or nixl_agent_config is None:
@@ -144,9 +152,7 @@ class ECCPUScheduler:
             )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
-        self._dtype = vllm_config.model_config.dtype
-        self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
-        self._element_size = torch.empty(0, dtype=self._dtype).element_size()
+        dp_index = vllm_config.parallel_config.data_parallel_index
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
@@ -161,39 +167,37 @@ class ECCPUScheduler:
             dtype=str(self._dtype),
             block_size_bytes=self._region.block_size_bytes,
         )
+        self._data = NixlDataTransport(
+            agent_name=f"{engine_id}_dp{dp_index}",
+            base_ptr=self._region.blocks.data_ptr(),
+            num_blocks=self._region.num_blocks,
+            block_size_bytes=self._region.block_size_bytes,
+            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
+        )
         if self._is_producer:
-            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
-            self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
-
-        # Registering the region with NIXL and binding the control sockets are
-        # the first side effects here. __init__ propagates a failure, so the
-        # caller never receives a scheduler it could shut down: unwind through
-        # the same teardown shutdown() uses.
-        try:
-            self._data = NixlDataTransport(
-                agent_name=engine_id,
-                base_ptr=self._region.blocks.data_ptr(),
-                num_blocks=self._region.num_blocks,
-                block_size_bytes=self._region.block_size_bytes,
-                total_size_bytes=self._region.num_blocks
-                * self._region.block_size_bytes,
-            )
-            if self._is_producer:
-                assert self._peer_host is not None
-                assert self._peer_port is not None
-                self._producer_session = ProducerSession(
-                    transport=ZmqServerTransport(
-                        host=self._peer_host, port=self._peer_port
-                    ),
-                    data=self._data,
-                    cache=self._cache,
-                    compat_hash=self._compat_hash,
+            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip()
+            if self._peer_host in ("0.0.0.0", "::", "*"):
+                raise ValueError(
+                    "Set VLLM_EC_SIDE_CHANNEL_HOST or VLLM_HOST_IP to a "
+                    "reachable address, not a wildcard."
                 )
-            if self._is_consumer:
-                self._transport = ZmqClientTransport()
-        except Exception:
-            self._teardown_nixl()
-            raise
+            base_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
+            port = base_port + dp_index if base_port else 0
+            if base_port < 0 or not 0 <= port <= 65535:
+                raise ValueError(
+                    "VLLM_EC_SIDE_CHANNEL_PORT + data_parallel_index "
+                    "must be between 1 and 65535, or use port 0 for auto allocation."
+                )
+            transport = ZmqServerTransport(host=self._peer_host, port=port)
+            self._peer_port = transport.port
+            self._producer_session = ProducerSession(
+                transport=transport,
+                data=self._data,
+                cache=self._cache,
+                compat_hash=self._compat_hash,
+            )
+        if self._is_consumer:
+            self._transport = ZmqClientTransport()
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
@@ -201,12 +205,48 @@ class ECCPUScheduler:
         entry = self._cache.get(identifier)
         return entry is not None and entry.ready
 
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        self._encoder_cache_query = query
+
+    @staticmethod
+    def _remote_announcement(
+        request: "Request", identifier: str
+    ) -> dict[str, Any] | None:
+        announced = (request.ec_transfer_params or {}).get(identifier)
+        if isinstance(announced, dict) and "peer_host" in announced:
+            return announced
+        return None
+
+    def requires_encoder_cache_readmission(
+        self, request: "Request", input_id: int
+    ) -> bool:
+        identifier = request.mm_features[input_id].identifier
+        return (
+            self._nixl_enabled
+            and self._is_consumer
+            and self._remote_announcement(request, identifier) is not None
+            and not self.has_cache_item(identifier)
+        )
+
     def ensure_cache_available(
         self,
         request: "Request",
         num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
+        if self._is_producer and self._encoder_cache_query is not None:
+            candidates = [
+                i
+                for i, feature in enumerate(request.mm_features)
+                if feature.mm_position.offset + feature.mm_position.length
+                > num_computed_tokens
+                and self._encoder_cache_query(request, i)
+                == feature.mm_position.get_num_embeds()
+            ]
+            if candidates:
+                self._republish_candidates[request] = candidates
+
         if not self._nixl_enabled:
             return True  # CPU offload never blocks.
         first = self._first_in_batch
@@ -218,7 +258,9 @@ class ECCPUScheduler:
         return self._nixl_consumer_admit(request, num_computed_tokens)
 
     def _nixl_consumer_admit(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
     ) -> bool:
         """Admit a request once its required remote encodings are ready.
 
@@ -235,9 +277,9 @@ class ECCPUScheduler:
             return True
         now = time.monotonic()
         pending = False
-        for feature in request.mm_features:
+        for input_id, feature in enumerate(request.mm_features):
             try:
-                if not self._admit_item(request, feature, num_computed_tokens, now):
+                if not self._admit_item(request, input_id, num_computed_tokens, now):
                     pending = True
             except _RemoteUnavailable as error:
                 if not self._fail_or_fallback(request, feature, str(error)):
@@ -247,7 +289,7 @@ class ECCPUScheduler:
     def _admit_item(
         self,
         request: "Request",
-        feature: "MultiModalFeatureSpec",
+        input_id: int,
         num_computed_tokens: int,
         now: float,
     ) -> bool:
@@ -262,29 +304,26 @@ class ECCPUScheduler:
                 or the item's total wait budget expired.
 
         """
+        feature = request.mm_features[input_id]
         pos = feature.mm_position
         mm_hash = feature.identifier
         if pos.offset + pos.length <= num_computed_tokens:
             self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
-        announced = (request.ec_transfer_params or {}).get(mm_hash)
-        # Without a producer address there is nothing to fetch: the request
-        # carries what the model needs and the encoder runs locally.
-        # `ec_transfer_params` reaches us from the request, so its shape is
-        # checked rather than assumed.
-        remote: dict[str, Any] | None = (
-            announced
-            if isinstance(announced, dict) and "peer_host" in announced
-            else None
-        )
-
         entry = self._cache.get(mm_hash)
         if entry is not None and entry.ready:
             # Local hit: upstream's update_state_after_alloc pins and
             # loads it through the same path as a natively cached entry.
             self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
+        remote = self._remote_announcement(request, mm_hash)
         if remote is None:
+            return True
+        if (
+            self._encoder_cache_query is not None
+            and self._encoder_cache_query(request, input_id) == pos.get_num_embeds()
+        ):
+            self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
         since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
         if now - since > _ADMIT_DEFER_TIMEOUT_S:
@@ -301,22 +340,30 @@ class ECCPUScheduler:
             # held by a quarantined/settling DMA and cannot be reused.
             return False
 
-        expected = pos.length * self._hidden_dim * self._element_size
         try:
             size = int(remote["size_bytes"])
+            shape = tuple(int(dim) for dim in remote["shape"])
         except (KeyError, TypeError, ValueError) as error:
             raise _RemoteUnavailable("the announced size was unusable") from error
-        if size != expected:
+        # The width is the producer's to report; the row count is not.
+        num_embeds = pos.get_num_embeds()
+        if (
+            len(shape) != 2
+            or shape[0] != num_embeds
+            or size != self._num_blocks(shape) * self._region.block_size_bytes
+        ):
             logger.warning(
-                "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
+                "EC consumer: size mismatch mm_hash=%s announced=%d shape=%s "
+                "expected %d rows",
                 mm_hash,
                 size,
-                expected,
+                shape,
+                num_embeds,
             )
             raise _RemoteUnavailable("the announced size was wrong")
 
         try:
-            started = self._start_xfer(mm_hash, remote, expected)
+            started = self._start_xfer(mm_hash, remote, size, (shape[0], shape[1]))
         except Exception as error:
             logger.exception(
                 "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
@@ -340,13 +387,7 @@ class ECCPUScheduler:
         """
         mm_hash = feature.identifier
         self._deferred_since.pop((request.request_id, mm_hash), None)
-        data = feature.data
-        metadata = (
-            self._metadata_resolver.fields_for(feature.modality) if data else set()
-        )
-        if data and any(
-            value.data is not None for key, value in data.items() if key not in metadata
-        ):
+        if self._metadata_resolver.has_encoder_input(feature):
             # Passthrough embeddings bypass the processor cache. SHM address
             # items therefore refer to media that the worker can encode.
             request.ec_transfer_params = dict(request.ec_transfer_params or {})
@@ -382,7 +423,11 @@ class ECCPUScheduler:
         return failed
 
     def _start_xfer(
-        self, mm_hash: str, info: "dict[str, Any]", size_bytes: int
+        self,
+        mm_hash: str,
+        info: "dict[str, Any]",
+        size_bytes: int,
+        shape: tuple[int, int],
     ) -> bool:
         """Allocate a not-ready cache entry and start a NIXL READ into it.
 
@@ -396,7 +441,7 @@ class ECCPUScheduler:
         )
 
         n_blocks = max(1, ceil(size_bytes / self._region.block_size_bytes))
-        entry = self._cache.alloc(mm_hash, n_blocks)
+        entry = self._cache.alloc(mm_hash, n_blocks, shape)
         if entry is None:
             logger.debug(
                 "EC consumer: cache full for mm_hash=%s (%d blocks); deferring",
@@ -486,39 +531,83 @@ class ECCPUScheduler:
         logger.info("EC consumer: producer peer down addr=%s", addr)
 
     def _promote_completed_reads(self) -> None:
-        """Drain the just-completed set built during ``_poll_step``.
+        """Drain the just-completed set built during `_poll_step`.
 
-        Reads are marked ready in ``_process_session_results``, so a deferred
-        request is re-admitted by ``ensure_cache_available`` and loaded through
+        Reads are marked ready in `_process_session_results`, so a deferred
+        request is re-admitted by `ensure_cache_available` and loaded through
         the same local path as a natively cached entry
-        (``update_state_after_alloc`` -> ``_pending_loads``). No explicit
+        (`update_state_after_alloc` -> `_pending_loads`). No explicit
         pin/load bookkeeping is needed here beyond clearing the set.
         """
         self._step_completed.clear()
 
-    def update_state_after_alloc(self, request: "Request", index: int) -> None:
-        feature = request.mm_features[index]
-        mm_hash = feature.identifier
+    def _num_blocks(self, shape: tuple[int, ...]) -> int:
+        size_bytes = shape[0] * shape[1] * self._dtype.itemsize
+        block_size = self._region.block_size_bytes
+        return (size_bytes + block_size - 1) // block_size
 
+    def _prepare_save(self, feature: "MultiModalFeatureSpec") -> None:
+        mm_hash = feature.identifier
         if self._is_producer and self._cache.get(mm_hash) is None:
-            entry = self._cache.alloc(mm_hash, feature.mm_position.length)
+            shape = (
+                feature.mm_position.get_num_embeds(),
+                get_encoder_output_width(self._vllm_config, feature.modality),
+            )
+            entry = self._cache.alloc(mm_hash, self._num_blocks(shape), shape)
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
 
+    def update_state_after_alloc(self, request: "Request", index: int) -> None:
+        feature = request.mm_features[index]
+        self._prepare_save(feature)
+        mm_hash = feature.identifier
         if self._is_consumer and mm_hash not in self._pending_loads:
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:
+                assert entry.shape is not None
                 self._cache.pin(mm_hash)
                 transfer_id = self._next_transfer_id
                 self._next_transfer_id += 1
-                self._pending_loads[mm_hash] = (transfer_id, list(entry.block_ids))
+                self._pending_loads[mm_hash] = (
+                    transfer_id,
+                    list(entry.block_ids),
+                    entry.shape,
+                )
                 self._load_acks[transfer_id] = (mm_hash, self._expected_load_reports)
+
+    def _prepare_republishes(self, scheduler_output: "SchedulerOutput") -> None:
+        freed_hashes = set(scheduler_output.free_encoder_mm_hashes)
+        for request, candidates in self._republish_candidates.items():
+            num_tokens = scheduler_output.num_scheduled_tokens.get(request.request_id)
+            if not num_tokens:
+                continue
+            # The scheduler advances the request's token cursor after building
+            # connector metadata.
+            start = request.num_computed_tokens
+            end = start + num_tokens
+            for i in candidates:
+                feature = request.mm_features[i]
+                if feature.identifier in freed_hashes:
+                    continue
+                pos = feature.mm_position
+                first = max(0, start - pos.offset)
+                last = min(pos.length, end - pos.offset)
+                if first >= last:
+                    continue
+                embed_start, embed_end = pos.get_embeds_indices_in_range(first, last)
+                if embed_start < embed_end:
+                    self._prepare_save(feature)
 
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> ECCPUConnectorMetadata:
         meta = ECCPUConnectorMetadata()
         if self._is_producer:
+            # CPU loads are already pinned, so republishing can only evict
+            # entries that aren't needed by those loads.
+            if self._republish_candidates:
+                self._prepare_republishes(scheduler_output)
+            self._republish_candidates.clear()
             if self._nixl_enabled and self._producer_session is not None:
                 self._producer_session.poll_step()
             meta.saves = self._pending_saves
@@ -572,7 +661,7 @@ class ECCPUScheduler:
         """Keep the engine stepping so this connector's polls keep running.
 
         With NIXL enabled the engine tick is the only driver of
-        ``ProducerSession.poll_step()``, and a producer's work arrives from a
+        `ProducerSession.poll_step()`, and a producer's work arrives from a
         remote consumer, so nothing local would otherwise wake it. Without NIXL
         this only has to outlive dispatched saves and loads, so the engine can
         quiesce once the worker has confirmed them.
@@ -613,13 +702,13 @@ class ECCPUScheduler:
             # A read arriving before the save lands is NACKed NACK_NOT_READY,
             # which the consumer retries on a later step rather than treating
             # as a miss.
-            size_bytes = (
-                feature.mm_position.length * self._hidden_dim * self._element_size
-            )
+            assert entry.shape is not None
+            size_bytes = len(entry.block_ids) * self._region.block_size_bytes
             items[mm_hash].update(
                 peer_host=self._peer_host,
                 peer_port=self._peer_port,
                 size_bytes=size_bytes,
+                shape=list(entry.shape),
             )
         logger.debug(
             "EC producer: announcing NIXL-readable encodings req_id=%s items=%s",
@@ -630,6 +719,7 @@ class ECCPUScheduler:
 
     def shutdown(self) -> None:
         self._pending_saves.clear()
+        self._republish_candidates.clear()
         self._pending_loads.clear()
         self._load_acks.clear()
         self._deferred_since.clear()

@@ -1,0 +1,249 @@
+meta:
+  title: "Llama-4-Scout"
+  slug: "llama-4-scout"
+  provider: "Meta"
+  description: "Llama 4 Scout 17B-16E MoE model with NVIDIA FP8/FP4 variants, fits on a single GPU with quantization"
+  date_added: 2025-08-06
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: ""
+  related_recipes:
+    - meta-llama/Llama-3.3-70B-Instruct
+  hardware:
+    h100: verified
+    b200: verified
+    gb200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    xeon6: verified
+
+model:
+  model_id: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+  min_vllm_version: "0.12.0"
+  architecture: moe
+  parameter_count: "109B"
+  active_parameters: "17B"
+  context_length: 10485760
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 262
+    description: "Full precision BF16"
+    supported_hardware: [h100, b200, gb200, mi300x, mi325x, mi355x, xeon6]
+
+  fp8:
+    model_id: "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
+    precision: fp8
+    vram_minimum_gb: 131
+    description: "NVIDIA FP8 quantization for Hopper and Blackwell, fits on 1x H100"
+    supported_hardware: [h100, b200, gb200]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+    extra_env: {}
+
+  nvfp4:
+    model_id: "nvidia/Llama-4-Scout-17B-16E-Instruct-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 65
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    supported_hardware: [b200, gb200]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic"
+    precision: fp8
+    label: "FP8 (RedHat)"
+    vram_minimum_gb: 131
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    supported_hardware: [h100, b200, gb200]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 65
+    description: "RedHatAI compressed-tensors NVFP4 quantization for Blackwell GPUs"
+    supported_hardware: [b200, gb200]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+    extra_env:
+      VLLM_USE_FLASHINFER_MOE_FP4: "1"
+
+  redhat_fp8_block:
+    model_id: "RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHat)"
+    vram_minimum_gb: 131
+    description: "RedHatAI FP8 block quantization"
+    supported_hardware: [h100, b200, gb200]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  cpu:
+    extra_args:
+      - "--max-model-len"
+      - "8192"
+  hopper:
+    extra_args:
+      - "--async-scheduling"
+      - "--no-enable-prefix-caching"
+      - "--max-num-batched-tokens"
+      - "8192"
+    extra_env: {}
+  blackwell:
+    extra_args:
+      - "--async-scheduling"
+      - "--no-enable-prefix-caching"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"pass_config":{"fuse_allreduce_rms":true,"eliminate_noops":true}}'
+  amd:
+    # 8 GPUs required for 17B×16E MoE. AITER JIT-compiles on first launch.
+    extra_args:
+      - "--no-enable-prefix-caching"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-num-seqs"
+      - "64"
+      - "--max-model-len"
+      - "32000"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  single_node_tp:
+    tp:
+      xeon6: 4
+
+guide: |
+  ## Overview
+
+  Llama 4 Scout is Meta's MoE model with 17B active parameters across 16 experts
+  (109B total). NVIDIA provides FP8 and FP4 quantized variants. With FP4 quantization,
+  the model fits on a single B200 GPU — making it one of the most accessible MoE models.
+
+  ## Prerequisites
+
+  - Hardware: 1x B200 (FP4), 1x H100 (FP8), 4x GPUs (BF16), 8x MI300X/MI325X/MI355X, or 4x Xeon6/Xeon5 NUMA nodes
+  - vLLM >= 0.12.0
+  - CUDA Driver >= 575 for GPUs
+  - Docker with NVIDIA Container Toolkit (recommended) for GPUs
+  - License: Must agree to Meta's Llama 4 Scout Community License for GPUs
+
+  ### AMD ROCm
+
+  The ROCm wheel requires Python 3.12, ROCm 7.0+, and glibc >= 2.35. Use the
+  ROCm Docker image when your host environment does not meet those requirements.
+
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  Launch on 8x MI300X / MI325X / MI355X with AITER enabled:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --tensor-parallel-size 8 \
+    --max-num-seqs 64 \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 16384 \
+    --max-model-len 32000
+  ```
+
+  The first AITER launch may take several minutes while ROCm kernels are compiled and cached.
+
+  ### pip (Intel Xeon 6 CPUs)
+  For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64 # For Intel Xeon 6
+  ```
+
+  ### Intel Xeon 6 Deployment via Docker
+
+  Launch the x86 CPU vLLM Docker container for `meta-llama/Llama-4-Scout-17B-16E-Instruct`:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --tensor-parallel-size 4 \
+    --max-model-len 8192
+  ```
+
+  `--max-model-len 8192` is retained because it is the model-specific row argument
+  in the validation workbook. TP/DP and host-specific CPU placement are intentionally
+  not prescribed.
+
+  The following validation settings are not model requirements and are intentionally
+  not portable CPU recipe defaults:
+
+  - `--max-num-batched-tokens` and `--max-num-seqs`: scheduler batch/concurrency
+    tuning for workload shape, latency targets, and platform capacity.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: runtime operational timeout tuning.
+
+  Hardware-specific overrides may still use these settings when they are part of a
+  validated platform configuration.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+  response = client.chat.completions.create(
+      model="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+      messages=[{"role": "user", "content": "Explain MoE models briefly."}],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  **FP4 only works on Blackwell:**
+  FP4 quantization requires compute capability 10.0 (B200/GB200). Use FP8 on Hopper.
+
+  **TP=1 recommended for best throughput:**
+  For maximum throughput per GPU, keep TP=1. Increase TP to 2/4/8 for lower latency.
+
+  ## References
+
+  - [Llama-4-Scout-17B-16E-Instruct](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct)
+  - [NVIDIA FP8 variant](https://huggingface.co/nvidia/Llama-4-Scout-17B-16E-Instruct-FP8)
+  - [NVIDIA FP4 variant](https://huggingface.co/nvidia/Llama-4-Scout-17B-16E-Instruct-FP4)

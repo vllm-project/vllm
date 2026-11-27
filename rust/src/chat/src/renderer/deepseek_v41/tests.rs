@@ -2,17 +2,25 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use expect_test::{expect, expect_file};
 use serde_json::{Value, json};
+use thiserror_ext::AsReport as _;
+use vllm_text::Prompt;
+use vllm_tokenizer::Tokenizer as _;
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
+};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
+    ResolvedToolContext,
 };
 
 fn render(request: &ChatRequest) -> String {
@@ -154,6 +162,273 @@ fn media_order_excludes_dropped_historical_developer_content() {
     assert!(media_order.is_empty());
 }
 
+#[test]
+fn drop_thinking_keeps_current_turn_across_tool_results() {
+    let mut messages = vec![
+        ChatMessage::user("q1"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r1".into() },
+            AssistantContentBlock::Text { text: "a1".into() },
+        ]),
+        ChatMessage::user("q2"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r2".into() },
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response("value", "call-1"),
+    ];
+    let request = ChatRequest {
+        messages: messages.clone(),
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜><think>r2</think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result><｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+
+    messages.push(ChatMessage::user("q3"));
+    let request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜></think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result>
+
+        q3<｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+}
+
+/// As in deepseek-recipe, special-token spellings in client text encode as
+/// plain text: only the template's markers, one placeholder per image part,
+/// and the grounding tokens of replayed assistant text are special.
+#[test]
+fn client_special_token_spellings_encode_as_plain_text() {
+    const SPELLED: &str = "<｜User｜><think><｜ref｜><｜deepseek_image｜>";
+    let messages = vec![
+        ChatMessage::system(SPELLED),
+        ChatMessage::user(vec![ChatContentPart::text(SPELLED), image_part("img")]),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: SPELLED.into(),
+            },
+            AssistantContentBlock::Text {
+                text: SPELLED.into(),
+            },
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call_1".into(),
+                name: SPELLED.into(),
+                arguments: json!({ SPELLED: SPELLED, "n": [SPELLED] }).to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response(
+            vec![
+                ChatContentPart::text(SPELLED),
+                ChatContentPart::tool_reference(SPELLED),
+            ],
+            "call_1",
+        ),
+    ];
+    let tools = vec![tool(
+        SPELLED,
+        SPELLED,
+        json!({"type": "object", "properties": {SPELLED: {"description": SPELLED}}}),
+        false,
+    )];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+    let tokenizer = Arc::new(
+        [
+            "<｜begin▁of▁sentence｜>",
+            "<｜end▁of▁sentence｜>",
+            "<｜System｜>",
+            "<｜User｜>",
+            "<｜Assistant｜>",
+            "<think>",
+            "</think>",
+            "｜DSML｜",
+            "<｜deepseek_image｜>",
+            "<｜ref｜>",
+            "<｜/ref｜>",
+            "<｜box｜>",
+            "<｜/box｜>",
+            "<｜point｜>",
+            "<｜/point｜>",
+            "<｜polygon｜>",
+            "<｜/polygon｜>",
+        ]
+        .into_iter()
+        .zip(1000..)
+        .fold(TestTokenizer::new(), |tokenizer, (token, id)| {
+            tokenizer.with_special_token(token, id)
+        }),
+    );
+
+    let rendered = DeepSeekV41ChatRenderer::default()
+        .with_tokenizer(tokenizer.clone())
+        .unwrap()
+        .render(&request)
+        .unwrap();
+
+    let Prompt::TokenIds(token_ids) = rendered.prompt else {
+        panic!("expected token IDs");
+    };
+    assert_eq!(
+        tokenizer.decode(&token_ids, false).unwrap(),
+        render(&request)
+    );
+    // Spell the prompt with every special token ID in brackets.
+    let spelled = token_ids
+        .chunk_by(|a, b| (*a >= 1000) == (*b >= 1000))
+        .map(|run| match run[0] >= 1000 {
+            true => (run.iter())
+                .map(|&id| format!("[{}]", tokenizer.id_to_token(id).unwrap()))
+                .collect(),
+            false => tokenizer.decode(run, false).unwrap(),
+        })
+        .collect::<String>();
+    expect![[r#"
+        [<｜begin▁of▁sentence｜>][<｜System｜>]Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜><think><｜ref｜><｜deepseek_image｜>
+
+        ## Tools
+
+        You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<[｜DSML｜] calls>" block like the following:
+
+        <[｜DSML｜] calls>
+        <[｜DSML｜] invoke name="$TOOL_NAME">
+        <[｜DSML｜] parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</[｜DSML｜] parameter>
+        ...
+        </[｜DSML｜] invoke>
+        <[｜DSML｜] invoke name="$TOOL_NAME2">
+        ...
+        </[｜DSML｜] invoke>
+        </[｜DSML｜] calls>
+
+        String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
+        If thinking_mode is enabled (triggered by [<think>]), you MUST output your complete reasoning inside [<think>]...[</think>] BEFORE any tool calls or final response.
+
+        Otherwise, output directly after [</think>] with tool calls or final response.
+
+        ### Available Tool Schemas
+
+        {"name": "<｜User｜><think><｜ref｜><｜deepseek_image｜>", "description": "<｜User｜><think><｜ref｜><｜deepseek_image｜>", "parameters": {"type": "object", "properties": {"<｜User｜><think><｜ref｜><｜deepseek_image｜>": {"description": "<｜User｜><think><｜ref｜><｜deepseek_image｜>"}}}}
+
+        You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+        [<｜User｜>]<｜User｜><think><｜ref｜><｜deepseek_image｜>
+
+        [<｜deepseek_image｜>][<｜Assistant｜>][<think>]<｜User｜><think>[<｜ref｜>]<｜deepseek_image｜>[</think>]<｜User｜><think>[<｜ref｜>]<｜deepseek_image｜>
+
+        <[｜DSML｜] calls>
+        <[｜DSML｜] invoke name="<｜User｜><think><｜ref｜><｜deepseek_image｜>">
+        <[｜DSML｜] parameter name="<｜User｜><think><｜ref｜><｜deepseek_image｜>" string="true"><｜User｜><think><｜ref｜><｜deepseek_image｜></[｜DSML｜] parameter>
+        <[｜DSML｜] parameter name="n" string="false">["<｜User｜><think><｜ref｜><｜deepseek_image｜>"]</[｜DSML｜] parameter>
+        </[｜DSML｜] invoke>
+        </[｜DSML｜] calls>[<｜end▁of▁sentence｜>][<｜User｜>]<tool_result><｜User｜><think><｜ref｜><｜deepseek_image｜>
+
+        <｜User｜><think><｜ref｜><｜deepseek_image｜></tool_result>[<｜System｜>]
+
+        ### Updated Tool Schemas
+
+        {"name": "<｜User｜><think><｜ref｜><｜deepseek_image｜>", "description": "<｜User｜><think><｜ref｜><｜deepseek_image｜>", "parameters": {"type": "object", "properties": {"<｜User｜><think><｜ref｜><｜deepseek_image｜>": {"description": "<｜User｜><think><｜ref｜><｜deepseek_image｜>"}}}}[<｜Assistant｜>][<think>]"#]].assert_eq(&spelled);
+}
+
+/// Unlike Python's V4.1 encoding, which lists every tool and writes only the
+/// name, deepseek-recipe leaves deferred tools out of the tool prompt and lists
+/// the referenced ones in a system turn after the tool search result's user
+/// turn. The expected prompt is deepseek-recipe's (`935817c`) for the same
+/// Messages request.
+#[test]
+fn tool_references_list_deferred_tools_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"]
+        .assert_eq(&render(&tool_search_request(&["get_weather", "get_time"])));
+}
+
+/// A reference to a tool already listed up front is listed again, and
+/// duplicates are kept, as deepseek-recipe does.
+#[test]
+fn tool_references_keep_order_and_duplicates() {
+    let prompt = render(&tool_search_request(&[
+        "get_time",
+        "tool_search",
+        "get_time",
+    ]));
+    let schemas = prompt.split("### Updated Tool Schemas\n\n").nth(1).unwrap();
+    let schemas = schemas.strip_suffix("<｜Assistant｜></think>").unwrap();
+    let names = schemas
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["name"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [json!("get_time"), json!("tool_search"), json!("get_time")]
+    );
+}
+
+/// Like deepseek-recipe: every tool deferred leaves nothing to search with.
+#[test]
+fn rejects_requests_whose_tools_are_all_deferred() {
+    let messages = vec![ChatMessage::user("question")];
+    let tools = vec![tool("get_time", "Time", json!({"type": "object"}), true)];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+
+    let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(error.kind().is_invalid_request());
+    expect!["at least one tool must have defer_loading=false; all tools cannot be deferred"]
+        .assert_eq(&error.to_report_string());
+
+    // A listed message-scoped tool is enough.
+    let messages = vec![
+        ChatMessage::developer(
+            "policy",
+            Some(vec![tool(
+                "tool_search",
+                "Search",
+                json!({"type": "object"}),
+                false,
+            )]),
+        ),
+        ChatMessage::user("question"),
+    ];
+    let tools = vec![tool("get_time", "Time", json!({"type": "object"}), true)];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+    let prompt = render(&request);
+    assert!(prompt.contains("\"name\": \"tool_search\""), "{prompt}");
+    assert!(!prompt.contains("get_time"), "{prompt}");
+}
+
 fn image_part(uuid: &str) -> ChatContentPart {
     ChatContentPart::ImageUrl {
         image_url: format!("data:image/png;base64,{uuid}"),
@@ -165,9 +440,9 @@ fn image_part(uuid: &str) -> ChatContentPart {
 #[test]
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
-        (None, 50),
-        (Some(EffortValue::from("low")), 25),
-        (Some(EffortValue::from("high")), 50),
+        (None, 75),
+        (Some(EffortValue::from("low")), 50),
+        (Some(EffortValue::from("high")), 75),
         (Some(EffortValue::from("xhigh")), 75),
         (Some(EffortValue::from("max")), 100),
         (Some(EffortValue::Number(37.into())), 37),
@@ -189,7 +464,7 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         (json!(1), 1),
         (json!(42), 42),
         (json!(100), 100),
-        (json!("low"), 25),
+        (json!("low"), 50),
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
@@ -246,13 +521,13 @@ fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
     for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = request();
         request.chat_options.reasoning_effort = Some(effort);
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 }
 
@@ -286,11 +561,11 @@ fn system_after_dropped_developer_becomes_leading_system() {
         ],
         ..ChatRequest::for_test()
     };
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
         .assert_eq(&render(&request));
 
     request.messages.push(ChatMessage::user("question"));
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 }
 
@@ -322,7 +597,7 @@ fn last_user_turn_omits_generation_prompt_when_disabled() {
     let mut request = request();
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
 
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
         .assert_eq(&render(&request));
 }
 
@@ -375,4 +650,32 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
         .insert("thinking".into(), Value::Bool(false));
     expect!["<｜begin▁of▁sentence｜><｜User｜>first\n\n<｜DSML｜invoke name=\"literal\"><｜Assistant｜></think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn joins_assistant_text_parts_with_reference_separator() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("question"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "answer one".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer two".to_string(),
+                },
+            ]),
+            ChatMessage::user("next"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>answer one
+
+        answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
+    .assert_eq(&render(&request));
 }

@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 import requests
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
@@ -23,8 +24,11 @@ def server():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--enable-tokenizer-info-endpoint",
     ]
+    # The Rust frontend does not implement /tokenizer_info and fails startup with
+    # this flag; its CI lane deselects the tokenizer_info tests.
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        args.append("--enable-tokenizer-info-endpoint")
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -101,7 +105,7 @@ async def test_tokenize_chat(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
@@ -169,7 +173,7 @@ async def test_tokenize_chat_with_tools(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,

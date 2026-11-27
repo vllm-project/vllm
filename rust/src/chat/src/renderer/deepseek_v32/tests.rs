@@ -9,7 +9,7 @@ use thiserror_ext::AsReport;
 
 use super::DeepSeekV32ChatRenderer;
 use crate::EffortValue;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{
@@ -152,6 +152,7 @@ fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
             "required": ["query"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     let mut request = ChatRequest {
         request_id: "deepseek-v32-tools".to_string(),
@@ -247,6 +248,37 @@ fn tool_results_after_last_user_resume_thinking() {
 }
 
 #[test]
+fn coerces_tool_call_arguments_that_are_not_an_object_to_empty() {
+    let render_arguments = |arguments: &str| {
+        render_request(&thinking_request(vec![
+            ChatMessage::user("Check the weather."),
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                AssistantToolCall {
+                    id: "call-weather".to_string(),
+                    name: "weather".to_string(),
+                    arguments: arguments.to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("{\"ok\":true}", "call-weather"),
+        ]))
+    };
+
+    let empty = render_arguments("{}");
+    assert!(empty.contains("<｜DSML｜invoke name=\"weather\">\n\n</｜DSML｜invoke>"));
+    for arguments in [
+        r#"{"city": "Hang"#,
+        "   ",
+        "[]",
+        "42",
+        "true",
+        r#""hello""#,
+        "null",
+    ] {
+        assert_eq!(render_arguments(arguments), empty, "{arguments:?}");
+    }
+}
+
+#[test]
 fn tool_results_follow_assistant_tool_call_id_order() {
     let request = thinking_request(vec![
         ChatMessage::user("Check two cities."),
@@ -287,8 +319,9 @@ fn tool_results_require_matching_tool_call_ids() {
 
     let error = render_result(&request).unwrap_err();
 
-    expect!["chat template error: invalid DeepSeek V3.2 tool message: unknown tool_call_id `call-unknown`"]
+    expect!["invalid DeepSeek V3.2 tool message: unknown tool_call_id `call-unknown`"]
         .assert_eq(&error.to_report_string());
+    assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
 }
 
 #[test]
@@ -300,8 +333,9 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
 
     let error = render_result(&request).unwrap_err();
 
-    expect!["chat template error: invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
+    expect!["invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
         .assert_eq(&error.to_report_string());
+    assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
 }
 
 #[test]
@@ -357,6 +391,71 @@ fn continue_final_assistant_omits_final_eos() {
 
     expect!["<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜></think>partial answer"]
         .assert_eq(&rendered);
+}
+
+/// Text parts of every role are joined like Python's `string` content format:
+/// "\n" between parts, empty parts dropped. Expected prompt from Python's
+/// `parse_chat_messages(content_format="string")` plus `encode_messages`.
+#[test]
+fn text_parts_are_joined_with_newlines_like_python() {
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::system(vec![
+                ChatContentPart::text("Sys one."),
+                ChatContentPart::text(""),
+                ChatContentPart::text("Sys two."),
+            ]),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Part one. "),
+                ChatContentPart::text("Part two."),
+            ]),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "Answer one.".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "Answer two.".to_string(),
+                },
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-1".to_string(),
+                    name: "weather".to_string(),
+                    arguments: "{\"city\":\"Paris\"}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("sunny"), ChatContentPart::text("20C")],
+                "call-1",
+            ),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Thanks."),
+                ChatContentPart::text("Bye."),
+            ]),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = render_request(&request);
+
+    expect![[r#"
+        <｜begin▁of▁sentence｜>Sys one.
+        Sys two.<｜User｜>Part one. 
+        Part two.<｜Assistant｜></think>Answer one.
+        Answer two.
+
+        <｜DSML｜function_calls>
+        <｜DSML｜invoke name="weather">
+        <｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜function_calls><｜end▁of▁sentence｜>
+
+        <function_results>
+        <result>sunny
+        20C</result>
+        </function_results>
+
+        </think><｜User｜>Thanks.
+        Bye.<｜Assistant｜></think>"#]]
+    .assert_eq(&rendered);
 }
 
 #[test]

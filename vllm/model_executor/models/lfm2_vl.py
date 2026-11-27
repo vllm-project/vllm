@@ -13,8 +13,8 @@ from transformers import BatchFeature
 from transformers.activations import ACT2FN
 from transformers.models.lfm2_vl import Lfm2VlProcessor
 from transformers.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
-from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
-    Lfm2VlImageProcessorFast,
+from transformers.models.lfm2_vl.image_processing_lfm2_vl import (
+    Lfm2VlImageProcessor,
     find_closest_aspect_ratio,
     round_by_factor,
 )
@@ -69,17 +69,6 @@ from .utils import (
 from .vision import is_vit_use_data_parallel
 
 
-def _pad_cumulative_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
-
-
 class Lfm2VLImagePixelInputs(TensorSchema):
     """Dimensions:
     - b: Number of images in the prompt
@@ -104,7 +93,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(Lfm2VlProcessor, **kwargs)
 
-    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -213,7 +202,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -231,6 +220,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "max_image_tokens", image_processor.max_image_tokens
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        use_thumbnail = mm_kwargs.get("use_thumbnail", image_processor.use_thumbnail)
         assert isinstance(downsample_factor, int)
         assert isinstance(encoder_patch_size, int)
         assert isinstance(max_pixels_tolerance, int | float)
@@ -239,6 +229,8 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         assert isinstance(max_image_tokens, int)
         assert isinstance(tile_size, int)
 
+        if not mm_kwargs.get("do_image_splitting", image_processor.do_image_splitting):
+            min_tiles = max_tiles = 1
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
             height=image_height,
@@ -261,7 +253,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         else:
             grid_width = grid_height = total_patches = 1
 
-        if grid_width * grid_height != 1:  # Thumbnail
+        if use_thumbnail and grid_width * grid_height != 1:
             total_patches += 1
 
         return grid_width, grid_height, total_patches
@@ -303,7 +295,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         )
         tile_img_placeholder = grid_placeholder + (image_token * num_tokens_per_tile)
 
-        grid_w, grid_h, _ = self._get_image_feature_grid_size(
+        grid_w, grid_h, total_patches = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
@@ -317,7 +309,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
                 for j in range(grid_w)
             ]
 
-            if num_thumbnail_tokens > 0:
+            if total_patches > grid_w * grid_h:  # Thumbnail
                 tiles_placeholder.append(
                     image_thumbnail_token + (image_token * num_thumbnail_tokens)
                 )
@@ -336,7 +328,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -868,9 +860,6 @@ class Lfm2VLForConditionalGeneration(
                 "gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={
-                "cu_seqlens": _pad_cumulative_seqlens_buffer,
-            },
         )
 
     def get_max_frames_per_video(self) -> int:

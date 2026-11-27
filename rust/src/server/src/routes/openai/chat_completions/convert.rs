@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -10,13 +12,13 @@ use vllm_chat::{
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, chat_request_error, text_request_error};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceObject, ToolChoiceValue,
 };
+use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -30,6 +32,8 @@ pub(super) struct PreparedRequest {
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Number of choices to generate.
+    pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
     /// Lowered chat request for `vllm-chat`.
@@ -54,8 +58,11 @@ pub(super) struct ResponseOptions {
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
 }
@@ -70,20 +77,18 @@ pub(super) fn prepare_chat_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
+    let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
         request.truncation_side,
     )
-    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
+    .map_err(|error| text_request_error("invalid prompt truncation", error))?;
 
-    let request_id = format!("chatcmpl-{}", ctx.request_id);
-    let response_model = lora_resolution
-        .lora_request
-        .as_ref()
-        .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let request_id = ctx.request_id.clone();
+    let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
     let echo = request
         .echo
@@ -117,7 +122,10 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
-    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
+    let is_named_tool_choice = matches!(
+        &request.tool_choice,
+        Some(ToolChoice::Object(ToolChoiceObject::Function { .. }))
+    );
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -126,6 +134,13 @@ pub(super) fn prepare_chat_request(
         .prompt_logprobs
         .or((request.echo && !request.stream).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
+    let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let logprobs = (request.logprobs && logprob_token_ids.is_none()).then_some(top_logprobs);
+    let output_top_logprobs = if logprob_token_ids.is_some() {
+        -1
+    } else {
+        top_logprobs
+    };
 
     let structured_outputs = convert_from_response_format(
         request.response_format.as_ref(),
@@ -143,7 +158,10 @@ pub(super) fn prepare_chat_request(
         request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+    .map_err(|error| chat_request_error("failed to resolve request tools", error))?;
+
+    #[expect(deprecated)]
+    let max_tokens = request.max_completion_tokens.or(request.max_tokens);
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
@@ -154,11 +172,13 @@ pub(super) fn prepare_chat_request(
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
-            max_tokens: request.max_completion_tokens,
+            max_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
-            logprobs: request.logprobs.then_some(top_logprobs),
+            logprobs,
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -169,13 +189,16 @@ pub(super) fn prepare_chat_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: request.bad_words,
-            logprob_token_ids: None,
+            bad_words_token_ids: None,
+            logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         chat_options: ChatOptions {
             generation_prompt_mode,
@@ -190,6 +213,7 @@ pub(super) fn prepare_chat_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -200,21 +224,24 @@ pub(super) fn prepare_chat_request(
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
+        return_prompt_text: request.return_prompt_text.unwrap_or(false),
     };
 
     Ok(PreparedRequest {
         request_id,
         response_model,
+        n,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
             requested_logprobs,
-            output_top_logprobs: top_logprobs,
+            output_top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
             is_named_tool_choice,
         },
         chat_request,
@@ -239,6 +266,7 @@ pub(crate) fn normalize_generation_prompt_mode(
         }
         (_, true, _) => {
             bail_invalid_request!(
+                param = "continue_final_message",
                 "Cannot set `continue_final_message` to True when the last message is not from the assistant."
             );
         }
@@ -257,7 +285,9 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -280,9 +310,7 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             name: _,
         } => {
             let mut blocks = Vec::new();
-            if let Some(reasoning) = reasoning
-                && !reasoning.is_empty()
-            {
+            if let Some(reasoning) = reasoning {
                 blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
             }
             if let Some(content) = content {
@@ -290,11 +318,6 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             }
             if let Some(tool_calls) = tool_calls {
                 blocks.extend(convert_assistant_tool_calls(tool_calls)?);
-            }
-            if blocks.is_empty() {
-                bail_invalid_request!(
-                    "Assistant messages must contain text, reasoning content, or tool_calls."
-                );
             }
 
             Ok(VllmChatMessage::assistant_blocks(blocks))
@@ -317,6 +340,9 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             convert_content(content)?,
             convert_message_tools(tools)?,
         )),
+        ChatMessage::Custom { role, content } => {
+            Ok(VllmChatMessage::custom(role, convert_content(content)?))
+        }
     }
 }
 
@@ -329,9 +355,12 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::Refusal { .. } => bail_invalid_request!(
+                    "Only assistant messages can have a 'refusal' content type."
+                ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
-                    detail: image_url.detail,
+                    detail: image_url.detail.map(Into::into),
                     uuid,
                 }),
                 ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
@@ -344,9 +373,10 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 }),
                 ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
                     data: input_audio.data,
-                    format: input_audio.format,
+                    format: Some(input_audio.format),
                     uuid,
                 }),
+                ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -363,7 +393,9 @@ fn convert_assistant_text_blocks(
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Ok(AssistantContentBlock::Text { text })
+                }
                 _ => bail_invalid_request!(
                     "Only text content parts are supported for assistant messages."
                 ),
@@ -385,32 +417,43 @@ fn convert_assistant_tool_calls(
             Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
                 id: tool_call.id,
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments.unwrap_or_else(|| "{}".to_string()),
+                // Like Python, an empty `arguments` string means no arguments,
+                // the same as an absent one: clients send it for calls to tools
+                // without parameters.
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .filter(|arguments| !arguments.is_empty())
+                    .unwrap_or_else(|| "{}".to_string()),
             }))
         })
         .collect()
 }
 
-pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+fn convert_tools_with_param(
+    tools: Option<Vec<Tool>>,
+    param: &'static str,
+) -> Result<Vec<ChatTool>, ApiError> {
     tools
         .unwrap_or_default()
         .into_iter()
         .map(|tool| {
             if tool.tool_type != "function" {
-                bail_invalid_request!("Only function tools are supported.");
+                bail_invalid_request!(param = param, "Only function tools are supported.");
             }
-            Ok(ChatTool {
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: tool.function.parameters,
-                strict: tool.function.strict,
-            })
+            let mut function = tool.function;
+            function.defer_loading = function.defer_loading.or(tool.defer_loading);
+            Ok(ChatTool::from(function))
         })
         .collect()
 }
 
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+    convert_tools_with_param(tools, "tools")
+}
+
 fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
-    let tools = convert_tools(tools)?;
+    let tools = convert_tools_with_param(tools, "messages[].tools")?;
     Ok((!tools.is_empty()).then_some(tools))
 }
 
@@ -419,34 +462,48 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
         ToolChoice::Value(ToolChoiceValue::Auto) => Ok(ChatToolChoice::Auto),
         ToolChoice::Value(ToolChoiceValue::None) => Ok(ChatToolChoice::None),
         ToolChoice::Value(ToolChoiceValue::Required) => Ok(ChatToolChoice::Required),
-        ToolChoice::Function {
-            tool_type,
-            function,
-        } if tool_type == "function" => Ok(ChatToolChoice::Function {
-            name: function.name.clone(),
-        }),
-        ToolChoice::AllowedTools { tools, .. } => bail_invalid_request!(
-            "allowed_tools tool_choice is not supported yet: {}.",
-            tools.iter().map(ToolReference::identifier).join(", ")
-        ),
-        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
+        ToolChoice::Object(ToolChoiceObject::Function { function }) => {
+            Ok(ChatToolChoice::Function {
+                name: function.name.clone(),
+            })
+        }
+        ToolChoice::Object(ToolChoiceObject::AllowedTools { allowed_tools }) => {
+            let names = allowed_tools
+                .tools
+                .iter()
+                .map(|tool| {
+                    if tool.tool_type != "function" {
+                        bail_invalid_request!(
+                            param = "tool_choice",
+                            "Only function tools are supported in allowed_tools."
+                        );
+                    }
+                    Ok(tool.function.name.clone())
+                })
+                .collect::<Result<_, ApiError>>()?;
+            Ok(ChatToolChoice::AllowedTools {
+                mode: allowed_tools.mode,
+                names,
+            })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::num::NonZeroU32;
     use std::sync::Arc;
 
     use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
-    use llm_multimodal::ImageDetail;
-    use serde_json::json;
-    use validator::Validate;
+    use serde_json::{Value, json};
+    use thiserror_ext::AsReport as _;
     use vllm_chat::{
-        AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
+        AllowedToolsMode, AssistantContentBlock, AssistantToolCall, ChatContentPart,
+        ChatMessage as VllmChatMessage, ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice,
+        GenerationPromptMode, InputAudioFormat, KimiK3ChatRenderer, KimiK3Variant,
+        SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
         Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
@@ -455,23 +512,25 @@ mod tests {
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
-        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageDetail, ImageUrl,
+        InputAudio, MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
+        ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, "chatcmpl-", request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }
@@ -529,6 +588,47 @@ mod tests {
                 "reasoning_effort": effort,
             });
             assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn chat_http_request_rejects_zero_stream_interval() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream_interval": 0,
+        });
+        assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
+    }
+
+    #[test]
+    fn chat_http_input_audio_format_accepts_only_openai_names() {
+        let request = |format: Option<Value>| {
+            let mut input_audio = json!({"data": "dGVzdA=="});
+            if let Some(format) = format {
+                input_audio["format"] = format;
+            }
+            json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "input_audio", "input_audio": input_audio}],
+                }],
+            })
+        };
+        for format in ["wav", "mp3"] {
+            serde_json::from_value::<ChatCompletionRequest>(request(Some(json!(format))))
+                .expect("OpenAI format names are accepted");
+        }
+        for (format, expected) in [
+            (None, "missing field `format`"),
+            (Some(Value::Null), "invalid type: null"),
+            (Some(json!("WAV")), "expected `wav` or `mp3`"),
+            (Some(json!("MP3")), "expected `wav` or `mp3`"),
+            (Some(json!("flac")), "expected `wav` or `mp3`"),
+        ] {
+            let error = serde_json::from_value::<ChatCompletionRequest>(request(format.clone()))
+                .expect_err("format must be rejected")
+                .to_string();
+            assert!(error.contains(expected), "format {format:?}: {error}");
         }
     }
 
@@ -615,7 +715,6 @@ mod tests {
             "min_tokens": 0,
         }))
         .expect("parse zero min_tokens");
-        request.validate().expect("validate zero min_tokens");
 
         let prepared = prepare_chat_request(
             request,
@@ -654,6 +753,39 @@ mod tests {
                 .error
                 .message
                 .contains("json cannot be an empty string")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_deeply_nested_json_schema() {
+        let schema = (1..65).fold(
+            json!({"type": "string"}),
+            |items, _| json!({"type": "array", "items": items}),
+        );
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            },
+        }))
+        .expect("parse response_format");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("The JSON schema is nested too deeply")
         );
     }
 
@@ -706,20 +838,114 @@ mod tests {
                 description: None,
                 parameters: serde_json::Value::Null,
                 strict: None,
+                defer_loading: None,
             }]
         );
     }
 
     #[test]
-    fn chat_http_request_rejects_empty_cache_salt() {
+    fn prepare_chat_request_maps_tool_defer_loading() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "messages": [{"role": "user", "content": "hello"}],
-            "cache_salt": "",
+            "tools": [
+                {"function": {"name": "tool_level"}, "defer_loading": true},
+                {"function": {"name": "function_level", "defer_loading": true}},
+                {
+                    "function": {"name": "function_wins", "defer_loading": false},
+                    "defer_loading": true,
+                },
+            ],
         }))
-        .expect("parse cache_salt");
+        .expect("parse defer_loading");
 
-        assert!(request.validate().is_err());
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare defer_loading");
+
+        let defer_loading = prepared
+            .chat_request
+            .tools()
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.defer_loading))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            defer_loading,
+            [
+                ("tool_level", Some(true)),
+                ("function_level", Some(true)),
+                ("function_wins", Some(false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_falls_back_to_deprecated_max_tokens() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 32,
+        }))
+        .expect("parse deprecated max_tokens");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare deprecated max_tokens");
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, Some(32));
+
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 32,
+            "max_completion_tokens": 64,
+        }))
+        .expect("parse both max_tokens and max_completion_tokens");
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("max_completion_tokens wins");
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_non_function_developer_tools() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("policy".to_string()),
+                tools: Some(vec![Tool {
+                    tool_type: "mcp".to_string(),
+                    function: Function {
+                        name: "tool".to_string(),
+                        description: None,
+                        parameters: Some(serde_json::Map::new()),
+                        strict: None,
+                        defer_loading: None,
+                    },
+                    defer_loading: None,
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_error_response().error.param.as_deref(),
+            Some("messages[].tools")
+        );
     }
 
     #[test]
@@ -791,10 +1017,11 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
-            .render(&prepared.chat_request)
-            .expect("Kimi K3 rendering succeeds")
-            .prompt;
+        let prompt =
+            KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K3)
+                .render(&prepared.chat_request)
+                .expect("Kimi K3 rendering succeeds")
+                .prompt;
         let Prompt::TokenIds(prompt_token_ids) = prompt else {
             panic!("Kimi K3 renders token IDs");
         };
@@ -816,13 +1043,13 @@ mod tests {
         }];
         request.add_generation_prompt = Some(false);
         request.continue_final_message = true;
-        request.skip_special_tokens = false;
+        request.skip_special_tokens = Some(false);
         request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
 
         let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 
@@ -846,10 +1073,11 @@ mod tests {
         assert_eq!(
             prepared.chat_request.decode_options,
             TextDecodeOptions {
-                skip_special_tokens: false,
+                skip_special_tokens: Some(false),
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -874,7 +1102,7 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]
@@ -901,7 +1129,7 @@ mod tests {
         let prepared = prepare_chat_request(
             base_request(),
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 
@@ -921,10 +1149,11 @@ mod tests {
         assert_eq!(
             prepared.chat_request.decode_options,
             TextDecodeOptions {
-                skip_special_tokens: true,
+                skip_special_tokens: None,
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -956,6 +1185,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..base_request()
         };
 
@@ -971,6 +1201,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
@@ -1014,9 +1245,13 @@ mod tests {
                         parameters: json!({
                             "type": "object",
                             "properties": {"city": {"type": "string"}},
-                        }),
+                        })
+                        .as_object()
+                        .cloned(),
                         strict: Some(true),
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -1042,9 +1277,47 @@ mod tests {
                         "properties": {"city": {"type": "string"}},
                     }),
                     strict: Some(true),
+                    defer_loading: None,
                 }]),
             )]
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_custom_role_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [
+                {"role": "root", "content": "Custom identity."},
+                {"role": "user", "content": "hello"},
+            ],
+        }))
+        .expect("parse custom role message");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![
+                VllmChatMessage::custom("root", "Custom identity."),
+                VllmChatMessage::user("hello"),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_http_message_keeps_standard_role_errors() {
+        let error = serde_json::from_value::<ChatMessage>(json!({
+            "role": "tool",
+            "content": "Sunny",
+        }))
+        .unwrap_err();
+
+        expect!["missing field `tool_call_id`"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -1058,7 +1331,7 @@ mod tests {
                     ContentPart::ImageUrl {
                         image_url: ImageUrl {
                             url: "https://example.com/image.png".to_string(),
-                            detail: Some(ImageDetail::Low),
+                            detail: Some(ImageDetail::Original),
                         },
                         uuid: Some("image-1".to_string()),
                     },
@@ -1084,7 +1357,7 @@ mod tests {
                 ChatContentPart::text("describe "),
                 ChatContentPart::ImageUrl {
                     image_url: "https://example.com/image.png".to_string(),
-                    detail: Some(ImageDetail::Low),
+                    detail: Some(llm_multimodal::ImageDetail::High),
                     uuid: Some("image-1".to_string()),
                 },
                 ChatContentPart::text(" briefly"),
@@ -1165,7 +1438,7 @@ mod tests {
                     ContentPart::InputAudio {
                         input_audio: InputAudio {
                             data: "dGVzdA==".to_string(),
-                            format: Some("wav".to_string()),
+                            format: InputAudioFormat::Wav,
                         },
                         uuid: Some("audio-1".to_string()),
                     },
@@ -1193,7 +1466,7 @@ mod tests {
             vec![VllmChatMessage::user(vec![
                 ChatContentPart::InputAudio {
                     data: "dGVzdA==".to_string(),
-                    format: Some("wav".to_string()),
+                    format: Some(InputAudioFormat::Wav),
                     uuid: Some("audio-1".to_string()),
                 },
                 ChatContentPart::audio_url("https://example.com/audio.mp3"),
@@ -1231,10 +1504,114 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_replays_assistant_refusal_parts_as_text() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."},
+                ]},
+            ],
+            "echo": true,
+        }))
+        .expect("refusal parts parse in assistant messages");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages[1],
+            VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::Text {
+                text: "I can't help with that.".to_string(),
+            }])
+        );
+        assert_eq!(
+            prepared.options.echo.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": [
+                {"type": "refusal", "refusal": "no"},
+            ]}],
+        }))
+        .expect("refusal parts parse in any message");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only assistant messages can have a 'refusal' content type."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_tool_reference_parts() {
+        let request = |reference: &str| -> ChatCompletionRequest {
+            serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [
+                    {"role": "user", "content": "find a weather tool"},
+                    {"role": "assistant", "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_search", "arguments": "{}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": [
+                        {"type": "tool_reference", "name": reference},
+                    ]},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "tool_search"}},
+                    {"type": "function", "function": {"name": "get_weather"}, "defer_loading": true},
+                ],
+            }))
+            .expect("tool_reference parts parse")
+        };
+        let prepare = |reference| {
+            prepare_chat_request(
+                request(reference),
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+        };
+
+        let prepared = prepare("get_weather").expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages[2],
+            VllmChatMessage::tool_response(
+                vec![ChatContentPart::tool_reference("get_weather")],
+                "call_1",
+            )
+        );
+
+        let error = prepare("get_time").unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        expect!["tool_reference `get_time` was not found in the available tools"]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
+            refusal: None,
+            annotations: None,
+            audio: None,
+            function_call: None,
             tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
@@ -1271,36 +1648,38 @@ mod tests {
 
     #[test]
     fn prepare_chat_request_accepts_legacy_reasoning_content_alias() {
-        let request = ChatCompletionRequest {
-            messages: vec![
-                serde_json::from_value(json!({
-                    "role": "assistant",
-                    "content": "answer",
-                    "reasoning_content": "inner",
-                }))
-                .expect("legacy reasoning_content alias is accepted"),
-            ],
-            add_generation_prompt: Some(false),
-            ..base_request()
-        };
+        for reasoning in ["inner", ""] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    serde_json::from_value(json!({
+                        "role": "assistant",
+                        "content": "answer",
+                        "reasoning_content": reasoning,
+                    }))
+                    .expect("legacy reasoning_content alias is accepted"),
+                ],
+                add_generation_prompt: Some(false),
+                ..base_request()
+            };
 
-        let prepared = prepare_chat_request(
-            request,
-            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
-        )
-        .expect("request is valid");
-        assert_eq!(
-            prepared.chat_request.messages,
-            vec![VllmChatMessage::assistant_blocks(vec![
-                AssistantContentBlock::Reasoning {
-                    text: "inner".to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: "answer".to_string(),
-                },
-            ])]
-        );
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            assert_eq!(
+                prepared.chat_request.messages,
+                vec![VllmChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Reasoning {
+                        text: reasoning.to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ])]
+            );
+        }
     }
 
     #[test]
@@ -1333,9 +1712,13 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
             ..base_request()
@@ -1370,9 +1753,50 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_empty_tool_call_arguments_as_absent() {
+        let tool_call_arguments = |arguments: serde_json::Value| {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_current_time", "arguments": arguments},
+                    }],
+                }],
+            }))
+            .expect("parse request");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            let [VllmChatMessage::Assistant { content }] =
+                prepared.chat_request.messages.as_slice()
+            else {
+                panic!("expected one assistant message");
+            };
+            let [AssistantContentBlock::ToolCall(call)] = content.as_slice() else {
+                panic!("expected one tool call");
+            };
+            call.arguments.clone()
+        };
+
+        assert_eq!(tool_call_arguments(json!("")), "{}");
+        assert_eq!(tool_call_arguments(json!(null)), "{}");
+        assert_eq!(
+            tool_call_arguments(json!(r#"{"tz":"UTC"}"#)),
+            r#"{"tz":"UTC"}"#
+        );
     }
 
     #[test]
@@ -1386,9 +1810,13 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
             ..base_request()
@@ -1408,6 +1836,84 @@ mod tests {
         assert!(!prepared.options.is_named_tool_choice);
     }
 
+    /// Tools declared in a developer message stay available under `tools: []`,
+    /// as they would with `tools` omitted.
+    #[test]
+    fn prepare_chat_request_keeps_developer_tools_with_empty_tools() {
+        for tool_choice in [ToolChoiceValue::Auto, ToolChoiceValue::Required] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    ChatMessage::Developer {
+                        content: MessageContent::Text("Use tools.".to_string()),
+                        tools: Some(vec![Tool {
+                            tool_type: "function".to_string(),
+                            function: Function {
+                                name: "lookup".to_string(),
+                                description: None,
+                                parameters: json!({"type": "object"}).as_object().cloned(),
+                                strict: None,
+                                defer_loading: None,
+                            },
+                            defer_loading: None,
+                        }]),
+                        name: None,
+                    },
+                    ChatMessage::User {
+                        content: MessageContent::Text("hello".to_string()),
+                        name: None,
+                    },
+                ],
+                tools: Some(Vec::new()),
+                tool_choice: Some(ToolChoice::Value(tool_choice)),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            let expected = match tool_choice {
+                ToolChoiceValue::Auto => ChatToolChoice::Auto,
+                _ => ChatToolChoice::Required,
+            };
+            assert_eq!(prepared.chat_request.tool_choice(), &expected);
+        }
+    }
+
+    /// A named tool choice with empty `tools` reports the missing function.
+    #[test]
+    fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
+        let request = ChatCompletionRequest {
+            tools: Some(Vec::new()),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "f".to_string(),
+                },
+            })),
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("no tool matches the named choice");
+
+        expect![[r#"
+            InvalidRequest {
+                message: "tool_choice function `f` was not found in the available tools",
+                param: Some(
+                    "tool_choice",
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&error);
+    }
+
     #[test]
     fn prepare_chat_request_lowers_named_function_tool_choice() {
         let request = ChatCompletionRequest {
@@ -1419,16 +1925,19 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
                 function: crate::routes::openai::utils::types::FunctionChoice {
                     name: "get_weather".to_string(),
                 },
-            }),
+            })),
             ..base_request()
         };
 
@@ -1446,6 +1955,123 @@ mod tests {
             }
         );
         assert!(prepared.options.is_named_tool_choice);
+    }
+
+    /// The nested Chat Completions `allowed_tools` shape lowers to an
+    /// allowed-tools choice, while every declared tool stays in the request.
+    #[test]
+    fn prepare_chat_request_lowers_allowed_tools_tool_choice() {
+        let tool = |name: &str| json!({"type": "function", "function": {"name": name}});
+        for (mode, expected_mode) in [
+            ("auto", AllowedToolsMode::Auto),
+            ("required", AllowedToolsMode::Required),
+        ] {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [tool("get_weather"), tool("get_time")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": mode, "tools": [tool("get_time")]},
+                },
+            }))
+            .unwrap();
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{mode}: {error:?}"));
+
+            let tool_names = prepared.chat_request.tool_context.initial_tools.iter();
+            assert_eq!(
+                tool_names.map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                ["get_weather", "get_time"]
+            );
+            assert_eq!(
+                prepared.chat_request.tool_choice(),
+                &ChatToolChoice::AllowedTools {
+                    mode: expected_mode,
+                    names: vec!["get_time".to_string()],
+                },
+                "{mode}"
+            );
+            assert!(!prepared.options.is_named_tool_choice);
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_invalid_allowed_tools() {
+        let prepare = |allowed: serde_json::Value| {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                "tool_choice": {"type": "allowed_tools", "allowed_tools": allowed},
+            }))
+            .unwrap();
+            prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect_err("invalid allowed_tools")
+        };
+
+        let errors = [
+            json!({"mode": "auto", "tools": [{"type": "function", "function": {"name": "f"}}]}),
+            json!({"mode": "required", "tools": []}),
+            json!({"mode": "auto", "tools": [{"type": "custom", "function": {"name": "f"}}]}),
+        ]
+        .map(prepare);
+
+        expect![[r#"
+            [
+                InvalidRequest {
+                    message: "tool_choice function `f` was not found in the available tools",
+                    param: Some(
+                        "tool_choice",
+                    ),
+                },
+                InvalidRequest {
+                    message: "tool_choice requires at least one available tool",
+                    param: Some(
+                        "tool_choice",
+                    ),
+                },
+                InvalidRequest {
+                    message: "Only function tools are supported in allowed_tools.",
+                    param: Some(
+                        "tool_choice",
+                    ),
+                },
+            ]
+        "#]]
+        .assert_debug_eq(&errors);
+    }
+
+    #[test]
+    fn selected_logprobs_override_chat_top_k_unless_empty() {
+        for ids in [vec![10, 20], vec![]] {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "logprobs": true, "top_logprobs": 1, "logprob_token_ids": ids,
+            }))
+            .unwrap();
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap();
+            let params = prepared.chat_request.sampling_params;
+            let selected = !ids.is_empty();
+            assert_eq!(params.logprob_token_ids, selected.then_some(ids));
+            assert_eq!(params.logprobs, (!selected).then_some(1));
+            assert_eq!(
+                prepared.options.output_top_logprobs,
+                if selected { -1 } else { 1 }
+            );
+        }
     }
 
     #[test]

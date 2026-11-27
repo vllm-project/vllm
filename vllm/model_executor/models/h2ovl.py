@@ -10,10 +10,12 @@
 # --------------------------------------------------------
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
+from vllm.inputs import MultiModalHashes
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import BatchedTensorInputs, MultiModalKwargsItem
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -135,6 +137,25 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
             replacement=get_replacement_internvl,
         )
 
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        images = inputs.mm_data_items.get("image")
+        if isinstance(images, ImageProcessorItems):
+            use_msac = (
+                len(images) == 1
+                and self.info.get_image_processor(
+                    **inputs.hf_processor_mm_kwargs
+                ).use_msac
+            )
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["image"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm, mm_hash=mm_hash, use_msac=use_msac
+                )
+                for mm_hash in hashes["image"]
+            ]
+        return hashes
+
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
@@ -158,7 +179,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 class H2OVLChatModel(InternVLChatModel):
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,

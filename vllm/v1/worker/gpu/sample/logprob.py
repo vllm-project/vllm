@@ -3,6 +3,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
@@ -19,6 +20,7 @@ def _topk_log_softmax_kernel(
     logits_ptr,
     logits_stride,
     topk_ids_ptr,
+    topk_ids_stride,
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -49,7 +51,7 @@ def _topk_log_softmax_kernel(
         k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
         k_mask = k_offset < topk
         topk_ids = tl.load(
-            topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0
+            topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0
         )
         logits = tl.load(row_ptr + topk_ids, mask=k_mask)
         logits = logits.to(tl.float32)
@@ -98,6 +100,7 @@ def compute_token_logprobs(
         logits,
         logits.stride(0),
         token_ids,
+        token_ids.stride(0),
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
@@ -267,3 +270,51 @@ class LogprobTokenIdsState:
 
     def max_num_token_ids(self, idx_mapping_np: np.ndarray) -> int:
         return int(self.num_token_ids.np[idx_mapping_np].max(initial=0))
+
+
+def concat_logprob_stashes(
+    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
+) -> LogprobsTensors:
+    """Join the logprobs stashed for the requests committing this step.
+
+    Each stash is as wide as the widest logprobs request in the batch at the
+    step that request converged, so stashes from different steps can differ
+    in width. Pad the narrow ones the way compute_topk_scores pads a mixed
+    batch: token id 0 at -inf, which the output processor never reports.
+    """
+    width = max(p.logprob_token_ids.shape[1] for p in parts)
+
+    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
+        return F.pad(t, (0, width - t.shape[1]), value=value)
+
+    return LogprobsTensors(
+        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
+        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
+        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
+def masked_stash_write(
+    stash: LogprobsTensors,
+    slots: torch.Tensor,
+    keep: torch.Tensor,
+    new: LogprobsTensors,
+) -> None:
+    """Write `new` ([n * W] rows) into the per-slot stash where `keep`.
+
+    The PyTorch counterpart of DiffusionGemma's `stash_converged_logprobs`.
+    """
+    n = slots.shape[0]
+    pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
+    ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
+    lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
+    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
+    W = ranks.shape[1]
+    for buf, rows in (
+        (stash.logprob_token_ids, ids.view(n, W, -1)),
+        (stash.logprobs, lps.view(n, W, -1)),
+        (stash.selected_token_ranks, ranks),
+    ):
+        mask = keep.view(n, *[1] * (rows.dim() - 1))
+        buf[slots, :W] = torch.where(mask, rows, buf[slots, :W])

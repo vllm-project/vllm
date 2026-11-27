@@ -25,6 +25,9 @@ import vllm.envs as envs
 from vllm.connections import (
     HTTPConnection,
     MediaDownloadSizeExceededError,
+    MediaFetchDeadlineExceededError,
+    MediaRequestDownloadBudget,
+    MediaRequestDownloadSizeExceededError,
     global_http_connection,
 )
 from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
@@ -33,7 +36,7 @@ from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO, MediaWithBytes
+from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
@@ -56,21 +59,19 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
 
 
 def _wrap_media_fetch_error(
-    url: str, exc: Exception
+    url: str, exc: Exception, *, request_field: str = "image_url"
 ) -> VLLMUnprocessableEntityError | Exception:
     """Convert media fetch exceptions to VLLMUnprocessableEntityError.
 
-    This handles HTTP errors that indicate the media resource is invalid
-    (4xx responses except 408/429, malformed URLs) and converts them to a
-    422 Unprocessable Entity error instead of 500.
+    Invalid media URLs (4xx responses except 408/429 and malformed URLs) and
+    exceeded media fetch deadlines produce a 422 Unprocessable Entity error.
 
     Transient errors (5xx, 408, 429, DNS failures, connection errors,
-    timeouts) are returned as-is to allow retry logic to handle them
+    socket timeouts) are returned as-is to allow retry logic to handle them
     appropriately.
 
     Returns:
-        VLLMUnprocessableEntityError for permanent client errors (4xx except
-            408/429, invalid URL)
+        VLLMUnprocessableEntityError for invalid URLs and exceeded deadlines.
         Original exception for transient errors (5xx, 408, 429, network blips)
             or other exceptions
 
@@ -109,10 +110,19 @@ def _wrap_media_fetch_error(
             value=url,
         )
 
-    if isinstance(exc, MediaDownloadSizeExceededError):
+    if isinstance(
+        exc, (MediaDownloadSizeExceededError, MediaRequestDownloadSizeExceededError)
+    ):
         return VLLMUnprocessableEntityError(
             f"Failed to fetch media from URL: {exc}",
             parameter="image_url",
+            value=url,
+        )
+
+    if isinstance(exc, MediaFetchDeadlineExceededError):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {exc}",
+            parameter=request_field,
             value=url,
         )
 
@@ -132,7 +142,7 @@ def merge_media_io_kwargs(
     """Merge config-level and per-request media_io_kwargs per modality.
 
     Each modality key is merged using the corresponding MediaIO subclass's
-    ``merge_kwargs``, which may apply modality-specific logic (e.g.
+    `merge_kwargs`, which may apply modality-specific logic (e.g.
     VideoMediaIO clears cross-dependent fps/num_frames fields).
     """
     if not defaults and not overrides:
@@ -162,6 +172,8 @@ class MediaConnector:
         *,
         allowed_local_media_path: str = "",
         allowed_media_domains: list[str] | None = None,
+        decoded_budget: MediaDecodedBudget | None = None,
+        download_budget: MediaRequestDownloadBudget | None = None,
     ) -> None:
         """Args:
         media_io_kwargs: Additional args passed to process media
@@ -201,6 +213,8 @@ class MediaConnector:
         if allowed_media_domains is None:
             allowed_media_domains = []
         self.allowed_media_domains = allowed_media_domains
+        self.decoded_budget = decoded_budget
+        self.download_budget = download_budget
 
         # Media download cache (opt-in via VLLM_MEDIA_CACHE)
         self._media_cache_dir: str | None = None
@@ -230,6 +244,12 @@ class MediaConnector:
                     media_cache,
                 )
 
+    def _image_io(self, image_mode: str | None = "RGB") -> ImageMediaIO:
+        return ImageMediaIO(
+            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {})),
+            decoded_budget=self.decoded_budget,
+        )
+
     def _get_cached_bytes(self, url: str) -> bytes | None:
         """Return cached bytes for a URL, or None if not cached/expired."""
         if not self._media_cache_dir:
@@ -245,7 +265,7 @@ class MediaConnector:
             return None
         # Touch mtime for LRU ordering
         try:
-            cache_path.touch()
+            os.utime(cache_path, None)
             return cache_path.read_bytes()
         except OSError:
             return None
@@ -338,7 +358,7 @@ class MediaConnector:
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
-            raise RuntimeError(
+            raise VLLMValidationError(
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
@@ -385,15 +405,34 @@ class MediaConnector:
                 return media_io.load_bytes(cached)
 
             connection = self.connection
+            budget_kwargs = (
+                {"request_budget": self.download_budget}
+                if self.download_budget is not None
+                else {}
+            )
             try:
                 data = connection.get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
+                    deadline=(
+                        time.monotonic() + 2 * fetch_timeout
+                        if fetch_timeout is not None
+                        else None
+                    ),
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    **budget_kwargs,
                 )
             except Exception as e:
-                wrapped = _wrap_media_fetch_error(url, e)
+                request_field = next(
+                    (
+                        f"{modality}_url"
+                        for modality, io_type in MODALITY_IO_MAP.items()
+                        if isinstance(media_io, io_type)
+                    ),
+                    "image_url",
+                )
+                wrapped = _wrap_media_fetch_error(url, e, request_field=request_field)
                 if isinstance(wrapped, VLLMUnprocessableEntityError):
                     raise wrapped from e
                 raise
@@ -438,12 +477,18 @@ class MediaConnector:
                 return await future
 
             connection = self.connection
+            budget_kwargs = (
+                {"request_budget": self.download_budget}
+                if self.download_budget is not None
+                else {}
+            )
             try:
                 data = await connection.async_get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    **budget_kwargs,
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -470,7 +515,9 @@ class MediaConnector:
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
         """Load audio from a URL."""
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        audio_io = AudioMediaIO(
+            decoded_budget=self.decoded_budget, **self.media_io_kwargs.get("audio", {})
+        )
 
         return self.load_from_url(
             audio_url,
@@ -483,7 +530,9 @@ class MediaConnector:
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
         """Asynchronously fetch audio from a URL."""
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        audio_io = AudioMediaIO(
+            decoded_budget=self.decoded_budget, **self.media_io_kwargs.get("audio", {})
+        )
 
         return await self.load_from_url_async(
             audio_url,
@@ -503,9 +552,7 @@ class MediaConnector:
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
         original image mode (e.g. preserving the alpha channel).
         """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
+        image_io = self._image_io(image_mode)
 
         try:
             return self.load_from_url(
@@ -529,9 +576,7 @@ class MediaConnector:
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
         original image mode (e.g. preserving the alpha channel).
         """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
+        image_io = self._image_io(image_mode)
 
         try:
             return await self.load_from_url_async(
@@ -549,12 +594,14 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Load video from an HTTP or base64 data URL."""
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        image_io = self._image_io(image_mode)
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):
@@ -573,6 +620,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_io_defaults: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
@@ -580,10 +628,11 @@ class MediaConnector:
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
         original image mode (e.g. preserving the alpha channel).
         """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        image_io = self._image_io(image_mode)
+        video_io_kwargs = {
+            **(video_io_defaults or {}),
+            **self.media_io_kwargs.get("video", {}),
+        }
         if "video_backend" not in video_io_kwargs and (
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):

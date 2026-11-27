@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from argparse import Namespace
 from typing import Final
 
 import pytest
 import schemathesis
+from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, settings
+from jsonschema import Draft202012Validator
 from schemathesis import GenerationMode
+from schemathesis.checks import not_a_server_error
 from schemathesis.config import (
     ChecksConfig,
     CoveragePhaseConfig,
@@ -29,6 +33,76 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
 LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
 
+def test_openapi_exposes_completion_response_schemas() -> None:
+    """The published 200 contract of both completion APIs must reference the
+    real response models, for the JSON body and for each SSE data chunk.
+
+    Uses the production app: FastAPI renames models used as both input and
+    output (-Input/-Output), which a router-only app cannot show.
+    """
+    from vllm.entrypoints.launchers.app import build_app
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionResponse,
+        CompletionStreamResponse,
+    )
+
+    args = Namespace(
+        disable_fastapi_docs=False,
+        enable_offline_docs=False,
+        root_path="",
+        allowed_origins=["*"],
+        allow_credentials=False,
+        allowed_methods=["*"],
+        allowed_headers=["*"],
+        api_key=None,
+        enable_request_id_headers=False,
+        enable_fault_tolerance=False,
+        middleware=[],
+        log_error_stack=False,
+    )
+    # No lifespan: schema generation does not need an inference engine.
+    client = TestClient(build_app(args, supported_tasks=("generate",)))
+    document = client.get("/openapi.json").json()
+    message = {"role": "assistant", "content": "hi"}
+    for path, unary, unary_choice, chunk, chunk_choice in (
+        (
+            "/v1/chat/completions",
+            ChatCompletionResponse,
+            {"index": 0, "message": message},
+            ChatCompletionStreamResponse,
+            {"index": 0, "delta": {"content": "hi"}},
+        ),
+        (
+            "/v1/completions",
+            CompletionResponse,
+            {"index": 0, "text": "hi"},
+            CompletionStreamResponse,
+            {"index": 0, "text": "hi"},
+        ),
+    ):
+        content = document["paths"][path]["post"]["responses"]["200"]["content"]
+        data = content["text/event-stream"]["schema"]["properties"]["data"]
+        assert data["anyOf"][0] == {"const": "[DONE]"}
+        for schema, model, choice in (
+            (content["application/json"]["schema"], unary, unary_choice),
+            (data["anyOf"][1]["contentSchema"], chunk, chunk_choice),
+        ):
+            assert schema == {"$ref": f"#/components/schemas/{model.__name__}"}
+            validator = Draft202012Validator(
+                {**schema, "components": document["components"]}
+            )
+            payload = model(model="m", choices=[choice], usage={}).model_dump(
+                mode="json"
+            )
+            validator.validate(payload)
+            payload["choices"] = "not an array"
+            assert not validator.is_valid(payload)
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [
@@ -39,7 +113,6 @@ def server():
         "--max-num-seqs",
         "5",
         "--enforce-eager",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": MAXIMUM_IMAGES}),
     ]
@@ -160,9 +233,25 @@ def test_openapi_stateless(case: schemathesis.Case):
         ("POST", "/inference/v1/generate"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
+    expected_server_error_status = {
+        # SmolVLM does not support either decision endpoint.
+        "/v1/systemone": 501,
+        "/v1/decisions": 501,
+        # Tiny fuzzed timeout_s values (e.g. 5e-324) legitimately return
+        # 503 probe_timeout.
+        "/health_generate": 503,
+    }.get(case.operation.path)
     # No need to verify SSL certificate for localhost
-    case.call_and_validate(
+    response = case.call_and_validate(
         verify=False,
         timeout=timeout,
         headers={"Content-Type": "application/json"},
+        excluded_checks=(
+            [not_a_server_error] if expected_server_error_status is not None else None
+        ),
     )
+    if expected_server_error_status is not None:
+        assert (
+            response.status_code < 500
+            or response.status_code == expected_server_error_status
+        )

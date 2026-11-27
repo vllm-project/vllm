@@ -3,11 +3,13 @@
 import contextlib
 import enum
 import functools
+import itertools
+import math
 import os
 import platform
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, get_args
 
 import torch
 
@@ -17,13 +19,17 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -136,19 +142,23 @@ class Platform:
     device_type: str
 
     # available dispatch keys:
-    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
+    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
 
     # available ray device keys:
-    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438 # noqa
+    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438
     # empty string means the device does not support ray
     ray_device_key: str = ""
+
+    @classmethod
+    def log_warnings(cls) -> None:
+        """Log platform-specific diagnostics after logging is configured."""
 
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
     # hint: search for "get_visible_accelerator_ids_env_var" in
-    # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
+    # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
 
     # environment variables that need to be set to 1 to prevent ray from
@@ -187,6 +197,11 @@ class Platform:
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
+
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        return None
 
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
@@ -236,6 +251,12 @@ class Platform:
         return cumem_available
 
     @classmethod
+    def is_confidential_compute(cls) -> bool:
+        """Whether the device runs in a confidential-computing mode that makes
+        host<->device copies host-synchronous and host mappings incoherent."""
+        return False
+
+    @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
@@ -249,7 +270,7 @@ class Platform:
 
     @classmethod
     def import_ir_kernels(cls) -> None:
-        """The default implementation imports ``vllm.kernels``, which registers
+        """The default implementation imports `vllm.kernels`, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
@@ -313,7 +334,7 @@ class Platform:
 
         vLLM internals use logical local IDs. Physical IDs are used only
         at platform/topology boundaries. This helper performs the final
-        translation needed by APIs such as ``torch.device("cuda:N")``.
+        translation needed by APIs such as `torch.device("cuda:N")`.
         """
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         device_control_env = os.environ.get(cls.device_control_env_var, "")
@@ -334,7 +355,7 @@ class Platform:
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
-        """Map a visible accelerator ordinal (e.g. ``torch.device.index``)
+        """Map a visible accelerator ordinal (e.g. `torch.device.index`)
         to a physical device ID.
 
         This is the inverse of the env-var translation performed by
@@ -363,6 +384,25 @@ class Platform:
             logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Override core Triton kernels with platform implementations.
+
+        Platforms whose Triton kernels need replacement implementations
+        override this method and call
+        `vllm.triton_utils.dispatcher.register_kernels`
+        with their overrides. It runs during model runner init, before any
+        kernel launch. The default implementation does nothing.
+        """
+        return
+
+    @classmethod
+    def get_moe_backends(cls) -> dict[str, type["FusedMoEExperts"]]:
+        """Out-of-tree MoE backends by `--moe-backend` name, in the priority
+        order used by `auto`. Names are lowercase with underscores and must not
+        reuse an in-tree backend's."""
+        return {}
 
     @classmethod
     def get_attn_backend_cls(
@@ -402,13 +442,95 @@ class Platform:
                 f"Backend {backend} is not supported for vit attention"
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """Get the MLA prefill backend class of a device.
+
+        Platforms that have a single, fixed MLA prefill backend can override
+        this to return it directly. The default implementation selects the
+        best backend from a device-capability-based priority list.
+
+        Returns:
+            The selected backend class.
+
+        Raises:
+            ValueError: If no MLA prefill backend is valid for the
+                configuration.
+
+        """
+        from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        if device_capability is None:
+            return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+
+        if device_capability.major == 10:  # Blackwell
+            if mla_selector_config.mla_dimensions == MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ):
+                priorities = [
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+            else:
+                priorities = [
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+        else:  # Hopper (SM90) and older
+            priorities = [MLAPrefillBackendEnum.FLASH_ATTN]
+
+        all_invalid_reasons: dict[str, list[str]] = {}
+
+        for backend_enum in priorities:
+            try:
+                backend_cls = backend_enum.get_class()
+                invalid_reasons = backend_cls.validate_configuration(
+                    device_capability, mla_selector_config
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                return backend_cls
+            all_invalid_reasons[backend_enum.name] = invalid_reasons
+
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{name}: [{', '.join(reasons)}]"
+                for name, reasons in all_invalid_reasons.items()
+            )
+            + "}"
+        )
+        logger.debug_once(
+            "Some MLA prefill backends are not valid with %s. Reasons: %s.",
+            repr(mla_selector_config),
+            reasons_str,
+        )
+        raise ValueError(
+            f"No valid MLA prefill backend found with {mla_selector_config!r}. "
+            f"Reasons: {reasons_str}."
+        )
 
     @classmethod
     def get_device_capability(
@@ -503,7 +625,7 @@ class Platform:
     def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
         """Return a mapping of device index to PCI bus ID string.
 
-        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Used by `VLLM_GPU_NIC_PCIE_MAPPING` for RDMA NIC selection.
         Subclasses should override with platform-specific discovery
         (e.g. pynvml for CUDA).
         """
@@ -573,10 +695,10 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backend(
+    def _find_non_ssm_backends(
         cls, vllm_config: "VllmConfig"
-    ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM attention backend from model layers."""
+    ) -> "list[type[AttentionBackend]]":
+        """Distinct non-SSM attention backends, in layer order."""
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -586,11 +708,80 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
-        return None
+            if not b.is_ssm() and b not in backends:
+                backends.append(b)
+        return backends
+
+    @classmethod
+    def _preferred_block_size_for_backends(
+        cls,
+        backend_classes: "list[type[AttentionBackend]]",
+        default_block_size: int,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends keep that preference only when they all ask
+        for the same size and all accept it. Differing preferences keep the
+        default. If any backend rejects the default, the LCM search is
+        unchanged.
+
+        `supports_block_size` may be overridden to accept exact sizes only
+        (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
+        one supported size per backend, each checked against every backend.
+
+        Raises:
+            ValueError: If the backends share no supported block size.
+
+        """
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.backend import MultipleOf
+
+        # Backends may read the current config to decide a preference.
+        with set_current_vllm_config(vllm_config):
+            if len(backend_classes) == 1:
+                return backend_classes[0].get_preferred_block_size(default_block_size)
+            if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Take a preference only when every backend asks for that same
+                # size. The max of disagreeing preferences would move
+                # DeepSeek-V4.1 from 64 to the SWA preference of 256.
+                preferences = [
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                ]
+                chosen = preferences[0]
+                if all(p == chosen for p in preferences) and all(
+                    b.supports_block_size(chosen) for b in backend_classes
+                ):
+                    return chosen
+                return default_block_size
+            # A backend declaring no sizes accepts any, so it contributes 1.
+            per_backend_sizes = [
+                [
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in b.get_supported_kernel_block_sizes()
+                ]
+                or [1]
+                for b in backend_classes
+            ]
+            candidates = sorted(
+                {math.lcm(*sizes) for sizes in itertools.product(*per_backend_sizes)}
+            )
+            for candidate in candidates:
+                if all(b.supports_block_size(candidate) for b in backend_classes):
+                    return candidate
+            raise ValueError(
+                "The attention backends share no supported KV cache block size ("
+                + "; ".join(
+                    f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                    for b in backend_classes
+                )
+                + ")."
+            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -598,7 +789,6 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -607,34 +797,67 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        # Phase 1: Pick a block size every attention backend supports (skip if
+        # user set --block-size). Models can mix backends with disjoint
+        # preferences, and a size from the first alone later fails
+        # select_common_block_size().
         if not cache_config.user_specified_block_size:
-            with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
+            preferred = cls._preferred_block_size_for_backends(
+                backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+            )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
+                    "Setting kv cache block size to %d for %s backend(s).",
                     preferred,
-                    backend_cls.get_name(),
+                    "/".join(b.get_name() for b in backend_classes),
                 )
             cache_config.block_size = preferred
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
+        pre_block_size = cache_config.block_size
         if model_config.is_hybrid:
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
+            cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
-            cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+            cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        pre_block_size: int,
+    ) -> None:
+        """Fail now, not at worker setup, if alignment left a rejected size.
+
+        Alignment rounds by the first backend's kernel block only, so it can
+        land on a size a sibling backend rejects.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+
+        block_size = vllm_config.cache_config.block_size
+        if block_size == pre_block_size:
+            return
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b.get_name()
+                for b in backend_classes
+                if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligned KV cache block size {block_size} is not supported by "
+                f"attention backend(s): {', '.join(rejecting)}."
+            )
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
@@ -648,24 +871,24 @@ class Platform:
         higher-precision "padded specs" (skip layers today; the first/last-N
         sibling in the future). A padded spec's per-token page is larger than
         the primary's *and not an integer multiple of it*, so the trivial
-        ``unify_kv_cache_spec_page_size`` cannot reconcile them. We do it here
+        `unify_kv_cache_spec_page_size` cannot reconcile them. We do it here
         instead, before the specs are built:
 
-        1. Bump the primary ``block_size`` (kernel-aligned) until the primary
+        1. Bump the primary `block_size` (kernel-aligned) until the primary
            page is large enough to cover the largest padded-spec page.
-        2. Record that shared page in each padded spec's ``*_page_size_padded``
+        2. Record that shared page in each padded spec's `*_page_size_padded`
            hint, so it pads up to the shared page.
 
-        ``unify`` then sees equal pages and stays trivial.
+        `unify` then sees equal pages and stays trivial.
 
-        To add a padded-spec type: append its per-token page to ``padded_pages``
-        and set its ``*_page_size_padded`` hint below.
+        To add a padded-spec type: append its per-token page to `padded_pages`
+        and set its `*_page_size_padded` hint below.
         """
         from vllm.config.vllm import set_current_vllm_config
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
-        from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+        from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -675,7 +898,7 @@ class Platform:
 
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
-            spec = FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -683,7 +906,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -750,17 +974,6 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
-        """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
-
-        The CUDA kpool paged-MQA indexer virtually splits each storage block
-        into pool pages, so ``block_size`` must be a multiple of
-        ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
-        platform override. Other platforms impose no extra constraint.
-        """
-        return None
-
-    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -772,12 +985,16 @@ class Platform:
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
+        from vllm.model_executor.layers.mamba.abstract import (
+            get_mamba_prefill_checkpoint_alignment,
+        )
+        from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
+            AttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
@@ -796,6 +1013,9 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+            from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
+
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -803,27 +1023,49 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
+                ),
             ).page_size_bytes
-        elif cache_config.cache_dtype.startswith("turboquant_"):
-            # TQ has a packed K|V layout; the standard FullAttentionSpec
-            # formula over-sizes it and trips unify_kv_cache_spec_page_size
-            # when all attention layers are TQ. With mixed skip+TQ the skip
-            # layers still use the standard layout — take max so mamba
-            # padding covers the largest actual page.
-            from vllm.v1.attention.backends.turboquant_attn import (
-                TurboQuantAttentionBackend,
-            )
+        elif (
+            cache_config.cache_dtype.startswith("turboquant_")
+            or cache_config.cache_dtype == "ultraquant_4bit"
+        ):
+            # TurboQuant and UltraQuant have packed K|V layouts; the standard
+            # AttentionSpec formula over-sizes them and trips
+            # unify_kv_cache_spec_page_size when all attention layers are
+            # packed. With mixed skip+packed the skip layers still use the
+            # standard layout — take max so mamba padding covers the largest
+            # actual page. Each dtype packs via its own backend.
+            _pack_backend: type[AttentionBackend]
+            if cache_config.cache_dtype == "ultraquant_4bit":
+                from vllm.v1.attention.backends.ultraquant_attn import (
+                    UltraQuantAttentionBackend,
+                )
 
-            tq_spec = FullAttentionSpec(
+                _pack_backend = UltraQuantAttentionBackend
+            else:
+                from vllm.v1.attention.backends.turboquant_attn import (
+                    TurboQuantAttentionBackend,
+                )
+
+                _pack_backend = TurboQuantAttentionBackend
+
+            tq_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
+            tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
-                skip_page = FullAttentionSpec(
+                skip_page = AttentionSpec(
                     block_size=1,
                     num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                     head_size=model_config.get_head_size(),
@@ -836,16 +1078,47 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
-            attn_spec = FullAttentionSpec(
+            attn_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
+                # A drafter whose attention layers hold more KV per token than the
+                # target's (e.g. an EAGLE head with more KV heads) sets the common
+                # page; size the block for it too (lcm, as for the skip layers
+                # above), or every Mamba page is later padded up to the drafter's.
+                spec_config = vllm_config.speculative_config
+                if (
+                    spec_config is not None
+                    and (draft_config := spec_config.draft_model_config) is not None
+                    and not draft_config.use_mla
+                ):
+                    draft_parallel_config = (
+                        spec_config.draft_parallel_config or parallel_config
+                    )
+                    draft_spec = AttentionSpec(
+                        block_size=1,
+                        num_kv_heads=draft_config.get_num_kv_heads(
+                            draft_parallel_config
+                        ),
+                        head_size=draft_config.get_head_size(),
+                        dtype=kv_cache_dtype,
+                        kv_quant_mode=kv_quant_mode,
+                    )
+                    draft_page_size_1_token = backend_cls.customize_spec(
+                        draft_spec
+                    ).page_size_bytes
+                    if draft_page_size_1_token > attn_page_size_1_token:
+                        attn_page_size_1_token = lcm(
+                            attn_page_size_1_token, draft_page_size_1_token
+                        )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -862,18 +1135,12 @@ class Platform:
             mamba_page_size = MambaSpec(
                 shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
                 dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                state_alignment=mamba_state_alignment(vllm_config),
                 block_size=-1,
             ).page_size_bytes
 
         if mamba_page_size == 0:
             return
-
-        # mamba_block_size here should either be user specified value or None
-        mamba_block_size = (
-            cache_config.mamba_block_size
-            if cache_config.user_specified_mamba_block_size
-            else None
-        )
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
@@ -884,34 +1151,52 @@ class Platform:
                 ),
                 cache_config.block_size,
             )
+            # Also a multiple of every backend's smallest kernel block.
+            backend_block_alignment = lcm(
+                *(
+                    min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
+                    for b in cls._find_non_ssm_backends(vllm_config)
+                    if (sizes := b.get_supported_kernel_block_sizes())
+                )
+            )
             if model_config.use_mla:
                 # TRTLLM/FlashInfer MLA decode kernels require the physical
                 # number of kernel blocks to be aligned to 128 / kernel_block_size.
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+        checkpoint_alignment = 1
+        if cache_config.enable_prefix_caching:
+            # Internal prefill checkpoints land on block boundaries.
+            checkpoint_alignment = (
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
+            )
+            kernel_block_alignment_size = lcm(
+                kernel_block_alignment_size, checkpoint_alignment
+            )
 
-        if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, align to mamba chunk size for kernel perf
-            # TODO(tdoublep): this constraint can be relaxed fairly
-            # easily by changing the way we layout chunks in the
-            # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            cache_config.mamba_block_size = attn_block_size
+        # Models that pack every layer's page into one block row (BLHNC) size
+        # the row themselves; no page is padded then.
+        packed_block_size = None
+        if hasattr(model_cls, "get_packed_hybrid_block_size"):
+            packed_block_size = model_cls.get_packed_hybrid_block_size(
+                vllm_config,
+                attn_page_size_1_token,
+                mamba_page_size,
+                lcm(backend_block_alignment, checkpoint_alignment),
+            )
+        if packed_block_size is not None:
+            attn_block_size = packed_block_size
         else:
-            # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
+            # Use minimum block size that satisfies both backend alignment and
+            # mamba page size compatibility
             attn_block_size = kernel_block_alignment_size * cdiv(
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
-            indexer_align = cls._get_indexer_block_alignment(vllm_config)
-            if indexer_align:
-                attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
+            attn_block_size = backend_block_alignment * cdiv(
+                attn_block_size, backend_block_alignment
+            )
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -921,8 +1206,11 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
+
+        if packed_block_size is not None:
+            return
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
@@ -945,11 +1233,6 @@ class Platform:
                 "exactly equal.",
                 mamba_padding_pct,
             )
-
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """Register custom KVCacheSpec class on current platform."""
-        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -1014,6 +1297,15 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        """Free bytes on device (None: the current one) to size memory from.
+        Platforms whose reported free memory is too low override this.
+        """
+        from vllm.utils.mem_utils import device_memory_info
+
+        return device_memory_info(device)[0]
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
@@ -1029,25 +1321,93 @@ class Platform:
         return True
 
     @classmethod
-    def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels."""
-        return 256
-
-    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
-        """Returns whether the GPU is an integrated (UMA) device that shares
-        system memory with the CPU.
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB policy and communicator.
+
+        Out-of-tree overrides validate their own policy and communicator names.
+        """
+        eplb_config = parallel_config.eplb_config
+        from vllm.config.parallel import EPLBCommunicatorBackend, EPLBPolicyOption
+
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
+        if eplb_config.policy not in get_args(EPLBPolicyOption):
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+        if eplb_config.communicator is None:
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
+                eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.communicator not in get_args(EPLBCommunicatorBackend):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
+        """Returns whether the GPU is an integrated (UMA) device that shares
+        system memory with the CPU. device_id None means the current device.
+
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
         return False
+
+    @classmethod
+    def enable_multi_stream_overlap(
+        cls,
+        aux_stream_list: list[torch.cuda.Stream] | None,
+        attn_metadata: object,
+    ) -> bool:
+        """Whether the current platform should enable multi-stream overlap
+        for the given aux streams and attention metadata."""
+        return False
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Set up per-stream library state before dual batch overlap runs its
+        microbatches on `streams` from `num_threads` new threads."""
+        return
 
     @classmethod
     def supports_mx(cls) -> bool:
@@ -1134,6 +1494,52 @@ class Platform:
         return cls._global_graph_pool
 
     @classmethod
+    def reset_global_graph_pool(cls) -> None:
+        """Make the next `get_global_graph_pool` call create a new pool.
+
+        Call this once all graphs in the pool are destroyed. Their outputs can
+        keep the old pool allocated, and capturing into it would fail.
+        """
+        cls._global_graph_pool = None
+
+    def get_cudagraph_capture_defaults(
+        self, vllm_config: "VllmConfig"
+    ) -> "CUDAGraphCaptureDefaults":
+        """Return capture defaults without mutating user configuration.
+
+        The common resolver applies these only to unset settings; explicit
+        legacy settings retain their shared-grid semantics.
+        """
+        from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+        return CUDAGraphCaptureDefaults()
+
+    @classmethod
+    def get_prefill_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return prefill token sizes within `max_tokens`; zero returns `[]`."""
+        from vllm.config.compilation import prefill_cudagraph_capture_grid
+
+        return prefill_cudagraph_capture_grid(max_tokens, dense_head)
+
+    @classmethod
+    def get_decode_cudagraph_capture_grid(cls, max_requests: int) -> list[int]:
+        """Return uniform decode request counts, independent of query length."""
+        from vllm.config.compilation import decode_cudagraph_capture_grid
+
+        return decode_cudagraph_capture_grid(max_requests)
+
+    @classmethod
+    def get_varlen_decode_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return adaptive verification token sizes within `max_tokens`."""
+        from vllm.config.compilation import varlen_decode_cudagraph_capture_grid
+
+        return varlen_decode_cudagraph_capture_grid(max_tokens, dense_head)
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """Get static graph wrapper class for static graph."""
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
@@ -1161,6 +1567,12 @@ class Platform:
         return False
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        """Returns if Model Runner V2 runs as the standalone (no-Triton) CPU
+        runner instead of the Triton-based one."""
+        return False
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         """Returns if the graph mode is supported by the current platform."""
         return False
@@ -1172,9 +1584,9 @@ class Platform:
         attention in the same decoder block of an encoder-decoder model such as
         BART).
 
-        Platforms that have verified that their ``runner_kv_caches`` is not
+        Platforms that have verified that their `runner_kv_caches` is not
         impacted by this case should override this to a no-op. Otherwise the
-        default implementation raises ``NotImplementedError``.
+        default implementation raises `NotImplementedError`.
         """
         raise NotImplementedError(
             "Multiple attention layers with the same layer index are not "
@@ -1264,7 +1676,20 @@ class Platform:
         """Validate environment variables for the current platform."""
         from vllm import envs
 
-        for env in os.environ:
+        for env, value in os.environ.items():
+            if env == "VLLM_USE_V2_MODEL_RUNNER":
+                if value != "1":
+                    raise ValueError(
+                        f"VLLM_USE_V2_MODEL_RUNNER={value} is no longer supported: "
+                        "Model Runner V1 has been removed. Unset this variable."
+                    )
+                logger.warning(
+                    "VLLM_USE_V2_MODEL_RUNNER=1 is redundant and can be unset: "
+                    "Model Runner V1 has been removed."
+                )
+                continue
+            if hint := envs.removed_environment_variables.get(env):
+                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in envs.environment_variables:
                 if hard_fail:
                     raise ValueError(
@@ -1274,6 +1699,28 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the platform's KV cache
+        config builder.
+
+        !!! note
+            Experimental, like the `KVCacheConfigBuilder` interface it selects.
+
+        The builder supplies grouping (`get_kv_cache_groups`) and tensor
+        placement (`get_kv_cache_config_from_groups`). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        `SupportsKVCacheGrouping`;
+        a builder that overrides `get_kv_cache_groups` owns grouping and
+        bypasses that model hook unless it calls `super()`.
+
+        Returns:
+            Fully-qualified class path of a `KVCacheConfigBuilder` subclass.
+
+        """
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):

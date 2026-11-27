@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.v1.executor.ray_utils import get_bundles_sorted_by_node
+from vllm.v1.executor.ray_utils import build_actor_name, get_bundles_sorted_by_node
 
 NODE_A = "node_a"
 NODE_B = "node_b"
@@ -98,3 +98,10 @@ def test_get_bundles_sorted_by_node(bundles_to_node_id, bundle_specs, expected):
         result = get_bundles_sorted_by_node(mock_pg)
 
     assert result == expected
+
+
+def test_build_actor_name_follows_pp_pcp_tp_layout():
+    # Workers are laid out as PP x PCP x TP, TP innermost.
+    names = [build_actor_name("x", rank, 2, 2, 2) for rank in range(8)]
+    assert names[5] == "vllm_Worker_x_TP1_PP1_PCP0"
+    assert names[6] == "vllm_Worker_x_TP0_PP1_PCP1"

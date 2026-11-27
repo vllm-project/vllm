@@ -21,7 +21,7 @@ use self::encoding::harmony_encoding;
 use super::{ChatRenderer, RenderedPrompt};
 use crate::AssistantMessageExt as _;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, invalid_messages};
 use crate::event::AssistantContentBlock;
 use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
@@ -94,9 +94,9 @@ impl HarmonyChatRenderer {
             request.chat_options.generation_prompt_mode,
             GenerationPromptMode::ContinueFinalAssistant
         ) {
-            return Err(Error::ChatTemplate(
-                "Harmony renderer does not support continue_final_message".to_string(),
-            ));
+            return Err(Error::UnsupportedContinueFinalMessage {
+                renderer: "Harmony",
+            });
         }
 
         let messages =
@@ -188,7 +188,8 @@ fn peel_leading_instructions(
         )),
         ChatMessage::User { .. }
         | ChatMessage::Assistant { .. }
-        | ChatMessage::ToolResponse { .. } => Ok((None, None, messages)),
+        | ChatMessage::ToolResponse { .. }
+        | ChatMessage::Custom { .. } => Ok((None, None, messages)),
     }
 }
 
@@ -243,9 +244,7 @@ fn preamble_tool_descriptions(
     leading_developer_tools: Option<&[ChatTool]>,
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
-    if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(request.initial_tools()));
-    }
+    tools.extend(to_tool_descriptions(request.initial_tools()));
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));
     }
@@ -315,9 +314,9 @@ fn to_harmony_message(
             tool_call_id,
         } => {
             let name = tool_call_names.get(tool_call_id).ok_or_else(|| {
-                Error::ChatTemplate(format!(
+                invalid_messages!(
                     "invalid Harmony tool message: unknown tool_call_id `{tool_call_id}`"
-                ))
+                )
             })?;
             vec![
                 Message::from_author_and_content(
@@ -327,6 +326,9 @@ fn to_harmony_message(
                 .with_channel("commentary")
                 .with_recipient("assistant"),
             ]
+        }
+        ChatMessage::Custom { role, .. } => {
+            return Err(Error::UnsupportedChatRole { role: role.clone() });
         }
     })
 }

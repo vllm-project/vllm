@@ -126,38 +126,21 @@ def native_w8a8_block_matmul(
     assert n_tiles == Bs.shape[0], f"{n_tiles} == {Bs.shape[0]}"
     assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
-    C_shape = (M, N)
-    C = torch.zeros(C_shape, dtype=compute_type, device=A.device)
-
-    A_tiles = [A[:, i * block_k : min((i + 1) * block_k, K)] for i in range(k_tiles)]
-    B_tiles = [
-        [
-            B[
-                j * block_n : min((j + 1) * block_n, N),
-                i * block_k : min((i + 1) * block_k, K),
-            ]
-            for i in range(k_tiles)
-        ]
-        for j in range(n_tiles)
-    ]
-    C_tiles = [C[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)]
-    As_tiles = [As[:, i : i + 1] for i in range(k_tiles)]
-
+    # Accumulate one K tile at a time, as the block-scaled kernels do: one
+    # matmul over the dequantized operands would sum in a different order.
+    Bs = Bs.repeat_interleave(block_n, dim=0)[:N]
+    C = torch.zeros((M, N), dtype=compute_type, device=A.device)
     for i in range(k_tiles):
-        for j in range(n_tiles):
-            a = A_tiles[i]
-            b = B_tiles[j][i]
-            c = C_tiles[j]
-            s = As_tiles[i] * Bs[j][i]
-            c[:, :] += torch.matmul(a, b.t()) * s
+        k = slice(i * block_k, min((i + 1) * block_k, K))
+        tile = torch.matmul(A[:, k], B[:, k].t())
+        tile *= As[:, i : i + 1] * Bs[:, i]
+        C += tile
 
     C = C.reshape(origin_C_shape).to(output_dtype)
     return C
 
 
-def native_per_token_group_quant_fp8(
-    x, group_size, eps=1e-10, dtype=torch.float8_e4m3fn
-):
+def native_per_token_group_quant_fp8(x, group_size, eps=1e-10, dtype=FP8_DTYPE):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
     assert x.shape[-1] % group_size == 0, (
@@ -165,9 +148,7 @@ def native_per_token_group_quant_fp8(
     )
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     x_ = x.reshape(x.numel() // group_size, group_size)
     amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
@@ -181,12 +162,15 @@ def native_per_token_group_quant_fp8(
     return x_q, x_s
 
 
-def native_per_token_group_quant_int8(x, group_size, eps=1e-10, dtype=torch.int8):
+def native_per_token_group_quant_int8(
+    x, group_size, eps=1e-10, dtype=torch.int8, *, round_to_nearest=True
+):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch.
 
     It converts the tensor values into int8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
+    Per-token quantization rounds to nearest; block quantization truncates.
     """
     assert x.shape[-1] % group_size == 0, (
         "the last dimension of `x` must be divisible by `group_size`"
@@ -201,9 +185,10 @@ def native_per_token_group_quant_int8(x, group_size, eps=1e-10, dtype=torch.int8
     # Use float32 for scale calculation for stability
     amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
     x_s = amax / int8_max
-    x_q = (
-        (x_.to(torch.float32) / x_s).round().clamp(min=int8_min, max=int8_max).to(dtype)
-    )  # Round before clamping
+    x_q = x_.to(torch.float32) / x_s
+    if round_to_nearest:
+        x_q = x_q.round()
+    x_q = x_q.clamp(min=int8_min, max=int8_max).to(dtype)
     x_q = x_q.reshape(x.shape)
     x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
 
@@ -247,25 +232,6 @@ def dequant(
             return (t.to(f32) * group_broadcast(scale, t.shape)).to(out_dtype)
     else:
         return t.to(out_dtype)
-
-
-def batched_dequant(
-    t: torch.Tensor,
-    scale: torch.Tensor | None,
-    block_shape: list[int] | None,
-    per_act_token_quant: bool,
-    out_dtype: torch.dtype | None = torch.float32,
-) -> torch.Tensor:
-    if scale is not None:
-        assert t.shape[0] == scale.shape[0]
-        out = torch.empty_like(t, dtype=out_dtype)
-        for e in range(t.shape[0]):
-            out[e] = dequant(
-                t[e], scale[e], block_shape, per_act_token_quant, out_dtype
-            )
-        return out
-
-    return t.to(out_dtype)
 
 
 def native_batched_masked_quant_matmul(

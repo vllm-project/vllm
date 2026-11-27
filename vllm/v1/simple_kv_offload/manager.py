@@ -4,7 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
@@ -27,27 +27,34 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
-    dcp_world_size_for_kv_cache_spec,
-    generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
+    is_mamba_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
+    resolve_dcp_kv_block_size,
+    to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    SlidingWindowManager,
+    get_kv_cache_kind,
 )
+from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.metrics import (
+    OUTCOME_TO_FIELD,
+    MetricName,
+    SimpleCPUOffloadStats,
+)
+from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes, num_offload_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -58,7 +65,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class BlockStoreMeta:
     """Per-block metadata snapshot for BlockStored event emission.
 
@@ -72,16 +79,17 @@ class BlockStoreMeta:
     lora_name: str | None
     extra_keys: tuple[Any, ...] | None
     block_size: int | None = None
+    lookahead_token_ids: list[int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferMeta:
     gpu_block_ids: list[int]
     cpu_block_ids: list[int]
     block_meta: list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadRequestState:
     request: "Request"
     transfer_meta: TransferMeta
@@ -90,7 +98,7 @@ class LoadRequestState:
 
 
 # NOTE: This per-request state is only used in eager mode.
-@dataclass
+@dataclass(slots=True)
 class StoreRequestState:
     request: "Request"
     # Accumulated block IDs from scheduler_output via yield_req_data.
@@ -109,7 +117,7 @@ class _StoreAdmission(Enum):
     ALREADY_CACHED = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class BoundaryStoreStats:
     """Cumulative counters for boundary hand-off stores.
 
@@ -117,8 +125,9 @@ class BoundaryStoreStats:
     simply not offloaded and a later request misses. Without counters the only
     symptom is a lower cache hit rate with nothing in the logs, so each decline
     reason is counted and exposed through
-    ``SimpleCPUOffloadConnector.get_boundary_store_stats()``. Reset by
-    ``reset()``; not otherwise cleared.
+    `SimpleCPUOffloadConnector.get_boundary_store_stats()`. Reset by
+    `reset()`, which carries any not-yet-drained deltas; not otherwise
+    cleared.
     """
 
     published: int = 0
@@ -143,6 +152,8 @@ class SimpleCPUOffloadScheduler:
         hash_block_size: int,
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
+        use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -162,17 +173,24 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity
+            kv_cache_config, offload_capacity, num_cpu_blocks
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
             self.cpu_kv_cache_config.prefix_cacheable_group_ids
         )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
+        # Must track kv_event_medium.
+        self._info_labelvalues: tuple[str, ...] = (
+            "disk" if disk_capacity_bytes > 0 else "cpu",
+            str(use_page_cache).lower(),
+            str(lazy_offload).lower(),
+            str(self.num_cpu_blocks),
+        )
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
         for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
-            if isinstance(g.kv_cache_spec, FullAttentionSpec):
+            if issubclass(g.manager_cls, FullAttentionManager):
                 self.fa_gidx = g_idx
                 break
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
@@ -185,22 +203,18 @@ class SimpleCPUOffloadScheduler:
             "disk" if disk_capacity_bytes > 0 else "cpu",
         )
 
-        spec_config = vllm_config.speculative_config
-        use_eagle_block_drop = (
-            spec_config is not None and spec_config.use_eagle_block_drop()
-        )
+        num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=use_eagle_block_drop,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -225,11 +239,12 @@ class SimpleCPUOffloadScheduler:
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int, int]
         ] = {}
+        # Eager mode: local prefix length from get_num_new_matched_tokens(),
+        # whose CPU copy update_state_after_alloc() refreshes.
+        self._pending_local_hits: dict[str, int] = {}
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
-        self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -244,13 +259,16 @@ class SimpleCPUOffloadScheduler:
         self._reqs_to_store: dict[str, StoreRequestState] = {}
         self._store_event_to_reqs: dict[int, list[str]] = {}
         self._in_flight_store_gpu_blocks: set[int] = set()
-        self._pending_finished_stores: list[TransferMeta] = []
+        self._pending_finished_stores: dict[str, TransferMeta] = {}
         self._abandoned_reqs_to_load: dict[str, LoadRequestState] = {}
 
         # Event counters
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
         self.boundary_store_stats = BoundaryStoreStats()
+        # Interval stats state drained by get_stats()
+        self._boundary_stats_snapshot = BoundaryStoreStats()
+        self._interval_load_blocks_completed = 0
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
@@ -259,20 +277,36 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _derive_cpu_config(
-        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
+        gpu_config: "KVCacheConfig",
+        cpu_capacity_bytes: int,
+        num_cpu_blocks: int | None = None,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
-        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
+        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
+
+        An explicit `num_cpu_blocks` is checked against local capacity."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        # Every KVCacheTensor describes placement within the same backing allocation,
-        # so its size is the total GPU KV cache size.
-        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        local_capacity = (
+            num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
+        )
+        if num_cpu_blocks is None:
+            num_cpu_blocks = num_offload_blocks(
+                gpu_config,
+                cpu_capacity_bytes,
+                gpu_total_bytes(gpu_config) // num_gpu_blocks,
+            )
+        elif (
+            type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity
+        ):
+            raise ValueError(
+                f"num_cpu_blocks={num_cpu_blocks!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
@@ -300,17 +334,17 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.prefix_cacheable_groups:
-            spec = g.kv_cache_spec
-            # Only full attention is sharded across DCP ranks; replicated specs
-            # (mamba, sliding window, chunked-local) keep their own block size.
-            block_size = spec.block_size * dcp_world_size_for_kv_cache_spec(
-                spec, cp_world_size
-            )
-            if isinstance(spec, MambaSpec):
+        for g in kv_cache_config.kv_cache_groups:
+            block_size = resolve_dcp_kv_block_size(g, cp_world_size)
+            if not g.prefix_cacheable:
+                # Bounded-replay SWA (DSV4.1) is never offloaded, but its blocks for
+                # each scheduled token come from the same free queue.
+                if isinstance(g.manager_config.params, SlidingWindowManager.Params):
+                    target += cdiv(max_num_batched_tokens, block_size)
+            elif is_mamba_group(g):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
+            elif isinstance(p := g.manager_config.params, SlidingWindowManager.Params):
+                target += cdiv(p.sliding_window, block_size) + 1
             else:
                 target += cdiv(max_num_batched_tokens, block_size)
         return int(target * (1 + WATERMARK_RATIO))
@@ -330,9 +364,15 @@ class SimpleCPUOffloadScheduler:
         # is dropped first.
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
+        self._pending_local_hits.pop(request.request_id, None)
 
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv:
             return 0, False
+
+        if num_computed_tokens and not self._lazy_mode:
+            # Refreshed at admission: a request waiting for blocks repeats
+            # this lookup every step.
+            self._pending_local_hits[request.request_id] = num_computed_tokens
 
         if num_computed_tokens % self.block_size != 0:
             # Transfers are whole-block copies, so an external suffix cannot
@@ -347,6 +387,15 @@ class SimpleCPUOffloadScheduler:
                 self.block_size,
             )
             return 0, False
+
+        # Suffix-relative chunk boundaries must match absolute token positions.
+        for group_id in self.prefix_cacheable_group_ids:
+            config = self.cpu_kv_cache_config.kv_cache_groups[group_id].manager_config
+            if (
+                isinstance(config.params, ChunkedLocalAttentionManager.Params)
+                and num_computed_tokens % config.params.attention_chunk_size
+            ):
+                return 0, False
 
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
@@ -396,6 +445,11 @@ class SimpleCPUOffloadScheduler:
                 block_ids=tuple([] for _ in range(num_groups)),
                 num_stored_blocks=[0] * num_groups,
             )
+
+        if num_local_tokens := self._pending_local_hits.pop(req_id, None):
+            # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
+            # but eager stores skip it, so move it to the MRU end here.
+            self._requeue_cpu_prefix(request, num_local_tokens)
 
         # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
@@ -499,12 +553,13 @@ class SimpleCPUOffloadScheduler:
         store_gpu, store_cpu, store_req_ids, store_meta = self.prepare_store_specs(
             scheduler_output
         )
-        for transfer in self._pending_finished_stores:
+        for transfer in self._pending_finished_stores.values():
             store_gpu.extend(transfer.gpu_block_ids)
             store_cpu.extend(transfer.cpu_block_ids)
             if store_meta is not None:
                 assert transfer.block_meta is not None
                 store_meta.extend(transfer.block_meta)
+        store_req_ids.extend(self._pending_finished_stores)
         self._pending_finished_stores.clear()
 
         if store_gpu:
@@ -576,9 +631,9 @@ class SimpleCPUOffloadScheduler:
         list[str],
         list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
     ]:
-        """Single-pass cursor walk: offload cached GPU blocks near eviction.
+        """Offload cached GPU blocks near eviction.
 
-        Walks the GPU free queue from the cursor, counting blocks that are
+        Walks the GPU free queue from its head, counting blocks that are
         free-or-offloaded (safe for the allocator to evict). Stops when
         target_free blocks are covered or CPU capacity is reached.
         """
@@ -590,18 +645,12 @@ class SimpleCPUOffloadScheduler:
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
-        # Validate cursor: stale if block was removed from free queue.
-        if self._cursor is not None and self._cursor.ref_cnt > 0:
-            self._cursor = None
-
         gpu_ids: list[int] = []
-        last_visited = self._cursor
 
-        for covered, node in enumerate(free_queue.iter_blocks_after(self._cursor)):
+        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
-            last_visited = node
             bhash = node.block_hash
 
             if (
@@ -610,8 +659,6 @@ class SimpleCPUOffloadScheduler:
                 and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
             ):
                 gpu_ids.append(node.block_id)
-
-        self._cursor = last_visited
 
         # Batch-allocate CPU blocks.
         if gpu_ids:
@@ -640,7 +687,7 @@ class SimpleCPUOffloadScheduler:
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids, block_meta) for the store
-            event. ``block_meta`` is None when kv cache events are disabled.
+            event. `block_meta` is None when kv cache events are disabled.
 
         """
         merged_gpu_block_ids: list[int] = []
@@ -724,19 +771,27 @@ class SimpleCPUOffloadScheduler:
             if scheduled_for_req:
                 req_ids.append(req_id)
 
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+        # Preemption frees the request's blocks. It resumes with a full new
+        # block table in its NewRequestData.
+        for req_id in preempted_req_ids:
+            state = self._reqs_to_store.get(req_id)
+            if state is not None:
+                state.block_ids = tuple([] for _ in range(num_groups))
+                state.num_stored_blocks = [0] * num_groups
+
+        for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if preempted:
+            if is_full_table:
                 state.block_ids = tuple([] for _ in range(num_groups))
-                state.num_stored_blocks = [0] * num_groups
-            if new_block_id_groups:
-                for g in range(min(num_groups, len(new_block_id_groups))):
-                    if new_block_id_groups[g] is not None:
+
+            if block_id_groups:
+                for g in range(min(num_groups, len(block_id_groups))):
+                    if block_id_groups[g] is not None:
                         # Accumulate new block IDs.
-                        state.block_ids[g].extend(new_block_id_groups[g])
+                        state.block_ids[g].extend(block_id_groups[g])
 
             num_new_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
             if num_new_tokens == 0:
@@ -818,19 +873,11 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
-        # Truncate to the granularity a lookup can actually land on. With
-        # fine-grained hits that is hash_block_size; otherwise hits only land on
-        # the scheduler block (the group LCM). Using the LCM unconditionally
-        # would drop whole blocks that sit between the last LCM boundary and a
-        # reachable fine-grained boundary, so the other groups would hold that
-        # boundary and this one would not, and the joint hybrid lookup would
-        # reconcile to zero.
-        store_alignment = (
-            self.hash_block_size
-            if self.cpu_coordinator.enable_partial_hash_hits
-            else self.block_size
+        # Mimic the GPU KV cache manager's cacheable prefix.
+        cacheable_tokens = min(
+            self.cpu_coordinator.get_num_cacheable_tokens(confirmed_tokens),
+            len(request.block_hashes) * self.hash_block_size,
         )
-        aligned_tokens = confirmed_tokens // store_alignment * store_alignment
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
@@ -845,7 +892,7 @@ class SimpleCPUOffloadScheduler:
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
             group_size = self.group_block_sizes[g]
-            ready = min(len(group_gpu_ids), aligned_tokens // group_size)
+            ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
             )
@@ -886,8 +933,10 @@ class SimpleCPUOffloadScheduler:
                         else maybe_convert_block_hash(resolved_hashes[i - 1])
                     )
                     lora_req = request.lora_request
-                    extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                        request, token_start, token_end, curr_mm_idx
+                    extra_keys, curr_mm_idx = (
+                        self.cpu_block_pool.generate_event_extra_keys(
+                            request, token_start, token_end, curr_mm_idx
+                        )
                     )
                     meta_by_hash = {
                         primary_block_hash: BlockStoreMeta(
@@ -898,6 +947,13 @@ class SimpleCPUOffloadScheduler:
                             lora_id=lora_req.adapter_id if lora_req else None,
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=extra_keys,
+                            lookahead_token_ids=(
+                                self.cpu_block_pool.get_lookahead_token_ids(
+                                    request, token_end
+                                )
+                                if self.cpu_block_pool.num_hash_lookahead_tokens
+                                else None
+                            ),
                         )
                     }
                     first_hash_idx = token_start // self.hash_block_size
@@ -911,7 +967,7 @@ class SimpleCPUOffloadScheduler:
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
                         secondary_extra_keys, secondary_mm_idx = (
-                            generate_block_hash_extra_keys(
+                            self.cpu_block_pool.generate_event_extra_keys(
                                 request,
                                 hash_start,
                                 hash_end,
@@ -919,7 +975,7 @@ class SimpleCPUOffloadScheduler:
                             )
                         )
                         meta_by_hash[block_hash] = BlockStoreMeta(
-                            token_ids=list(request.all_token_ids[hash_start:hash_end]),
+                            token_ids=request.all_token_ids[hash_start:hash_end],
                             parent_block_hash=(
                                 None
                                 if hash_idx == 0
@@ -931,6 +987,13 @@ class SimpleCPUOffloadScheduler:
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=secondary_extra_keys,
                             block_size=self.hash_block_size,
+                            lookahead_token_ids=(
+                                self.cpu_block_pool.get_lookahead_token_ids(
+                                    request, hash_end
+                                )
+                                if self.cpu_block_pool.num_hash_lookahead_tokens
+                                else None
+                            ),
                         )
                     block_meta.append(meta_by_hash)
 
@@ -955,6 +1018,42 @@ class SimpleCPUOffloadScheduler:
     def get_boundary_store_stats(self) -> BoundaryStoreStats:
         return replace(self.boundary_store_stats)
 
+    def get_stats(self) -> SimpleCPUOffloadStats:
+        """Drain per-step stats for the connector's stats hooks."""
+        stats = SimpleCPUOffloadStats()
+
+        current = self.boundary_store_stats
+        for outcome, field_name in OUTCOME_TO_FIELD.items():
+            delta = getattr(current, field_name) - getattr(
+                self._boundary_stats_snapshot, field_name
+            )
+            if delta > 0:
+                stats.increase_counter(MetricName.SAVE_OUTCOMES, delta, (outcome,))
+        self._boundary_stats_snapshot = replace(current)
+
+        if self._interval_load_blocks_completed:
+            stats.increase_counter(
+                MetricName.LOAD_BLOCKS,
+                self._interval_load_blocks_completed,
+            )
+            self._interval_load_blocks_completed = 0
+
+        stats.set_gauge(
+            MetricName.USED_BLOCKS,
+            self.num_cpu_blocks - self.cpu_block_pool.get_num_free_blocks(),
+        )
+        pending = sum(
+            len(t.cpu_block_ids)
+            for t in (
+                *self._store_event_to_blocks.values(),
+                *self._pending_finished_stores.values(),
+                *self._abandoned_store_event_to_blocks.values(),
+            )
+        )
+        stats.set_gauge(MetricName.PENDING_STORE_BLOCKS, pending)
+        stats.set_gauge(MetricName.INFO, 1, self._info_labelvalues)
+        return stats
+
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
 
@@ -965,7 +1064,9 @@ class SimpleCPUOffloadScheduler:
         """
         # --- Load completions ---
         for req_id in list(connector_output.finished_recving or []):
-            self._cleanup_load_request(req_id)
+            completed_blocks = self._cleanup_load_request(req_id)
+            if completed_blocks:
+                self._interval_load_blocks_completed += completed_blocks
 
         # --- Store completions ---
         meta = connector_output.kv_connector_worker_meta
@@ -1010,7 +1111,12 @@ class SimpleCPUOffloadScheduler:
                 if state is None:
                     continue
                 state.store_events.discard(event_idx)
-                if state.finished and not state.store_events:
+                if (
+                    state.finished
+                    and not state.store_events
+                    and req_id not in self._pending_finished_stores
+                ):
+                    self._requeue_cpu_prefix(state.request)
                     self._cleanup_store_request(req_id)
 
     def _process_store_completion(
@@ -1070,9 +1176,7 @@ class SimpleCPUOffloadScheduler:
 
                 for block_hash, meta, event_block_size in events_to_emit:
                     group_idx = get_group_id(block_hash)
-                    spec = self.cpu_kv_cache_config.kv_cache_groups[
-                        group_idx
-                    ].kv_cache_spec
+                    group = self.cpu_kv_cache_config.kv_cache_groups[group_idx]
                     if meta is not None and len(meta.token_ids) != event_block_size:
                         # token_ids were sliced with a different g_block_size
                         # (e.g. Mamba+DCP where capture uses spec.block_size *
@@ -1096,22 +1200,31 @@ class SimpleCPUOffloadScheduler:
                             lora_id=meta.lora_id if meta else None,
                             medium=self.kv_event_medium,
                             lora_name=meta.lora_name if meta else None,
-                            extra_keys=(
-                                [extra_keys] if extra_keys is not None else None
-                            ),
+                            extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
-                            kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
-                            kv_cache_spec_sliding_window=(
-                                get_kv_cache_spec_sliding_window(spec)
+                            kv_cache_spec_kind=get_kv_cache_kind(
+                                group.manager_config, group.distinct_specs
+                            ).value,
+                            kv_cache_spec_sliding_window=getattr(
+                                group.manager_config.params, "sliding_window", None
                             ),
                             locality="LOCAL",
+                            lookahead_token_ids=(
+                                [meta.lookahead_token_ids]
+                                if token_ids
+                                and meta is not None
+                                and meta.lookahead_token_ids is not None
+                                else None
+                            ),
                         )
                     )
 
-        # Free CPU and GPU blocks' ref counts to turn them into prefix cache
+        # Free CPU and GPU blocks' ref counts to turn them into prefix cache.
+        # Lazy stores come from the GPU eviction end; return them there.
         self.cpu_block_pool.free_blocks(cpu_blocks)
         self._gpu_block_pool.free_blocks(
-            self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
+            evict_first=self._lazy_mode,
         )
 
     def _release_transfer_refs(self, transfer: TransferMeta) -> None:
@@ -1145,6 +1258,7 @@ class SimpleCPUOffloadScheduler:
         pending = self._pending_cpu_hits.pop(req_id, None)
         if pending is not None:
             self._free_pending_cpu_hit(pending)
+        self._pending_local_hits.pop(req_id, None)
 
         # Handle load: defer cleanup if load is in-flight
         load_state = self._reqs_to_load.get(req_id)
@@ -1158,9 +1272,10 @@ class SimpleCPUOffloadScheduler:
         if not self._lazy_mode:
             store_state = self._reqs_to_store.get(req_id)
             if store_state is not None:
-                if store_state.store_events:
+                if store_state.store_events or req_id in self._pending_finished_stores:
                     store_state.finished = True  # Defer: stores in-flight
                 else:
+                    self._requeue_cpu_prefix(request)
                     self._cleanup_store_request(req_id)
 
         return False, None
@@ -1182,36 +1297,43 @@ class SimpleCPUOffloadScheduler:
         if state is None or gpu_pool is None:
             return
         gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
-        partial_tail = self._find_fa_partial_tail_source(request, block_ids)
-        if (
-            partial_tail is not None
-            # Decode tokens can fill the boundary block, in which case the
-            # positional scan above already selected it. Appending again would
-            # allocate two CPU blocks for one GPU block.
-            and partial_tail not in gpu_ids
-            and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
-        ):
-            gpu_ids.append(partial_tail)
-            if block_meta is not None:
-                # The block's own hashes are registered at completion, so no
-                # capture is needed here; emit the event without a payload, as
-                # the size-mismatch fallback above already does.
-                block_meta.append({})
+        # A fine-grained hit needs the prompt tail of every group that keys
+        # one. There can be several: e.g. under DCP a replicated draft group
+        # sits next to the sharded target group, each with its own block size.
+        for group_idx in self.prefix_cacheable_group_ids:
+            partial_tail = self._find_partial_tail_source(request, block_ids, group_idx)
+            if (
+                partial_tail is not None
+                # Decode tokens can fill the boundary block, in which case the
+                # positional scan above already selected it. Appending again
+                # would allocate two CPU blocks for one GPU block.
+                and partial_tail not in gpu_ids
+                and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
+            ):
+                gpu_ids.append(partial_tail)
+                if block_meta is not None:
+                    # The block's own hashes are registered at completion, so
+                    # no capture is needed here; emit the event without a
+                    # payload, as the size-mismatch fallback above already does.
+                    block_meta.append({})
         if not gpu_ids:
             return
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
-        self._pending_finished_stores.append(
-            TransferMeta(gpu_ids, [b.block_id for b in cpu_blocks], block_meta)
+        self._pending_finished_stores[request.request_id] = TransferMeta(
+            gpu_ids, [b.block_id for b in cpu_blocks], block_meta
         )
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
 
-    def _find_fa_partial_tail_source(
-        self, request: "Request", block_ids: tuple[list[int], ...]
+    def _find_partial_tail_source(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        group_idx: int,
     ) -> int | None:
-        """Locate the full-attention prompt-tail block for a fine-grained hit.
+        """Locate one group's prompt-tail block for a fine-grained hit.
 
-        Mirrors ``FullAttentionManager._cache_partial_tail_block``: only the
+        Mirrors `FullAttentionManager._cache_partial_tail_block`: only the
         final prompt hash boundary is eligible, and boundaries that land on a
         physical block edge are already covered by the positional scan.
 
@@ -1220,22 +1342,35 @@ class SimpleCPUOffloadScheduler:
         no new core hand-off is required. The boundary key is registered at
         completion along with the block's other hashes, so nothing has to be
         captured here.
+
+        Groups that never key a prompt tail are filtered by the registered-key
+        check below. Prefix-cached Mamba tables are not positional; their tail
+        arrives through the boundary-state hand-off instead.
         """
         if not self.cpu_coordinator.enable_partial_hash_hits:
             return None
         assert self._gpu_block_pool is not None
-        boundary_tokens = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+        manager = self.cpu_coordinator.single_type_managers[group_idx]
+        if not manager.has_positionally_stable_blocks:
+            return None
+        group_block_size = self.group_block_sizes[group_idx]
+        boundary_tokens = min(
+            get_reusable_prefix_length(
+                request.num_prompt_tokens,
+                num_hash_lookahead_tokens=self.cpu_block_pool.num_hash_lookahead_tokens,
+                alignment_tokens=self.hash_block_size,
+            ),
+            len(request.block_hashes) * self.hash_block_size,
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None
-        if boundary_tokens % self.fa_block_size == 0:
+        if boundary_tokens % group_block_size == 0:
             return None
-        block_idx = boundary_tokens // self.fa_block_size
-        fa_block_ids = block_ids[self.fa_gidx]
-        if block_idx >= len(fa_block_ids):
+        block_idx = boundary_tokens // group_block_size
+        group_block_ids = block_ids[group_idx]
+        if block_idx >= len(group_block_ids):
             return None
-        gpu_block_id = fa_block_ids[block_idx]
+        gpu_block_id = group_block_ids[block_idx]
         gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
         if gpu_block.is_null or gpu_block_id in self._in_flight_store_gpu_blocks:
             return None
@@ -1243,7 +1378,7 @@ class SimpleCPUOffloadScheduler:
         if hash_idx >= len(request.block_hashes):
             return None
         block_hash = make_block_hash_with_group_id(
-            request.block_hashes[hash_idx], self.fa_gidx
+            request.block_hashes[hash_idx], group_idx
         )
         # Only worth copying when the boundary key is actually registered on
         # the source block; completion replays the block's own hashes.
@@ -1268,20 +1403,24 @@ class SimpleCPUOffloadScheduler:
             blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
         ]
         if blocks_to_free:
-            self.cpu_block_pool.free_blocks(blocks_to_free)
+            self.cpu_block_pool.free_blocks(reversed(blocks_to_free))  # tail first
 
-    def _cleanup_load_request(self, req_id: str) -> None:
+    def _cleanup_load_request(self, req_id: str) -> int:
         """Release all load resources for a request.
 
         Shared between request_finished() and update_connector_output() paths.
         Removes the request from _reqs_to_load, cleans up event mappings,
         and frees CPU/GPU touch refs.
+
+        Returns the number of blocks in the load if it had been issued to
+        the worker, else 0 (never-issued loads are not counted as completed
+        by the caller).
         """
         state = self._reqs_to_load.pop(req_id, None)
         if state is None:
             state = self._abandoned_reqs_to_load.pop(req_id, None)
         if state is None:
-            return
+            return 0
         # Remove from load event mapping (only this req, not whole event)
         if state.load_event is not None:
             reqs = self._load_event_to_reqs.get(state.load_event)
@@ -1292,10 +1431,10 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
+            # Free CPU touch refs, tail first
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.cpu_block_ids
+                for bid in reversed(state.transfer_meta.cpu_block_ids)
             )
             # Free GPU touch refs
             assert self._gpu_block_pool is not None
@@ -1303,6 +1442,29 @@ class SimpleCPUOffloadScheduler:
                 self._gpu_block_pool.blocks[bid]
                 for bid in state.transfer_meta.gpu_block_ids
             )
+
+        if state.load_event is None:
+            return 0
+        return len(state.transfer_meta.gpu_block_ids)
+
+    def _requeue_cpu_prefix(
+        self, request: "Request", max_length: int | None = None
+    ) -> None:
+        """Requeue the CPU prefix a lookup of `request` would hit as most recent.
+
+        Stores land in prefix order and an admission-time requeue ages while
+        the request runs, but a lookup stops at the first missing block. Requeue
+        the hit tail first, as the GPU KV cache manager frees blocks, so the
+        eviction takes the end of a prefix before its start.
+        """
+        if max_length is None:
+            max_length = len(request.block_hashes) * self.hash_block_size
+        hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
+            request.block_hashes, max_length
+        )
+        blocks = [blk for grp in hit for blk in grp if not blk.is_null]
+        self.cpu_block_pool.touch(blocks)
+        self.cpu_block_pool.free_blocks(reversed(blocks))
 
     def _cleanup_store_request(self, req_id: str) -> None:
         """Release store metadata for a request.
@@ -1337,8 +1499,13 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        for pending in self._pending_cpu_hits.values():
+            self._free_pending_cpu_hit(pending)
+        self._pending_cpu_hits.clear()
+        self._pending_local_hits.clear()
+
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
-        for transfer in self._pending_finished_stores:
+        for transfer in self._pending_finished_stores.values():
             self._release_transfer_refs(transfer)
         self._pending_finished_stores.clear()
 
@@ -1362,8 +1529,20 @@ class SimpleCPUOffloadScheduler:
             for event_idx, count in self._store_event_pending_counts.items()
             if event_idx in self._abandoned_store_event_to_blocks
         }
-        self._cursor = None
-        self.boundary_store_stats = BoundaryStoreStats()
+        # Seed the fresh counters with outcomes since the last drain so a
+        # mid-interval reset() does not drop them from the next report.
+        undrained = BoundaryStoreStats(
+            **{
+                f.name: max(
+                    0,
+                    getattr(self.boundary_store_stats, f.name)
+                    - getattr(self._boundary_stats_snapshot, f.name),
+                )
+                for f in fields(BoundaryStoreStats)
+            }
+        )
+        self.boundary_store_stats = undrained
+        self._boundary_stats_snapshot = BoundaryStoreStats()
         # NOTE: _load_event_counter / _store_event_counter are not
         # reset as they are monotonic and must stay ahead of the workers
         # high-water marks to avoid event index collisions

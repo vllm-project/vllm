@@ -1,51 +1,224 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+import os
 from dataclasses import dataclass
-from functools import partial
 from itertools import accumulate
+from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationArgs
+from safetensors import safe_open
+from safetensors.torch import save_file
 from torch import nn
 from torch.nn import functional as F
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
-import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
+import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
+import vllm.utils.gpu_sync_debug as gpu_sync_debug
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.config import (
+    EngramConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.config.compilation import CUDAGraphMode
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.distributed.engram_pool import verbs
+from vllm.distributed.parallel_state import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
+from vllm.models.qwen4_exp.amd.ple_layer import (
+    Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
+)
+from vllm.models.qwen4_exp.common.ops.ple import ple_conv
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
-    compute_ple_shard_overlap,
-    copy_ple_embedding_shard_,
+    PLEVocabParallelEmbedding,
 )
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
+    Qwen4ExpPLEDiskOffloadEmbedding,
+    Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEHostMemoryEmbedding,
+    Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLEPoolEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    stage_host_rows,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
+from vllm.utils.torch_utils import weak_ref_tensor
+from vllm.utils.vmm_driver import imex_channel_available
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
+    PleShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import MambaSpec
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,drafts,spec_rows,non_spec_rows,token_order",
+    [
+        pytest.param([4, 2, 0], [3, 1, -1], [0, 1], [], None, id="spec-padding"),
+        pytest.param(
+            [3, 1, 2, 5, 0],
+            [2, -1, 1, -1, -1],
+            [0, 2],
+            [1, 3],
+            [0, 1, 2, 4, 5, 3, 6, 7, 8, 9, 10],
+            id="mixed-padding",
+        ),
+        pytest.param([1, 5], [-1, -1], [], [0, 1], None, id="non-spec"),
+    ],
+)
+def test_ple_metadata_preserves_request_and_token_order(
+    device, full_graph, query_lens, drafts, spec_rows, non_spec_rows, token_order
+):
+    """Preserve state routing, acceptance and prefill offsets without GPU sync."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = torch.device(device)
+    config = VllmConfig()
+    config.cache_config.enable_prefix_caching = False
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE
+    )
+    config.compilation_config.max_cudagraph_capture_size = 32
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(block_size=16, shapes=((16, 64),), dtypes=(torch.float32,)),
+        ["ple"],
+        config,
+        device,
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 16 for q in query_lens], query_lens=query_lens),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    common.is_prefilling = torch.tensor(
+        [q > 1 and d < 0 for q, d in zip(query_lens, drafts)]
+    )
+    # Token padding is independent of the sum of per-request query lengths.
+    common.num_actual_tokens += 3
+    accepted = torch.arange(1, len(query_lens) + 1, dtype=torch.int32, device=device)
+    drafts_cpu = torch.tensor(drafts, dtype=torch.int32)
+    sync_mode = torch.cuda.get_sync_debug_mode() if device.type == "cuda" else None
+    if sync_mode is not None:
+        torch.cuda.set_sync_debug_mode("error")
+    try:
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=accepted,
+            num_decode_draft_tokens_cpu=drafts_cpu,
+        )
+    finally:
+        if sync_mode is not None:
+            torch.cuda.set_sync_debug_mode(sync_mode)
+
+    def check(actual, expected):
+        torch.testing.assert_close(
+            actual, torch.tensor(expected, dtype=actual.dtype, device=device)
+        )
+
+    assert metadata.num_spec_decodes == len(spec_rows)
+    assert metadata.num_decodes == sum(query_lens[i] == 1 for i in non_spec_rows)
+    assert metadata.num_prefills == sum(query_lens[i] > 1 for i in non_spec_rows)
+    if spec_rows:
+        assert metadata.spec_state_indices_tensor is not None
+        assert metadata.num_accepted_tokens is not None
+        assert metadata.spec_query_start_loc is not None
+        torch.testing.assert_close(
+            metadata.spec_state_indices_tensor[: len(spec_rows)],
+            common.block_table_tensor[spec_rows, 0],
+        )
+        torch.testing.assert_close(
+            metadata.num_accepted_tokens[: len(spec_rows)], accepted[spec_rows]
+        )
+        check(
+            metadata.spec_query_start_loc[: len(spec_rows) + 1],
+            [0, *accumulate(query_lens[i] for i in spec_rows)],
+        )
+        if full_graph and not non_spec_rows:
+            check(metadata.spec_state_indices_tensor[len(spec_rows) :], [NULL_BLOCK_ID])
+            check(metadata.num_accepted_tokens[len(spec_rows) :], [1])
+            check(
+                metadata.spec_query_start_loc[len(spec_rows) + 1 :], [sum(query_lens)]
+            )
+            assert (
+                metadata.spec_state_indices_tensor.data_ptr()
+                == builder.spec_state_indices_tensor.data_ptr()
+            )
+    if non_spec_rows:
+        torch.testing.assert_close(
+            metadata.state_indices_tensor, common.block_table_tensor[non_spec_rows, 0]
+        )
+        prefill_lens = [query_lens[i] for i in non_spec_rows if query_lens[i] > 1]
+        check(metadata.query_start_loc_p, [0, *accumulate(prefill_lens)])
+        check(metadata.has_initial_states_p, [True] * len(prefill_lens))
+    if token_order is not None:
+        check(
+            torch.cat((metadata.spec_token_indx, metadata.non_spec_token_indx)),
+            token_order,
+        )
+    else:
+        assert metadata.spec_token_indx is None
+        assert metadata.non_spec_token_indx is None
+    assert metadata.nums_dict is None
+    assert metadata.batch_ptr is None
+    assert metadata.token_chunk_offset_ptr is None
 
 
 def _mock_etp_group(
     monkeypatch: pytest.MonkeyPatch,
     world_size: int = 1,
     all_reduce=lambda tensor: tensor,
+    rank: int = 0,
 ) -> None:
     group = SimpleNamespace(
-        rank_in_group=0,
+        rank_in_group=rank,
         world_size=world_size,
         all_reduce=all_reduce,
     )
@@ -77,12 +250,23 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
     return module
 
 
+def _make_test_ple_embedding(tp_start: int, tp_end: int) -> PLEVocabParallelEmbedding:
+    """Create an embedding with only the state needed for shard loading."""
+    embedding = PLEVocabParallelEmbedding.__new__(PLEVocabParallelEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.shard_indices = SimpleNamespace(
+        org_vocab_start_index=tp_start,
+        org_vocab_end_index=tp_end,
+    )
+    return embedding
+
+
 def _set_test_embedding_weight_loader(embedding) -> None:
-    embedding.weight.weight_loader = partial(
-        copy_ple_embedding_shard_,
+    loader = _make_test_ple_embedding(
         tp_start=embedding.shard_indices.org_vocab_start_index,
         tp_end=embedding.shard_indices.org_vocab_end_index,
     )
+    embedding.weight.weight_loader = loader.weight_loader
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -111,19 +295,16 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
 
 
 def test_ple_shard_overlap_and_copy() -> None:
-    overlap = compute_ple_shard_overlap(
-        checkpoint_start=2, checkpoint_rows=5, tp_start=4, tp_end=8
-    )
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
+    overlap = embedding._compute_shard_overlap(checkpoint_start=2, checkpoint_rows=5)
     assert overlap == PLEShardOverlap(source_start=2, destination_start=0, row_count=3)
 
     destination = torch.full((4, 2), -1.0)
     loaded = torch.arange(10, dtype=torch.float64).reshape(5, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         loaded,
         checkpoint_start=2,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 3
@@ -132,13 +313,12 @@ def test_ple_shard_overlap_and_copy() -> None:
 
 
 def test_ple_shard_copy_is_a_noop_without_overlap() -> None:
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
     destination = torch.ones(4, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         torch.zeros(2, 2),
         checkpoint_start=10,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 0
@@ -163,6 +343,81 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
         module.ngram_embedding.weight,
         torch.cat((shard_0[2:4], shard_1[0:2])),
     )
+
+
+@pytest.mark.parametrize("case", ["complete", "missing", "duplicate", "missing_scale"])
+def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
+    module = _make_ngram_embedding_for_load_test()
+    embedding = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.org_vocab_size = 8
+    embedding.shard_indices = module.ngram_embedding.shard_indices
+    embedding.weight = module.ngram_embedding.weight
+    embedding._loaded_ranges = []
+    scale = torch.finfo(torch.float32).min if case == "missing_scale" else 0.25
+    embedding.weight_scale = nn.Parameter(torch.tensor([scale]))
+    embedding.table = SimpleNamespace(row_start=2, shard=embedding.weight)
+    ready = []
+    embedding.pool = SimpleNamespace(ready=lambda table: ready.append(table))
+    module.ngram_embedding = embedding
+    shards = [
+        ("ngram_embedding.shard_0.weight", torch.zeros(4, 2)),
+        ("ngram_embedding.shard_1.weight", torch.ones(4, 2)),
+    ]
+    if case == "missing":
+        shards.pop()
+    elif case == "duplicate":
+        shards.append(shards[0])
+    module.load_weights(shards)
+    if case == "missing_scale":
+        with pytest.raises(ValueError, match="missing its global scale"):
+            Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
+        assert not ready
+        return
+
+    Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
+    if case == "complete":
+        embedding.process_weights_after_loading()
+        assert ready == [embedding.table]
+        torch.testing.assert_close(embedding.weight[:2], torch.zeros(2, 2))
+        torch.testing.assert_close(embedding.weight[2:], torch.ones(2, 2))
+    else:
+        error = (
+            "PLE rows covered through" if case == "missing" else "overlapping PLE rows"
+        )
+        with pytest.raises(RuntimeError, match=error):
+            embedding.process_weights_after_loading()
+        assert not ready
+
+
+@pytest.mark.parametrize("is_checkpoint_format", [True, False])
+@torch.no_grad()
+def test_ple_pool_blocks_weight_reload_before_mutation(is_checkpoint_format):
+    pooled = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
+    nn.Module.__init__(pooled)
+    layer = nn.Linear(2, 2, bias=False)
+    model = nn.Sequential(layer, pooled)
+    original = layer.weight.detach().clone()
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            engram_config=None,
+            model_config=SimpleNamespace(architecture="TestModel"),
+            load_config=SimpleNamespace(device="cpu"),
+            lora_config=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot reload weights; restart the group"):
+        reload_weights(
+            config,
+            model,
+            [("0.weight", original + 1)],
+            weights_path=None,
+            is_checkpoint_format=is_checkpoint_format,
+        )
+
+    torch.testing.assert_close(layer.weight, original)
 
 
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
@@ -191,6 +446,162 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     torch.testing.assert_close(
         module.ngram_embedding.weight_scale,
         weight_scale.float(),
+    )
+
+
+def _make_nvfp4_ngram_embedding(monkeypatch, *, rank=0, device="cpu", pinned=False):
+    _mock_etp_group(monkeypatch, world_size=2, rank=rank)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    cls = Qwen4ExpPLEPinnedHostEmbedding if pinned else Qwen4ExpPLEDeviceEmbedding
+    with torch.device(device):
+        embedding = cls(
+            8,
+            160,
+            params_dtype=torch.bfloat16,
+            padding_size=2,
+            prefix="test.ple_embedding.ngram_embedding",
+            embedding_method=Qwen4ExpPLENvFp4EmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    module = _make_ngram_embedding_for_load_test()
+    module.ngram_embedding = embedding
+    module.split_ngram_parts = 3
+    codes = torch.arange(8 * 80).reshape(8, 80).to(torch.uint8)
+    scales = ((torch.arange(80).reshape(8, 10) + 1) / 4).to(torch.float8_e4m3fn)
+    tensors = []
+    # Checkpoint shards cross ETP boundaries; scales can arrive before weights.
+    for shard in (2, 0, 1):
+        for suffix, tensor in (("weight_scale", scales), ("weight", codes)):
+            tensors.append(
+                (f"ngram_embedding.shard_{shard}.{suffix}", tensor[shard * 3 :][:3])
+            )
+    tensors.append(("ngram_embedding.weight_scale_2", torch.tensor(0.37)))
+    return module, tensors, codes, scales
+
+
+def _reference_nvfp4_ple(codes, scales):
+    nibbles = torch.stack((codes & 15, codes >> 4), dim=-1).reshape(8, 160)
+    values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    decoded = values[(nibbles & 7).long()] * torch.where(nibbles < 8, 1.0, -1.0)
+    return (decoded * scales.float().repeat_interleave(16, -1) * 0.37).bfloat16()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nvfp4_ple_loads_streamed_shards_across_etp_boundaries(monkeypatch, rank):
+    module, tensors, codes, scales = _make_nvfp4_ngram_embedding(monkeypatch, rank=rank)
+    loaded = set()
+    for start in range(0, len(tensors), 3):
+        loaded.update(module.load_weights(iter(tensors[start : start + 3])))
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+
+    assert loaded == {
+        "ngram_embedding.weight",
+        "ngram_embedding.weight_scale",
+        "ngram_embedding.weight_scale_2",
+    }
+    assert layer.weight.dtype == torch.uint8
+    assert layer.weight_scale.dtype == torch.float8_e4m3fn
+    assert layer.weight.numel() + layer.weight_scale.numel() == 4 * (80 + 10)
+    torch.testing.assert_close(layer.weight, codes[rank * 4 :][:4])
+    torch.testing.assert_close(
+        layer.weight_scale.float(), scales[rank * 4 :][:4].float()
+    )
+    ids = torch.tensor([[3, 4], [7, 0], [4, 3]])
+    output = layer(ids)
+    expected = _reference_nvfp4_ple(codes, scales)[ids]
+    expected[(ids < rank * 4) | (ids >= (rank + 1) * 4)] = 0
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+
+def test_nvfp4_ple_rejects_missing_global_scale(monkeypatch):
+    module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
+    module.load_weights(tensors[:-1])
+    layer = module.ngram_embedding
+    with pytest.raises(ValueError, match="missing its global scale"):
+        layer.embedding_method.process_weights_after_loading(layer)
+
+
+def test_nvfp4_ple_resolves_from_mixed_precision_quantized_layers():
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "quantized_layers": {
+                    prefix: {"quant_algo": "NVFP4", "group_size": 16},
+                    "model.language_model.layers.0.mlp.experts": {
+                        "quant_algo": "NVFP4",
+                        "group_size": 16,
+                    },
+                },
+            }
+        }
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(config, prefix),
+        Qwen4ExpPLENvFp4EmbeddingMethod,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("pinned", [False, True])
+def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned):
+    # Rank 1 exercises both the vocab offset and out-of-shard masking.
+    rank = 1
+    module, tensors, codes, scales = _make_nvfp4_ngram_embedding(
+        monkeypatch, rank=rank, device="cuda", pinned=pinned
+    )
+    module.load_weights(iter(tensors))
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+    ids = torch.tensor([[3, 4], [7, 0]], device="cuda")
+    lookup_fn = layer._lookup if pinned else torch.compile(layer, fullgraph=True)
+
+    def lookup():
+        return lookup_fn(ids)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            lookup()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = lookup()
+    for new_ids in ([[3, 4], [7, 0]], [[4, 3], [0, 7]]):
+        ids.copy_(torch.tensor(new_ids, device="cuda"))
+        graph.replay()
+        cpu_ids = ids.cpu()
+        expected = _reference_nvfp4_ple(codes, scales)[cpu_ids]
+        expected[(cpu_ids < rank * 4) | (cpu_ids >= (rank + 1) * 4)] = 0
+        torch.testing.assert_close(output.cpu(), expected, atol=0, rtol=0)
+        if pinned:
+            layer.start_prefetch(ids)
+            torch.testing.assert_close(
+                layer.finalize_prefetch(total_tokens=ids.shape[0]).cpu(),
+                expected.flatten(-2),
+                atol=0,
+                rtol=0,
+            )
+    assert layer.weight.device.type == ("cpu" if pinned else "cuda")
+    assert layer.weight_scale.device == layer.weight.device
+    assert layer.weight_scale_2.device.type == "cuda"
+    assert lookup_fn(ids[:0]).shape == (0, 2, 160)
+    padded_ids = torch.tensor([[8, -1]], device="cuda")
+    torch.testing.assert_close(
+        lookup_fn(padded_ids),
+        torch.zeros(1, 2, 160, device="cuda", dtype=torch.bfloat16),
+        atol=0,
+        rtol=0,
     )
 
 
@@ -396,7 +807,6 @@ def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
 def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         ignored_layers=[],
         weight_block_size=[128, 128],
     )
@@ -416,23 +826,79 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     )
 
 
-def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        pytest.param(ModelOptNvFp4Config(exclude_modules=[]), id="modelopt-nvfp4"),
+        pytest.param(
+            OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor")),
+            id="online-fp8",
+        ),
+        pytest.param(
+            CompressedTensorsConfig(
+                target_scheme_map={
+                    "re:.*ngram_embedding": {
+                        "weights": QuantizationArgs(num_bits=8, type="int"),
+                    },
+                },
+                ignore=[],
+                quant_format="int-quantized",
+            ),
+            id="compressed-tensors",
+        ),
+    ],
+)
+def test_ple_embedding_falls_back_for_unsupported_quantization_configs(
+    quant_config: QuantizationConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warn when global quantization falls back to an unquantized PLE table."""
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
-    nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
-    with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
-
-    dynamic_fp8_config = Fp8Config(
-        is_checkpoint_fp8_serialized=False,
-        ignored_layers=[],
+    test_logger = logging.getLogger("test.ple_fallback")
+    monkeypatch.setattr(ngram_embedding_module, "logger", test_logger)
+    caplog.set_level(logging.WARNING, logger=test_logger.name)
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
-    with pytest.raises(NotImplementedError, match="serialized FP8"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(dynamic_fp8_config, prefix)
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "Falling back to unquantized PLE" in caplog.text
 
 
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_respects_inc_layer_config() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = INCConfig(
+        weight_bits=4,
+        group_size=128,
+        block_name_to_quantize="model.layers",
+        extra_config={".*ple.*": {"bits": 16, "data_type": "float"}},
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+    quant_config.extra_config = None
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_is_unquantized_under_quark() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = QuarkConfig({"exclude": [], "global_quant_config": {}})
 
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
@@ -454,33 +920,78 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     )
 
 
-def test_pinned_embedding_forward_finalizes_prefetched_output(
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_pinned_embedding_finalize_prefetch_optionally_reduces_output(
     monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+    reduce_results: bool,
 ) -> None:
+    """Deferring reduction must preserve full token rows and wait for the lookup."""
+    total_tokens = 3
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
-    embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
+    values = torch.arange(1, 13).reshape(4, 3)
+    embedding._prefetch_buffer = torch.stack(
+        (values, torch.zeros_like(values)), dim=1
+    ).to(dtype)
     embedding._output_dim = 6
-    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
-    expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
-
-    def finalize_prefetched(
-        prefetch_output: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        assert prefetch_output is embedding._prefetch_buffer
-        output.copy_(expected)
-
+    embedding.tp_size = 2
+    embedding.reduce_results = reduce_results
+    embedding.etp_data_parallel_size = 1
+    embedding._prefetch_stream = object()
+    waited_streams: list[object] = []
+    reduced_dtypes = []
     monkeypatch.setattr(
-        embedding,
-        "_finalize_prefetch",
-        finalize_prefetched,
+        torch.cuda,
+        "current_stream",
+        lambda: SimpleNamespace(wait_stream=waited_streams.append),
     )
 
-    output = embedding(hidden_states)
+    def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        assert waited_streams == [embedding._prefetch_stream]
+        reduced_dtypes.append(tensor.dtype)
+        # The remote rank owns the other head's vocabulary rows.
+        return tensor + tensor.flip(1)
 
-    assert output.dtype == embedding._prefetch_buffer.dtype
-    assert torch.equal(output, expected)
+    embedding.parallel_group = SimpleNamespace(all_reduce=all_reduce)
+    output = embedding.finalize_prefetch(total_tokens=total_tokens)
+
+    expected = (
+        values.unsqueeze(1).expand(-1, 2, -1).to(dtype)
+        if reduce_results
+        else embedding._prefetch_buffer
+    )
+    expected = expected[:total_tokens].flatten(-2)
+    comm_dtype = torch.int8 if dtype == torch.float8_e4m3fn else dtype
+    assert reduced_dtypes == ([comm_dtype] if reduce_results else [])
+    assert waited_streams == [embedding._prefetch_stream]
+    assert output.dtype == dtype
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+def test_pinned_embedding_finalize_prefetch_requires_prior_start_prefetch() -> None:
+    """Finalizing before start_prefetch must fail instead of reading garbage."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding._output_dim = 6
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding.finalize_prefetch(total_tokens=2)
+
+
+def test_pinned_embedding_finalize_requires_prior_start_prefetch() -> None:
+    """_finalize_prefetch before any start_prefetch must fail loudly."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding.tp_size = 1
+    output = torch.zeros(2, 6, dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding._finalize_prefetch(torch.empty(4, 2, 3), output)
 
 
 def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
@@ -566,12 +1077,10 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     loaded_weight = (
         torch.arange(12, dtype=torch.float32).reshape(4, 3).to(storage_dtype)
     )
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         embedding.weight,
         loaded_weight,
         checkpoint_start=0,
-        tp_start=0,
-        tp_end=4,
     )
     input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
     output = embedding._lookup(input_ids)
@@ -597,8 +1106,71 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     )
 
 
-def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pinned_embedding_start_prefetch_allocates_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allocate prefetch storage on first use and finalize the lookup results."""
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
+
+    loaded_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    loaded_weight = loaded_weight.to(torch.bfloat16)
+    embedding._copy_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+    )
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    embedding.start_prefetch(ngram_ids)
+
+    buffer = embedding._prefetch_buffer
+    assert buffer is not None
+    assert buffer.shape == (4, 2, 3)
+    assert buffer.dtype == torch.bfloat16
+    assert buffer.device.type == "cuda"
+    assert embedding._prefetch_stream is not None
+
+    output = embedding.finalize_prefetch(total_tokens=ngram_ids.shape[0])
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "exclude_pattern",
+    [
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding",
+        "*.ngram_embedding",
+    ],
+)
+def test_ple_fp8_embedding_supports_mixed_precision_config(
+    exclude_pattern: str,
+) -> None:
     prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    nvfp4_prefix = "model.language_model.layers.2.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
@@ -607,8 +1179,9 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
                 "group_size": 16,
                 "quantized_layers": {
                     prefix: {"quant_algo": "FP8"},
+                    nvfp4_prefix: {"quant_algo": "NVFP4"},
                     "model.language_model.layers.2.moe.gate_proj": {
-                        "quant_algo": "NVFP4"
+                        "quant_algo": "MXFP8"
                     },
                 },
             }
@@ -622,10 +1195,439 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
-            "model.language_model.layers.2.moe.gate_proj",
+            "model.language_model.layers.3.ple.ple_embedding.ngram_embedding",
         ),
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, nvfp4_prefix),
+        Qwen4ExpPLENvFp4EmbeddingMethod,
+    )
+    # An explicitly unsupported PLE format must not fall back to unquantized.
+    with pytest.raises(ValueError, match="Unsupported quant_algo 'MXFP8'"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            quant_config,
+            "model.language_model.layers.2.moe.gate_proj",
+        )
+
+    quant_config.exclude_modules = [exclude_pattern]
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def _save_ple_checkpoint(path: Path, fmt: str, parts: int = 4) -> None:
+    """Save a 24-row, 32-wide PLE table split into checkpoint shards."""
+    tensors: dict[str, torch.Tensor] = {}
+    if fmt == "nvfp4":
+        planes = {
+            "weight": torch.arange(24 * 16).reshape(24, 16).to(torch.uint8),
+            "weight_scale": (torch.arange(48).reshape(24, 2) / 8 + 0.25).to(
+                torch.float8_e4m3fn
+            ),
+        }
+        tensors["ngram_embedding.weight_scale_2"] = torch.tensor(0.37)
+    else:
+        values = torch.linspace(-2, 2, 24 * 32).reshape(24, 32)
+        planes = {"weight": values.to(torch.bfloat16)}
+        if fmt == "fp8":
+            planes = {"weight": values.to(torch.float8_e4m3fn)}
+            tensors["ngram_embedding.weight_scale"] = torch.tensor([0.25])
+    for name, table in planes.items():
+        for index, shard in enumerate(table.chunk(parts)):
+            tensors[f"ngram_embedding.shard_{index}.{name}"] = shard.clone()
+    save_file(tensors, path)
+
+
+def _make_ple_from_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    fmt: str,
+    *,
+    disk_offload: bool,
+    cpu_offload: bool = False,
+    dp_shared_memory: bool = False,
+    device: str = "cpu",
+    load: bool = True,
+) -> Qwen4ExpNGramEmbedding:
+    """Build a two-head PLE embedding and load `path` through file-backed views.
+
+    `cpu_offload` without `disk_offload` takes the host-memory table, since
+    UVA is reported unavailable.
+    """
+    _mock_etp_group(monkeypatch)
+    for module in (embedding_module, parameter_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    group = SimpleNamespace(world_size=1)
+    vllm_config = SimpleNamespace(
+        load_config=SimpleNamespace(load_format="auto"),
+        engram_config=EngramConfig(
+            disk_offload=disk_offload,
+            cpu_offload=cpu_offload,
+            dp_shared_memory=dp_shared_memory,
+        ),
+    )
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module, "is_uva_available", lambda: False
+    )
+    for name, value in (
+        ("get_current_vllm_config", vllm_config),
+        ("get_etp_group", group),
+        ("get_tp_group", group),
+    ):
+        monkeypatch.setattr(nvidia_ngram_embedding_module, name, lambda v=value: v)
+    config = SimpleNamespace(
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        vocab_size=64,
+        split_ngram_parts=4,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_embedding_dtype={"nvfp4": "nvfp4", "fp8": "float8_e4m3fn"}.get(fmt),
+    )
+    with torch.device(device):
+        module = Qwen4ExpNGramEmbedding(
+            config,
+            64,
+            0,
+            8,
+            data_parallel_rank=0,
+            prefix="t",
+            params_dtype=torch.bfloat16,
+        )
+    if load:
+        with safe_open(path, framework="pt") as checkpoint:
+            module.load_weights(
+                (name, checkpoint.get_tensor(name))
+                for name in checkpoint.keys()  # noqa: SIM118
+            )
+        embedding = module.ngram_embedding
+        embedding.quant_method.process_weights_after_loading(embedding)
+    return module
+
+
+def _check_pool_ple(rank: int, path: Path, store: str, transport, host: bool) -> None:
+    torch.accelerator.set_device_index(rank)
+    path = path / f"rank-{rank}" / "model.safetensors"
+    model_config = ModelConfig(
+        model=str(path.parent), dtype="bfloat16", skip_tokenizer_init=True
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        engram_config=EngramConfig(
+            peer_group_size=2,
+            peer_group_store=store,
+            peer_group_transport=transport,
+            cpu_offload=host,
+        ),
+    )
+
+    def load(config: VllmConfig) -> Qwen4ExpPLEEmbedding:
+        with set_current_vllm_config(config):
+            with torch.device(f"cuda:{rank}"):
+                module = Qwen4ExpNGramEmbedding(
+                    model_config.hf_text_config,
+                    64,
+                    0,
+                    8,
+                    data_parallel_rank=0,
+                    prefix="t",
+                    params_dtype=torch.bfloat16,
+                )
+            with safe_open(path, framework="pt") as checkpoint:
+                module.load_weights(
+                    (name, checkpoint.get_tensor(name))
+                    for name in checkpoint.keys()  # noqa: SIM118
+                )
+            embedding = module.ngram_embedding
+            embedding.quant_method.process_weights_after_loading(embedding)
+            if isinstance(embedding, Qwen4ExpPLEPoolEmbedding):
+                embedding.process_weights_after_loading()
+            return embedding
+
+    try:
+        with set_current_vllm_config(config):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=rank,
+                distributed_init_method=f"file://{path.parent}/world-{rank}",
+                backend="nccl",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=1)
+        embedding = load(config)
+        reference = load(
+            VllmConfig(
+                model_config=model_config,
+                engram_config=EngramConfig(cpu_offload=False),
+            )
+        )
+        assert isinstance(embedding, Qwen4ExpPLEPoolEmbedding)
+        assert embedding.table is not None
+        assert embedding.weight.shape == (12, 32)
+        start = embedding.table.row_start
+        assert torch.equal(
+            embedding.weight.view(torch.uint8).to(reference.weight.device),
+            reference.weight[start : start + 12].view(torch.uint8),
+        )
+        ids = torch.tensor([[0, 11], [12, 23]], dtype=torch.long, device="cuda")
+        embedding(ids)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = embedding(ids)
+        for rows in ([[12, 12], [11, 0]], [[23, 11], [0, 12]]):
+            ids.copy_(torch.tensor(rows, device="cuda"))
+            graph.replay()
+            expected = reference(ids)
+            assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+            torch.testing.assert_close(
+                embedding.dequantize(output, torch.bfloat16),
+                reference.dequantize(expected, torch.bfloat16),
+                atol=0,
+                rtol=0,
+            )
+        embedding.pool.group.barrier()
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="requires two CUDA GPUs",
+)
+@pytest.mark.parametrize(
+    "transport,host", [("nvlink", False), ("rdma", False), ("rdma", True)]
+)
+def test_ple_pool_checkpoint_shards_and_cuda_graph(
+    tmp_path: Path, transport, host: bool
+) -> None:
+    if transport == "nvlink" and not imex_channel_available():
+        pytest.skip("requires CUDA FABRIC handles")
+    if transport == "rdma" and not verbs.active_devices():
+        pytest.skip("requires an active mlx5 RDMA device")
+    text_config = Qwen4ExpTextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=64,
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        split_ngram_parts=3,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_layer_ids=[1],
+    )
+    text_config.ple_embedding_dtype = "float8_e4m3fn"
+    config = Qwen4ExpConfig(
+        text_config=text_config, architectures=["Qwen4ExpForConditionalGeneration"]
+    )
+    for rank in range(2):
+        config.save_pretrained(tmp_path / f"rank-{rank}")
+    path = tmp_path / "rank-0" / "model.safetensors"
+    _save_ple_checkpoint(path, "fp8", parts=3)
+    os.link(path, tmp_path / "rank-1" / "model.safetensors")
+    torch.multiprocessing.spawn(
+        _check_pool_ple,
+        args=(tmp_path, str(tmp_path / "peers"), transport, host),
+        nprocs=2,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="host staging is CUDA-only")
+@pytest.mark.parametrize(
+    "source,fmt",
+    [
+        (source, fmt)
+        for source in ("disk", "host_memory")
+        for fmt in ("bf16", "fp8", "nvfp4")
+    ]
+    + [("pageable", "bf16")],
+)
+def test_host_staged_ple_matches_resident_table_under_graph_replay(
+    monkeypatch, tmp_path, fmt, source
+) -> None:
+    """Staged rows equal the resident lookup of the same ids in a replayed graph."""
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, fmt)
+    if source == "pageable":
+        monkeypatch.setattr(current_platform, "is_pin_memory_available", lambda: False)
+    gather = _make_ple_from_checkpoint(
+        monkeypatch,
+        path,
+        fmt,
+        disk_offload=source == "disk",
+        cpu_offload=source != "disk",
+        device="cuda",
+    )
+    resident = _make_ple_from_checkpoint(
+        monkeypatch, path, fmt, disk_offload=False, device="cuda"
+    )
+    if source == "disk":
+        assert isinstance(gather.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+        assert gather.ngram_embedding.weight.numel() == 0
+    else:
+        assert isinstance(gather.ngram_embedding, Qwen4ExpPLEHostMemoryEmbedding)
+        assert gather.ngram_embedding.weight.device.type == "cpu"
+    if source == "pageable":
+        assert not gather.ngram_embedding._host_ids.is_pinned()
+    hidden_states = torch.zeros(8, 64, device="cuda")
+    query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
+    ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
+    input_ids = torch.randint(1, 64, (8,), device="cuda")
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", True)
+
+    def stage() -> None:
+        with_gpu_sync_check(stage_host_rows)(
+            [(gather, gather.ngram_embedding)],
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
+
+    def forward(module: Qwen4ExpNGramEmbedding) -> torch.Tensor:
+        return module(hidden_states, input_ids, query_start_loc, ngram_context)
+
+    stage()
+    forward(gather)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = forward(gather).clone()
+    for seed in range(2):
+        torch.manual_seed(seed)
+        input_ids.copy_(torch.randint(1, 64, (8,)))
+        stage()
+        graph.replay()
+        expected = forward(resident)
+        assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "error"),
+    [
+        pytest.param(
+            lambda tensors: {k: v.float() for k, v in tensors.items()},
+            "must match the embedding dtype",
+            id="dtype",
+        ),
+        pytest.param(
+            lambda tensors: {k: v for k, v in tensors.items() if "_2." not in k},
+            "cover 18 of 24 rows",
+            id="missing_shard",
+        ),
+        pytest.param(
+            lambda tensors: {k: v.clone() for k, v in tensors.items()},
+            "not a file-backed view",
+            id="copied",
+        ),
+    ],
+)
+def test_disk_offload_rejects_shards_it_cannot_serve_from_files(
+    monkeypatch, tmp_path, corrupt, error
+) -> None:
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, "bf16")
+    module = _make_ple_from_checkpoint(
+        monkeypatch, path, "bf16", disk_offload=True, load=False
+    )
+    embedding = module.ngram_embedding
+    with safe_open(path, framework="pt") as checkpoint:
+        tensors = {name: checkpoint.get_tensor(name) for name in checkpoint.keys()}  # noqa: SIM118
+        with pytest.raises(ValueError, match=error):
+            module.load_weights(corrupt(tensors).items())
+            embedding.quant_method.process_weights_after_loading(embedding)
+
+
+def test_disk_offload_fails_closed_on_truncation_and_reload(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, "bf16")
+    module = _make_ple_from_checkpoint(monkeypatch, path, "bf16", disk_offload=True)
+    embedding = module.ngram_embedding
+    assert isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+    embedding.copy_ids_to_host(torch.tensor([[0, 23], [5, 6], [12, 17], [23, 23]]))
+    embedding.stage_rows(4)
+    os.truncate(path, path.stat().st_size - 4)
+
+    with pytest.raises(ValueError, match="truncated at offset"):
+        embedding.stage_rows(4)
+    with pytest.raises(RuntimeError, match="does not support weight reload"):
+        module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(6, 32))])
+
+
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_host_memory_ple_stages_owned_rows(
+    monkeypatch: pytest.MonkeyPatch, fp8: bool, rank: int
+) -> None:
+    """Each ETP rank stages its own rows from host memory and zeros the rest."""
+    _mock_etp_group(monkeypatch, world_size=2, rank=rank)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    method = (
+        Qwen4ExpPLEFp8EmbeddingMethod()
+        if fp8
+        else Qwen4ExpPLEUnquantizedEmbeddingMethod()
+    )
+    embedding = Qwen4ExpPLEHostMemoryEmbedding(
+        8,
+        4,
+        params_dtype=torch.bfloat16,
+        padding_size=2,
+        prefix="test.ple_embedding.ngram_embedding",
+        embedding_method=method,
+        num_ngram_heads=2,
+        max_total_tokens=3,
+    )
+    assert embedding.weight.device.type == "cpu"
+    table = (torch.arange(32).reshape(8, 4) + 1).to(embedding.weight.dtype)
+    embedding.weight.data.copy_(table[rank * 4 : (rank + 1) * 4])
+    for ids in ([[3, 4], [7, 0], [4, 3]], [[1, 6]]):
+        ngram_ids = torch.tensor(ids)
+        embedding.copy_ids_to_host(ngram_ids)
+        embedding.stage_rows(ngram_ids.shape[0])
+        output = embedding.staged_rows(ngram_ids.shape[0])
+
+        expected = table[ngram_ids].float()
+        expected[(ngram_ids < rank * 4) | (ngram_ids >= (rank + 1) * 4)] = 0
+        assert output.dtype == table.dtype
+        torch.testing.assert_close(output.float(), expected.flatten(-2), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dp_shared_memory", [False, True])
+def test_cpu_offload_without_uva_uses_host_memory_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dp_shared_memory: bool
+) -> None:
+    """Both private and shared UVA tables fall back to ordinary host RAM."""
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module,
+        "get_engram_dp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=0),
+    )
+    module = _make_ple_from_checkpoint(
+        monkeypatch,
+        tmp_path,
+        "bf16",
+        disk_offload=False,
+        cpu_offload=True,
+        dp_shared_memory=dp_shared_memory,
+        load=False,
+    )
+    assert type(module.ngram_embedding) is Qwen4ExpPLEHostMemoryEmbedding
+    assert module.ngram_embedding.weight.device.type == "cpu"
+    assert not module.ngram_embedding.supports_prefetch
+    assert module.ngram_embedding.quant_method.supports_pre_processed_weights is False
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
@@ -859,7 +1861,7 @@ def test_fused_ngram_ids_correctness(
     contexts: list[list[int]],
     first_token_id: int,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_ngram_ids
+    from vllm.models.qwen4_exp.common.ops.ple import ple_ngram_ids
 
     device = torch.device("cuda")
     query_start_loc = torch.tensor(
@@ -883,6 +1885,40 @@ def test_fused_ngram_ids_correctness(
     offsets = params["ngram_heads_offsets"]
     sizes = params["ngram_heads_vocab_sizes"]
     assert torch.all((actual >= offsets) & (actual < offsets + sizes))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
+def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
+    """Eager breaks hand the side-stream lookup weak refs, so the ids must stay
+    valid after start_prefetch returns rather than be reused from the pool."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    input_ids = torch.arange(20, 25, dtype=torch.int32, device=device)
+    ngram_context = torch.tensor([[11, 12], [13, 14]], dtype=torch.int32, device=device)
+    params = _ngram_hash_params(device, ngram_context.shape[1])
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    for name in ("layer_multipliers", "ngram_heads_vocab_sizes", "ngram_heads_offsets"):
+        module.register_buffer(name, params[name])
+    module.eos_token_id = params["eos_token_id"]
+    module.heads_per_ngram = params["heads_per_ngram"]
+    num_heads = params["ngram_heads_vocab_sizes"].numel()
+    module._prefetch_ids = torch.empty(8, num_heads, dtype=torch.long, device=device)
+    prefetched: list[torch.Tensor] = []
+    module.ngram_embedding = SimpleNamespace(
+        supports_prefetch=True,
+        start_prefetch=lambda ids: prefetched.append(weak_ref_tensor(ids)),
+    )
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+
+    # A fresh pool makes the next same-size allocation reuse any freed ids,
+    # like a later CUDA graph segment would.
+    pool = torch.cuda.MemPool()
+    with torch.cuda.use_mem_pool(pool):
+        module.start_prefetch(input_ids, query_start_loc, ngram_context)
+        torch.full_like(expected, -1)
+
+    assert torch.equal(prefetched[0], expected)
 
 
 def _short_conv_dilated_decode_pytorch(
@@ -1104,11 +2140,11 @@ def _short_conv_dilated_spec_pytorch(
 
     Each spec request feeds multiple (draft + 1) query tokens. The conv
     outputs are computed causally after rolling back the previous draft
-    state by ``num_accepted_tokens - 1``. The current candidate inputs stay
+    state by `num_accepted_tokens - 1`. The current candidate inputs stay
     in the extended cache for the next forward, matching
-    ``causal_conv1d_update``.
+    `causal_conv1d_update`.
 
-    ``spec_query_len`` (== num_speculative_tokens + 1) is the maximum query
+    `spec_query_len` (== num_speculative_tokens + 1) is the maximum query
     length and is a Python int, so no host synchronization is needed; this
     keeps the path safe for full CUDA-graph capture/replay where the buffers
     are padded at the request level.
@@ -1384,7 +2420,7 @@ def _make_conv_case(
     return rng, state_reference, conv_state, weights
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ConvBatchCase:
     spec_query_lens: tuple[int, ...] = ()
     num_accepted: tuple[int, ...] = ()
@@ -1501,11 +2537,17 @@ def _make_conv_metadata(
             else None
         ),
         non_spec_query_start_loc=(non_spec_query_start_loc if has_non_spec else None),
+        query_start_loc_p=(
+            non_spec_query_start_loc[case.num_decodes :] - case.num_decodes
+            if num_prefills
+            else None
+        ),
         has_initial_states_p=(
             torch.arange(num_prefills, device=device) % 2 == 0 if num_prefills else None
         ),
         max_prefill_query_len=max(case.prefill_query_lens, default=0),
         num_spec_decodes=num_spec_reqs,
+        checkpoint=None,
     )
     return metadata, token_offset
 
@@ -1575,15 +2617,26 @@ def _make_conv_metadata(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    ("layer_cls", "fuse_residual"),
+    [
+        pytest.param(Qwen4ExpPLELayer, True, id="nvidia-fused"),
+        pytest.param(Qwen4ExpPLELayer, False, id="nvidia-unfused"),
+        pytest.param(Qwen4ExpPLELayerAMD, True, id="amd-fused"),
+    ],
+)
 def test_fused_conv_correctness(
     case: _ConvBatchCase,
     state_layout: str,
+    layer_cls: type[nn.Module],
+    fuse_residual: bool,
 ) -> None:
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
     if case.state_index_stride > 1:
         assert metadata.state_indices_tensor.stride(0) == case.state_index_stride
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    # layer_cls is type[nn.Module], so layer_cls.__new__ is type.__new__.
+    module = object.__new__(layer_cls)
     nn.Module.__init__(module)
     module.conv_state_len = (case.kernel_size - 1) * case.dilation
     module.short_conv_dilation = case.dilation
@@ -1618,12 +2671,15 @@ def test_fused_conv_correctness(
     )
     null_state = conv_state[NULL_BLOCK_ID].clone()
     residual_kernel = residual.clone()
-    residual_reference = residual.clone()
+    # The unfused kernel must overwrite the buffer without reading its contents.
+    residual_reference = (
+        residual.clone() if fuse_residual else torch.zeros_like(residual)
+    )
 
     module._short_conv_dilated_dispatch(
         inputs=inputs,
         residual=residual_kernel,
-        outer_residual=outer_residual,
+        outer_residual=outer_residual if fuse_residual else None,
         metadata=metadata,
         conv_state=conv_state,
         conv_weights=weights,
@@ -1637,7 +2693,8 @@ def test_fused_conv_correctness(
         conv_state_len=module.conv_state_len,
         dilation=module.short_conv_dilation,
     )
-    residual_reference = outer_residual + residual_reference
+    if fuse_residual:
+        residual_reference = outer_residual + residual_reference
 
     assert torch.equal(
         residual_kernel[:num_real_tokens], residual_reference[:num_real_tokens]
@@ -1647,8 +2704,129 @@ def test_fused_conv_correctness(
     if case.graph_padding:
         assert torch.equal(
             residual_kernel[num_real_tokens:],
-            (outer_residual + residual)[num_real_tokens:],
+            residual_reference[num_real_tokens:],
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _ConvBatchCase(num_decodes=1, prefill_query_lens=(200, 130)),
+            id="decode-prefill",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(3, 4),
+                num_accepted=(2, 4),
+                num_decodes=1,
+                prefill_query_lens=(200, 130),
+                spec_query_len=4,
+            ),
+            id="mixed",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "layer_cls",
+    [
+        pytest.param(Qwen4ExpPLELayer, id="nvidia"),
+        pytest.param(Qwen4ExpPLELayerAMD, id="amd"),
+    ],
+)
+def test_prefill_exports_conv_window_at_checkpoint(
+    case: _ConvBatchCase, state_layout: str, layer_cls: type[nn.Module]
+) -> None:
+    """A checkpoint holds the conv state of the prefill stopped at its offset.
+
+    In the mixed batch the prefills' tokens are reached through the non-spec
+    token map. Nothing else in the cache changes, including the checkpoint
+    block's speculative columns.
+    """
+    device = torch.device("cuda")
+    metadata, num_real_tokens = _make_conv_metadata(case, device)
+    module = object.__new__(layer_cls)
+    nn.Module.__init__(module)
+    module.conv_state_len = (case.kernel_size - 1) * case.dilation
+    module.short_conv_dilation = case.dilation
+    module._checkpoint_exporter = MambaPrefillCheckpointExporter(
+        state_len=module.conv_state_len
+    )
+    rng, _, conv_state, weights = _make_conv_case(
+        device,
+        seed=num_real_tokens,
+        channels=case.channels,
+        kernel_size=case.kernel_size,
+        dilation=case.dilation,
+        state_layout=state_layout,
+        spec_query_len=case.spec_query_len,
+    )
+    inputs = torch.randn(
+        metadata.num_actual_tokens,
+        case.channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
+    )
+    without_checkpoint = conv_state.clone()
+
+    # One row per non-spec request; the prefills checkpoint mid-query.
+    offsets = [0] * case.num_decodes + [64, 128]
+    checkpoint_slots = [NULL_BLOCK_ID] * case.num_decodes + [
+        _KERNEL_STATE_BLOCKS - 1,
+        _KERNEL_STATE_BLOCKS - 2,
+    ]
+    metadata.checkpoint = MambaPrefillCheckpointMetadata(
+        torch.tensor(offsets, dtype=torch.int32, device=device),
+        torch.tensor(checkpoint_slots, dtype=torch.int32, device=device),
+    )
+    for state, checkpoint in (
+        (conv_state, metadata.checkpoint),
+        (without_checkpoint, None),
+    ):
+        metadata.checkpoint = checkpoint
+        module._short_conv_dilated_dispatch(
+            inputs=inputs,
+            residual=torch.zeros_like(inputs),
+            outer_residual=None,
+            metadata=metadata,
+            conv_state=state,
+            conv_weights=weights,
+        )
+
+    query_start_loc = metadata.non_spec_query_start_loc.tolist()
+    token_map = metadata.non_spec_token_indx
+    state_len = module.conv_state_len
+    for row in range(case.num_decodes, len(offsets)):
+        tokens = torch.arange(
+            query_start_loc[row], query_start_loc[row] + offsets[row], device=device
+        )
+        if token_map is not None:
+            tokens = token_map[tokens]
+        stopped = without_checkpoint.clone()
+        scratch = torch.tensor([checkpoint_slots[row]], device=device)
+        ple_conv(
+            inputs[tokens].contiguous(),
+            torch.zeros_like(inputs[tokens]),
+            stopped,
+            weights,
+            scratch,
+            None,
+            mode="prefill",
+            dilation=case.dilation,
+            query_start_loc=torch.tensor(
+                [0, offsets[row]], dtype=torch.int32, device=device
+            ),
+            has_initial_states=torch.tensor([False], device=device),
+        )
+        slot = checkpoint_slots[row]
+        assert torch.equal(
+            conv_state[slot, :, :state_len], stopped[slot, :, :state_len]
+        )
+        conv_state[slot, :, :state_len] = without_checkpoint[slot, :, :state_len]
+    assert torch.equal(conv_state, without_checkpoint)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")
@@ -1656,7 +2834,7 @@ def test_fused_conv_correctness(
 def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     import math
 
-    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_gate
+    from vllm.models.qwen4_exp.common.ops.ple import ple_gate
 
     device = torch.device("cuda")
     hc, h = 4, 2560
@@ -1715,3 +2893,273 @@ def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     expected_normed = grouped_norm(expected_gated, norm_conv)
     assert torch.equal(gated, expected_gated)
     torch.testing.assert_close(normed, expected_normed, atol=1e-2, rtol=1e-2)
+
+
+def _build_amd_ngram_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    device: str,
+    cpu_offload: bool,
+    fp8_checkpoint: bool,
+) -> tuple[amd_ple_layer.Qwen4ExpNGramEmbedding, torch.Tensor]:
+    """Construct and load a small AMD embedding through its checkpoint loader."""
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    monkeypatch.setattr(
+        amd_ple_layer,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(engram_config=SimpleNamespace(cpu_offload=cpu_offload)),
+    )
+    config = Qwen4ExpTextConfig(
+        ngram_size=3,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=8,
+        split_ngram_parts=2,
+        ple_embed_dim=6,
+        eos_token_id=0,
+        vocab_size=64,
+    )
+    with torch.device(device):
+        module = amd_ple_layer.Qwen4ExpNGramEmbedding(
+            config,
+            embedding_dim=config.ple_embed_dim,
+            ple_dense_layer_id=0,
+            max_total_tokens=4,
+            prefix="test.ple_embedding",
+            layer_name="test.ple",
+            quant_config=(
+                Fp8Config(is_checkpoint_fp8_serialized=True) if fp8_checkpoint else None
+            ),
+            params_dtype=torch.bfloat16,
+        )
+    # Only the outer owner is a stub; the embedding constructor and loader run.
+    layer = Qwen4ExpPLELayerAMD.__new__(Qwen4ExpPLELayerAMD)
+    nn.Module.__init__(layer)
+    layer.ple_embedding = module
+
+    monkeypatch.setattr(
+        amd_ple_layer,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={module.layer_name: layer}),
+    )
+
+    embedding = module.ngram_embedding
+    loaded_weight = (
+        torch.arange(embedding.org_vocab_size * embedding.embedding_dim)
+        .reshape(embedding.org_vocab_size, embedding.embedding_dim)
+        .to(embedding.weight.dtype)
+    )
+    shard_size = (embedding.org_vocab_size + 1) // 2
+    weights = [
+        (f"ngram_embedding.shard_{i}.weight", shard)
+        for i, shard in enumerate(loaded_weight.split(shard_size))
+    ]
+    expected_loaded = {"ngram_embedding.weight"}
+    if fp8_checkpoint:
+        weights.append(("ngram_embedding.weight_scale", torch.tensor([0.25])))
+        expected_loaded.add("ngram_embedding.weight_scale")
+    assert module.load_weights(weights) == expected_loaded
+    embedding.quant_method.process_weights_after_loading(embedding)
+    return module, loaded_weight
+
+
+@pytest.mark.parametrize(
+    "device,cpu_offload",
+    [
+        pytest.param("cpu", False, id="cpu-resident"),
+        pytest.param(
+            "cuda:0",
+            False,
+            id="gpu-resident",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="requires CUDA or ROCm"
+            ),
+        ),
+        pytest.param(
+            "cuda:0",
+            True,
+            id="gpu-offloaded",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="requires CUDA or ROCm"
+            ),
+        ),
+    ],
+)
+def test_amd_fp8_embedding_loads_checkpoint_shards_and_global_scale(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    cpu_offload: bool,
+) -> None:
+    """AMD checkpoint loading must accept and apply the global FP8 scale."""
+    module, loaded_weight = _build_amd_ngram_embedding(
+        monkeypatch, device=device, cpu_offload=cpu_offload, fp8_checkpoint=True
+    )
+    embedding = module.ngram_embedding
+    assert embedding.weight.dtype == torch.float8_e4m3fn
+    assert embedding.weight.device == torch.device("cpu" if cpu_offload else device)
+    if cpu_offload:
+        assert embedding.weight.is_pinned()
+    assert embedding.weight_scale.device == torch.device(device)
+    torch.testing.assert_close(embedding.weight.float().cpu(), loaded_weight.float())
+    dequantized = embedding.dequantize(embedding.weight.to(device), torch.bfloat16)
+    torch.testing.assert_close(
+        dequantized.cpu(), loaded_weight.to(torch.bfloat16) * 0.25, rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+def test_amd_pinned_embedding_prefetch_machinery_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned embedding must not allocate the prefetch stream/buffer in init.
+
+    Paths that never prefetch (AMD uses the synchronous pinned-lookup op)
+    keep the stream/buffer unallocated for the process lifetime. NVIDIA's
+    first `start_prefetch` — the eager profile run, always before cudagraph
+    capture — allocates them lazily.
+    """
+    module, _ = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=False
+    )
+    embedding = module.ngram_embedding
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+@pytest.mark.parametrize("fp8_checkpoint", [False, True], ids=["bf16", "fp8"])
+def test_amd_pinned_embedding_output_written_under_compile(
+    monkeypatch: pytest.MonkeyPatch,
+    fp8_checkpoint: bool,
+) -> None:
+    """The AMD pinned lookup op must survive aot_autograd/Inductor.
+
+    The op writes via the declared-mutated `output`. Without
+    `mutates_args=["output"]` the call is dead-code-eliminated, the UVA lookup
+    never runs, and the returned `output` stays untouched.
+    """
+    module, loaded_weight = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=fp8_checkpoint
+    )
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = torch.zeros(
+        ngram_ids.shape[0],
+        module.embedding_dim,
+        dtype=module.ngram_embedding.weight.dtype,
+        device="cuda:0",
+    )
+
+    def lookup(ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
+            ids, out, module.layer_name
+        )
+        return out
+
+    torch.compile(lookup, fullgraph=True)(ngram_ids, output)
+    torch.cuda.current_stream().synchronize()
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+@pytest.mark.parametrize("fp8_checkpoint", [False, True], ids=["bf16", "fp8"])
+def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    fp8_checkpoint: bool,
+) -> None:
+    """The AMD pinned lookup op must be capture-safe.
+
+    It launches a single kernel on the current stream, so a cudagraph capture
+    reproduces the lookup into `output` without cross-stream work.
+    """
+    module, loaded_weight = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=fp8_checkpoint
+    )
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = torch.zeros(
+        ngram_ids.shape[0],
+        module.embedding_dim,
+        dtype=module.ngram_embedding.weight.dtype,
+        device="cuda:0",
+    )
+
+    def lookup(ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
+            ids, out, module.layer_name
+        )
+        return out
+
+    graph = torch.cuda.CUDAGraph()
+    warmup_stream = torch.cuda.Stream(device="cuda:0")
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            lookup(ngram_ids, output)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    with torch.cuda.graph(graph):
+        lookup(ngram_ids, output)
+    for _ in range(2):
+        ngram_ids.copy_(ngram_ids.flip(-1) + 3)
+        output.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.current_stream().synchronize()
+
+        expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+        torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="only the ROCm backend runs the n-gram embedding under torch.compile",
+)
+@pytest.mark.parametrize(
+    ("query_lens", "contexts"),
+    [([3, 1], [[5, 6], [0, 7]]), ([1, 0, 2], [[1, 2], [3, 4], [0, 0]])],
+    ids=["two-requests", "empty-request"],
+)
+def test_amd_ngram_embedding_matches_reference_under_compile(
+    monkeypatch: pytest.MonkeyPatch,
+    query_lens: list[int],
+    contexts: list[list[int]],
+) -> None:
+    """The AMD n-gram ID op must run under Dynamo with a symbolic request count."""
+    module, loaded_weight = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=False, fp8_checkpoint=False
+    )
+    device = torch.device("cuda:0")
+    query_start_loc = torch.tensor(
+        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
+    )
+    input_ids = torch.tensor(
+        [9, 0, 11, 12][: sum(query_lens)], dtype=torch.int32, device=device
+    )
+    ngram_context = torch.tensor(contexts, dtype=torch.int32, device=device)
+
+    compiled = torch.compile(module, fullgraph=True, dynamic=True)
+    output = compiled(input_ids, query_start_loc, ngram_context)
+
+    ngram_ids = _reference_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        module.layer_multipliers,
+        module.ngram_heads_vocab_sizes,
+        module.ngram_heads_offsets,
+        module.eos_token_id,
+        module.heads_per_ngram,
+    )
+    expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)

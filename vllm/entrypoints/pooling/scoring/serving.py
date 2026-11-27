@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections.abc import AsyncGenerator
+from typing import Any
+
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
@@ -28,9 +32,11 @@ from .protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from .typing import ScoreInput
+from .types import ScoreInput
 
 logger = init_logger(__name__)
+
+_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
 class ServingScores(PoolingServing):
@@ -102,6 +108,7 @@ class ServingScores(PoolingServing):
                 ctx.request.documents,
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
                 num_prompt_tokens,
+                return_documents=ctx.request.return_documents is not False,
             )
         else:
             raise ValueError(f"Invalid {self.request_id_prefix} request type")
@@ -148,6 +155,8 @@ class ServingScores(PoolingServing):
         documents: ScoreInput | list[ScoreInput],
         top_n: int,
         num_prompt_tokens: int,
+        *,
+        return_documents: bool,
     ) -> JSONResponse:
         if not isinstance(documents, list):
             documents = [documents]
@@ -156,13 +165,15 @@ class ServingScores(PoolingServing):
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
-            document = documents[idx]
-            if isinstance(document, str):
-                rerank_document = RerankDocument(text=document)
-            else:
-                rerank_document = RerankDocument(
-                    multi_modal=document.get("content", [])
-                )
+            rerank_document = None
+            if return_documents:
+                document = documents[idx]
+                if isinstance(document, str):
+                    rerank_document = RerankDocument(text=document)
+                else:
+                    rerank_document = RerankDocument(
+                        multi_modal=document.get("content", [])
+                    )
 
             result = RerankResult(
                 index=idx,
@@ -195,12 +206,97 @@ class ServingScores(PoolingServing):
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
         await self._preprocessing(self.io_processor, ctx)
 
-        # stage 1: encode queries and cache token embeddings on workers.
-        await self._flash_late_interaction_encode_queries(ctx)
-        # stage 2: encode docs and return scalar scores from workers.
-        await self._flash_late_interaction_encode_docs(ctx)
+        try:
+            # stage 1: encode queries and cache token embeddings on workers.
+            await self._flash_late_interaction_encode_queries(ctx)
+            # stage 2: encode docs and return scalar scores from workers.
+            await self._flash_late_interaction_encode_docs(ctx)
+        except BaseException:
+            cleanup = asyncio.create_task(self._cleanup_flash_late_interaction(ctx))
+            try:
+                await self._await_late_interaction_cleanup(cleanup)
+            except Exception:
+                logger.exception("Failed to clean up late-interaction query cache.")
+            raise
 
         return await self._postprocessing_async(self.io_processor, ctx)
+
+    @staticmethod
+    async def _await_late_interaction_cleanup(task: asyncio.Future[Any]) -> None:
+        """Bound cleanup waiting and defer cancellation until it finishes."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while not task.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    task.cancel()
+                    task.add_done_callback(
+                        lambda done: None if done.cancelled() else done.exception()
+                    )
+                    raise TimeoutError("Timed out waiting for late-interaction cleanup")
+                try:
+                    await asyncio.wait({task}, timeout=remaining)
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+            task.result()
+        except Exception:
+            if cancellation is not None:
+                logger.exception("Late-interaction cleanup failed during cancellation.")
+            raise
+        finally:
+            if cancellation is not None:
+                raise cancellation
+
+    async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
+        query_keys = ctx.late_interaction_query_keys
+        if not query_keys:
+            return
+
+        doc_keys = ctx.late_interaction_doc_keys or []
+
+        try:
+            # Stop documents before removing the query tensors they reference.
+            # Also abort requests cancelled before add_request returned a collector.
+            await self.engine_client.abort([*query_keys, *doc_keys])
+        finally:
+            # Bound release even when a timed-out abort enters this finally block.
+            async with asyncio.timeout(_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS):
+                await self.engine_client.collective_rpc(
+                    "release_late_interaction_query_cache",
+                    args=(query_keys,),
+                )
+
+    async def _collect_late_interaction_batch(self, ctx: ScoringServeContext):
+        generators = await self._prepare_generators(ctx)
+
+        async def collect(generator: AsyncGenerator[PoolingRequestOutput, None]):
+            final_result = None
+            async for result in generator:
+                if result.error is not None:
+                    raise result.error.to_exception()
+                final_result = result
+            if final_result is None:
+                raise ValueError("Failed to generate results for all prompts")
+            return final_result
+
+        tasks = [asyncio.create_task(collect(generator)) for generator in generators]
+        batch_future = asyncio.gather(*tasks)
+        try:
+            results = await asyncio.shield(batch_future)
+        except BaseException:
+            # Stop and join every producer before aborting and releasing keys.
+            for task in tasks:
+                task.cancel()
+            try:
+                await self._await_late_interaction_cleanup(
+                    asyncio.gather(batch_future, *tasks, return_exceptions=True)
+                )
+            except Exception:
+                logger.exception("Failed to stop late-interaction producers.")
+            raise
+        ctx.final_res_batch = results
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
@@ -243,8 +339,7 @@ class ServingScores(PoolingServing):
             prompt_extras=ctx.prompt_extras,
         )
 
-        await self._prepare_generators(query_ctx)
-        await self._collect_batch(query_ctx)
+        await self._collect_late_interaction_batch(query_ctx)
         ctx.query_final_res_batch = query_ctx.final_res_batch
 
     async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
@@ -259,7 +354,9 @@ class ServingScores(PoolingServing):
         query_keys = ctx.late_interaction_query_keys
         if query_keys is None:
             raise RuntimeError("Late-interaction query keys were not initialized.")
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+        doc_namespace = random_uuid()
+        doc_keys = [f"late-interaction-{doc_namespace}-doc-{i}" for i in range(n_docs)]
+        ctx.late_interaction_doc_keys = doc_keys
 
         for i in range(n_docs):
             query_idx = 0 if n_queries == 1 else i
@@ -284,7 +381,6 @@ class ServingScores(PoolingServing):
             prompt_extras=ctx.prompt_extras,
         )
 
-        await self._prepare_generators(doc_ctx)
-        await self._collect_batch(doc_ctx)
+        await self._collect_late_interaction_batch(doc_ctx)
 
         ctx.final_res_batch = doc_ctx.final_res_batch

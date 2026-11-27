@@ -14,8 +14,12 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
+from vllm.multimodal.image import open_image
 from vllm.utils.import_utils import is_numba_available
 from vllm.utils.jit_monitor import numba_workqueue_threading_layer
+
+_IDENTITY_LUT = np.tile(np.arange(256, dtype=np.uint8)[:, None], (1, 3))
+_SOLID_BG_VALUES = {"white": 255, "black": 0, "gray": 128}
 
 if is_numba_available():
     from numba import njit, prange
@@ -143,29 +147,60 @@ def navit_resize_video(
     return ret
 
 
-def _to_pil(data: Any) -> Image.Image:
+def _fill_transparent_bg(
+    image: Image.Image, bg_config: dict[str, Any] | None
+) -> Image.Image:
+    """Convert to RGB, compositing alpha over the checkpoint's background.
+
+    Mirrors `fill_transparent_bg_with` of the checkpoint's `media_utils.py`.
+    """
+    if image.mode == "RGB":
+        return image
+    has_alpha = "A" in image.getbands() or "transparency" in image.info
+    if bg_config is None or not has_alpha:
+        return image.convert("RGB")
+
+    rgba = np.asarray(image.convert("RGBA"))
+    height, width = rgba.shape[:2]
+    pattern = bg_config.get("pattern", "black")
+    if pattern == "chessboard":
+        square = bg_config.get("chessboard_square_size", 16)
+        rows = (np.arange(height) // square)[:, None]
+        cols = (np.arange(width) // square)[None, :]
+        gray_parity = 1 if bg_config.get("chessboard_square_on_top_left", True) else 0
+        bg = np.where(
+            (rows + cols) % 2 == gray_parity,
+            bg_config.get("chessboard_gray_value", 200),
+            bg_config.get("chessboard_white_value", 255),
+        ).astype(np.uint8)
+    elif pattern in _SOLID_BG_VALUES:
+        bg = np.full((height, width), _SOLID_BG_VALUES[pattern], dtype=np.uint8)
+    else:
+        raise ValueError(f"Invalid background pattern: {pattern}")
+
+    alpha = rgba[:, :, 3:].astype(np.float32) / 255.0
+    blended = alpha * rgba[:, :, :3] + (1 - alpha) * bg[:, :, None]
+    return Image.fromarray(blended.astype(np.uint8))
+
+
+def _to_pil(
+    data: Any, bg_config: dict[str, Any] | None = None, to_rgb: bool = True
+) -> Image.Image:
     if hasattr(data, "media") and hasattr(data, "original_bytes"):
         data = data.media
     if isinstance(data, Image.Image):
-        return data if data.mode == "RGB" else data.convert("RGB")
-    if isinstance(data, str):
+        image = data
+    elif isinstance(data, str):
         if data.startswith("data:"):
             raw_base64 = data.split(",", 1)[1]
-            return Image.open(io.BytesIO(base64.b64decode(raw_base64))).convert("RGB")
-        return Image.open(data).convert("RGB")
-    if isinstance(data, bytes):
-        return Image.open(io.BytesIO(data)).convert("RGB")
-    raise ValueError(f"Unsupported data type: {type(data)}")
-
-
-def _ensure_media_type(media: dict[str, Any]) -> dict[str, Any]:
-    if media["type"] == "image":
-        media["image"] = _to_pil(media["image"])
-        return media
-    if media["type"] == "video_chunk":
-        media["video_chunk"] = [_to_pil(frame) for frame in media["video_chunk"]]
-        return media
-    raise ValueError(f"Unsupported media type: {media['type']}")
+            image = open_image(io.BytesIO(base64.b64decode(raw_base64)))
+        else:
+            image = open_image(data)
+    elif isinstance(data, bytes):
+        image = open_image(io.BytesIO(data))
+    else:
+        raise ValueError(f"Unsupported data type: {type(data)}")
+    return _fill_transparent_bg(image, bg_config) if to_rgb else image
 
 
 class KimiK25FusedVisionProcessor(BaseImageProcessor):
@@ -185,9 +220,30 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
         self.normalize_lut = (values / 255.0 - image_mean[None, :]) * image_std_inv[
             None, :
         ]
+        # Kimi-K3 composites transparent images over a background, by default
+        # after resizing them in their original mode; Kimi-K2.5 sets neither.
+        self.transparent_bg_config = media_proc_cfg.get("transparent_bg_config")
+        self.fill_bg_before_resize = (
+            media_proc_cfg.get("transparent_bg_fill_stage", "before_resize")
+            == "before_resize"
+        )
+
+    def _ensure_media_type(self, media: dict[str, Any]) -> dict[str, Any]:
+        def to_pil(data: Any) -> Image.Image:
+            return _to_pil(
+                data, self.transparent_bg_config, to_rgb=self.fill_bg_before_resize
+            )
+
+        if media["type"] == "image":
+            media["image"] = to_pil(media["image"])
+            return media
+        if media["type"] == "video_chunk":
+            media["video_chunk"] = [to_pil(frame) for frame in media["video_chunk"]]
+            return media
+        raise ValueError(f"Unsupported media type: {media['type']}")
 
     def media_tokens_calculator(self, media: dict[str, Any]) -> int:
-        media = _ensure_media_type(media)
+        media = self._ensure_media_type(media)
         ret = self.get_resize_config(media)
         return ret["num_tokens"]
 
@@ -229,16 +285,22 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
 
         raise ValueError(f"Unsupported type: {media_input['type']}")
 
-    @staticmethod
-    def resize_image(image: Image.Image, new_width: int, new_height: int) -> np.ndarray:
+    def resize_image(
+        self, image: Image.Image, new_width: int, new_height: int
+    ) -> np.ndarray:
         image = image.resize((new_width, new_height), resample=Image.Resampling.BICUBIC)
-        return np.asarray(image)
+        return np.asarray(_fill_transparent_bg(image, self.transparent_bg_config))
 
     def preprocess(
         self,
         medias: list[dict[str, Any]],
         return_tensors: str | TensorType | None = None,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
     ) -> BatchFeature:
+        assert do_rescale == do_normalize
+        device_normalize = not do_normalize
+
         if not isinstance(medias, list):
             medias = [medias]
         if not medias:
@@ -253,7 +315,7 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
         total_patches = 0
 
         for idx, item in enumerate(medias):
-            item = _ensure_media_type(item)
+            item = self._ensure_media_type(item)
             resize_config = self.get_resize_config(item)
             new_width = resize_config["new_width"]
             new_height = resize_config["new_height"]
@@ -296,8 +358,9 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
             )
             total_patches += num_patches
 
+        lut = _IDENTITY_LUT if device_normalize else self.normalize_lut
         pixel_values_np = np.empty(
-            (total_patches, 3, patch_size, patch_size), dtype=np.float32
+            (total_patches, 3, patch_size, patch_size), dtype=lut.dtype
         )
         out_offset = 0
         with numba_workqueue_threading_layer():
@@ -318,7 +381,7 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
                     padded_height,
                     padded_width,
                     patch_size,
-                    self.normalize_lut,
+                    lut,
                 )
                 out_offset += num_patches
 

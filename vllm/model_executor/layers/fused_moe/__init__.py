@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutedScaleMode,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -79,6 +80,7 @@ __all__ = [
     "FusedMoEPrepareAndFinalizeModular",
     "GateLinear",
     "MoERunner",
+    "RoutedScaleMode",
     "RoutingMethodType",
     "RoutedExperts",
     "SharedExperts",
@@ -106,7 +108,11 @@ if HAS_TRITON:
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
@@ -132,7 +138,11 @@ if HAS_TRITON:
     )
 
     __all__ += [
-        "AiterExperts",
+        "AiterUnquantizedExperts",
+        "AiterFp8BlockExperts",
+        "AiterFp8TensorExperts",
+        "AiterFp8ChannelExperts",
+        "AiterMxfp4Experts",
         "fused_topk",
         "fused_experts",
         "get_config_file_name",

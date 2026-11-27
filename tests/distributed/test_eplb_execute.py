@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,9 +24,123 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+def test_async_eplb_worker_stops_before_model_teardown(
+    tmp_path,
+    vllm_runner,
+    enable_pickle,
+):
+    """Worker shutdown must not leave EPLB accessing released model resources."""
+    import psutil
+    from transformers import Qwen3MoeConfig
+
+    from vllm import SamplingParams
+
+    def worker_lifecycle(worker) -> tuple[bool, bool, int | None, bool]:
+        state = worker.model_runner.eplb_state
+        process = state.policy_process
+        return (
+            hasattr(worker.model_runner, "model"),
+            state.async_worker is not None and state.async_worker.is_alive(),
+            None if process is None else process._process.pid,
+            all(ms.eplb_stats is not None for ms in state.model_states.values()),
+        )
+
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        num_hidden_layers=2,
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_experts=8,
+        num_experts_per_tok=2,
+        vocab_size=1024,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config={
+            "use_async": True,
+            "step_interval": 4,
+            "window_size": 2,
+            "num_redundant_experts": 2,
+        },
+        kernel_config={"moe_backend": "triton", "enable_jit_warmup": False},
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+    ) as runner:
+        outputs = runner.llm.generate(
+            [{"prompt_token_ids": [10, 20, 30]}],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                detokenize=False,
+            ),
+            use_tqdm=False,
+        )
+        assert len(outputs[0].outputs[0].token_ids) == 8
+        before = runner.llm.collective_rpc(worker_lifecycle, timeout=30)
+        planner_pids = [pid for _, _, pid, _ in before]
+        assert [(m, w, s) for m, w, _, s in before] == [(True, True, True)] * 2
+        assert all(pid is not None and psutil.pid_exists(pid) for pid in planner_pids)
+        assert len(set(planner_pids)) == 2
+
+        runner.llm.collective_rpc("shutdown", timeout=30)
+
+        assert (
+            runner.llm.collective_rpc(worker_lifecycle, timeout=30)
+            == [(False, False, None, True)] * 2
+        )
+        assert all(not psutil.pid_exists(pid) for pid in planner_pids if pid)
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e8m0fnu, torch.float4_e2m1fn_x2])
+def test_set_eplb_state_registers_byte_dtypes_as_uint8_views(dtype):
+    """NCCL lacks these dtypes, so EPLB must see their bytes as uint8 views
+    sharing storage with the parameter the kernel reads."""
+    weight = torch.zeros(2, 8, dtype=torch.int32)
+    scale = torch.zeros(2, 4, dtype=torch.uint8).view(dtype)
+    layer = SimpleNamespace(
+        get_expert_weights=lambda: [weight, scale],
+        set_eplb_state=lambda **_: None,
+    )
+    model = SimpleNamespace(moe_layers=[layer])
+    empty = torch.empty(0)
+    MixtureOfExperts.set_eplb_state(model, empty, empty, empty)
+
+    registered_weight, registered_scale = model.expert_weights[0]
+    assert registered_weight is weight
+    assert registered_scale.dtype == torch.uint8
+    registered_scale.fill_(127)
+    assert torch.equal(scale.view(torch.uint8), registered_scale)
+
+
+def _skip_unless_symm_mem(world_size: int) -> None:
+    if not current_platform.is_cuda() or not current_platform.is_fully_connected(
+        [
+            current_platform.visible_device_id_to_physical_device_id(i)
+            for i in range(world_size)
+        ]
+    ):
+        pytest.skip("symm_mem requires NVLink-connected CUDA GPUs")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -36,7 +151,11 @@ def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
     gsd._install_copy_checkers()
     monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
 
-    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+    monkeypatch.setattr(
+        eplb_comm,
+        "P2POp",
+        lambda op, tensor, peer=None, group=None, tag=0, group_peer=None: tensor,
+    )
 
     def receive(tensors):
         for tensor in tensors:
@@ -409,6 +528,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
+        expert_buffer = communicator.owned_expert_buffer or expert_buffer
         communicator.set_stream(stream)
 
         for layer_idx in range(num_layers):
@@ -430,6 +550,8 @@ def _test_async_transfer_layer_without_mtp_worker(
                 new_indices=new_indices_cpu[layer_idx].numpy(),
                 ep_rank=ep_rank,
             )
+            # As in the async worker: expert_buffer writes are not stream-ordered.
+            torch.accelerator.current_stream().synchronize()
 
     local_ok = verify_expert_weights_after_shuffle(
         expert_weights,
@@ -524,6 +646,7 @@ def _test_rearrange_expert_weights_with_redundancy(
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
+        expert_buffer = communicator.owned_expert_buffer or expert_buffer
 
         # Execute weight rearrangement
         rearrange_expert_weights_inplace(
@@ -587,7 +710,8 @@ def _test_rearrange_expert_weights_with_redundancy(
     ],
 )
 @pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "torch_xccl", "pynccl", "nixl"]
+    "eplb_communicator",
+    ["torch_nccl", "torch_gloo", "torch_xccl", "pynccl", "nixl", "symm_mem"],
 )
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
@@ -607,6 +731,8 @@ def test_rearrange_expert_weights_with_redundancy(
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if eplb_communicator == "symm_mem":
+        _skip_unless_symm_mem(world_size)
     distributed_run(
         _test_rearrange_expert_weights_with_redundancy,
         world_size,
@@ -707,7 +833,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "torch_xccl", "nixl"])
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_gloo", "torch_xccl", "nixl", "symm_mem"]
+)
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -724,6 +852,8 @@ def test_async_transfer_layer_without_mtp(
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if eplb_communicator == "symm_mem":
+        _skip_unless_symm_mem(world_size)
 
     distributed_run(
         _test_async_transfer_layer_without_mtp_worker,
@@ -849,3 +979,42 @@ def test_rearrange_expert_weights_profile_mode(world_size):
         _test_rearrange_expert_weights_profile_mode,
         world_size,
     )
+
+
+def _test_eplb_communicator_pipeline_parallel(env, world_size, backend):
+    set_env_vars_and_device(env)
+    config = VllmConfig()
+    config.parallel_config.tensor_parallel_size = 2
+    config.parallel_config.pipeline_parallel_size = world_size // 2
+
+    with set_current_vllm_config(config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=2,
+            pipeline_model_parallel_size=world_size // 2,
+        )
+        ep_group = get_tp_group()
+        peer_rank = 1 - ep_group.rank_in_group
+        rank = torch.distributed.get_rank()
+        send_tensor = torch.full((16,), rank, device="cuda", dtype=torch.int32)
+        recv_tensor = torch.empty_like(send_tensor)
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group,
+            backend=backend,
+            expert_weights=[[send_tensor]],
+            expert_buffer=[recv_tensor],
+        )
+        communicator.add_send([send_tensor], peer_rank, expert_id=0)
+        communicator.add_recv([recv_tensor], peer_rank, expert_id=0)
+        communicator.execute()
+
+        expected = torch.full_like(recv_tensor, ep_group.ranks[peer_rank])
+        torch.testing.assert_close(recv_tensor, expected)
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("backend", ["torch_nccl", "torch_gloo"])
+def test_eplb_communicator_pipeline_parallel(world_size, backend):
+    """Transfer weights within each PP stage, including nonzero global ranks."""
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(_test_eplb_communicator_pipeline_parallel, world_size, backend)
