@@ -157,11 +157,11 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
-        # Without a tool parser nothing else consumes reasoning markers, so a
-        # grammar that can open reasoning from content parses the whole stream,
-        # as the non-streaming path does, even when the prompt closed reasoning.
+        # Without a tool parser, keep feeding the reasoning parser after
+        # reasoning ends, as the non-streaming path does: an engine parser
+        # drops the special tokens its adjust_request kept in the text.
         self._reasoning_engine_streams_all = self._tool_parser is None and getattr(
-            self._reasoning_parser, "opens_reasoning_in_content", False
+            self._reasoning_parser, "engine_based_streaming", False
         )
         if (
             self._reasoning_parser is None
@@ -907,8 +907,11 @@ class DelegatingParser(Parser):
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
-            if should_transition and not self._reasoning_engine_streams_all:
+            if should_transition:
+                # Also when the engine keeps streaming, so finalize_generation
+                # does not promote reasoning into content after real content.
                 state.reasoning_ended = True
+            if should_transition and not self._reasoning_engine_streams_all:
                 reasoning_transitioned = True
                 current_token_ids = self._extract_content_ids(delta_token_ids)
                 # Flush whenever the reasoning parser is engine-based (not only
