@@ -10,6 +10,7 @@ Validates that `Qwen3Parser` correctly handles
 """
 
 import dataclasses
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -784,3 +785,78 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+    def test_adjust_request_preserves_skip_special_tokens_when_thinking_disabled(
+        self, mock_tokenizer
+    ):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        req = MagicMock()
+        req.chat_template_kwargs = {"enable_thinking": False}
+        req.tools = None
+        req.tool_choice = "none"
+        req.skip_special_tokens = True
+
+        adjusted = p.adjust_request(req)
+        assert adjusted.skip_special_tokens is True
+
+    def test_adjust_request_sets_skip_special_tokens_false_when_thinking_enabled(
+        self, mock_tokenizer
+    ):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        req = MagicMock()
+        req.chat_template_kwargs = {"enable_thinking": True}
+        req.tools = None
+        req.tool_choice = "none"
+        req.skip_special_tokens = True
+
+        adjusted = p.adjust_request(req)
+        assert adjusted.skip_special_tokens is False
+
+    def test_adjust_request_honors_request_chat_template_kwargs(self, mock_tokenizer):
+        p = Qwen3Parser(mock_tokenizer)  # defaults to thinking_enabled=True
+        req = MagicMock()
+        req.chat_template_kwargs = {"enable_thinking": False}
+        req.tools = None
+        req.tool_choice = "none"
+        req.skip_special_tokens = True
+
+        adjusted = p.adjust_request(req)
+        assert adjusted.skip_special_tokens is True
+
+    def test_adjust_request_sets_skip_special_tokens_false_when_tools_present(
+        self, mock_tokenizer
+    ):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        req = MagicMock()
+        req.chat_template_kwargs = {"enable_thinking": False}
+        req.tools = [{"type": "function", "function": {"name": "test_func"}}]
+        req.tool_choice = "auto"
+        req.skip_special_tokens = True
+
+        adjusted = p.adjust_request(req)
+        assert adjusted.skip_special_tokens is False
+
+    def test_delegating_parser_preserves_skip_special_tokens_when_thinking_disabled(
+        self, mock_tokenizer
+    ):
+        dp = _Qwen3DelegatingParser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        req = MagicMock()
+        req.chat_template_kwargs = {"enable_thinking": False}
+        req.tools = None
+        req.tool_choice = "none"
+        req.skip_special_tokens = True
+
+        adjusted = dp.adjust_request(req)
+        assert adjusted.skip_special_tokens is True
