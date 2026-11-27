@@ -557,7 +557,7 @@ _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 _DEQUANT_CHUNK_BYTES = 1 << 30
 
 
-def dequant_mxfp4(
+def dequantize_mxfp4_weight(
     weight: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
 ) -> torch.Tensor:
     """Dequantize OCP MXFP4 weights exactly.
@@ -609,7 +609,9 @@ def repack_mxfp4_fnuz_checkpoint_blocks(
     if not empty_partition:
         for expert in range(experts):
             src_scale = scale[expert].view(torch.uint8)
-            ref = dequant_mxfp4(weight[expert], src_scale, torch.float64).view(grid)
+            ref = dequantize_mxfp4_weight(
+                weight[expert], src_scale, torch.float64
+            ).view(grid)
             # The published converter uses the source E8M0 scale maximum,
             # including groups whose payload is entirely zero.
             max_exp = src_scale.view(rows // 128, 128, cols // 128, 4).amax((1, 3))
@@ -647,6 +649,6 @@ def dequantize_mxfp4_moe_weights(
         experts = slice(start, min(start + experts_per_chunk, num_experts))
         yield (
             experts,
-            dequant_mxfp4(w13_weight[experts], w13_scale[experts], out_dtype),
-            dequant_mxfp4(w2_weight[experts], w2_scale[experts], out_dtype),
+            dequantize_mxfp4_weight(w13_weight[experts], w13_scale[experts], out_dtype),
+            dequantize_mxfp4_weight(w2_weight[experts], w2_scale[experts], out_dtype),
         )

@@ -10,8 +10,8 @@ import torch
 import vllm.model_executor.layers.quantization.online.fp8 as online_fp8
 from vllm.model_executor.layers.quantization.utils import mxfp4_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    dequant_mxfp4,
     dequantize_mxfp4_moe_weights,
+    dequantize_mxfp4_weight,
 )
 
 E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -40,24 +40,24 @@ def _mxfp4(rows: int, cols: int, low: int, high: int, seed: int = 0):
     return weight, scale
 
 
-def test_dequant_mxfp4_is_exact_with_positive_zero() -> None:
+def test_dequantize_mxfp4_weight_is_exact_with_positive_zero() -> None:
     # Scales above 2**123 would overflow bf16 for the largest codes.
     weight, scale = _mxfp4(64, 256, 0, 250)
     expected = _reference(weight, scale)
 
-    actual = dequant_mxfp4(weight, scale, torch.float32)
+    actual = dequantize_mxfp4_weight(weight, scale, torch.float32)
 
     assert torch.equal(actual.double(), expected)
     assert not torch.signbit(actual[actual == 0]).any()
-    bf16 = dequant_mxfp4(weight, scale, torch.bfloat16)
+    bf16 = dequantize_mxfp4_weight(weight, scale, torch.bfloat16)
     assert torch.equal(bf16.double(), expected)
 
 
-def test_dequant_mxfp4_rejects_nan_scale() -> None:
+def test_dequantize_mxfp4_weight_rejects_nan_scale() -> None:
     weight, scale = _mxfp4(32, 64, 100, 130)
     scale[3, 1] = 255
     with pytest.raises(ValueError, match="NaN"):
-        dequant_mxfp4(weight, scale, torch.bfloat16)
+        dequantize_mxfp4_weight(weight, scale, torch.bfloat16)
 
 
 @pytest.mark.parametrize("empty_partition", [False, True])
@@ -117,7 +117,7 @@ def test_power_of_two_block_fp8_keeps_mxfp4_exact(
     weight[1, 0] = 0x01  # 0.5 * 2**-14, the smallest value
     scale[1, 0] = 113
     values = torch.zeros(384, 256, dtype=torch.bfloat16)
-    values[:288] = dequant_mxfp4(weight, scale, torch.bfloat16)
+    values[:288] = dequantize_mxfp4_weight(weight, scale, torch.bfloat16)
 
     quantized, block_scale = online_fp8._per_block_cast_to_fp8_pow2(values, [128, 128])
 
