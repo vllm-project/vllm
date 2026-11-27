@@ -178,6 +178,9 @@ class EngineCoreReadyResponse:
     # total, for frontends without a VllmConfig (the Rust frontend). Set
     # without chunked prefill, when they are all encoded in one step.
     max_mm_embeds_per_request: int | None = None
+    # `DeviceConfig.device_type` of this engine (e.g. `cuda`, `cpu`), which the
+    # stat loggers of frontends without a VllmConfig (the Rust frontend) print.
+    device_type: str | None = None
 
 
 class EngineCoreRequest(
