@@ -8,6 +8,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cuda/ptx>
 #include <cstdint>
 #include <type_traits>
 
@@ -510,10 +511,12 @@ __device__ void exact_topk_rescan(const InT* __restrict__ scores,
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
           bool UsePredicatedLoads = false, OverflowRecovery Recovery,
-          typename InT>
+          typename InT, bool kStaged = false>
 __device__ void histogram_4096_topk(const InT* __restrict__ scores,
                                     int32_t* __restrict__ output,
-                                    uint32_t length, void* _smem) {
+                                    uint32_t length, void* _smem,
+                                    const InT* staged = nullptr,
+                                    uint64_t* stage_bars = nullptr) {
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
   constexpr uint32_t ITEMS_PER_THREAD = HIST_BINS / kBlockSize;
   static_assert(HIST_BINS >= kBlockSize,
@@ -540,48 +543,73 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
     smem->counter_gt = 0;
     smem->counter_eq = 0;
   }
-  if constexpr (UsePredicatedLoads || sizeof(InT) == 2) {
-    const bool row_aligned =
-        (reinterpret_cast<uintptr_t>(scores) % sizeof(vecs[0])) == 0;
+  bool done = false;
+  if constexpr (kStaged) {
+    static_assert(!UsePredicatedLoads && sizeof(InT) == 4);
+    __syncthreads();
 #pragma unroll
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
-      const uint32_t base = (tx + v * kBlockSize) * 4;
-      if (base < length) {
-        if (row_aligned && base + 3 < length) {
-          load_vec4(scores + base, vecs[v]);
-        } else {
-          load_vec4_predicated(scores + base, static_cast<int>(base),
-                               static_cast<int>(length), vecs[v]);
+      if (v * kBlockSize * 4 < length) {
+        while (!cuda::ptx::mbarrier_try_wait_parity(&stage_bars[v], 0)) {
+        }
+        const uint32_t base = (tx + v * kBlockSize) * 4;
+        if (base < length) {
+          load_vec4(staged + base, vecs[v]);
+          const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
+#pragma unroll
+          for (uint32_t e = 0; e < 4; e++) {
+            if (base + e < length) {
+              atomicAdd(&smem->histogram[vec_bin<HIST_BITS>(vecs[v], bins, e)],
+                        1);
+            }
+          }
         }
       }
     }
+    __syncthreads();
   } else {
+    if constexpr (UsePredicatedLoads || sizeof(InT) == 2) {
+      const bool row_aligned =
+          (reinterpret_cast<uintptr_t>(scores) % sizeof(vecs[0])) == 0;
 #pragma unroll
-    for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
-      const uint32_t base = (tx + v * kBlockSize) * 4;
-      if (base < length) {
-        load_vec4(scores + base, vecs[v]);
+      for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
+        const uint32_t base = (tx + v * kBlockSize) * 4;
+        if (base < length) {
+          if (row_aligned && base + 3 < length) {
+            load_vec4(scores + base, vecs[v]);
+          } else {
+            load_vec4_predicated(scores + base, static_cast<int>(base),
+                                 static_cast<int>(length), vecs[v]);
+          }
+        }
+      }
+    } else {
+#pragma unroll
+      for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
+        const uint32_t base = (tx + v * kBlockSize) * 4;
+        if (base < length) {
+          load_vec4(scores + base, vecs[v]);
+        }
       }
     }
-  }
-  __syncthreads();
+    __syncthreads();
 
-  // Build histogram from RF via atomic adds into the shared histogram
-  bool done = false;
+    // Build histogram from RF via atomic adds into the shared histogram
 #pragma unroll
-  for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
+    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+      const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
 #pragma unroll
-    for (uint32_t e = 0; e < 4 && !done; e++) {
-      const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
-      if (idx >= length) {
-        done = true;
-      } else {
-        atomicAdd(&smem->histogram[vec_bin<HIST_BITS>(vecs[v], bins, e)], 1);
+      for (uint32_t e = 0; e < 4 && !done; e++) {
+        const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+        if (idx >= length) {
+          done = true;
+        } else {
+          atomicAdd(&smem->histogram[vec_bin<HIST_BITS>(vecs[v], bins, e)], 1);
+        }
       }
     }
+    __syncthreads();
   }
-  __syncthreads();
 
   // Phase 2: Prefix scan to find threshold bin
   // Multi-element scan (4096 bins: 4 per thread)

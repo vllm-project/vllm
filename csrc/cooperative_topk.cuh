@@ -34,6 +34,8 @@ constexpr uint32_t kElemPerStage = 16;
 constexpr uint32_t kSizePerStage =
     kElemPerStage * hist4096::kBlockSize;  // 16384
 
+constexpr uint32_t kStagedShortRowMinLen = 6 * 1024;
+
 // CS=4 two-pass path uses two TMA stages as a double buffer.
 constexpr uint32_t kStreamingStagesCS4 = 2;
 // BF16 stages take half the bytes, so the same smem holds twice as many.
@@ -708,6 +710,46 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
   if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
     if (rank == 0) {
       extern __shared__ __align__(128) uint8_t sr[];
+      if constexpr (kOversizedSmem && sizeof(InT) == 4) {
+        if (sl > static_cast<int32_t>(kStagedShortRowMinLen)) {
+          constexpr uint32_t kSteps = hist4096::kHist4096VecsPerThread;
+          constexpr uint32_t kStepElems = hist4096::kBlockSize * 4;
+          static_assert(
+              sizeof(hist4096::Histogram4096Smem<TopK, 12>) +
+                  hist4096::kHist4096MaxLen * sizeof(InT) + 256 <=
+              sizeof(SmemFused<kFusedStagesCS16Oversized<InT>, 1, InT>));
+          uint32_t dyn;
+          asm volatile("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn));
+          const uint32_t bar_off = (dyn - kSteps * sizeof(uint64_t)) & ~127u;
+          auto* bars = reinterpret_cast<uint64_t*>(sr + bar_off);
+          auto* buf = reinterpret_cast<InT*>(
+              sr +
+              ((bar_off - hist4096::kHist4096MaxLen * sizeof(InT)) & ~127u));
+          if (tx == 0) {
+            for (uint32_t s = 0; s < kSteps; s++) {
+              mbarrier_init(&bars[s], 1);
+            }
+            asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+          }
+          __syncthreads();
+          if (tx == 0) {
+            const uint32_t bytes =
+                (static_cast<uint32_t>(sl) * sizeof(InT) + 15) & ~15u;
+            for (uint32_t s = 0; s * kStepElems * sizeof(InT) < bytes; s++) {
+              const uint32_t off = s * kStepElems * sizeof(InT);
+              const uint32_t step_bytes = kStepElems * sizeof(InT);
+              const uint32_t n = min(step_bytes, bytes - off);
+              mbarrier_arrive_expect_tx(&bars[s], n);
+              tma_load(reinterpret_cast<uint8_t*>(buf) + off,
+                       reinterpret_cast<const uint8_t*>(in) + off, n, &bars[s]);
+            }
+          }
+          hist4096::histogram_4096_topk<TopK, 12, kSteps, false,
+                                        hist4096::OverflowRecovery::kFp32Rescan,
+                                        InT, true>(in, out, sl, sr, buf, bars);
+          return;
+        }
+      }
       hist4096::histogram_4096_topk<
           TopK, 12, hist4096::kHist4096VecsPerThread, false,
           hist4096::OverflowRecovery::kFp32Rescan, InT>(
