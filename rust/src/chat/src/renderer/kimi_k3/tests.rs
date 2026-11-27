@@ -115,6 +115,43 @@ fn render_request(request: &crate::request::ChatRequest) -> String {
     tokenizer.decode(&token_ids, false).unwrap()
 }
 
+/// A tool result that matches no tool call, and replayed tool-call arguments
+/// that are JSON but not an object, are the request's messages' errors.
+#[test]
+fn message_refusals_are_request_errors() {
+    let renderer = KimiK3ChatRenderer::new(
+        Arc::new(test_tokenizer()),
+        Default::default(),
+        KimiK3Variant::K3,
+    );
+    let call = |arguments: &str| {
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call-known".to_string(),
+            name: "lookup".to_string(),
+            arguments: arguments.to_string(),
+        })])
+    };
+    for messages in [
+        vec![
+            ChatMessage::user("hi"),
+            call("{}"),
+            ChatMessage::tool_response("{}", "call-unknown"),
+        ],
+        vec![ChatMessage::user("hi"), call("[1]")],
+    ] {
+        let request = crate::request::ChatRequest {
+            messages,
+            ..crate::request::ChatRequest::for_test()
+        };
+        let error = renderer.render(&request).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::error::ErrorKind::invalid_param("messages"),
+            "{error:?}"
+        );
+    }
+}
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src/renderer/kimi_k3/fixtures")

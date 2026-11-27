@@ -1,11 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from http import HTTPStatus
+from io import BytesIO
+
 import pytest
+import requests
 import torch
 
+import vllm.envs as envs
+from tests.multimodal.utils import create_long_gop_video
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.connections import MediaFetchDeadlineExceededError
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
+from vllm.renderers.chat_utils.types import (
+    ChatCompletionContentPartAudioParam,
+    ChatCompletionContentPartVideoParam,
+)
 from vllm.utils.serial_utils import tensor2base64
 
 from .utils import (
@@ -14,6 +28,34 @@ from .utils import (
 )
 
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+
+
+def test_parse_chat_messages_checks_video_audio_limit_before_url_loading():
+    model_config = ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": 1, "audio": 0},
+        allowed_media_domains=["allowed.example"],
+    )
+
+    # This URL cannot reach the network even if the connector is called.
+    with pytest.raises(VLLMValidationError, match="At most 0 audio"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "https://other.example/video.mp4"},
+                        }
+                    ],
+                }
+            ],
+            model_config,
+            content_format="string",
+            mm_processor_kwargs={"load_audio_from_video": True},
+        )
 
 
 @pytest.fixture(scope="function")
@@ -48,6 +90,60 @@ def qwen25omni_model_config_mm_interleaved():
             "video": 1,
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("parameter", "load_audio_from_video"),
+    [("audio_url", False), ("video_url", False), ("video_url", True)],
+    ids=["audio", "video", "video-soundtrack"],
+)
+def test_parse_chat_messages_media_deadline_reports_url_field(
+    qwen25omni_model_config_mm_interleaved: ModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    parameter: str,
+    load_audio_from_video: bool,
+) -> None:
+    part: ChatCompletionContentPartAudioParam | ChatCompletionContentPartVideoParam
+    if parameter == "audio_url":
+        part = {
+            "type": "audio_url",
+            "audio_url": {"url": "https://media.invalid/audio"},
+        }
+    else:
+        part = {
+            "type": "video_url",
+            "video_url": {"url": "https://media.invalid/video"},
+        }
+
+    video_response = None
+    if load_audio_from_video:
+        # Decode a valid video first, then time out fetching its soundtrack.
+        video_response = requests.Response()
+        video_response.status_code = HTTPStatus.OK
+        video_response.raw = BytesIO(create_long_gop_video(num_frames=2))
+
+    def fetch(*args: object, **kwargs: object) -> requests.Response:
+        nonlocal video_response
+        if video_response is not None:
+            response, video_response = video_response, None
+            return response
+        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+
+    monkeypatch.setattr(envs, "VLLM_MEDIA_CACHE", "")
+    monkeypatch.setattr(requests.Session, "send", fetch)
+
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+        parse_chat_messages(
+            [{"role": "user", "content": [part]}],
+            qwen25omni_model_config_mm_interleaved,
+            content_format="string",
+            mm_processor_kwargs={"load_audio_from_video": load_audio_from_video},
+        )
+
+    error = create_error_response(exc_info.value).error
+    assert error.code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert error.param == parameter
+    assert "Media fetch exceeded its time limit" in error.message
 
 
 def test_parse_chat_messages_empty_video_embeds_with_uuid(

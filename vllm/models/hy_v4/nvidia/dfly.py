@@ -38,10 +38,10 @@ from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from ..common.mrope import set_token_rope
 from ..dfly_config import HYV4DFlySpeculatorConfig
 from .model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
-from .mrope import set_token_rope
 
 
 class HYV4DFlyQuantizationConfig(CompressedTensorsConfig):
@@ -69,7 +69,15 @@ class HYV4DFlyQuantizationConfig(CompressedTensorsConfig):
         scheme = super().get_scheme_dict(layer, layer_name)
         if scheme is not None:
             weights = scheme["weights"]
-            if not isinstance(weights, QuantizationArgs) or weights.num_bits != 8:
+            activations = scheme["input_activations"]
+            if not (
+                isinstance(weights, QuantizationArgs)
+                and isinstance(activations, QuantizationArgs)
+                and self._is_fp8_w8a8(weights, activations)
+                and weights.num_bits == activations.num_bits == 8
+                and weights.block_structure == [128, 128]
+                and activations.dynamic
+            ):
                 raise ValueError("HYV4 DFly draft layers require BF16 or blockwise FP8")
         return scheme
 

@@ -239,6 +239,8 @@ pub enum ChatEvent {
         usage: ChatTokenUsage,
         /// Engine lifecycle times used by frontend response metrics.
         timestamps: RequestTimestamps,
+        /// First engine output batch that produced non-empty parsed text.
+        first_content_token_ts: Option<f64>,
         /// Per-request speculative-decoding statistics emitted by the engine.
         spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
         finish_reason: FinishReason,
