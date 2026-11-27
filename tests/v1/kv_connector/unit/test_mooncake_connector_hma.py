@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    MLAAttentionSpec,
 )
 
 from .offloading_connector.utils import make_kv_cache_group
@@ -782,3 +783,86 @@ def test_hisparse_import_rejects_incompatible_layout(hisparse_producer):
         "Region-mapped source and destination payloads differ "
         f"for layer {regions[1].layer_name}: source={page}, destination={page + 1}"
     )
+
+
+@pytest.mark.cpu_test
+def test_hisparse_producer_pp_import_and_validation():
+    """Producer PP stages copy their own layers to a PP1 HiSparse decoder."""
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.uint8
+    )
+    page = spec.page_size_bytes
+    stages = [0, 1]
+    stage_names = [
+        (f"model.layers.{s}.mla_attn", f"model.layers.{s}.indexer") for s in stages
+    ]
+    d_cfg = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group([n[0] for n in stage_names], spec),
+            make_kv_cache_group([n[1] for n in stage_names], spec),
+        ],
+    )
+    d_cfg.kv_cache_groups[0].host_resident = True
+    d_cfg.hisparse_host_num_blocks = 8
+    d_cfg.hisparse_shared_host_pool = True
+
+    p_vllm = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
+    )
+    p_vllm.parallel_config = ParallelConfig(pipeline_parallel_size=2)
+
+    hosts = [torch.full((8, page), 0xCC, dtype=torch.uint8) for _ in stages]
+    gpus = [torch.full((8, page), 0xCC, dtype=torch.uint8) for _ in stages]
+    pull = _make_pull_meta("d", [[6, 5], [7, 2, 6]])
+    with mooncake_register_worker(
+        d_cfg, vllm_config=_hisparse_decoder_config(2), tp_size=2, tp_rank=0
+    ) as (decoder, _):
+        decoder.register_kv_caches(
+            {stage_names[s][0]: hosts[s] for s in stages}
+            | {stage_names[s][1]: gpus[s] for s in stages}
+        )
+        meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
+        assert all(off == -1 for off in meta.registered_row_offsets)
+
+    send = SendBlockMeta("p", pull.transfer_id, [[4, 3, 2, 1]], asyncio.Event())
+    for s in stages:
+        p_cfg = KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[make_kv_cache_group(list(stage_names[s]), spec)],
+        )
+        src_h = torch.full((8, page), 10 + s, dtype=torch.uint8)
+        src_g = torch.full((8, page), 20 + s, dtype=torch.uint8)
+        with mooncake_register_worker(
+            p_cfg, kv_role="kv_producer", vllm_config=p_vllm
+        ) as (producer, _):
+            producer.register_kv_caches(
+                {stage_names[s][0]: src_h, stage_names[s][1]: src_g}
+            )
+            local, remote, err = producer._prepare_transfer_regions(meta)
+            assert err is None and len(local) == len(remote) == 2
+            srcs, dsts, lens, errs, msg = asyncio.run(
+                producer._build_transfer_params([("d", send)], meta, local, remote)
+            )
+            assert errs == [] and msg is None
+            for src, dst, length in zip(srcs, dsts, lens):
+                ctypes.memmove(int(dst), int(src), int(length))
+            assert torch.all(hosts[s][[6, 5]] == 10 + s)
+            assert torch.all(gpus[s][[7, 2, 6]] == 20 + s)
+            if s == 0:
+                meta.remote_pp_size = 2
+                assert producer._prepare_transfer_regions(meta)[2] == (
+                    "Region-mapped imports require decoder PP1 and unsplit MLA pages"
+                )
+                meta.remote_pp_size = 1
+                missing = _xfer_meta(
+                    [r for r in remote if r.layer_name != stage_names[0][0]],
+                    {"d": ("x", [[5], [6]])},
+                )
+                assert producer._prepare_transfer_regions(missing)[2] == (
+                    "Producer has no matching destination layer"
+                )

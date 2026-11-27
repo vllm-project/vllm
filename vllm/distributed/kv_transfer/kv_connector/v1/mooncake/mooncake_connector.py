@@ -2347,13 +2347,12 @@ class MooncakeConnectorWorker:
         remote: list[TransferRegion],
     ) -> str | None:
         if (
-            self.pp_size != 1
-            or meta.remote_pp_size != 1
+            meta.remote_pp_size != 1
             or self._physical_blocks_per_logical_kv_block != 1
             or not self.use_mla
         ):
-            return "Region-mapped imports require PP1 and unsplit MLA pages"
-        if len(local) != len(remote):
+            return "Region-mapped imports require decoder PP1 and unsplit MLA pages"
+        if self.pp_size == 1 and len(local) != len(remote):
             return "Region-mapped imports require the same layers on both endpoints"
         for region in local + remote:
             if region.group_index < 0 or region.shared_group_ids not in (
@@ -2362,12 +2361,15 @@ class MooncakeConnectorWorker:
             ):
                 return "Region-mapped imports do not support opaque multi-group regions"
         local_by_name = {region.layer_name: region for region in local}
-        if len(local_by_name) != len(local):
+        remote_by_name = {region.layer_name: region for region in remote}
+        if len(local_by_name) != len(local) or len(remote_by_name) != len(remote):
             return "Region-mapped MLA imports require one region per layer"
-        for destination in remote:
-            source = local_by_name.get(destination.layer_name)
-            if source is None:
-                return "Destination has no matching producer layer"
+        # Each producer PP stage must cover all of its own layers. Check the
+        # original regions so partial-layer alignment cannot hide a missing one.
+        for source in local:
+            destination = remote_by_name.get(source.layer_name)
+            if destination is None:
+                return "Producer has no matching destination layer"
             if source.kv_block_len != destination.kv_block_len:
                 return (
                     "Region-mapped source and destination payloads differ "
@@ -2576,7 +2578,14 @@ class MooncakeConnectorWorker:
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(group_index)
                 self.region_shared_groups.append((group_index,))
-                self.region_row_offsets.append(view_addr - storage_addr)
+                # A full-stride page-contiguous tensor is a standalone layer,
+                # not an opaque packed row (offset 0, length == stride).
+                row_offset = (
+                    -1
+                    if page_contiguous and kv_block_len == block_stride
+                    else view_addr - storage_addr
+                )
+                self.region_row_offsets.append(row_offset)
                 continue
 
             block_is_contiguous = is_non_overlapping_and_dense(cache[0])

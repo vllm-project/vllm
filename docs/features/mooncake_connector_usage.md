@@ -62,6 +62,9 @@ set `--kv-transfer-config` to:
 
 Set `host_pool_gib` to the host-cache capacity in GiB per data-parallel replica.
 The prefiller and decoder can use different TP sizes, such as TP2 and TP4.
+The prefiller can also use pipeline parallelism (e.g., `--pipeline-parallel-size 2`)
+while the HiSparse decoder runs with `--pipeline-parallel-size 1`; each prefiller
+stage transfers its own sparse-MLA layers to the decoder.
 
 ## Environment Variables
 
