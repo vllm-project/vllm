@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for Qwen3-VL multimodal processing."""
 
+import asyncio
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -16,6 +19,7 @@ from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.processing import ProcessorInputs
 from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -566,57 +570,221 @@ def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
         processor.info.parse_mm_data(mm_data)
 
 
-@pytest.mark.parametrize("model_id", [MODEL_ID])
-def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> None:
-    """Regression test for memory profiling with `cap_pixels_per_frame`.
-
-    With the HF per-frame pixel cap enabled (transformers#48071) and a
-    raised video budget, a 2-frame profiling dummy would be processed at
-    only 2 * cap pixels, underestimating the largest possible video (a
-    fully sampled one still fills the whole `longest_edge` budget). The
-    dummy builder must spread the budget over enough frames that the cap
-    is not binding.
-    """
-    # 16 capped frames' worth of budget on top of the default per-frame
-    # ceiling (max_video_tokens=768 at patch 16, merge 2 -> 786,432
-    # pixels per frame).
+@pytest.mark.parametrize(
+    ("video_kwargs", "expected_frames"),
+    [
+        ({}, 2),
+        ({"cap_pixels_per_frame": True}, 4),
+        ({"cap_pixels_per_frame": True, "max_video_tokens": 1536}, 4),
+    ],
+)
+def test_dummy_video_spreads_budget_when_frame_cap_enabled(
+    video_kwargs: dict[str, object], expected_frames: int
+) -> None:
+    """Spread the profiling budget over frames using the actual HF ceiling."""
+    # The processor instance uses 768 tokens per frame at patch 16, merge 2.
     per_frame_cap = 768 * (16 * 2) ** 2
-    budget = per_frame_cap * 16
-    size = {"longest_edge": budget, "shortest_edge": 4096}
-
-    capped_ctx = build_model_context(
-        model_id,
+    size = {"longest_edge": per_frame_cap * 4, "shortest_edge": 4096}
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-Reranker-2B",
         mm_processor_kwargs={
             "videos_kwargs": {
                 "size": size,
-                "cap_pixels_per_frame": True,
+                **video_kwargs,
             },
         },
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
-    capped = MULTIMODAL_REGISTRY.create_processor(capped_ctx.model_config)
-    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    dummy = processor.dummy_inputs.get_dummy_mm_data(
         1024, {"video": 1}, MultiModalDummyOptions()
     )
-    capped_videos = capped_dummy["video"]
-    assert isinstance(capped_videos, list)
-    capped_frames = capped_videos[0][0].shape[0]
-    assert capped_frames == 16, (
-        f"Expected the dummy to spread the budget over 16 frames, got {capped_frames}"
+    videos = dummy["video"]
+    assert isinstance(videos, list)
+    assert videos[0][0].shape[0] == expected_frames
+
+
+def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> None:
+    """The shortest-edge floor can raise the cost of each frame in a real clip."""
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-Reranker-2B",
+        mm_processor_kwargs={
+            "max_video_tokens": 4,
+            "videos_kwargs": {
+                "cap_pixels_per_frame": True,
+                "size": {"shortest_edge": 5120, "longest_edge": 10240},
+            },
+        },
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_cache_gb=0,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    profiled = processor.get_dummy_mm_inputs({"video": 1})
+    data = _build_video_mm_data(num_frames=4, width=64, height=64, original_fps=2.0)
+    data["video"][0][1]["do_sample_frames"] = False
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data(data),
+        hf_processor_mm_kwargs={},
     )
 
-    uncapped_ctx = build_model_context(
+    (profiled_video,) = profiled["mm_placeholders"]["video"]
+    (processed_video,) = processed["mm_placeholders"]["video"]
+    assert processed_video.get_num_embeds() == 8
+    assert profiled_video.get_num_embeds() >= processed_video.get_num_embeds()
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_processor_per_video_hashes_survive_partitioning(
+    model_id: str, scoped: bool
+) -> None:
+    """A one-video encoder child must hash its video like the full request.
+
+    The Python EPD proxy fans multi-video requests out to one-video encoder
+    children, slicing per-video lists to the videos each child carries. The
+    cache key of a video may then depend only on its own per-video element,
+    not on the raw list, or the producer and consumer hash the same video
+    differently and every EC transfer misses.
+    """
+    kwargs: dict[str, Any] = {"num_frames": [8, 16]}
+    if scoped:
+        kwargs = {"videos_kwargs": dict(kwargs)}
+
+    def scoped_form(flat: dict[str, Any]) -> dict[str, Any]:
+        return {"videos_kwargs": dict(flat)} if scoped else dict(flat)
+
+    ctx = build_model_context(
         model_id,
-        mm_processor_kwargs={"videos_kwargs": {"size": size}},
-        limit_mm_per_prompt={"image": 0, "video": 1},
+        limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_cache_gb=1,
     )
-    uncapped = MULTIMODAL_REGISTRY.create_processor(uncapped_ctx.model_config)
-    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(
-        1024, {"video": 1}, MultiModalDummyOptions()
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(2)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
+
+    def run(count: int, items, hf_kwargs, uuids):
+        return processor(
+            "<|vision_start|><|video_pad|><|vision_end|>" * count,
+            mm_items=processor.info.parse_mm_data({"video": items}),
+            mm_uuid_items={"video": uuids},
+            hf_processor_mm_kwargs=hf_kwargs,
+        )
+
+    full = run(2, videos, kwargs, ["v0", "v1"])
+    child0 = run(1, [videos[0]], scoped_form({"num_frames": [8]}), ["v0"])
+    child1 = run(1, [videos[1]], scoped_form({"num_frames": [16]}), ["v1"])
+    assert child0["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert child1["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][1]
+
+    # Entries beyond the video count never affect processing, so they must
+    # not affect the cache key either.
+    tail = run(2, videos, scoped_form({"num_frames": [8, 16, 32]}), ["v0", "v1"])
+    assert tail["mm_hashes"] == full["mm_hashes"]
+
+    # Changing only the second video's effective value must invalidate only its key.
+    changed = run(2, videos, scoped_form({"num_frames": [8, 24]}), ["v0", "v1"])
+    assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("form", ["flat", "scoped", "shadowed"])
+@pytest.mark.parametrize(("key", "value"), [("num_frames", 16), ("fps", 4.0)])
+@pytest.mark.parametrize("use_uuid", [False, True])
+@pytest.mark.parametrize("slicing", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_processor_image_hash_survives_video_partitioning(
+    model_id: str,
+    form: str,
+    key: str,
+    value: int | float,
+    use_uuid: bool,
+    slicing: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mixed parent and image child both preserve the upstream image key."""
+    from examples.disaggregated.disaggregated_encoder import disagg_epd_proxy
+
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
     )
-    uncapped_videos = uncapped_dummy["video"]
-    assert isinstance(uncapped_videos, list)
-    uncapped_frames = uncapped_videos[0][0].shape[0]
-    assert uncapped_frames == 2, (
-        f"Expected the uncapped dummy to keep 2 frames, got {uncapped_frames}"
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    video = _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+    kwargs: dict[str, Any] = {key: [value]}
+    if form != "flat":
+        kwargs = {"videos_kwargs": kwargs}
+    if form == "shadowed":
+        kwargs[key] = [value / 2 if key == "fps" else 8]
+
+    items = []
+    uuids = {}
+    for modality in ("image", "video"):
+        media_type = f"{modality}_url"
+        item: dict[str, Any] = {
+            "type": media_type,
+            media_type: {"url": f"http://media/{modality}"},
+        }
+        if use_uuid:
+            item["uuid"] = modality
+            uuids[modality] = [modality]
+        items.append(item)
+    response = SimpleNamespace(status=200, read=AsyncMock(return_value=b"{}"))
+    post = AsyncMock(return_value=response)
+    monkeypatch.setattr(disagg_epd_proxy, "encode_session", SimpleNamespace(post=post))
+    monkeypatch.setattr(disagg_epd_proxy, "NO_REWRITE", not use_uuid)
+    asyncio.run(
+        disagg_epd_proxy.fanout_encoder_primer(
+            {
+                "messages": [{"role": "user", "content": items}],
+                "mm_processor_kwargs": kwargs,
+            },
+            ["http://encoder"],
+            "hash-regression",
+            enable_per_video_kwargs_slicing=slicing,
+        )
     )
+    children = [json.loads(call.kwargs["data"]) for call in post.await_args_list]
+    child = next(
+        body
+        for body in children
+        if body["messages"][0]["content"][0]["type"] == "image_url"
+    )
+
+    media = processor.info.parse_mm_data({"image": [image], "video": [video]})
+    image_media = media.select({"image"})
+    child_uuid = child["messages"][0]["content"][0].get("uuid")
+    child_uuids = {"image": [child_uuid]} if child_uuid is not None else {}
+    image_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    parent_hashes = processor(
+        image_prompt + video_prompt,
+        mm_items=media,
+        mm_uuid_items=uuids,
+        hf_processor_mm_kwargs=kwargs,
+    )["mm_hashes"]
+    child_hashes = processor(
+        image_prompt,
+        mm_items=image_media,
+        mm_uuid_items=child_uuids,
+        hf_processor_mm_kwargs=child["mm_processor_kwargs"],
+    )["mm_hashes"]
+
+    # Before per-video normalization, Qwen3-VL rehashed only the video keys.
+    upstream_image_hash = ProcessorInputs(
+        prompt=[],
+        mm_data_items=image_media,
+        mm_uuid_items=uuids,
+        hf_processor_mm_kwargs=kwargs,
+    ).get_mm_hashes(
+        processor.info.model_id, processor.info.ctx.get_mm_config().mm_hasher_algorithm
+    )["image"]
+    assert list(parent_hashes) == list(media)
+    assert parent_hashes["image"] == child_hashes["image"] == upstream_image_hash

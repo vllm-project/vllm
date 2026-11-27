@@ -226,7 +226,6 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     )
 
 
-_cublaslt_gemm_nt_impl: Callable[..., Any] | None = None
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _fp8_einsum_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
@@ -246,14 +245,11 @@ _requantize_fp8_weights_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _relayout_fp4_weights_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _transform_fp4_sf_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
 _transform_fp8_block_sf_for_sm90_mega_moe_impl: Callable[..., Any] | None = None
-_get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
     None
 )
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
-_pack_ue8m0_to_int_impl: Callable[..., Any] | None = None
-_get_mn_major_tma_aligned_packed_ue8m0_tensor_impl: Callable[..., Any] | None = None
 _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
     Callable[..., Any] | None
 ) = None
@@ -313,7 +309,6 @@ def _apply_pdl(mod, enable: bool = True) -> None:
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _cublaslt_gemm_nt_impl
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
@@ -327,17 +322,13 @@ def _lazy_init() -> None:
     global _relayout_fp4_weights_for_sm90_mega_moe_impl
     global _transform_fp4_sf_for_sm90_mega_moe_impl
     global _transform_fp8_block_sf_for_sm90_mega_moe_impl
-    global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
-    global _pack_ue8m0_to_int_impl
-    global _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl
     global _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl
     # fast path
     if (
-        _cublaslt_gemm_nt_impl is not None
-        or _fp8_gemm_nt_impl is not None
+        _fp8_gemm_nt_impl is not None
         or _fp8_einsum_impl is not None
         or _grouped_impl is not None
         or _grouped_masked_impl is not None
@@ -350,8 +341,6 @@ def _lazy_init() -> None:
         or _bf16_mega_gate_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
-        or _pack_ue8m0_to_int_impl is not None
-        or _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
         or _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
     ):
         return
@@ -373,7 +362,6 @@ def _lazy_init() -> None:
     # Enable PDL for DeepGEMM on architectures that support it (SM90+).
     if current_platform.is_arch_support_pdl():
         _apply_pdl(_dg, True)
-    _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
@@ -417,9 +405,6 @@ def _lazy_init() -> None:
     _transform_fp8_block_sf_for_sm90_mega_moe_impl = getattr(
         _dg, "transform_fp8_block_sf_for_sm90_mega_moe", None
     )
-    _get_mn_major_tma_aligned_tensor_impl = getattr(
-        _dg, "get_mn_major_tma_aligned_tensor", None
-    )
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
     )
@@ -428,10 +413,6 @@ def _lazy_init() -> None:
     )
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
-    )
-    _pack_ue8m0_to_int_impl = getattr(_dg, "pack_ue8m0_to_int", None)
-    _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl = getattr(
-        _dg, "get_mn_major_tma_aligned_packed_ue8m0_tensor", None
     )
     _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl = getattr(
         _dg, "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor", None
@@ -527,46 +508,13 @@ def mk_alignment_scope(value: int):
         set_mk_alignment_for_contiguous_layout(prev)
 
 
-def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor."""
-    _lazy_init()
-    if _get_mn_major_tma_aligned_tensor_impl is None:
-        return _missing()
-    return _get_mn_major_tma_aligned_tensor_impl(x)
-
-
-def pack_ue8m0_to_int(x: torch.Tensor) -> torch.Tensor:
-    """Pack 4 UE8M0 (uint8) scales into one int32.
-
-    DeepGEMM's SM100/SM120 FP8/FP4 kernels accept either `float32` scales
-    (legacy format, 4 B/scale) or `int32` packed UE8M0 scales (1 B/scale
-    after 4:1 packing — 4× smaller than the legacy fp32 representation).
-    """
-    _lazy_init()
-    if _pack_ue8m0_to_int_impl is None:
-        return _missing()
-    return _pack_ue8m0_to_int_impl(x)
-
-
-def get_mn_major_tma_aligned_packed_ue8m0_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Pack UE8M0 (uint8) → int32 with the MN-major TMA-aligned layout the
-    DeepGEMM kernels consume directly. 16× smaller than the fp32 legacy SF
-    format. Use for non-grouped 2D scale tensors.
-    """
-    _lazy_init()
-    if _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl is None:
-        return _missing()
-    return _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl(x)
-
-
 def get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
     sf: torch.Tensor,
     ks_tensor: torch.Tensor,
     ks: list[int],
     gran_k: int,
 ) -> torch.Tensor:
-    """Grouped (3D, expert-batched) variant of
-    `get_mn_major_tma_aligned_packed_ue8m0_tensor`. Use for MoE weight
+    """Grouped (3D, expert-batched). Use for MoE weight
     scale tensors of shape `(num_experts, mn, k_scale)`.
     """
     _lazy_init()
@@ -575,13 +523,6 @@ def get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
     return _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl(
         sf, ks_tensor, ks, gran_k
     )
-
-
-def cublaslt_gemm_nt(*args, **kwargs):
-    _lazy_init()
-    if _cublaslt_gemm_nt_impl is None:
-        return _missing(*args, **kwargs)
-    return _cublaslt_gemm_nt_impl(*args, **kwargs)
 
 
 def bf16_mega_gate(
@@ -1263,14 +1204,11 @@ __all__ = [
     "get_num_sms",
     "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",
-    "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
     "get_theoretical_mk_alignment_for_contiguous_layout",
-    "pack_ue8m0_to_int",
     "requantize_fp8_weights_for_sm90_mega_moe",
     "relayout_fp4_weights_for_sm90_mega_moe",
     "transform_fp4_sf_for_sm90_mega_moe",
     "transform_fp8_block_sf_for_sm90_mega_moe",
-    "get_mn_major_tma_aligned_packed_ue8m0_tensor",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
 ]

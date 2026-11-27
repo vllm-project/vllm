@@ -104,6 +104,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -926,6 +931,8 @@ class Qwen3VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
+    default_mm_limits = {"video": 32}
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
 
@@ -1136,6 +1143,17 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return timestamps
 
 
+def _get_max_video_tokens_per_frame(
+    video_processor: Qwen3VLVideoProcessor, video_kwargs: Mapping[str, object]
+) -> int | None:
+    if not video_kwargs.get(
+        "cap_pixels_per_frame", getattr(video_processor, "cap_pixels_per_frame", None)
+    ):
+        return None
+    # HF resolves the enable flag at call time. The ceiling comes from the instance.
+    return getattr(video_processor, "max_video_tokens", None)
+
+
 class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -1195,22 +1213,18 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
 
-        # With the HF processor's per-frame pixel cap enabled
-        # (cap_pixels_per_frame, huggingface/transformers#48071), a 2-frame
-        # dummy is processed at only 2 * cap pixels, so memory profiling
-        # underestimates the largest possible item: a fully sampled video
-        # still reaches the whole longest_edge budget. Spread the budget
-        # over enough frames that the cap is not binding for the dummy.
-        # This takes precedence over a shrinking num_frames override, which
-        # would otherwise reintroduce the under-profiling.
-        if video_mm_kwargs.get("cap_pixels_per_frame"):
-            max_video_tokens = video_mm_kwargs.get(
-                "max_video_tokens",
-                getattr(video_processor, "max_video_tokens", 768),
-            )
+        # Spread the nominal video pixel budget over more frames when HF's
+        # per-frame cap can make a two-frame dummy smaller than a request.
+        max_video_tokens = _get_max_video_tokens_per_frame(
+            video_processor, video_mm_kwargs
+        )
+        if max_video_tokens is not None and video_mm_kwargs.get(
+            "do_resize", video_processor.do_resize
+        ):
             patch_size = video_mm_kwargs.get("patch_size", video_processor.patch_size)
             merge_size = video_mm_kwargs.get("merge_size", video_processor.merge_size)
-            per_frame_cap = max_video_tokens * (patch_size * merge_size) ** 2
+            # The shortest-edge floor can apply independently to every frame.
+            per_frame_cap = max(max_video_tokens * (patch_size * merge_size) ** 2, 1)
             target_num_frames = max(
                 target_num_frames,
                 min(video_processor.max_frames, cdiv(video_max_pixels, per_frame_cap)),
@@ -1326,20 +1340,53 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return per_video_kwargs
 
     def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
-        hashes = dict(super()._get_mm_hashes(inputs))
-        per_video_kwargs = self._get_per_video_kwargs(
-            inputs.hf_processor_mm_kwargs, len(hashes.get("video", []))
-        )
-        if per_video_kwargs and "video" in hashes:
-            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
-            hashes["video"] = [
-                MultiModalHasher.hash_kwargs(
-                    algorithm,
-                    mm_hash=mm_hash,
-                    **{key: values[i] for key, values in per_video_kwargs.items()},
+        per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
+        if not per_video_kwargs or "video" not in inputs.mm_data_items:
+            return super()._get_mm_hashes(inputs)
+        # The base hash must not fold the raw per-video lists: the rehash below
+        # already folds each video's own element, and folding the raw form too
+        # would make a partitioned encoder child (EPD fan-out carries a sliced
+        # list) hash the same video differently than the full request.
+        kwargs = dict(inputs.hf_processor_mm_kwargs)
+        videos_kwargs = kwargs.get("videos_kwargs")
+        if isinstance(videos_kwargs, dict):
+            videos_kwargs = dict(videos_kwargs)
+            kwargs["videos_kwargs"] = videos_kwargs
+        else:
+            videos_kwargs = {}
+        for key in per_video_kwargs:
+            # Mirror explicit scoped-over-flat precedence. Retain shadowed
+            # values and scalars; the proxy partitions only the active list.
+            scope = videos_kwargs if key in videos_kwargs else kwargs
+            if isinstance(scope.get(key), list):
+                scope.pop(key)
+        # Non-video children keep the original kwargs and cache identity.
+        hashes: dict[str, list[str]] = {}
+        for modality in inputs.mm_data_items:
+            modality_kwargs = (
+                kwargs if modality == "video" else inputs.hf_processor_mm_kwargs
+            )
+            hashes.update(
+                super()._get_mm_hashes(
+                    replace(
+                        inputs,
+                        mm_data_items=inputs.mm_data_items.select({modality}),
+                        hf_processor_mm_kwargs=modality_kwargs,
+                    )
                 )
-                for i, mm_hash in enumerate(hashes["video"])
-            ]
+            )
+        per_video_kwargs = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, len(hashes["video"])
+        )
+        algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+        hashes["video"] = [
+            MultiModalHasher.hash_kwargs(
+                algorithm,
+                mm_hash=mm_hash,
+                **{key: values[i] for key, values in per_video_kwargs.items()},
+            )
+            for i, mm_hash in enumerate(hashes["video"])
+        ]
         return hashes
 
     def _get_cache_missing_processor_kwargs(
@@ -1440,6 +1487,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
+            video_tensor_bytes = 0
 
             for item_idx, item in enumerate(videos):
                 video_array, metadata = item
@@ -1495,14 +1543,82 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 ):
                     video_scoped_kwargs["fps"] = None
 
+                hf_processor = self.info.get_hf_processor(**video_mm_kwargs)
+                video_processor = hf_processor.video_processor
+                video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                    hf_processor, video_mm_kwargs, scope="videos_kwargs"
+                )
+                patch_size = video_kwargs.get("patch_size", video_processor.patch_size)
+                merge_size = video_kwargs.get("merge_size", video_processor.merge_size)
+                temporal_patch_size = video_kwargs.get(
+                    "temporal_patch_size", video_processor.temporal_patch_size
+                )
+                if min(patch_size, merge_size, temporal_patch_size) <= 0:
+                    raise ValueError("Video patch and merge sizes must be positive.")
+
+                frame_count = len(video_array)
+                if video_kwargs["do_sample_frames"]:
+                    frame_count = len(
+                        video_processor.sample_frames(
+                            metadata,
+                            num_frames=video_kwargs.get(
+                                "num_frames", video_processor.num_frames
+                            ),
+                            fps=video_kwargs.get("fps", video_processor.fps),
+                        )
+                    )
+                height, width, channels = get_video_frame_dimensions(video_array)
+                if video_kwargs.get("do_resize", video_processor.do_resize):
+                    size = video_kwargs.get("size", video_processor.size)
+                    factor = patch_size * merge_size
+                    max_pixels = size["longest_edge"]
+                    max_video_tokens = _get_max_video_tokens_per_frame(
+                        video_processor, video_kwargs
+                    )
+                    if max_video_tokens is not None:
+                        frame_cap = max_video_tokens * factor**2
+                        pixels_per_frame = max(
+                            min(frame_cap, max_pixels // frame_count),
+                            int(size["shortest_edge"] * 1.05),
+                        )
+                        max_pixels = pixels_per_frame * frame_count
+                    height, width = video_smart_resize(
+                        num_frames=frame_count,
+                        height=height,
+                        width=width,
+                        factor=factor,
+                        temporal_factor=temporal_patch_size,
+                        min_pixels=size["shortest_edge"],
+                        max_pixels=max_pixels,
+                    )
+                padded_frames = round_up(frame_count, temporal_patch_size)
+                estimated_bytes = (
+                    padded_frames
+                    * height
+                    * width
+                    * channels
+                    * estimate_video_pixel_element_size(
+                        video_array, video_processor, video_kwargs
+                    )
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
+
                 video_outputs = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**video_mm_kwargs),
+                    hf_processor,
                     dict(text=self._get_hf_mm_text({"video": 1}), **video_mm_data),
                     video_mm_kwargs,
                 )
 
+                video_pixels = video_outputs["pixel_values_videos"]
+                # Reserve the concatenated tensor while the inputs are live.
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
-                pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
+                pixel_values_videos_lst.append(video_pixels)
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
