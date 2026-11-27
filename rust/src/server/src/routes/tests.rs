@@ -3054,6 +3054,37 @@ async fn render_chat_classifies_renderer_errors_by_fault() {
     }
 }
 
+/// Like Python's `VLLM_MAX_COMPLETION_PROMPTS` check, a batch of more than
+/// 1024 prompts is a 400. A flat token-ID list is one prompt, however long.
+#[tokio::test]
+async fn completions_reject_batches_above_max_completion_prompts() {
+    let mut app = test_render_app_with_max_model_len(Some(2048));
+
+    let mut errors = Vec::new();
+    for prompt in [json!(vec!["hi"; 1025]), json!(vec![vec![1]; 1025])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/completions/render",
+            json!({"model": "render-model", "prompt": prompt}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        errors.push(json.to_string());
+    }
+    assert_eq!(errors[0], errors[1]);
+    expect_test::expect![[r#"{"error":{"message":"prompt list length 1025 exceeds the maximum allowed count of 1024. To increase this limit, set the VLLM_MAX_COMPLETION_PROMPTS environment variable.","type":"BadRequestError","param":"prompt","code":400}}"#]].assert_eq(&errors[0]);
+
+    for prompt in [json!(vec!["hi"; 1024]), json!(vec![1; 1025])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/completions/render",
+            json!({"model": "render-model", "prompt": prompt}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+}
+
 /// Python renders an empty user turn, so the render route must accept empty
 /// message content instead of rejecting it.
 #[tokio::test]
