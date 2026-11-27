@@ -109,6 +109,20 @@ def _normalize_decode_limits(
     return max_duration_s, max_decode_bytes
 
 
+_MIN_RESAMPLE_SAMPLES = 1024
+
+
+def _silence_like(frame: "av.AudioFrame", samples: int) -> "av.AudioFrame":
+    """Return a silent frame matching `frame`'s format, layout and rate."""
+    silence = av.AudioFrame(
+        format=frame.format.name, layout=frame.layout.name, samples=samples
+    )
+    for plane in silence.planes:
+        plane.update(bytes(plane.buffer_size))
+    silence.sample_rate = frame.sample_rate
+    return silence
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -194,6 +208,7 @@ def load_audio_pyav(
             if needs_resampling
             else None
         )
+        last_frame = None
         try:
             # A final None drains the resampler's delayed output.
             for frame in chain(container.decode(stream), (None,)):
@@ -201,7 +216,27 @@ def load_audio_pyav(
                     assert resampler is not None
                     if frame is not None:
                         total_input_samples += frame.samples
-                    for out_frame in resampler.resample(frame):
+                        last_frame = frame
+                        out_frames = resampler.resample(frame)
+                    else:
+                        out_frames = []
+                        if (
+                            last_frame is not None
+                            and total_input_samples < _MIN_RESAMPLE_SAMPLES
+                        ):
+                            # libswresample needs enough input to emit the
+                            # delayed tail; pad short clips with silence as
+                            # resample_audio_pyav does, then trim below.
+                            out_frames.extend(
+                                resampler.resample(
+                                    _silence_like(
+                                        last_frame,
+                                        _MIN_RESAMPLE_SAMPLES - total_input_samples,
+                                    )
+                                )
+                            )
+                        out_frames.extend(resampler.resample(None))
+                    for out_frame in out_frames:
                         arr = out_frame.to_ndarray()
                         total_samples += arr.shape[-1]
                         total_decode_bytes += arr.nbytes
@@ -247,10 +282,6 @@ def load_audio_pyav(
         # samples a given libswresample build emits around the flush.
         expected_samples = math.ceil(total_input_samples * sr / native_sr)
         audio = audio[..., :expected_samples]
-        shortfall = expected_samples - audio.shape[-1]
-        if shortfall > 0:
-            pad_width = [(0, 0)] * (audio.ndim - 1) + [(0, shortfall)]
-            audio = np.pad(audio, pad_width)
     if mono and audio.ndim > 1:
         audio = np.mean(audio, axis=0)
 

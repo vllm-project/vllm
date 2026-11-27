@@ -12,6 +12,7 @@ import pytest
 import soundfile as sf
 
 import vllm.envs as envs
+from vllm.multimodal.audio import resample_audio_pyav
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
@@ -111,6 +112,7 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
         (16000, 22050, 16000),
         (16000, 22050, 64),
         (44100, 16000, 64),
+        (44100, 16000, 32),
         (16000, 16000, 16000),
     ],
 )
@@ -125,6 +127,9 @@ def test_pyav_resampling_keeps_final_samples(native_sr, target_sr, num_samples):
 
     assert sample_rate == target_sr
     assert len(audio) == (num_samples * target_sr + native_sr - 1) // native_sr
+    # The tail must carry signal, not padding; match the in-memory resampler.
+    expected = resample_audio_pyav(samples, orig_sr=native_sr, target_sr=target_sr)
+    np.testing.assert_array_equal(audio, expected)
 
 
 def test_pyav_resampling_trims_extra_flushed_samples(monkeypatch):
