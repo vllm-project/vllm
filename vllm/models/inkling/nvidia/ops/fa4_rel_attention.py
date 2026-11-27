@@ -96,13 +96,12 @@ def _sm80_rel_attention(
         out = torch.empty_like(q)
     num_tokens, num_heads, _ = q.shape
     sheared = shear_rel_logits(rel_logits, cu_seqlens_q, cache_seqlens, rel_extent)
-    out_f32 = q.new_empty(q.shape, dtype=torch.float32)
     lse = q.new_empty((num_heads, num_tokens), dtype=torch.float32)
     rel_attention(
         q,
         key_cache,
         value_cache,
-        out_f32,
+        out,  # bf16 is fine: the kernel's store casts to out's dtype
         lse,
         sheared,
         block_table=block_table,
@@ -114,7 +113,6 @@ def _sm80_rel_attention(
         num_splits=1,
         mode=MODE_OUT_LSE,
     )
-    out.copy_(out_f32)
     return out
 
 
