@@ -41,6 +41,17 @@ def _use_fp8_e4b15(device: int = 0) -> int:
 
 
 @triton.jit
+def _e4m3_decode(b):
+    """uint8 E4M3 (fp8e4nv) bytes -> float32 with integer operations."""
+    i = b.to(tl.int32)
+    e = (i >> 3) & 15
+    m = i & 7
+    normal = (((e + 120) << 23) | (m << 20)).to(tl.float32, bitcast=True)
+    mag = tl.where(e == 0, m.to(tl.float32) * 0.001953125, normal)
+    return tl.where(i >= 128, -mag, mag)
+
+
+@triton.jit
 def _tq_decode_stage1(
     # Precomputed query projection
     Q_rot_ptr,  # [B, Hq, D] float32
@@ -162,7 +173,7 @@ def _tq_decode_stage1(
                 other=0,
             )
             if FP8_E4B15:
-                k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+                k_float = _e4m3_decode(k_raw)
             else:
                 k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             scores = (
@@ -371,7 +382,7 @@ def _tq_full_dequant_kv(
     if KEY_FP8:
         k_raw = tl.load(KV_cache_ptr + slot_base + d_offs, mask=d_mask, other=0)
         if FP8_E4B15:
-            k_recon = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+            k_recon = _e4m3_decode(k_raw)
         else:
             k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
