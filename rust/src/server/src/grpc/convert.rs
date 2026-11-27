@@ -7,6 +7,7 @@
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
@@ -420,9 +421,27 @@ pub fn to_sequence_output(
 }
 
 fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishInfo, Status> {
+    let (finish_reason, stop_reason) = finish_reason_to_proto(&finished.finish_reason, token_ids)?;
+
+    Ok(pb::FinishInfo {
+        num_output_tokens: finished.usage.output_token_count as u32,
+        finish_reason,
+        stop_reason,
+        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
+    })
+}
+
+/// Map a finish reason to `FinishInfo.finish_reason` and `stop_reason`.
+/// `token_ids` ends with the terminal output tokens.
+pub(super) fn finish_reason_to_proto(
+    reason: &FinishReason,
+    token_ids: &[u32],
+) -> Result<(i32, Option<pb::finish_info::StopReason>), Status> {
     use pb::finish_info::FinishReason as PbFinishReason;
 
-    let (finish_reason, stop_reason) = match &finished.finish_reason {
+    Ok(match reason {
         FinishReason::Stop(reason) => {
             let sr = match reason {
                 Some(StopReason::TokenId(id)) => {
@@ -448,15 +467,6 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         }
         FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
-    };
-
-    Ok(pb::FinishInfo {
-        num_output_tokens: finished.usage.output_token_count as u32,
-        finish_reason,
-        stop_reason,
-        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
-        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -486,6 +496,46 @@ fn prompt_logprobs_to_proto(
     ranks.insert(0, 0);
     candidates.insert(0, pb::CandidateTokenInfo { tokens: vec![] });
     (logprobs, ranks, candidates)
+}
+
+/// Rebuild output logprobs from the flat proto arrays of a `SequenceOutput`;
+/// the inverse of [`positions_to_proto`]. `None` when the output carries no
+/// logprobs.
+pub(super) fn output_logprobs_from_proto(
+    output: &pb::SequenceOutput,
+) -> Result<Option<Logprobs>, Status> {
+    if output.logprobs.is_empty() && output.ranks.is_empty() && output.candidate_tokens.is_empty() {
+        return Ok(None);
+    }
+    let len = output.token_ids.len();
+    if output.logprobs.len() != len
+        || output.ranks.len() != len
+        || !(output.candidate_tokens.is_empty() || output.candidate_tokens.len() == len)
+    {
+        return Err(Status::internal(
+            "output logprobs, ranks and candidate_tokens must align with token_ids",
+        ));
+    }
+    let positions = (0..len)
+        .map(|index| {
+            let sampled = TokenLogprob {
+                token_id: output.token_ids[index],
+                logprob: output.logprobs[index],
+                rank: output.ranks[index],
+            };
+            let candidates = output.candidate_tokens.get(index).into_iter().flat_map(|info| {
+                info.tokens.iter().map(|token| TokenLogprob {
+                    token_id: token.id,
+                    logprob: token.logprob,
+                    rank: token.rank,
+                })
+            });
+            PositionLogprobs {
+                entries: std::iter::once(sampled).chain(candidates).collect(),
+            }
+        })
+        .collect();
+    Ok(Some(Logprobs { positions }))
 }
 
 /// Shared helper: convert a slice of decoded position logprobs to flat proto

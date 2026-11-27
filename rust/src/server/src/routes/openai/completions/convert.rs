@@ -409,6 +409,8 @@ mod tests {
             text: TextRequestProcessor::new(Arc::new(TestTextBackend), 64),
             chat: ChatRequestProcessor::new(Arc::new(TestTextBackend), None, None),
             lora_modules: Vec::new(),
+            api_server_options: Default::default(),
+            system_fingerprint: None,
         }
     }
 

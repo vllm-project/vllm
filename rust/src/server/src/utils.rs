@@ -82,6 +82,19 @@ impl Event {
     }
 }
 
+/// The terminal SSE event of an OpenAI-style stream.
+pub(crate) const SSE_DONE_FRAME: &[u8] = b"data: [DONE]\n\n";
+
+/// Frame a JSON payload as one SSE `data:` event, the bytes the HTTP routes
+/// send for [`Event::json`].
+pub(crate) fn sse_data_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 8);
+    frame.extend_from_slice(b"data: ");
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(b"\n\n");
+    frame
+}
+
 /// Convert one chunk stream into OpenAI-style SSE events.
 ///
 /// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`

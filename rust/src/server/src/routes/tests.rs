@@ -859,6 +859,8 @@ fn test_render_state(max_model_len: Option<u32>) -> RenderState {
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
+        api_server_options: Default::default(),
+        system_fingerprint: None,
     }
 }
 
@@ -2857,6 +2859,8 @@ fn completion_suffix_render_app(chat_renderer: DynChatRenderer) -> axum::Router 
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
+        api_server_options: Default::default(),
+        system_fingerprint: None,
     }))
 }
 
@@ -3159,6 +3163,8 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
             lora_modules: Vec::new(),
+            api_server_options: Default::default(),
+            system_fingerprint: None,
         }));
         let (status, json) = post_json(
             &mut app,

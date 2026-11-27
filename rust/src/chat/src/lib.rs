@@ -22,7 +22,7 @@ pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent, ChatTokenUsage,
 };
-use futures::{StreamExt, TryStreamExt as _};
+use futures::{Stream, StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
 pub use multimodal::{InputAudioFormat, mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
@@ -70,9 +70,9 @@ use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
-use vllm_llm::Llm;
+use vllm_llm::{GenerateOutput, GeneratePromptInfo, Llm, Logprobs, PromptCacheUsage};
 use vllm_metrics::{METRICS, RenderRequestType};
-use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
+use vllm_text::{EffectiveSampling, Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -94,6 +94,23 @@ pub struct ChatRequestProcessor {
 }
 
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
+
+/// One chunk of output generated elsewhere, for
+/// [`ChatRequestProcessor::detokenize_stream`].
+#[derive(Debug, Clone, Default)]
+pub struct DetokenizeChunk {
+    pub token_ids: Vec<u32>,
+    /// Logprobs aligned with `token_ids`, when generated.
+    pub logprobs: Option<Logprobs>,
+    /// Set on the final chunk only.
+    pub finish_reason: Option<FinishReason>,
+    /// Prompt tokens served from cache; set on the final chunk only.
+    pub num_cached_tokens: usize,
+    /// Set on the final chunk only.
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
+    /// Set on the final chunk only.
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
+}
 
 impl ChatRequestProcessor {
     /// Create a processor using the engine's effective model dtype and context
@@ -288,14 +305,7 @@ impl ChatRequestProcessor {
         self.map_reasoning_effort(&mut request);
 
         let mut output_processors = (0..n.get())
-            .map(|_| {
-                self.backend.new_chat_output_processor(
-                    &mut request,
-                    NewChatOutputProcessorOptions {
-                        tool_strict_level: self.tool_strict_level,
-                    },
-                )
-            })
+            .map(|_| self.new_output_processor(&mut request))
             .collect::<Result<Vec<_>>>()?;
         let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
@@ -329,6 +339,105 @@ impl ChatRequestProcessor {
             output_processors,
             prompt_text,
         })
+    }
+
+    /// Parse output chunks generated elsewhere for a prepared request,
+    /// emitting deltas, without an engine.
+    ///
+    /// `request` must be the request passed to [`Self::prepare`] and
+    /// `prompt_token_ids` the prompt it produced, so that parsers resolve and
+    /// initialize the same way as they would during generation.
+    ///
+    /// The stream ends at the first chunk with a finish reason, or earlier when
+    /// a stop string in `request.decode_options` matches, dropping `outputs`.
+    /// It fails if `outputs` ends without a finish reason. With
+    /// `request.intermediate` the events are incremental deltas, otherwise the
+    /// output arrives whole at the end.
+    ///
+    /// The returned stream's [`ChatEventStream::sampling`] holds only the
+    /// request's own values, as model defaults are resolved where generation
+    /// happens.
+    pub fn detokenize_stream(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
+    ) -> Result<ChatEventStream> {
+        request.validate()?;
+        // Decoding skips the text request, which validates these in generation.
+        request.decode_options.validate(&request.request_id)?;
+        self.map_reasoning_effort(&mut request);
+
+        let mut output_processor = self.new_output_processor(&mut request)?;
+        output_processor.initialize(&prompt_token_ids)?;
+        // Resolve the generation-config default like the text request would, so
+        // that decoding matches the worker's.
+        let decode_options = &mut request.decode_options;
+        decode_options.skip_special_tokens = decode_options
+            .skip_special_tokens
+            .or(text_processor.default_skip_special_tokens()?);
+
+        let request_id = request.request_id.clone();
+        let sampling = EffectiveSampling {
+            temperature: request.sampling_params.temperature.unwrap_or(1.0),
+            top_p: request.sampling_params.top_p.unwrap_or(1.0),
+            max_tokens: request.sampling_params.max_tokens.unwrap_or(0),
+            presence_penalty: request.sampling_params.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: request.sampling_params.frequency_penalty.unwrap_or(0.0),
+        };
+        // The decoder reads the prompt from the first output.
+        let mut prompt_info = Some(Box::new(GeneratePromptInfo {
+            prompt_token_ids: prompt_token_ids.into(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+        }));
+        let outputs = outputs.map(move |chunk| {
+            Ok(GenerateOutput {
+                request_id: request_id.clone(),
+                prompt_info: prompt_info.take(),
+                token_ids: chunk.token_ids,
+                logprobs: chunk.logprobs,
+                finish_reason: chunk.finish_reason,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: chunk.num_cached_tokens,
+                    ..Default::default()
+                },
+                kv_transfer_params: chunk.kv_transfer_params,
+                ec_transfer_params: chunk.ec_transfer_params,
+                sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: Default::default(),
+                routed_experts: Default::default(),
+                timestamps: Default::default(),
+            })
+        });
+        let decoded_stream = vllm_text::output::decoded_text_event_stream(
+            request.request_id.clone(),
+            text_processor.tokenizer(),
+            outputs,
+            request.decode_options,
+            request.intermediate,
+        )
+        .map_err(Error::from)
+        .boxed();
+
+        let events = output_processor.process(decoded_stream)?;
+        Ok(ChatEventStream::new(request.request_id, sampling, events))
+    }
+
+    /// Effective reasoning parser name, if parsing is enabled.
+    pub fn reasoning_parser_name(&self) -> Option<&str> {
+        self.backend.reasoning_parser_name()
+    }
+
+    fn new_output_processor(&self, request: &mut ChatRequest) -> Result<DynChatOutputProcessor> {
+        self.backend.new_chat_output_processor(
+            request,
+            NewChatOutputProcessorOptions {
+                tool_strict_level: self.tool_strict_level,
+            },
+        )
     }
 }
 

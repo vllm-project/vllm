@@ -71,6 +71,63 @@ for example, a temperature and multiple samples requested in JSON would not be
 preserved by those fields alone. This remaining contract work is tracked in
 [#65503](https://github.com/vllm-project/vllm/issues/65503).
 
+### Turning generated tokens into the client response
+
+`Render.DerenderStream` is the reverse step for a request rendered with
+`Render.Render`: it turns the `Inference.GenerateStream` output into what the
+client expects, with the server-side reasoning and tool-call parsers applied.
+For `api = API_CHAT` with `n = 1` it returns serialized SSE events for a
+`stream: true` body, or the final JSON body for a `stream: false` one, matching
+`/v1/chat/completions` apart from `id` and `created`.
+
+1. Send `start` first, with the same `RenderRequest` passed to `Render` and the
+   `prompt_token_ids` it returned. `mm_payload` is ignored.
+2. Send each `GenerateStream` response unchanged, up to and including the one
+   with `finish_info`. To end early, send an output with
+   `finish_info.finish_reason = ABORTED`.
+3. Read the `events` (or the single `body`) from the responses. The server ends
+   the stream with the response that carries the finished sequence in
+   `finished` and reads no further messages, so stop sending then.
+
+If the stream ends without `finished`, cancel `GenerateStream`. That happens on
+a gRPC error status, and for a streaming client on an in-band error event
+(`data: {"error": ...}` followed by `data: [DONE]`), which the gateway can
+forward to the client as is.
+
+Set `response.output_token_ids = true` on the `GenerateRequest`:
+`DerenderStream` decodes `token_ids` and does not read `text`. When the body
+sets `logprobs`, also set `response.output_logprobs`, and when it sets
+`top_logprobs`, set `response.output_candidates`. The `stop`
+strings of the `GenerateRequest` must match the body's `stop`, because the
+stream applies the same stop matching as the worker. It rejects a stop string
+the body does not list, and one that differs from where its own decoding
+stops, since that means the two sides decoded different text.
+
+If the worker does not match stop strings (`response.output_text = false`),
+`DerenderStream` matches them itself, ends the output at the match, and reports
+the `stop_string` in `finished`. The worker never sent it, so cancel
+`GenerateStream` when you see it.
+
+Not supported yet: `n > 1`, prompt logprobs, `return_prompt_text`,
+`return_weight_versions`, and APIs other than `API_CHAT`. `DerenderStream`
+rejects these at `start` with `UNIMPLEMENTED`, so a gateway can fall back to
+HTTP. Send `start` before submitting `GenerateStream` and wait for the response
+headers, which the server sends once it accepts `start`, so that a rejected
+request generates nothing. A rejected `start` ends the stream with a status and
+no headers. `DerenderStream` reports no per-request metrics.
+
+A request the body itself makes invalid fails with `INVALID_ARGUMENT`, which a
+gateway can return to the client as HTTP 400. `GenerateStream` output that
+`DerenderStream` cannot use, such as a stream that closes before a finished
+output or a stop string the body does not list, fails with `INTERNAL`. As on
+the HTTP route, the `x-request-id` metadata sets the response `id`
+(`chatcmpl-<x-request-id>`).
+
+The render server uses default response options, so the output can differ from
+a `vllm serve` started with `--enable-prompt-tokens-details` or
+`--enable-force-include-usage`: `usage.prompt_tokens_details` is not returned,
+and usage is only streamed when the body asks for it.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

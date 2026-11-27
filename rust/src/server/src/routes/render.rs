@@ -13,7 +13,6 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
@@ -24,11 +23,10 @@ use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
     validate_request as validate_generate_request,
 };
+use crate::routes::openai::chat_completions::convert::{PreparedRequest, prepare_chat_request};
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validate_max_output_tokens;
-use crate::routes::openai::{
-    ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
-};
+use crate::routes::openai::{ChatCompletionRequest, CompletionRequest, lower_completion_request};
 use crate::utils::{resolve_request_context, unix_timestamp};
 
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
@@ -165,7 +163,7 @@ fn hoist_transfer_params(
 }
 
 pub(crate) struct LoweredChatRender {
-    pub(crate) chat_request: ChatRequest,
+    pub(crate) prepared: PreparedRequest,
     pub(crate) model: String,
 }
 
@@ -180,17 +178,14 @@ pub(crate) async fn lower_chat_render_request<S: RenderContext>(
 
     let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
 
-    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
+    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
     validate_max_output_tokens(
         "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
+        prepared.chat_request.sampling_params.max_tokens,
         state.text_processor().max_model_len(),
     )?;
 
-    Ok(LoweredChatRender {
-        chat_request,
-        model,
-    })
+    Ok(LoweredChatRender { prepared, model })
 }
 
 /// `/v1/chat/completions/render` on both the render-only server and, with
@@ -209,15 +204,17 @@ pub(crate) async fn render_chat<S: RenderContext>(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let LoweredChatRender {
-        chat_request,
-        model,
-    } = lower_chat_render_request(state.as_ref(), body, &headers).await?;
+    let LoweredChatRender { prepared, model } =
+        lower_chat_render_request(state.as_ref(), body, &headers).await?;
     let text_request = state
         .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;
         // its output grammar is the same for every sample.
-        .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
+        .prepare(
+            prepared.chat_request,
+            NonZeroU32::MIN,
+            state.text_processor(),
+        )
         .await
         .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
