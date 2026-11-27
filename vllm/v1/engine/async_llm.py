@@ -58,6 +58,7 @@ from vllm.v1.engine import (
     CheckpointState,
     EngineCoreRequest,
     EngineHealthState,
+    KVCacheGroupMetadata,
     PauseMode,
 )
 from vllm.v1.engine.admission_control import SharedAdmissionStats
@@ -420,6 +421,9 @@ class AsyncLLM(EngineClient):
             self._supported_tasks = await self.engine_core.get_supported_tasks_async()
 
         return self._supported_tasks
+
+    async def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata]:
+        return self.engine_core.get_kv_cache_group_metadata()
 
     async def add_request(
         self,
