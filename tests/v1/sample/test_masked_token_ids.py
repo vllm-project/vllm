@@ -5,7 +5,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
-MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL = "vllm/tiny-random-LlamaForCausalLM"
 VOCAB_SIZE = 32000
 UNMASKED_TOKEN_ID = 1234
 
