@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -37,7 +39,10 @@ VL_EXPECTED_LORA_OUTPUT = [
     "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",  # noqa: E501
 ]
 
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH)
+
+@cache
+def _tokenizer():
+    return AutoTokenizer.from_pretrained(MODEL_PATH)
 
 
 def _assert_exact_outputs(
@@ -78,7 +83,7 @@ def _run_text_lora_sample(
     input_templates = []
     for prompt_text in prompts:
         messages = [{"role": "user", "content": prompt_text}]
-        prompt = TOKENIZER.apply_chat_template(
+        prompt = _tokenizer().apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -114,7 +119,7 @@ def _run_vl_lora_sample(
             ],
         }
     ]
-    prompt = TOKENIZER.apply_chat_template(
+    prompt = _tokenizer().apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -161,7 +166,7 @@ def _build_text_prompts() -> list[str]:
     input_templates = []
     for prompt_text in prompts:
         messages = [{"role": "user", "content": prompt_text}]
-        prompt = TOKENIZER.apply_chat_template(
+        prompt = _tokenizer().apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -181,7 +186,7 @@ def _build_vl_prompts() -> list[dict]:
             ],
         }
     ]
-    prompt = TOKENIZER.apply_chat_template(
+    prompt = _tokenizer().apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,

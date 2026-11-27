@@ -1599,6 +1599,12 @@ def num_gpus_available():
     return current_platform.device_count()
 
 
+@pytest.fixture(scope="session")
+def phi4mm_model_path() -> str:
+    """Local Phi-4-multimodal snapshot, which bundles its vision and speech LoRAs."""
+    return hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
+
+
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
 _dummy_llava_path = os.path.join(temp_dir, "dummy_llava")

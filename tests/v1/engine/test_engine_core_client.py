@@ -11,6 +11,7 @@ import uuid
 from collections import Counter
 from concurrent.futures import Future
 from dataclasses import dataclass
+from functools import cache
 from threading import Thread
 from types import SimpleNamespace
 from typing import Any
@@ -58,19 +59,22 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
-PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 TEST_MODULE = "tests.v1.engine.test_engine_core_client"
 
 _REQUEST_COUNTER = 0
+
+
+@cache
+def prompt_tokens() -> list[int]:
+    return AutoTokenizer.from_pretrained(MODEL_NAME)(PROMPT).input_ids
 
 
 def make_request(
     params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:
     if not prompt_tokens_ids:
-        prompt_tokens_ids = PROMPT_TOKENS
+        prompt_tokens_ids = prompt_tokens()
 
     global _REQUEST_COUNTER
     _REQUEST_COUNTER += 1

@@ -75,11 +75,6 @@ def has_huggingface_access(repo):
         return False
 
 
-HF_HUB_AMD_ORG_ACCESS = all(
-    [has_huggingface_access(model_name) for model_name in MODEL_ACCURACIES]
-)
-
-
 @dataclass(slots=True)
 class ModelCase:
     model_id: str
@@ -105,10 +100,6 @@ class EvaluationConfig:
 
 
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.",
-)
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("model_name, expected_accuracy", MODEL_ACCURACIES.items())
 def test_gpt_oss_attention_quantization(
@@ -119,6 +110,8 @@ def test_gpt_oss_attention_quantization(
 ):
     if tp_size > current_platform.device_count():
         pytest.skip("Not enough GPUs to run this test case")
+    if not has_huggingface_access(model_name):
+        pytest.skip("Read access to huggingface.co/amd is required for this test.")
 
     if "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8" in model_name and on_gfx950():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")

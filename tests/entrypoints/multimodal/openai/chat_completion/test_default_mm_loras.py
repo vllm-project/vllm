@@ -9,23 +9,20 @@ import pytest_asyncio
 
 from tests.conftest import AudioTestAssets
 from tests.utils import RemoteOpenAIServer
-from vllm.transformers_utils.repo_utils import hf_api
 
 # NOTE - the tests in this module are currently analogous to test_chat, but are
 # separated to avoid OOM killing due to module-scoped servers, since we
 # need a multimodal model for these tests.
 
 # Contains a modality specific lora alongside the base model
-MULTIMODAL_MODEL_NAME = hf_api().snapshot_download(
-    "microsoft/Phi-4-multimodal-instruct"
-)
-AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
+MULTIMODAL_MODEL_NAME = "microsoft/Phi-4-multimodal-instruct"
 
 ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 
 @pytest.fixture(scope="module")
-def multimodal_server():
+def multimodal_server(phi4mm_model_path):
+    audio_lora_path = os.path.join(phi4mm_model_path, "speech-lora")
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -36,7 +33,7 @@ def multimodal_server():
         # lora config below
         "--enable-lora",
         "--lora-modules",
-        f"speech={AUDIO_LORA_PATH}",
+        f"speech={audio_lora_path}",
         "--max-lora-rank",
         "320",
         "--max-num-seqs",
@@ -45,7 +42,7 @@ def multimodal_server():
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
-        f'{{"audio": "{AUDIO_LORA_PATH}"}}',
+        f'{{"audio": "{audio_lora_path}"}}',
     ]
 
     with RemoteOpenAIServer(

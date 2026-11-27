@@ -13,7 +13,6 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.multimodal.media.audio import load_audio
-from vllm.transformers_utils.repo_utils import hf_api
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -35,14 +34,12 @@ HF_MULTIIMAGE_IMAGE_PROMPT = (
     "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 )
 
-model_path = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
-# Since the vision-lora and speech-lora co-exist with the base model,
-# we have to manually specify the path of the lora weights.
-vision_lora_path = os.path.join(model_path, "vision-lora")
-speech_question = os.path.join(
-    model_path, "examples", "what_is_shown_in_this_image.wav"
-)
-models = [model_path]
+models = ["microsoft/Phi-4-multimodal-instruct"]
+
+
+@pytest.fixture(scope="module")
+def vision_lora_path(phi4mm_model_path: str) -> str:
+    return os.path.join(phi4mm_model_path, "vision-lora")
 
 
 def vllm_to_hf_output(
@@ -79,6 +76,7 @@ def run_test(
     inputs: Sequence[tuple[list[str], PromptImageInput, PromptAudioInput | None]],
     model: str,
     *,
+    vision_lora_path: str,
     max_model_len: int,
     dtype: str,
     max_tokens: int,
@@ -184,6 +182,7 @@ def test_models(
     vllm_runner,
     image_assets,
     model,
+    vision_lora_path: str,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -206,6 +205,7 @@ def test_models(
         vllm_runner,
         inputs_per_image,
         model,
+        vision_lora_path=vision_lora_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
@@ -226,6 +226,7 @@ def test_multi_images_models(
     vllm_runner,
     image_assets,
     model,
+    vision_lora_path: str,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -250,6 +251,7 @@ def test_multi_images_models(
         vllm_runner,
         inputs_per_case,
         model,
+        vision_lora_path=vision_lora_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
@@ -267,13 +269,18 @@ def test_multi_images_models(
 def test_vision_speech_models(
     hf_runner,
     vllm_runner,
+    phi4mm_model_path: str,
     model,
+    vision_lora_path: str,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
     # use the example speech question so that the model outputs are reasonable
+    speech_question = os.path.join(
+        phi4mm_model_path, "examples", "what_is_shown_in_this_image.wav"
+    )
     audio = load_audio(speech_question, sr=None)
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
@@ -290,6 +297,7 @@ def test_vision_speech_models(
         vllm_runner,
         inputs_vision_speech,
         model,
+        vision_lora_path=vision_lora_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,

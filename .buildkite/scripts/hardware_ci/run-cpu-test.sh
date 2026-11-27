@@ -89,8 +89,8 @@ rm -f "$build_log"
 # RuntimeError when a snapshot dir has a config but no weight files. Match
 # those messages too or the fallback never triggers for those cache misses.
 #
-# Also mount ~/.cache/vllm: multimodal test fixtures (e.g. VideoAsset, via
-# vllm/assets/video.py) download into VLLM_ASSETS_CACHE (~/.cache/vllm/assets
+# Also mount ~/.cache/vllm: multimodal test fixtures (e.g. ImageAsset, via
+# vllm/assets/base.py) download into VLLM_ASSETS_CACHE (~/.cache/vllm/assets
 # by default), a directory distinct from the HF hub cache above. Without a
 # persistent mount there, those assets never survive past one container's
 # lifetime, so every run re-fetches them from the network on the "offline"

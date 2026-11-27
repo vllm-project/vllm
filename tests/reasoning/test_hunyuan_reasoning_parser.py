@@ -141,14 +141,17 @@ TEST_CASES = [
     ),
 ]
 
-# Global tokenizer initialization to avoid repeated loading
-tokenizer = AutoTokenizer.from_pretrained("tencent/Hunyuan-A13B-Instruct")
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    return AutoTokenizer.from_pretrained("tencent/Hunyuan-A13B-Instruct")
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
     param_dict: dict,
+    tokenizer,
 ):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
@@ -167,7 +170,7 @@ def test_reasoning(
     assert content == param_dict["content"]
 
 
-def _new_parser() -> HunyuanA13BReasoningParser:
+def _new_parser(tokenizer) -> HunyuanA13BReasoningParser:
     return HunyuanA13BReasoningParser(tokenizer)
 
 
@@ -180,14 +183,14 @@ END_DETECTION_OUTPUTS = [
 
 
 @pytest.mark.parametrize("output", END_DETECTION_OUTPUTS)
-def test_reasoning_end_gate_matches_streaming_extraction(output: str):
+def test_reasoning_end_gate_matches_streaming_extraction(output: str, tokenizer):
     """The structured-output manager uses its own parser instance and never
     calls `extract_reasoning_streaming`, so end detection must work from token
     ids alone and fire on the same token where extraction switches to the
     answer."""
     ids = tokenizer.encode(output, add_special_tokens=False)
 
-    extractor = _new_parser()
+    extractor = _new_parser(tokenizer)
     extraction_end = None
     for i in range(1, len(ids) + 1):
         extractor.extract_reasoning_streaming(
@@ -203,7 +206,7 @@ def test_reasoning_end_gate_matches_streaming_extraction(output: str):
             break
     assert extraction_end is not None
 
-    gate = _new_parser()
+    gate = _new_parser(tokenizer)
     gate_steps = [
         i
         for i in range(1, len(ids) + 1)
@@ -214,9 +217,9 @@ def test_reasoning_end_gate_matches_streaming_extraction(output: str):
     assert gate.is_reasoning_end(ids[:extraction_end])
 
 
-def test_is_reasoning_end_streaming_marker_across_steps():
+def test_is_reasoning_end_streaming_marker_across_steps(tokenizer):
     ids = tokenizer.encode(SIMPLE_REASONING["output"], add_special_tokens=False)
-    parser = _new_parser()
+    parser = _new_parser(tokenizer)
     end = len(tokenizer.encode(COMPLETE_REASONING["output"], add_special_tokens=False))
 
     # Several tokens accepted at once, e.g. speculative decoding.
@@ -224,7 +227,7 @@ def test_is_reasoning_end_streaming_marker_across_steps():
     assert not parser.is_reasoning_end_streaming(ids[: end + 2], ids[end : end + 2])
 
 
-def test_is_reasoning_end_ignores_prior_turns_in_prompt():
+def test_is_reasoning_end_ignores_prior_turns_in_prompt(tokenizer):
     """Earlier assistant turns keep `<think>...</answer>` in the prompt; they
     must not start the grammar for the current turn."""
     messages = [
@@ -236,7 +239,7 @@ def test_is_reasoning_end_ignores_prior_turns_in_prompt():
         messages, tokenize=False, add_generation_prompt=True
     )
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-    parser = _new_parser()
+    parser = _new_parser(tokenizer)
 
     assert not parser.is_reasoning_end(prompt_ids)
     assert not parser.is_reasoning_end(

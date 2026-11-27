@@ -34,7 +34,6 @@ def download_video_asset(filename: str) -> str:
             repo_id="raushan-testing-hf/videos-test",
             filename=filename,
             repo_type="dataset",
-            cache_dir=video_directory,
         )
     return video_path_str
 

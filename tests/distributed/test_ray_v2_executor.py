@@ -72,7 +72,8 @@ def create_placement_group(request):
 @pytest.fixture
 def executor(request):
     """Create a RayExecutorV2 and shut it down after the test."""
-    executor = RayExecutorV2(vllm_config=request.param)
+    vllm_config = create_vllm_config(tensor_parallel_size=request.param)
+    executor = RayExecutorV2(vllm_config=vllm_config)
     yield executor
     executor.shutdown()
 
@@ -192,7 +193,7 @@ def test_ray_v2_executor_pg(tp_size, pp_size, create_placement_group):
 
 @pytest.mark.parametrize(
     "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
+    [2],
     indirect=True,
 )
 def test_ray_v2_executor_failure_callback(executor):
@@ -213,7 +214,7 @@ def test_ray_v2_executor_failure_callback(executor):
 
 @pytest.mark.parametrize(
     "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
+    [2],
     indirect=True,
 )
 def test_ray_v2_executor_collective_rpc(executor):
@@ -225,7 +226,7 @@ def test_ray_v2_executor_collective_rpc(executor):
 
 @pytest.mark.parametrize(
     "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
+    [2],
     indirect=True,
 )
 def test_ray_v2_executor_driver_node_rank_0(executor):
@@ -241,7 +242,7 @@ def test_ray_v2_executor_driver_node_rank_0(executor):
 
 @pytest.mark.parametrize(
     "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
+    [2],
     indirect=True,
 )
 def test_ray_v2_executor_worker_death(executor):
@@ -283,7 +284,7 @@ def test_ray_v2_executor_shutdown():
 
 @pytest.mark.parametrize(
     "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
+    [2],
     indirect=True,
 )
 def test_ray_v2_run_refs_stored_for_monitoring(executor):
