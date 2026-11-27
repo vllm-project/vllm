@@ -271,6 +271,7 @@ def test_dummy_run_requests_fit_in_budget(
     runner.max_num_tokens = max_num_tokens
     runner.max_num_reqs = max_num_reqs
     runner.max_model_len = max_model_len
+    runner.num_speculative_steps = 0
     runner.speculator = None
     if spec is not None:
         num_query_per_req, draft_slots = spec

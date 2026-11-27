@@ -1658,6 +1658,7 @@ class Worker(WorkerBase):
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
             num_active_loras=0,
+            allow_skip_drafts=True,
         )
 
     def probe_forward(self) -> str | None:
