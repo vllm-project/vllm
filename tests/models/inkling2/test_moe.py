@@ -679,6 +679,37 @@ def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):
         torch.testing.assert_close(run(tile), expected, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_largest_tile_rounds_launched_tiles(dist_init, fmt: str):
+    """`max_ctas` is a constexpr of the routing kernel. At the largest tile,
+    which batches above the captured prefill sizes reach at their exact token
+    count, it is rounded up to a granule, so those batches share a few kernel
+    variants and never launch fewer tiles than they need. Smaller tiles keep
+    the exact count."""
+    experts = _build_moe(fmt, _random_moe_weights(fmt)).experts
+    trtllm_bmm.expert_plan.cache_clear()
+    granule = trtllm_bmm._LARGE_TILE_CTAS_GRANULE
+    (below, small), (_, large) = trtllm_bmm._TILES[-2:]
+
+    def exact(tokens: int, tile: int) -> int:
+        rows = tokens * experts.topk
+        full = min(experts.num_experts, rows)
+        return full + (rows - full) // tile
+
+    span = 4096
+    seen = set()
+    for tokens in range(below + 1, below + 1 + span, 32):
+        plan = experts.plan(tokens)
+        assert plan.tile == large
+        assert plan.max_ctas % granule == 0
+        assert exact(tokens, large) <= plan.max_ctas < exact(tokens, large) + granule
+        seen.add(plan.max_ctas)
+    assert len(seen) <= span * experts.topk // large // granule + 2
+
+    plan = experts.plan(below)
+    assert (plan.tile, plan.max_ctas) == (small, exact(below, small))
+
+
 def _nan_filled(empty):
     def wrapper(*args, **kwargs):
         out = empty(*args, **kwargs)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import time
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any
@@ -10,9 +11,10 @@ import numpy as np
 import torch
 
 from vllm import PoolingParams, SamplingParams
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -538,6 +540,335 @@ def run_kv_cache_sizing_warmup(
             run_context_prefill_warmup(
                 model_runner, worker_execute_model, worker_sample_tokens, workspace_size
             )
+
+
+# Mixed prefill+decode steps are run at every decode request count up to
+# this: the counts a moderate concurrency reaches, where the decode attention
+# split plan changes with each count. Above, the plan changes every few
+# requests and the decode graph grid is coarser anyway.
+_MIXED_DECODE_COUNT_MAX = 16
+# Prompt lengths of the new request in those steps, cycled by decode count:
+# both odd (not a multiple of 16), the first below the 64-token range in which
+# FA4 takes its small-launch split path, the second above it.
+_MIXED_PREFILL_LENS = (37, 141)
+# Spacing of the eager prefill steps above the captured sizes: one odd count
+# and one multiple of 16 at the bottom, the middle and (this far below the
+# token budget, leaving the drafting slots) the top of the eager range.
+_EAGER_TOP_MARGIN = 64
+
+
+def _eager_prefill_warmup_token_counts(model_runner: GPUModelRunner) -> list[int]:
+    """Token counts of the eager steps `run_serving_shape_warmup` runs.
+
+    A prefill step up to the largest captured prefill size replays a graph
+    padded to a captured token count, a multiple of 16 above 16, and the
+    KV-sizing step runs the whole token budget, also a multiple of 16. Triton
+    specializes a kernel on each integer argument's divisibility by 16 (and
+    equality to 1), and some kernels take constexprs derived from the token
+    count (a tile count, say), so the first eager step above the capture range
+    whose token count is no multiple of 16 compiles a new variant of every
+    kernel that receives the token count, while every request waits.
+
+    Returns, at the bottom, the middle and the top of the eager range, one
+    count that is not a multiple of 16 and one that is; nothing when no
+    prefill size is captured (every size compiles on first use then) or when
+    the budget itself is captured.
+    """
+    compilation_config = model_runner.vllm_config.compilation_config
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        return []
+    captured = compilation_config.prefill_cudagraph_capture_token_sizes or []
+    capture_max = max(captured, default=0)
+    budget = model_runner.max_num_tokens
+    if capture_max == 0 or capture_max + _EAGER_TOP_MARGIN >= budget:
+        return []
+    anchors = {
+        capture_max,
+        (capture_max + budget) // 2 // 16 * 16,
+        (budget - _EAGER_TOP_MARGIN) // 16 * 16,
+    }
+    counts = {
+        count
+        for anchor in anchors
+        for count in (anchor + 1, anchor + 16)
+        if capture_max < count < budget
+    }
+    return sorted(counts)
+
+
+@contextmanager
+def _collect_triton_compiles(names: list[str]) -> Iterator[None]:
+    """Append the name of every Triton kernel compiled inside the block."""
+    if not HAS_TRITON:
+        yield
+        return
+    try:
+        from triton import knobs
+    except Exception:  # pragma: no cover - old Triton without knobs
+        yield
+        return
+
+    previous = knobs.runtime.jit_post_compile_hook
+
+    def on_compile(**kwargs: Any) -> Any:
+        names.append(getattr(kwargs.get("fn"), "name", "<unknown>"))
+        if previous is not None:
+            return previous(**kwargs)
+        return None
+
+    knobs.runtime.jit_post_compile_hook = on_compile
+    try:
+        yield
+    finally:
+        knobs.runtime.jit_post_compile_hook = previous
+
+
+def run_mixed_decode_count_warmup(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    num_decode_reqs: int,
+    prefill_len: int,
+    *,
+    num_short_decode_reqs: int = 0,
+    req_id_prefix: str = "_decode_count_warmup",
+) -> bool:
+    """Run one mixed step of `num_decode_reqs` decoding requests, each
+    verifying a full set of drafts except the first `num_short_decode_reqs`,
+    which carry one token and no drafts, beside one new `prefill_len`-token
+    request, after a step that admits the decoding requests.
+
+    A uniform decode batch replays the decode graph of the next captured
+    request count, so its kernels only ever run at captured counts. A mixed
+    batch runs its attention eagerly at its exact decode count: the split
+    plan and the decode token count are new compile keys of the split-combine
+    kernels whenever that count is not captured, and a request the drafter
+    proposed nothing for makes the decode token count no multiple of 16.
+    """
+    if model_runner.is_pooling_model or model_runner.is_encoder_decoder:
+        return False
+    num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
+    decode_query_len = model_runner.decode_query_len if num_spec_steps else 1
+    num_decode_reqs = min(
+        num_decode_reqs,
+        _cap_num_warmup_reqs(
+            model_runner, model_runner.max_num_reqs - 1, decode_query_len
+        ),
+    )
+    if num_decode_reqs < 1:
+        return False
+    num_short_decode_reqs = min(max(num_short_decode_reqs, 0), num_decode_reqs)
+    prefill_len = min(prefill_len, model_runner.max_model_len - 1)
+    spec_config = model_runner.speculative_config
+    draft_slots = (
+        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+    )
+    decode_tokens = [
+        1 if i < num_short_decode_reqs else decode_query_len
+        for i in range(num_decode_reqs)
+    ]
+    num_tokens = sum(decode_tokens) + prefill_len
+    if num_tokens + (num_decode_reqs + 1) * draft_slots > model_runner.max_num_tokens:
+        return False
+
+    decode_prompt_len = 2
+    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
+    block_count = _warmup_block_counter(model_runner)
+    decode_prefill_block_counts = [
+        block_count(decode_prompt_len, g) for g in kv_cache_groups
+    ]
+    decode_block_counts = [
+        block_count(decode_prompt_len + decode_query_len, g) for g in kv_cache_groups
+    ]
+    decode_block_deltas = [
+        decode - prefill
+        for decode, prefill in zip(decode_block_counts, decode_prefill_block_counts)
+    ]
+    prefill_block_counts = [block_count(prefill_len, g) for g in kv_cache_groups]
+    required_blocks = num_decode_reqs * sum(decode_block_counts) + sum(
+        prefill_block_counts
+    )
+    num_blocks = num_committable_kv_blocks(model_runner)
+    if num_blocks <= required_blocks:
+        logger.warning(
+            "Skipping the %d-decode mixed warmup because only %d KV blocks are "
+            "available for %d required warmup blocks.",
+            num_decode_reqs,
+            num_blocks,
+            required_blocks,
+        )
+        return False
+    ensure_kv_cache_blocks(model_runner, 1 + required_blocks)
+
+    next_block_id = 1
+
+    def _alloc_blocks(num_blocks: int) -> list[int]:
+        nonlocal next_block_id
+        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+
+    sampling_params = SamplingParams(max_tokens=2, temperature=0.0, watermarking=False)
+    decode_req_ids = [f"{req_id_prefix}_decode_{i}_" for i in range(num_decode_reqs)]
+    prefill_req_id = f"{req_id_prefix}_prefill_"
+    decode_token_ids = _warmup_token_ids(model_runner, decode_prompt_len)
+
+    admit_output = SchedulerOutput.make_empty()
+    admit_output.num_spec_tokens_to_schedule = num_spec_steps
+    admit_output.scheduled_new_reqs = [
+        NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=decode_token_ids,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=tuple(_alloc_blocks(n) for n in decode_prefill_block_counts),
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=decode_token_ids,
+        )
+        for req_id in decode_req_ids
+    ]
+    admit_output.num_scheduled_tokens = dict.fromkeys(decode_req_ids, decode_prompt_len)
+    admit_output.total_num_scheduled_tokens = decode_prompt_len * num_decode_reqs
+
+    cached_decode_reqs = CachedRequestData.make_empty()
+    cached_decode_reqs.req_ids = list(decode_req_ids)
+    cached_decode_reqs.num_computed_tokens = [decode_prompt_len] * num_decode_reqs
+    cached_decode_reqs.num_output_tokens = [1] * num_decode_reqs
+    cached_decode_reqs.new_block_ids = [
+        tuple(_alloc_blocks(n) for n in decode_block_deltas)
+        if any(decode_block_deltas)
+        else None
+        for _ in decode_req_ids
+    ]
+    prefill_token_ids = _warmup_token_ids(model_runner, prefill_len)
+    mixed_output = SchedulerOutput.make_empty()
+    mixed_output.num_spec_tokens_to_schedule = num_spec_steps
+    mixed_output.scheduled_cached_reqs = cached_decode_reqs
+    mixed_output.scheduled_new_reqs = [
+        NewRequestData(
+            req_id=prefill_req_id,
+            prompt_token_ids=prefill_token_ids,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=prefill_token_ids,
+        )
+    ]
+    mixed_output.num_scheduled_tokens = dict(zip(decode_req_ids, decode_tokens))
+    mixed_output.num_scheduled_tokens[prefill_req_id] = prefill_len
+    if num_spec_steps:
+        mixed_output.scheduled_spec_decode_tokens = {
+            req_id: [0] * num_spec_steps
+            for req_id, tokens in zip(decode_req_ids, decode_tokens)
+            if tokens == decode_query_len
+        }
+    mixed_output.total_num_scheduled_tokens = num_tokens
+
+    cleanup_output = SchedulerOutput.make_empty()
+    cleanup_output.finished_req_ids = {*decode_req_ids, prefill_req_id}
+
+    model_runner.kv_connector.set_disabled(True)
+    try:
+        with _fixed_draft_counts(model_runner):
+            try:
+                _run_step(worker_execute_model, worker_sample_tokens, admit_output)
+                _run_step(worker_execute_model, worker_sample_tokens, mixed_output)
+            finally:
+                _run_step(worker_execute_model, None, cleanup_output)
+    finally:
+        model_runner.kv_connector.set_disabled(False)
+    return True
+
+
+@torch.inference_mode()
+def run_serving_shape_warmup(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
+    """Compile the kernel variants of batch shapes that serving reaches but
+    neither the other warmup steps nor CUDA graph capture run, so that they
+    do not compile during inference: mixed prefill+decode steps at every
+    decode request count up to `_MIXED_DECODE_COUNT_MAX`, and eager prefill
+    steps above the largest captured prefill size, at token counts that are
+    and are not multiples of 16 (`_eager_prefill_warmup_token_counts`).
+
+    Only the compiled kernels outlive these steps. A failure is logged and
+    serving goes on; the kernels then compile on first use, as before.
+    """
+    if (
+        model_runner.is_pooling_model
+        or model_runner.is_encoder_decoder
+        or model_runner.vllm_config.is_mm_encoder_only
+    ):
+        return
+    start = time.perf_counter()
+    ran: list[str] = []
+    compiled: list[str] = []
+    try:
+        with _collect_triton_compiles(compiled):
+            max_count = min(_MIXED_DECODE_COUNT_MAX, model_runner.max_num_reqs - 1)
+            decode_query_len = model_runner.decode_query_len
+            for count in range(1, max_count + 1):
+                prefill_len = _MIXED_PREFILL_LENS[count % len(_MIXED_PREFILL_LENS)]
+                if run_mixed_decode_count_warmup(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                    count,
+                    prefill_len,
+                ):
+                    ran.append(f"{count}d+{prefill_len}p")
+                # The same count with one request the drafter proposed
+                # nothing for: the decode token count leaves the %16 class.
+                if (
+                    count >= 2
+                    and (count * decode_query_len) % 16 == 0
+                    and run_mixed_decode_count_warmup(
+                        model_runner,
+                        worker_execute_model,
+                        worker_sample_tokens,
+                        count,
+                        prefill_len,
+                        num_short_decode_reqs=1,
+                    )
+                ):
+                    ran.append(f"{count}d(1 short)+{prefill_len}p")
+            for count in _eager_prefill_warmup_token_counts(model_runner):
+                if run_mixed_prefill_decode_warmup(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                    count,
+                    req_id_prefix="_eager_prefill_warmup",
+                    prefill_only_fallback=True,
+                ):
+                    ran.append(f"eager{count}")
+    except Exception:
+        logger.exception(
+            "Serving-shape warmup failed after %d steps (%s); serving goes on "
+            "and the remaining kernel variants compile on first use.",
+            len(ran),
+            ", ".join(ran),
+        )
+    finally:
+        if model_runner.speculator is not None:
+            try:
+                model_runner.speculator.reset_state()
+            except Exception:
+                logger.exception("Could not reset the speculator after warmup.")
+    logger.info(
+        "Serving-shape warmup ran %d steps (%s) in %.1f s, compiling %d Triton "
+        "kernel variants%s.",
+        len(ran),
+        ", ".join(ran),
+        time.perf_counter() - start,
+        len(compiled),
+        ": " + ", ".join(sorted(set(compiled))) if compiled else "",
+    )
 
 
 @torch.inference_mode()

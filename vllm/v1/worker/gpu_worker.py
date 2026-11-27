@@ -146,7 +146,11 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
-from .gpu.warmup import run_kv_cache_sizing_warmup, warmup_kernels
+from .gpu.warmup import (
+    run_kv_cache_sizing_warmup,
+    run_serving_shape_warmup,
+    warmup_kernels,
+)
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -1132,6 +1136,14 @@ class Worker(WorkerBase):
         ):
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            # Batch shapes serving reaches that neither the steps above nor graph
+            # capture run (mixed steps at uncaptured decode counts, eager prefill
+            # steps above the captured sizes): compile their kernel variants now
+            # rather than inside the first request that reaches them.
+            run_serving_shape_warmup(
+                self.model_runner, self.execute_model, self.sample_tokens
+            )
         if self.cache_config.enable_extensible_kv_cache:
             kv_cache = self.model_runner.extensible_kv_cache
             assert kv_cache is not None
