@@ -265,6 +265,59 @@ def test_message_queue_shutdown_idle():
     distributed_run(worker_fn_test_shutdown_idle, 4)
 
 
+def test_acquire_write_respects_shutdown():
+    """shutdown() should unblock a writer stuck in acquire_write."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024,
+        max_chunks=2,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+
+    try:
+        threading.Thread(target=writer.wait_until_ready, daemon=True).start()
+        reader.wait_until_ready()
+
+        # Fill the buffer so the next enqueue blocks.
+        writer.enqueue("m0")
+        writer.enqueue("m1")
+
+        done = threading.Event()
+        result: dict[str, object] = {}
+
+        def writer_thread_fn():
+            try:
+                writer.enqueue("m2")
+                result["result"] = "completed"
+            except BaseException as exc:
+                result["exc"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(target=writer_thread_fn, daemon=True).start()
+
+        # Simulate what death monitors do: call shutdown on the writer-side mq.
+        writer.shutdown()
+
+        done.wait(timeout=3.0)
+        assert done.is_set(), "shutdown did not unblock the writer"
+        assert isinstance(result["exc"], RuntimeError)
+        assert str(result["exc"]) == "cancelled"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for socket in (
+            writer.local_socket,
+            reader.local_socket,
+            writer._spin_condition.local_notify_socket,
+            reader._spin_condition.local_notify_socket,
+            reader._spin_condition.read_cancel_socket,
+            reader._spin_condition.write_cancel_socket,
+        ):
+            socket.close(linger=0)
+
+
 @worker_fn_wrapper
 def worker_fn_test_idle_to_busy():
     rank = dist.get_rank()
