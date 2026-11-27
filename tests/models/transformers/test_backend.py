@@ -34,14 +34,21 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.lora.layers import MergedQKVParallelLinearWithLoRA
 from vllm.model_executor import model_loader
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.transformers.base import Base, SplitWeights
+from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import (
+    ShardId,
     StageMissingLayer,
     WeightsMapper,
     _model_to_pp_missing_layer_names,
@@ -1075,74 +1082,294 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
     assert module.int8.dtype == torch.int8 and not module.int8.requires_grad
 
 
+class _LoadPathStub(nn.Module):
+    """A module with the `Base` methods that its weight loading calls."""
+
+    _apply_conversion_mapping = Base._apply_conversion_mapping
+    _drop_ignored_unexpected = Base._drop_ignored_unexpected
+
+
+def _stub_for(model: nn.Module, *conversions) -> _LoadPathStub:
+    """A stub whose `self.model` is `model`, loading with `conversions`."""
+    stub = _LoadPathStub()
+    stub.config = PreTrainedConfig()
+    stub.model = model
+    model.base_model_prefix = "model"
+    if not hasattr(model, "_keys_to_ignore_on_load_unexpected"):
+        model._keys_to_ignore_on_load_unexpected = None
+    stub._weight_conversions = lambda: list(conversions)
+    stub._maybe_apply_model_mapping = lambda: None
+    stub.ignore_unexpected_prefixes = stub.ignore_unexpected_suffixes = []
+    Base._create_hf_to_vllm_mapper(stub)
+    return stub
+
+
 def test_ignored_unexpected_patterns_match_renamed_keys():
     """Like Transformers, `_keys_to_ignore_on_load_unexpected` matches renamed keys
     and only drops weights nothing loads (A.X-K1's `post_mlp_layernorm` is renamed
     into `mlp` and unused only on its dense layers)."""
-    stub = nn.Module()
-    stub.layers = nn.ModuleList([nn.Module(), nn.Module()])
-    stub.layers[0].mlp = nn.Module()
-    stub.layers[0].mlp.post_norm = nn.RMSNorm(2)
-    stub.model = SimpleNamespace(_keys_to_ignore_on_load_unexpected=[r"mlp\.post_norm"])
-    stub.hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
-    )
-    weights = [(f"layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
+    model = nn.Module()
+    model._keys_to_ignore_on_load_unexpected = [r"mlp\.post_norm"]
+    model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    model.layers[0].mlp = nn.Module()
+    model.layers[0].mlp.post_norm = nn.RMSNorm(2)
+    stub = _stub_for(model, WeightRenaming("post_norm", "mlp.post_norm"))
+    weights = [(f"model.layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
 
-    kept = Base._drop_ignored_unexpected(stub, iter(weights))
+    loaded = Base.load_weights(stub, weights)
 
-    assert [name for name, _ in kept] == ["layers.0.post_norm.weight"]
+    assert loaded == {"model.layers.0.mlp.post_norm.weight"}
 
 
 @pytest.mark.skipif(
-    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
 )
-def test_split_weights_splits_fused_gqa_qkv():
+def test_convert_weights_splits_fused_gqa_qkv(dist_init, default_vllm_config):
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
-    into each projection's size, matched before and named after the renamings. Like
-    in Transformers, a longer name that only starts with the pattern is not split,
-    and a quantization scale for the fused tensor is rejected, not split. The fused
-    tensor of a skipped module is left for the loader to drop."""
-    with torch.device("meta"):
-        model = nn.Module()
-        model.config = PreTrainedConfig()
-        model.self_attn = nn.Module()
-        model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
-        model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
-        model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
-        model.vision_tower = StageMissingLayer("vision_tower")
+    into each projection's size, after the renamings, also into a quantized module
+    unless it's stored unquantized (in another dtype than the module's weight). The
+    fused tensor of a skipped module is left for the loader to drop."""
+    model = _LoadPathStub()
+    model.config = PreTrainedConfig()
+    model.self_attn = nn.Module()
+    model.self_attn.q_proj = ReplicatedLinear(8, 8, bias=False)
+    model.self_attn.k_proj = ReplicatedLinear(8, 2, bias=False)
+    model.self_attn.v_proj = ReplicatedLinear(8, 2, bias=False)
+    model.vision_tower = StageMissingLayer("vision_tower")
     converter = WeightConverter(
         source_patterns="query_key_value",
         target_patterns=["q_proj", "k_proj", "v_proj"],
         operations=[core_model_loading.Split(dim=0)],
     )
-    mapper = WeightsMapper(
+    model.hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_renaming=[
             WeightRenaming(r"^attention\.", "self_attn."),
             WeightRenaming(r"^vision_model\.", "vision_tower."),
         ]
     )
+    model.weight_converters = [converter]
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
-    weights = SplitWeights(converter, mapper, model)
+    weights = model._apply_conversion_mapping
     # Cached by `id`, which a model freed by an earlier test may have had
     _model_to_pp_missing_layer_names.pop(id(model), None)
-    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
-    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
+    fused_weight = ("attention.query_key_value.weight", fused)
+    pieces = dict(weights([fused_weight]))
 
     assert list(pieces) == [
-        "attention.q_proj.weight",
-        "attention.k_proj.weight",
-        "attention.v_proj.weight",
-        "attention.query_key_value_norm.weight",
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
     ]
-    split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
+    split = [pieces[f"self_attn.{p}_proj.weight"] for p in "qkv"]
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
 
-    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
-    with pytest.raises(ValueError, match="quantized tensors is not supported"):
-        list(weights([scale]))
+    model.self_attn.q_proj.quant_method = SimpleNamespace(uses_meta_device=False)
+    assert len(list(weights([fused_weight]))) == 3
+    unquantized = (fused_weight[0], fused.bfloat16())
+    with pytest.raises(ValueError, match="split of a tensor stored like its weight"):
+        list(weights([unquantized]))
+    model.self_attn.q_proj.quant_method.uses_meta_device = True
+    assert len(list(weights([unquantized]))) == 3
 
     skipped = ("vision_model.query_key_value.weight", fused)
-    assert list(weights([skipped])) == [skipped]
+    assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
+
+
+def test_converters_apply_to_renamed_weights():
+    """Like in Transformers, converters see the renamed checkpoint names, so those
+    scoped to a sub-model apply too (Molmo2's `ff_proj`), and a `Concatenate` joins
+    all of its sources (its `wte` embeddings)."""
+    model = nn.Module()
+    model.language_model = text = nn.Module()
+    text.embed_tokens = nn.Embedding(3, 2)
+    text.up_proj = nn.Linear(2, 2, bias=False)
+    text.gate_proj = nn.Linear(2, 2, bias=False)
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
+    )
+    concat = WeightConverter(
+        source_patterns=["wte.embedding", "wte.new_embedding"],
+        target_patterns="embed_tokens.weight",
+        operations=[core_model_loading.Concatenate(dim=0)],
+    )
+    for converter in (chunk, concat):
+        converter.scope_prefix, converter.base_model_prefix = "language_model", "model"
+    renaming = WeightRenaming(r"transformer\.", "language_model.")
+    stub = _stub_for(model, renaming, chunk, concat)
+    ff_proj, wte = torch.rand(4, 2), [torch.rand(2, 2), torch.rand(1, 2)]
+    checkpoint = {
+        "model.transformer.ff_proj.weight": ff_proj,
+        "model.transformer.wte.embedding": wte[0],
+        "model.transformer.wte.new_embedding": wte[1],
+    }
+
+    Base.load_weights(stub, checkpoint.items())
+
+    up_gate = torch.cat([text.up_proj.weight, text.gate_proj.weight])
+    torch.testing.assert_close(up_gate, ff_proj)
+    torch.testing.assert_close(text.embed_tokens.weight, torch.cat(wte))
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
+)
+@pytest.mark.parametrize("lora", [False, True])
+def test_split_into_vllm_fused_qkv(lora, dist_init, default_vllm_config):
+    """`Split` sizes targets that vLLM fused into a `QKVParallelLinear` by its full
+    head counts (here GQA), and each piece loads into its shard (Molmo2's
+    `att_proj`), also once LoRA wraps it (reloading weights in place)."""
+    model = nn.Module()
+    model.self_attn = nn.Module()
+    qkv = QKVParallelLinear(8, head_size=2, total_num_heads=4, total_num_kv_heads=1)
+    model.self_attn.qkv_proj = MergedQKVParallelLinearWithLoRA(qkv) if lora else qkv
+    split = WeightConverter(
+        source_patterns="query_key_value",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    stub = _stub_for(model, WeightRenaming(r"attention\.", "self_attn."), split)
+    stub.hf_to_vllm_mapper |= WeightsMapper(
+        orig_to_new_stacked={
+            f"model.self_attn.{p}_proj": ("model.self_attn.qkv_proj", p) for p in "qkv"
+        }
+    )
+    fused = torch.rand(12, 8)
+
+    Base.load_weights(stub, [("model.attention.query_key_value.weight", fused)])
+
+    torch.testing.assert_close(qkv.weight, fused)
+
+
+def test_joining_into_a_quantized_module_is_rejected():
+    """Converting into a quantized module by joining its sources (Molmo2's `wte`
+    embeddings) is rejected, unless it quantizes online after loading."""
+    model = nn.Module()
+    model.embed_tokens = nn.Embedding(3, 2)
+    concat = WeightConverter(
+        source_patterns=["wte.embedding", "wte.new_embedding"],
+        target_patterns="embed_tokens.weight",
+        operations=[core_model_loading.Concatenate(dim=0)],
+    )
+    convert = _stub_for(model, concat)._apply_conversion_mapping
+    wte = [("model.wte.embedding", torch.rand(2, 2))]
+    wte += [("model.wte.new_embedding", torch.rand(1, 2))]
+
+    model.embed_tokens.quant_method = SimpleNamespace(uses_meta_device=False)
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
+        list(convert(wte))
+    model.embed_tokens.quant_method.uses_meta_device = True
+    assert [name for name, _ in convert(wte)] == ["model.embed_tokens.weight"]
+
+
+def test_converted_weight_with_no_module_is_left_to_the_loader():
+    """A converted weight that no module on this rank loads (e.g. an MTP layer the
+    loader ignores) is passed on unconverted for the loader to drop or report."""
+    model = nn.Module()
+    model.layers = nn.ModuleList([nn.Module()])
+    layer = model.layers[0]
+    layer.up_proj = nn.Linear(2, 2, bias=False)
+    layer.gate_proj = nn.Linear(2, 2, bias=False)
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
+    )
+    stub = _stub_for(model, chunk)
+    stub.ignore_unexpected_prefixes = ["model.layers.1."]
+    ff_proj = torch.rand(4, 2)
+    checkpoint = [(f"model.layers.{i}.ff_proj.weight", ff_proj) for i in range(2)]
+
+    Base.load_weights(stub, checkpoint)
+
+    up_gate = torch.cat([layer.up_proj.weight, layer.gate_proj.weight])
+    torch.testing.assert_close(up_gate, ff_proj)
+
+
+def _quantized_split_stub() -> _LoadPathStub:
+    """Molmo2's fused `att_proj` (a module's `Split`) and `ff_proj.weight` (a weight's
+    `Chunk`), loaded into vLLM's fused `qkv_proj` and `gate_up_proj`."""
+    model = _LoadPathStub()
+    model.config = PreTrainedConfig()
+    model.self_attn = nn.Module()
+    model.self_attn.qkv_proj = QKVParallelLinear(
+        6, head_size=2, total_num_heads=4, total_num_kv_heads=1
+    )
+    model.mlp = nn.Module()
+    model.mlp.gate_up_proj = MergedColumnParallelLinear(6, [4, 4])
+    stacked: dict[str, tuple[str, ShardId]] = {
+        f"self_attn.{p}_proj": ("self_attn.qkv_proj", p) for p in "qkv"
+    }
+    stacked |= {"mlp.gate_proj": ("mlp.gate_up_proj", 0)}
+    stacked |= {"mlp.up_proj": ("mlp.gate_up_proj", 1)}
+    model.hf_to_vllm_mapper = WeightsMapper(orig_to_new_stacked=stacked)
+    model.weight_converters = [
+        WeightConverter(
+            source_patterns="att_proj",
+            target_patterns=["q_proj", "k_proj", "v_proj"],
+            operations=[core_model_loading.Split(dim=0)],
+        ),
+        WeightConverter(
+            source_patterns="ff_proj.weight",
+            target_patterns=["up_proj.weight", "gate_proj.weight"],
+            operations=[core_model_loading.Chunk(dim=0)],
+        ),
+    ]
+    return model
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
+)
+@pytest.mark.parametrize(
+    ("name", "shape", "pieces"),
+    [
+        ("self_attn.att_proj.weight_scale", (1,), None),  # FP8 per tensor
+        ("mlp.ff_proj.input_scale", (1,), None),
+        ("self_attn.att_proj.input_scale", (), None),  # modelopt FP8
+        ("mlp.ff_proj.weight_shape", (2,), None),  # int4 pack-quantized
+        ("self_attn.att_proj.weight_scale", (12, 1), [(8, 1), (2, 1), (2, 1)]),
+        ("mlp.ff_proj.weight_packed", (8, 3), [(4, 3), (4, 3)]),
+        ("self_attn.att_proj.weight_scale", (6, 3), [(4, 3), (1, 3), (1, 3)]),
+        ("mlp.ff_proj.weight_scale", (8,), [(4,), (4,)]),  # 1-D, the weight's rows
+    ],
+)
+def test_convert_weights_splits_quantized_tensors(
+    name, shape, pieces, dist_init, default_vllm_config
+):
+    """The other tensors a quantized checkpoint stores with a weight that a converter
+    splits (Molmo2's and Sarvam-30B's quantized checkpoints) are split like the weight,
+    by rows or blocks of rows (here per channel, packed and in blocks of 2), or copied
+    to every piece (`None`) if they're a single value or 1-D of another length."""
+    convert = _quantized_split_stub()._apply_conversion_mapping
+    tensor = torch.rand(shape)
+    module, param = name.rsplit(".", 1)
+    prefix = module.rpartition(".")[0]
+    targets = {"self_attn": ["q", "k", "v"], "mlp": ["up", "gate"]}[prefix]
+
+    converted = dict(convert([(name, tensor)]))
+
+    assert list(converted) == [f"{prefix}.{t}_proj.{param}" for t in targets]
+    if pieces is None:
+        assert all(piece is tensor for piece in converted.values())
+    else:
+        assert [tuple(piece.shape) for piece in converted.values()] == pieces
+        torch.testing.assert_close(torch.cat(list(converted.values())), tensor)
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
+)
+@pytest.mark.parametrize("module", ["self_attn.att_proj", "mlp.ff_proj"])
+def test_convert_weights_rejects_quantized_tensors_that_dont_split(
+    module, dist_init, default_vllm_config
+):
+    """A tensor of a split module that divides neither like the weight nor as a single
+    value fails by name, for a module's converter and a weight's."""
+    convert = _quantized_split_stub()._apply_conversion_mapping
+
+    with pytest.raises(ValueError, match=f"Cannot split '{module}.weight_scale'"):
+        list(convert([(f"{module}.weight_scale", torch.rand(5, 1))]))
