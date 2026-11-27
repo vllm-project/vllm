@@ -237,6 +237,8 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
         main_kv_cache=attn.kv_cache,
+        main_decode_q_out=torch.empty(0, 1, 1),
+        main_prefill_q_out=torch.empty(2, 1, 1),
         block_indices=torch.empty(2, 1, dtype=torch.int32),
     )
 

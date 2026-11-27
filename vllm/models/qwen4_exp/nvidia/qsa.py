@@ -1044,17 +1044,36 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
-        # FlashInfer FP8 prefill: the fused prepare writes the prefill rows'
-        # Q (after the decode rows) in FP8 directly.
-        flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
-        main_fp8_q_start = None
-        if (
-            self.index_group is None
-            and flashinfer_prefill is not None
-            and self.flashinfer_query_dtype == torch.float8_e4m3fn
-        ):
-            main_fp8_q_start = main_metadata.num_decode_tokens
-        selected, main_outputs = self.indexer(
+        # The fused prepare writes decode and prefill Q rows to separate
+        # buffers: for FlashInfer FP8 prefill the prefill rows go straight to
+        # FP8, else both are views of one BF16 Q.
+        prefill_query = None
+        decode_q_out = prefill_q_out = None
+        if self.use_fused_qsa_prepare:
+            num_decode_tokens = main_metadata.num_decode_tokens
+            flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
+            fp8_prefill = (
+                self.index_group is None
+                and flashinfer_prefill is not None
+                and self.flashinfer_query_dtype == torch.float8_e4m3fn
+            )
+            query = qkv.new_empty(
+                num_decode_tokens if fp8_prefill else num_tokens,
+                self.num_heads,
+                self.head_dim,
+            )
+            decode_q_out = query[:num_decode_tokens]
+            if fp8_prefill:
+                prefill_query = qkv.new_empty(
+                    num_tokens - num_decode_tokens,
+                    self.num_heads,
+                    self.head_dim,
+                    dtype=torch.float8_e4m3fn,
+                )
+                prefill_q_out = prefill_query
+            else:
+                prefill_q_out = query[num_decode_tokens:]
+        selected, main_gate = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
@@ -1062,22 +1081,22 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
-            main_fp8_q_start=main_fp8_q_start,
+            main_decode_q_out=decode_q_out,
+            main_prefill_q_out=prefill_q_out,
             block_indices=block_indices,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if self.index_group is not None:
             self.index_group.set_logical_topk_ready(0)
-        prefill_query = None
-        if main_outputs is None:
+        if main_gate is None:
             assert key is not None and value is not None
             num_rows = slot_mapping.shape[0]
             self.impl.do_kv_cache_update(
                 self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
         else:
-            query, output_gate, prefill_query = main_outputs
+            output_gate = main_gate
         if self.index_group is not None:
             self.index_group.cache(0).finish_kv_update()
         assert query is not None and output_gate is not None
