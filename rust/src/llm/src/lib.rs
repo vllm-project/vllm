@@ -22,7 +22,6 @@ mod admission;
 mod aux_output;
 mod error;
 mod fingerprint;
-mod health;
 mod inflight;
 mod log_stats;
 mod output;
@@ -34,18 +33,17 @@ pub use admission::AdmissionLimits;
 pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use fingerprint::LlmFingerprint;
-pub use health::NotReady;
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
+pub use vllm_engine_core_client::NotReady;
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 pub use weight_versions::{WeightVersionSpan, WeightVersions};
 
 use crate::admission::{Admission, AdmissionGuard};
-use crate::health::HealthProbes;
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::{
@@ -155,7 +153,6 @@ pub struct EngineCoreLlm {
     /// construction so the request families export zero-valued series before
     /// the first request.
     request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
-    health_probes: HealthProbes,
 }
 
 impl EngineCoreLlm {
@@ -196,7 +193,6 @@ impl EngineCoreLlm {
             inflight: InflightRequests::new(),
             admission,
             request_metric_handles,
-            health_probes: HealthProbes::default(),
         }
     }
 
@@ -459,7 +455,7 @@ impl Llm for EngineCoreLlm {
     }
 
     async fn check_health_generate(&self, timeout: Duration) -> std::result::Result<(), NotReady> {
-        self.health_probes.check(&self.client, timeout).await
+        self.client.check_health_generate(timeout).await
     }
 
     async fn generate_n(

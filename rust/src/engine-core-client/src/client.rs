@@ -24,16 +24,18 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
-use crate::protocol::utility::{CheckpointState, EngineHealthState, PauseMode, SleepLevel};
+use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
-use crate::transport::{self, ConnectedEngine, EngineId};
+use crate::transport::{self, ConnectedEngine};
 
+mod health;
 pub(crate) mod imp;
 mod output_channel;
 mod readiness;
 mod state;
 mod stream;
 
+pub use health::NotReady;
 pub use state::RequestObserver;
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
@@ -566,19 +568,6 @@ impl EngineCoreClient {
             .collect()
     }
 
-    /// Return the routing identity of each connected engine with the
-    /// data-parallel rank it reported in its ready response.
-    pub fn engine_ranks(&self) -> Vec<(EngineId, u32)> {
-        (self.engines.iter())
-            .map(|engine| {
-                (
-                    engine.engine_id.clone(),
-                    engine.ready_response.data_parallel_rank,
-                )
-            })
-            .collect()
-    }
-
     /// Return the engine identities of all engines connected to this client.
     pub fn engine_identities(&self) -> Vec<&[u8]> {
         self.engines.iter().map(|engine| &*engine.engine_id).collect()
@@ -1038,22 +1027,14 @@ impl EngineCoreClient {
         self.call_utility_consensus("get_weight_version", ()).await
     }
 
-    /// Ask the given engine whether it can run the model now: an idle engine
-    /// runs a forward probe before it answers.
-    ///
-    /// The returned future owns what it needs, so callers can run it detached
-    /// from any one request.
-    pub fn check_health_generate(
+    /// Check that every engine can run the model now, as Python's
+    /// `AsyncLLM.check_health_generate`, waiting at most `timeout` for their
+    /// answers: an idle engine runs a forward probe before it answers.
+    pub async fn check_health_generate(
         &self,
-        engine_id: &EngineId,
-    ) -> impl Future<Output = Result<EngineHealthState>> + Send + 'static {
-        let inner = self.inner.clone();
-        let engine_id = engine_id.clone();
-        async move {
-            let mut states =
-                (inner.call_utility_on(&[engine_id], "check_health_generate", (), None)).await?;
-            Ok(states.pop().expect("one result per engine"))
-        }
+        timeout: Duration,
+    ) -> std::result::Result<(), NotReady> {
+        self.inner.health_probes().check(&self.inner, timeout).await
     }
 
     /// Return whether the engine is currently sleeping at any level.

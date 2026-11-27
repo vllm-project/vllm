@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
+use crate::client::health::HealthProbes;
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
@@ -62,6 +63,11 @@ pub(crate) struct ClientInner {
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+    // TODO: consider merging into `readiness`: both ask the engines whether
+    // they can serve (`is_inference_ready` versus a `check_health_generate`
+    // probe) and track the same control-call epochs.
+    /// Generation readiness probes, one in flight per engine at most.
+    health_probes: HealthProbes,
 }
 
 impl ClientInner {
@@ -104,6 +110,7 @@ impl ClientInner {
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
             readiness: Arc::new(Readiness::new()),
+            health_probes: HealthProbes::new(engines),
         }
     }
 
@@ -273,6 +280,15 @@ impl ClientInner {
 
     pub fn readiness(&self) -> &Arc<Readiness> {
         &self.readiness
+    }
+
+    pub fn health_probes(&self) -> &HealthProbes {
+        &self.health_probes
+    }
+
+    /// The runtime this client's tasks run on.
+    pub fn runtime_handle(&self) -> &Handle {
+        &self.handle
     }
 
     /// Call a typed utility method on every engine. See
