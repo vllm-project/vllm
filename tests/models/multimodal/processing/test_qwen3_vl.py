@@ -14,8 +14,10 @@ import pytest
 import torch
 from transformers.models.qwen3_vl import Qwen3VLVideoProcessor
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
@@ -901,3 +903,36 @@ def test_video_scoped_frame_limits(
             assert processed["mm_placeholders"]["video"][0].get_num_embeds() == (
                 int(grid.prod()) // 4
             )
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_video_budget_rejects_num_frames_before_sampling(
+    monkeypatch: pytest.MonkeyPatch, scoped: bool
+) -> None:
+    """An explicit frame count over the budget must be rejected unsampled."""
+    ctx = build_model_context(MODEL_ID, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    # A 128x128 RGB frame takes 49152 uint8 or 196608 float32 bytes and is counted
+    # twice, so 8 frames fit in 4 MiB and 64 do not in either format.
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 4 << 20)
+
+    def process(num_frames: int):
+        kwargs: dict[str, Any] = {"num_frames": num_frames}
+        return processor(
+            "<|vision_start|><|video_pad|><|vision_end|>",
+            mm_items=processor.info.parse_mm_data(_build_video_mm_data(num_frames=4)),
+            hf_processor_mm_kwargs={"videos_kwargs": kwargs} if scoped else kwargs,
+        )
+
+    # Within the budget, HF's explicit count applies beyond the 4 decoded frames.
+    grid = process(8)["mm_kwargs"].get_data()["video_grid_thw"]
+    assert isinstance(grid, torch.Tensor)
+    assert grid.tolist() == [[4, 8, 8]]
+
+    def fail_sampling(*args: object, **kwargs: object):
+        raise AssertionError("Frames were sampled before the budget check.")
+
+    # vLLM's timestamps and HF's sampler both build their indices with linspace.
+    monkeypatch.setattr(np, "linspace", fail_sampling)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
+        process(64)
