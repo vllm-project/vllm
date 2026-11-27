@@ -736,7 +736,9 @@ class Attention(nn.Module, AttentionLayerBase):
                     num_lookahead_tokens=vllm_config.num_lookahead_tokens,
                 )
             return SlidingWindowManager.layer_config(
-                spec, sliding_window=self.sliding_window
+                spec,
+                sliding_window=self.sliding_window,
+                sink_len=int(getattr(self, "kv_sink_len", 0) or 0),
             )
         else:
             spec = AttentionSpec(

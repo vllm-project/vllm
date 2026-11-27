@@ -1085,12 +1085,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """Left out of prefix caching without a replay window of its own:
         another group's bounded replay recomputes enough tokens to rebuild it
         (e.g. the DeepSeek-V4 compressor states under the SWA replay)."""
+        sink_len: int = 0
+        """Tokens at the start of the sequence that stay allocated after the
+        window slides. DSpark draft attention reads these plus the window."""
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
         params = config.params
         assert isinstance(params, SlidingWindowManager.Params)
-        return not (params.bounded_replay or params.rebuilt_by_replay)
+        # A pinned sink leaves a hole in front of the window, which the
+        # sliding-window prefix hit does not describe.
+        return not (
+            params.bounded_replay or params.rebuilt_by_replay or params.sink_len > 0
+        )
 
     @classmethod
     def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
@@ -1102,6 +1109,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def sliding_window_reach(cls, config: ManagerConfig) -> int:
         params = config.params
         assert isinstance(params, SlidingWindowManager.Params)
+        if params.sink_len > 0:
+            # The worker nulls every leading block before the window, which
+            # would also null the pinned sink. A sink group is read through a
+            # gathered sink-plus-window table, so it never touches the freed
+            # middle and needs no mask.
+            return 0
         return params.sliding_window - 1 + params.extra_retained_tokens
 
     @classmethod
@@ -1131,7 +1144,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
         # [XXCD][EF] to store the 6-token window [CDEF].
-        return cdiv(num_tokens, block_size) + 1
+        # The sink block is extra once the window has moved past the start.
+        sink_blocks = cdiv(params.sink_len, block_size) if params.sink_len else 0
+        return cdiv(num_tokens, block_size) + 1 + sink_blocks
 
     @classmethod
     def max_allocated_blocks_per_request(
@@ -1153,7 +1168,29 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_group, **kwargs)
         params = self.manager_config.params
         assert isinstance(params, SlidingWindowManager.Params)
-        self.num_retained_tokens = self.sliding_window_reach(self.manager_config)
+        # The worker frees by the window alone. A sink group reports a reach
+        # of 0 to the cache-hit logic, but it must still skip the tokens
+        # before the window.
+        self.num_retained_tokens = (
+            params.sliding_window - 1 + params.extra_retained_tokens
+        )
+        self.sink_len = params.sink_len
+
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
+        """Free blocks outside the window, but keep the leading sink blocks."""
+        del num_prompt_tokens
+        num_skipped_tokens = self.get_num_skipped_tokens(processed_computed_tokens)
+        if num_skipped_tokens <= 0:
+            return
+        blocks = self.req_to_blocks[request_id]
+        num_skipped_blocks = min(num_skipped_tokens // self.block_size, len(blocks))
+        sink_blocks = cdiv(self.sink_len, self.block_size) if self.sink_len else 0
+        self._remove_blocks_in_range(request_id, sink_blocks, num_skipped_blocks)
 
     @classmethod
     def find_longest_cache_hit(
