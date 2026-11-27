@@ -356,7 +356,11 @@ class KVCacheCoordinator(ABC):
         pools = dict.fromkeys(
             manager.block_pool for manager in self.single_type_managers
         )
-        return all([pool.reset_prefix_cache() for pool in pools])
+        if not all([pool.reset_prefix_cache() for pool in pools]):
+            return False
+        for manager in self.single_type_managers:
+            manager.reset_prefix_cache()
+        return True
 
     def free(self, request: Request) -> None:
         """Free the blocks for the request.

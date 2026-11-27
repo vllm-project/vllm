@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for Qwen3-VL multimodal processing."""
 
+import asyncio
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -16,6 +19,7 @@ from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.processing import ProcessorInputs
 from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -628,3 +632,159 @@ def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> No
     (processed_video,) = processed["mm_placeholders"]["video"]
     assert processed_video.get_num_embeds() == 8
     assert profiled_video.get_num_embeds() >= processed_video.get_num_embeds()
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_processor_per_video_hashes_survive_partitioning(
+    model_id: str, scoped: bool
+) -> None:
+    """A one-video encoder child must hash its video like the full request.
+
+    The Python EPD proxy fans multi-video requests out to one-video encoder
+    children, slicing per-video lists to the videos each child carries. The
+    cache key of a video may then depend only on its own per-video element,
+    not on the raw list, or the producer and consumer hash the same video
+    differently and every EC transfer misses.
+    """
+    kwargs: dict[str, Any] = {"num_frames": [8, 16]}
+    if scoped:
+        kwargs = {"videos_kwargs": dict(kwargs)}
+
+    def scoped_form(flat: dict[str, Any]) -> dict[str, Any]:
+        return {"videos_kwargs": dict(flat)} if scoped else dict(flat)
+
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(2)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
+
+    def run(count: int, items, hf_kwargs, uuids):
+        return processor(
+            "<|vision_start|><|video_pad|><|vision_end|>" * count,
+            mm_items=processor.info.parse_mm_data({"video": items}),
+            mm_uuid_items={"video": uuids},
+            hf_processor_mm_kwargs=hf_kwargs,
+        )
+
+    full = run(2, videos, kwargs, ["v0", "v1"])
+    child0 = run(1, [videos[0]], scoped_form({"num_frames": [8]}), ["v0"])
+    child1 = run(1, [videos[1]], scoped_form({"num_frames": [16]}), ["v1"])
+    assert child0["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert child1["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][1]
+
+    # Entries beyond the video count never affect processing, so they must
+    # not affect the cache key either.
+    tail = run(2, videos, scoped_form({"num_frames": [8, 16, 32]}), ["v0", "v1"])
+    assert tail["mm_hashes"] == full["mm_hashes"]
+
+    # Changing only the second video's effective value must invalidate only its key.
+    changed = run(2, videos, scoped_form({"num_frames": [8, 24]}), ["v0", "v1"])
+    assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("form", ["flat", "scoped", "shadowed"])
+@pytest.mark.parametrize(("key", "value"), [("num_frames", 16), ("fps", 4.0)])
+@pytest.mark.parametrize("use_uuid", [False, True])
+@pytest.mark.parametrize("slicing", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_processor_image_hash_survives_video_partitioning(
+    model_id: str,
+    form: str,
+    key: str,
+    value: int | float,
+    use_uuid: bool,
+    slicing: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mixed parent and image child both preserve the upstream image key."""
+    from examples.disaggregated.disaggregated_encoder import disagg_epd_proxy
+
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    video = _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+    kwargs: dict[str, Any] = {key: [value]}
+    if form != "flat":
+        kwargs = {"videos_kwargs": kwargs}
+    if form == "shadowed":
+        kwargs[key] = [value / 2 if key == "fps" else 8]
+
+    items = []
+    uuids = {}
+    for modality in ("image", "video"):
+        media_type = f"{modality}_url"
+        item: dict[str, Any] = {
+            "type": media_type,
+            media_type: {"url": f"http://media/{modality}"},
+        }
+        if use_uuid:
+            item["uuid"] = modality
+            uuids[modality] = [modality]
+        items.append(item)
+    response = SimpleNamespace(status=200, read=AsyncMock(return_value=b"{}"))
+    post = AsyncMock(return_value=response)
+    monkeypatch.setattr(disagg_epd_proxy, "encode_session", SimpleNamespace(post=post))
+    monkeypatch.setattr(disagg_epd_proxy, "NO_REWRITE", not use_uuid)
+    asyncio.run(
+        disagg_epd_proxy.fanout_encoder_primer(
+            {
+                "messages": [{"role": "user", "content": items}],
+                "mm_processor_kwargs": kwargs,
+            },
+            ["http://encoder"],
+            "hash-regression",
+            enable_per_video_kwargs_slicing=slicing,
+        )
+    )
+    children = [json.loads(call.kwargs["data"]) for call in post.await_args_list]
+    child = next(
+        body
+        for body in children
+        if body["messages"][0]["content"][0]["type"] == "image_url"
+    )
+
+    media = processor.info.parse_mm_data({"image": [image], "video": [video]})
+    image_media = media.select({"image"})
+    child_uuid = child["messages"][0]["content"][0].get("uuid")
+    child_uuids = {"image": [child_uuid]} if child_uuid is not None else {}
+    image_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    parent_hashes = processor(
+        image_prompt + video_prompt,
+        mm_items=media,
+        mm_uuid_items=uuids,
+        hf_processor_mm_kwargs=kwargs,
+    )["mm_hashes"]
+    child_hashes = processor(
+        image_prompt,
+        mm_items=image_media,
+        mm_uuid_items=child_uuids,
+        hf_processor_mm_kwargs=child["mm_processor_kwargs"],
+    )["mm_hashes"]
+
+    # Before per-video normalization, Qwen3-VL rehashed only the video keys.
+    upstream_image_hash = ProcessorInputs(
+        prompt=[],
+        mm_data_items=image_media,
+        mm_uuid_items=uuids,
+        hf_processor_mm_kwargs=kwargs,
+    ).get_mm_hashes(
+        processor.info.model_id, processor.info.ctx.get_mm_config().mm_hasher_algorithm
+    )["image"]
+    assert list(parent_hashes) == list(media)
+    assert parent_hashes["image"] == child_hashes["image"] == upstream_image_hash

@@ -69,17 +69,6 @@ class MambaStateDtypeCalculator:
         return (state_dtype,)
 
     @classmethod
-    def mamba1_state_dtype(
-        cls,
-        model_dtype: ModelDType | torch.dtype,
-        mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
-    ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
-        )
-
-    @classmethod
     def mamba2_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -195,21 +184,6 @@ class MambaStateShapeCalculator:
         if is_conv_state_dim_first():
             return (dim, state_len)
         return (state_len, dim)
-
-    @classmethod
-    def mamba1_state_shape(
-        cls,
-        tp_world_size: int,
-        intermediate_size: int,
-        state_size: int,
-        conv_kernel: int,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
-
-        temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
-
-        return conv_state_shape, temporal_state_shape
 
     @classmethod
     def mamba2_state_shape(
@@ -435,10 +409,6 @@ class MambaStateCopyFuncCalculator:
     @classmethod
     def linear_attention_state_copy_func(cls):
         return (get_temporal_copy_spec,)
-
-    @classmethod
-    def mamba1_state_copy_func(cls):
-        return (get_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod
     def mamba2_state_copy_func(cls):
