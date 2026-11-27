@@ -27,6 +27,7 @@ import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.models.hy_v4.common.sinks import gather_full_sinks_
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -147,14 +148,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         super().process_weights_after_loading(act_dtype)
         if self.sinks is None or not self.use_shardq:
             return
-        from vllm.distributed import get_tp_group
-
-        tp_group = get_tp_group()
-        full = tp_group.all_gather(self.sinks.to(tp_group.device), dim=0)
-        # Reload in place to preserve pointers held by captured CUDA graphs.
-        if self._sinks_full is None:
-            self._sinks_full = torch.empty_like(full)
-        self._sinks_full.copy_(full)
+        self._sinks_full = gather_full_sinks_(self.sinks, self._sinks_full)
 
     def reserve_workspace(self) -> None:
         super().reserve_workspace()

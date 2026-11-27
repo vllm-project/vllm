@@ -131,12 +131,14 @@ class AttentionConfig:
 
     indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
     """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
-    sparse-attention indexer. "auto" (default) picks the model's default:
-    "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100, "float32" otherwise.
+    sparse-attention indexer, also used by Kimi K3. "auto" (default) picks the
+    model's default: "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100,
+    "float32" otherwise (Kimi K3 included).
     "float32" reduces the head-weighted scores in FP32 and feeds them to the
     top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
-    in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
-    logits directly, while other top-k kernels read an FP32 copy. The sparse
+    in BF16 with BF16 head weights and lets the top-k kernels that take BF16
+    rank the logits directly (DeepSelect; in decode also the cooperative and
+    persistent kernels), while the others read an FP32 copy. The sparse
     MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
     on SM90 and ROCm, independently of this setting."""
 
@@ -158,8 +160,12 @@ class AttentionConfig:
     is not supported. A mixed step's decode tokens stay sharded by head (on the
     DCP path under DCP); steps whose HiSparse decode boundary disagrees with
     the ShardQ speculative-verification boundary skip ShardQ for that step. On
-    ROCm, DeepSeek-V4.1 shards only its indexer prefill this way and all-gathers
-    the top-k back; its attention stays sharded by head."""
+    ROCm, models that opt in (currently HY4) shard on
+    `ROCM_AITER_MLA_SPARSE` with an `fp8_ds_mla` KV cache or
+    `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, and only with fewer than 16 local
+    heads (e.g. HY4 at TP8). DeepSeek-V4.1 on ROCm shards only its indexer
+    prefill this way and all-gathers the top-k back, with its attention
+    sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
