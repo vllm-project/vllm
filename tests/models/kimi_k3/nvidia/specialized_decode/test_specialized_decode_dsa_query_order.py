@@ -3,7 +3,7 @@
 """Kimi K3 specialized decode: the DCP "front" query order (`cutedsl.dsa.overlap`
 QUERY_AFTER_FRONT): MlaQuery forked after IndexFront and launched without PDL.
 
-- Policy (no GPU): the table names DCP16 at 6-8 rows only.
+- Policy (no GPU): the table names DCP16 at 6-8 rows and DCP8 at 5-15 rows only.
 - Wiring (no GPU): `PreparedDsa.run_dcp` runs the indexer inputs (IndexFront)
   before forking MlaQuery for the listed shapes, after it for every other shape, and
   the sparse core waits for the query either way.
@@ -26,7 +26,7 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
 @pytest.mark.parametrize("dcp", [1, 2, 4, 8, 16])
 def test_query_after_front_table(dcp):
     for batch in range(1, 321):
-        want = dcp == 16 and 6 <= batch <= 8
+        want = (dcp == 16 and 6 <= batch <= 8) or (dcp == 8 and 5 <= batch <= 15)
         assert overlap.query_after_front(batch, dcp) is want, (dcp, batch)
 
 
