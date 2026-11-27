@@ -1002,6 +1002,46 @@ steps:
       - amd-smi
       - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation
 
+- label: ":nvidia: (DGX Spark) [Nightly] Kernels (sm_12x subset)"
+  key: kernels-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/"
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/utils/flashinfer.py
+  - vllm/platforms/cuda.py
+  - vllm/_custom_ops.py
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - tests/kernels/utils.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/quantization/nvfp4_utils.py
+  - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/kernels/quantization/test_nvfp4_scaled_mm.py
+  - tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+  - tests/kernels/moe/test_nvfp4_moe.py
+  - tests/kernels/moe/test_flashinfer_moe.py
+  commands:
+    # Only cases that run sm_12x-specific FP4 kernels; B200 runs these files in full.
+    - nvidia-smi
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py -k "shape8 or shape10"
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py -k "(test_nvfp4_gemm and (shape4 or shape5 or shape6)) or FlashInferB12xNvFp4LinearKernel-144-150-token_shape2"
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py -k "(cutlass or b12x or w4a16) and (shape4 or shape5 or shape6)"
+    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py -k "dtype0-1-256-2-1024-1024 or dtype0-8-40-224-1024-1536 or dtype0-6-64-64-3072-1024 or dtype0-1-64-2-1280-4096 or dtype0-8-288-224-1280-4096"
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py -k "SILU and (dtype0-1-40-2-1024-1024 or dtype0-8-256-224-1024-1536)"
+
 - label: ":nvidia: (B200) Gate Linear CuTeDSL Kernels"
   key: kernels-gate-linear-cutedsl-b200
   automatic_shard: true

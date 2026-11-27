@@ -1,0 +1,2 @@
+Gemma-4-26B-A4B-NVFP4-dgx-spark.yaml
+Nemotron-3-Super-120B-A12B-NVFP4-dgx-spark.yaml

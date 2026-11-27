@@ -1464,6 +1464,53 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (DGX Spark) [Nightly] GSM8K Eval (NVFP4 Models)"
+  key: gsm8k-eval-nvfp4-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 60
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/models/gemma4.py
+  - vllm/model_executor/models/gemma4_mm.py
+  - vllm/model_executor/models/nemotron_h.py
+  - tests/evals/gsm8k/
+  commands:
+    # Each config sets --gpu-memory-utilization: GB10 memory is shared with the
+    # host, and an unset utilization resolves to 1.0.
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-dgx-spark.txt
+
+- label: ":nvidia: (DGX Spark) [Nightly] GSM8K Eval (NVFP4 MTP)"
+  key: gsm8k-eval-nvfp4-mtp-dgx-spark
+  timeout_in_minutes: 40
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - csrc/
+  - vllm/config/speculative.py
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/mamba/
+  - vllm/models/qwen3_5/
+  - vllm/utils/flashinfer.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/evals/gsm8k/
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-dgx-spark-spec-decode.txt
+
 - label: ":nvidia: (H200 MIG 35GB) LM Eval KV-Offload"
   key: kv-offload-small
   automatic_shard: true
