@@ -714,6 +714,7 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
     from tests.v1.core.utils import new_kv_cache_group
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import flashinfer_nvfp4_kv_views
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
         KVCacheConfig,
@@ -769,13 +770,15 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
         attn_groups=[AttentionGroup(fi.FlashInferBackend, ["layer.1"], spec, 0)],
     )
     assert layer.kv_cache is caches["layer.1"]
-    assert layer.impl.runtime_kv_cache_views is not None
+    assert isinstance(layer.bound_kv_cache, tuple)
     one = torch.ones(())
     layer._k_scale = layer._v_scale = one
     kv = torch.randn(2, 96, 2, 128, dtype=torch.bfloat16)
-    layer.impl.do_kv_cache_update(layer, kv[0], kv[1], layer.kv_cache, torch.arange(96))
+    layer.impl.do_kv_cache_update(
+        layer, kv[0], kv[1], layer.bound_kv_cache, torch.arange(96)
+    )
 
-    data, scales, kv_layout = fi._nvfp4_kv_views(layer.kv_cache, 2)
+    data, scales, kv_layout = flashinfer_nvfp4_kv_views(caches["layer.1"], 2)
     pages = torch.arange(6, dtype=torch.int32)[None]
     seq_lens = torch.tensor([96], dtype=torch.int32)
     deq = torch.empty_like(kv)[:, None]

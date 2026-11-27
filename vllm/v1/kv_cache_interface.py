@@ -358,7 +358,6 @@ def compute_layout_strides(
 
 class KVCacheLayerComponents(NamedTuple):
     page: torch.Tensor
-    layout: KVCacheLayout
     views: tuple[torch.Tensor, ...]
 
 
@@ -484,7 +483,7 @@ def create_kv_cache_views(
                 block_stride,
                 prod(shape_bytes[1:]),
             )
-            runtime.components[name] = KVCacheLayerComponents(page, layout, components)
+            runtime.components[name] = KVCacheLayerComponents(page, components)
         offset += layer_stride
     return views
 

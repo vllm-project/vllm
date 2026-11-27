@@ -534,6 +534,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 else GroupShape.PER_TENSOR,
             )
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        self.bound_kv_cache = kv_cache
+
+    @property
+    def kv_cache(self) -> torch.Tensor:
+        """Packed page used by connectors and tensor-only model code."""
+        cache = self.bound_kv_cache
+        return cache[0] if isinstance(cache, tuple) else cache
+
+    @kv_cache.setter
+    def kv_cache(self, page: torch.Tensor) -> None:
+        self.bind_kv_cache(page)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -812,7 +825,9 @@ def unified_kv_cache_update(
             attn_layer,
             key,
             value,
-            kv_cache,
+            attn_layer.bound_kv_cache
+            if isinstance(attn_layer, Attention)
+            else kv_cache,
             layer_slot_mapping,
         )
 
@@ -859,7 +874,7 @@ def unified_attention_with_output(
         query,
         key,
         value,
-        kv_cache,
+        self.bound_kv_cache if isinstance(self, Attention) else kv_cache,
         attn_metadata,
         output=output,
         output_scale=output_scale,

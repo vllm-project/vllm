@@ -22,7 +22,12 @@ from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    np_to_pinned_tensor,
+    nvfp4_split_data_scale,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
@@ -214,6 +219,40 @@ _FLASHINFER_LAYOUT_NAMES = {
     "BLNHC": "NHD",
     "BHLNC": "HND",
 }
+
+
+_KVPair = tuple[torch.Tensor, torch.Tensor]
+
+
+def flashinfer_nvfp4_kv_views(
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...], num_kv_heads: int
+) -> tuple[_KVPair, _KVPair, str]:
+    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
+    if isinstance(kv_cache, tuple):
+        page, k_data, k_scale, v_data, v_scale = kv_cache
+        layout = "HND" if page.stride(1) >= page.stride(2) else "NHD"
+        return (
+            (k_data, v_data),
+            (k_scale.view(torch.float8_e4m3fn), v_scale.view(torch.float8_e4m3fn)),
+            layout,
+        )
+    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
+    hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
+    if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
+        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
+    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
+    side_size = num_kv_heads * block_size * full_dim
+    (k_data, k_scale), (v_data, v_scale) = (
+        nvfp4_split_data_scale(
+            kv_cache.as_strided(
+                (num_blocks, *dims, full_dim),
+                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
+                kv_cache.storage_offset() + side * side_size,
+            )
+        )
+        for side in range(2)
+    )
+    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 def flashinfer_nvfp4_component_shapes(

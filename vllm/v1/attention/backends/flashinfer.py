@@ -66,7 +66,6 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
-    nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -81,6 +80,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     flashinfer_nvfp4_component_shapes,
+    flashinfer_nvfp4_kv_views,
     get_dcp_local_seq_lens,
     get_flashinfer_kv_cache_layouts,
     get_flashinfer_layout_string,
@@ -161,32 +161,6 @@ def _nvfp4_kv_on_fa2() -> bool:
 def _use_fa2_native_decode() -> bool:
     # Below SM90, native decode runs fa2, which takes uniform multi-token queries.
     return not current_platform.has_device_capability(90)
-
-
-_KVPair = tuple[torch.Tensor, torch.Tensor]
-
-
-def _nvfp4_kv_views(
-    kv_cache: torch.Tensor, num_kv_heads: int
-) -> tuple[_KVPair, _KVPair, str]:
-    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
-    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
-    hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
-    if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
-        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
-    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
-    side_size = num_kv_heads * block_size * full_dim
-    (k_data, k_scale), (v_data, v_scale) = (
-        nvfp4_split_data_scale(
-            kv_cache.as_strided(
-                (num_blocks, *dims, full_dim),
-                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
-                kv_cache.storage_offset() + side * side_size,
-            )
-        )
-        for side in range(2)
-    )
-    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 def _get_trtllm_workspace_buffer():
@@ -2561,7 +2535,7 @@ class FlashInferImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor | None,
         value: torch.Tensor | None,
-        kv_cache: torch.Tensor,
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         attn_metadata: FlashInferMetadata,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
@@ -2666,6 +2640,10 @@ class FlashInferImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         kv_cache_layout = attn_metadata.kv_cache_layout
 
+        bound_cache = kv_cache
+        if isinstance(kv_cache, tuple):
+            kv_cache = kv_cache[0]
+
         # FlashInfer treats uint8 KV cache as NVFP4. vLLM stores FP8 KV cache
         # as uint8 bytes, so pass FP8 caches with their logical dtype.
         if not self.is_kvcache_nvfp4 and kv_cache.dtype == torch.uint8:
@@ -2719,7 +2697,9 @@ class FlashInferImpl(AttentionImpl):
                 canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
-            nvfp4_kv_data, nvfp4_kv_block_scales, _ = self._nvfp4_views(kv_cache)
+            nvfp4_kv_data, nvfp4_kv_block_scales, _ = flashinfer_nvfp4_kv_views(
+                bound_cache, self.num_kv_heads
+            )
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -3265,28 +3245,12 @@ class FlashInferImpl(AttentionImpl):
                     output[:num_decode_tokens].copy_(out)
         return output_padded
 
-    def _nvfp4_views(self, cache: torch.Tensor) -> tuple[_KVPair, _KVPair, str]:
-        bound = self.runtime_kv_cache_views
-        if bound is not None:
-            source, layout, views = bound
-            if source is cache and views[0].data_ptr() == cache.data_ptr():
-                k_data, k_scale, v_data, v_scale = views
-                return (
-                    (k_data, v_data),
-                    (
-                        k_scale.view(torch.float8_e4m3fn),
-                        v_scale.view(torch.float8_e4m3fn),
-                    ),
-                    get_flashinfer_layout_string(layout),
-                )
-        return _nvfp4_kv_views(cache, self.num_kv_heads)
-
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         slot_mapping: torch.Tensor,
     ) -> None:
         if self.kv_sharing_target_layer_name is None:
@@ -3298,7 +3262,9 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.nvfp4_fa2:
-                data, scales, kv_layout = self._nvfp4_views(kv_cache)
+                data, scales, kv_layout = flashinfer_nvfp4_kv_views(
+                    kv_cache, self.num_kv_heads
+                )
                 nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
                     key,
                     value,
@@ -3310,6 +3276,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=kv_layout,
                 )
                 return
+            if isinstance(kv_cache, tuple):
+                kv_cache = kv_cache[0]
             if self.is_kvcache_nvfp4:
                 # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
                 #                            (B, N, H, full_dim));

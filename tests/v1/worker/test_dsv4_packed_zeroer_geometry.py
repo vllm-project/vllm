@@ -11,8 +11,6 @@ CPU only: the zeroer's `__init__` precomputes the segment tables; no kernel is
 launched.
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -74,9 +72,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
             ]
         ),
         kernel_block_sizes=[spec.block_size],
-        static_forward_context={
-            f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(NUM_LAYERS)
-        },
+        cache_pages={f"layer.{i}": views[i] for i in range(NUM_LAYERS)},
         num_blocks=NUM_BLOCKS,
     )
     assert zeroer._meta is not None
@@ -146,9 +142,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
         torch.device("cpu"),
         attn_groups_iter=iter(attn_groups),
         kernel_block_sizes=[64, 64],
-        static_forward_context={
-            name: SimpleNamespace(kv_cache=views[name]) for name in views
-        },
+        cache_pages=views,
         num_blocks=config.num_blocks,
     )
     assert zeroer._meta is not None

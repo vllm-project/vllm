@@ -1604,6 +1604,27 @@ def test_gdn_runtime_states_alias_planned_pages(layout, runner):
             expected[start : start + payload.numel()] = payload.flatten()
     assert torch.equal(raw, expected)
 
+    from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
+    from vllm.v1.worker.utils import KVBlockZeroer
+
+    args = (
+        torch.device("cpu"),
+        [AttentionGroup(GDNAttentionBackend, ["b"], spec, 0)],
+        [spec.block_size],
+        caches,
+        num_blocks,
+    )
+    gpu_meta = KVBlockZeroer(*args)._meta
+    assert gpu_meta is not None
+    addresses, strides, sizes = gpu_meta[:3]
+    assert addresses.tolist() == [conv.data_ptr()]
+    assert strides.tolist() == [block_stride // 4]
+    assert sizes.tolist() == [spec.state_content_size_bytes // 4]
+    CPUKVBlockZeroer(*args).zero_block_ids([1])
+    expected_start = tensor.offset + layer_stride + block_stride
+    expected[expected_start : expected_start + spec.state_content_size_bytes] = 0
+    assert torch.equal(raw, expected)
+
 
 @pytest.mark.parametrize("layout", ["LBHNC", "BLHNC", "LBNHC", "BLNHC"])
 @pytest.mark.parametrize("num_blocks,num_heads", [(1, 1), (3, 2)])
@@ -1612,6 +1633,7 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.backends.utils import (
         flashinfer_nvfp4_component_shapes,
+        flashinfer_nvfp4_kv_views,
         get_flashinfer_layout_string,
     )
     from vllm.v1.kv_cache_interface import (
@@ -1664,6 +1686,32 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     assert set(runtime.components) == {"b"}
     assert runtime.components["b"].page is second
     actual = runtime.components["b"].views
+
+    from vllm.model_executor.layers.attention import Attention
+
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    bind_kv_cache_to_layers({"b": second}, {"b": layer}, runtime=runtime)
+    assert layer.kv_cache is second
+    assert isinstance(layer.bound_kv_cache, tuple)
+    packed, *components = layer.bound_kv_cache
+    assert packed is second
+    assert all(x is y for x, y in zip(components, actual, strict=True))
+    data, scales, runtime_layout = flashinfer_nvfp4_kv_views(
+        layer.bound_kv_cache, num_heads
+    )
+    assert runtime_layout == kv_layout
+    assert tuple(x.data_ptr() for x in data) == (
+        components[0].data_ptr(),
+        components[2].data_ptr(),
+    )
+    assert tuple(x.data_ptr() for x in scales) == (
+        components[1].data_ptr(),
+        components[3].data_ptr(),
+    )
+    assert all(x.dtype == torch.float8_e4m3fn for x in scales)
+    bind_kv_cache_to_layers({"b": first}, {"b": layer}, runtime=runtime)
+    assert layer.bound_kv_cache is first
 
     dims = (num_heads, rows) if kv_layout == "HND" else (rows, num_heads)
     expected = []

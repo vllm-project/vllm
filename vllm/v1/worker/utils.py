@@ -66,6 +66,7 @@ def _zero_kv_blocks_kernel(
     seg_page_sizes_ptr,
     block_ids_ptr,
     BLOCK_SIZE: tl.constexpr,
+    BYTE_STORES: tl.constexpr = False,
 ):
     """Zero KV cache blocks across all segments in a single launch.
 
@@ -95,7 +96,7 @@ def _zero_kv_blocks_kernel(
         return
     block_id = tl.load(block_ids_ptr + block_index)
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
-    ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
+    ptr = tl.cast(seg_addr, tl.pointer_type(tl.uint8 if BYTE_STORES else tl.int32))
     block_offset = block_id.to(tl.int64) * block_stride_el.to(tl.int64)
     cols = chunk_offset + tl.arange(0, BLOCK_SIZE).to(tl.int64)
     tl.store(
@@ -113,12 +114,14 @@ class KVBlockZeroer:
     newly-allocated blocks.
     """
 
+    _byte_stores = False
+
     def __init__(
         self,
         device: torch.device,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
-        static_forward_context: dict[str, Any],
+        cache_pages: dict[str, torch.Tensor],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
@@ -138,7 +141,8 @@ class KVBlockZeroer:
         Each virtual block is represented as an independent segment so its
         physical block stride and zeroed page span remain independent.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        Register the allocator's pages, including pages bound as component tuples.
+        Managers decide which new block IDs need clearing.
         """
         self.device = device
         self._meta: (
@@ -157,7 +161,7 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec):
+            if not spec.has_layer_views:
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
@@ -166,12 +170,7 @@ class KVBlockZeroer:
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv = static_forward_context[layer_name].kv_cache
-                if not isinstance(kv, torch.Tensor):
-                    continue
-                if group.kernel_block_stride:
-                    # Bound views address kernel blocks; zero by manager block.
-                    kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
+                kv = cache_pages[layer_name]
                 if kv.device.type != self.device.type:
                     continue
                 dp = kv.data_ptr()
@@ -184,7 +183,6 @@ class KVBlockZeroer:
 
                 el = kv.element_size()
                 block_stride_bytes = kv.stride(0) * el
-                assert block_stride_bytes % 4 == 0
                 assert kv.shape[0] % ratio == 0
                 outer_dims = [
                     d
@@ -196,31 +194,36 @@ class KVBlockZeroer:
                 kernel_page_bytes = el + sum(
                     (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
                 )
-                assert kernel_page_bytes % 4 == 0
                 logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    assert (dp + off_bytes) % 4 == 0
                     for virtual_index in range(ratio):
                         addr = dp + off_bytes + virtual_index * block_stride_bytes
                         if (idx := seen_ptrs.get(addr)) is not None:
-                            assert (
-                                seg_block_strides[idx]
-                                == logical_block_stride_bytes // 4
-                            )
+                            assert seg_block_strides[idx] == logical_block_stride_bytes
                             seg_page_sizes[idx] = max(
-                                seg_page_sizes[idx], kernel_page_bytes // 4
+                                seg_page_sizes[idx], kernel_page_bytes
                             )
                             continue
                         seen_ptrs[addr] = len(seg_addrs)
                         seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                        seg_block_strides.append(logical_block_stride_bytes)
+                        seg_page_sizes.append(kernel_page_bytes)
 
         if not seg_addrs:
             self._meta = None
             return
 
+        # State pages can end on a sub-word boundary. Never round a write into
+        # the next page; retain word stores when the whole table is aligned.
+        self._byte_stores = any(
+            value % 4
+            for column in (seg_addrs, seg_block_strides, seg_page_sizes)
+            for value in column
+        )
+        if not self._byte_stores:
+            seg_block_strides = [stride // 4 for stride in seg_block_strides]
+            seg_page_sizes = [size // 4 for size in seg_page_sizes]
         max_page_size_el = max(seg_page_sizes)
         blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
         self._meta = (
@@ -253,6 +256,7 @@ class KVBlockZeroer:
             seg_page_sizes,
             idx,
             BLOCK_SIZE=blk_size,
+            BYTE_STORES=self._byte_stores,
         )
 
     def warmup(self, num_kv_blocks: int) -> None:
@@ -979,7 +983,9 @@ def bind_kv_cache_to_layers(
                 if isinstance(layer, MambaBase):
                     layer.bind_kv_cache(entry.views)
                     continue
-                layer.impl.runtime_kv_cache_views = entry
+                if isinstance(layer, Attention):
+                    layer.bind_kv_cache((page, *entry.views))
+                    continue
         layer.bind_kv_cache(page)
 
 
@@ -1002,8 +1008,6 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
-            if getattr(layer.impl, "runtime_kv_cache_views", None) is not None:
-                layer.impl.runtime_kv_cache_views = None
             if hasattr(layer.impl, "_kv_view_cache"):
                 layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):

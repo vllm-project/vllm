@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -44,9 +43,7 @@ def test_cpu_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
         device,
         attn_groups_iter=iter(groups),
         kernel_block_sizes=[spec.block_size],
-        static_forward_context={
-            f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(num_layers)
-        },
+        cache_pages={f"layer.{i}": views[i] for i in range(num_layers)},
         num_blocks=num_blocks,
     )
 
@@ -79,7 +76,7 @@ def test_cpu_zeroes_every_kernel_block_in_a_logical_block():
             [AttentionGroup(None, ["layer"], spec, kv_cache_group_id=0)]
         ),
         kernel_block_sizes=[2],
-        static_forward_context={"layer": SimpleNamespace(kv_cache=cache)},
+        cache_pages={"layer": cache},
         num_blocks=num_blocks,
     )
 

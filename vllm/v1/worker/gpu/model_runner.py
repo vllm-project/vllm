@@ -877,6 +877,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ),
                 allocate=allocate_fn,
             )
+        self.kv_caches_by_layer = kv_caches_dict
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
@@ -888,7 +889,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
-            self.kv_caches_by_layer = kv_caches_dict
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
             # AuxOutput connector requires resolved kv_cache_config.
@@ -905,7 +905,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
-            static_forward_context=self.compilation_config.static_forward_context,
+            cache_pages=self.kv_caches_by_layer,
             num_blocks=self.kv_cache_config.num_blocks,
         )
 

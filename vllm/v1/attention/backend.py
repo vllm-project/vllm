@@ -808,11 +808,6 @@ class AttentionImplBase(ABC, Generic[T]):
     method - subclasses define their own forward interfaces.
     """
 
-    # Bound byte views for backends that consume both packed pages and components.
-    runtime_kv_cache_views: (
-        tuple[torch.Tensor, KVCacheLayout, tuple[torch.Tensor, ...]] | None
-    ) = None
-
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
