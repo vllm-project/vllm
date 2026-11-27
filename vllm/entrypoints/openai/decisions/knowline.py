@@ -133,8 +133,7 @@ def question_block(question: Question) -> str:
     the default head; an empty value renders empty. Foreign question types
     (the OpenAI decisions API builds its own) letter their options the same
     way."""
-    # build_question always sets raw, so the absent case is a None element
-    # rather than a None tuple, and rendering it would print the string.
+    # build_question always sets raw; absent instructions are a None element.
     raw_instructions = question.raw[0] if question.raw is not None else None
     if raw_instructions is not None:
         head = render_value(raw_instructions)
