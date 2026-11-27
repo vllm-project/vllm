@@ -177,6 +177,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
                 register_graph_buffers=register,
+                device_group=self.device_group,
             )
             if self.aiter_ar_comm.disabled:
                 self.aiter_ar_comm = None

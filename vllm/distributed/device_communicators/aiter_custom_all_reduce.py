@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM-owned wrapper over AITER's ``CustomAllreduce``.
+"""vLLM-owned wrapper over AITER's ``CustomAllreduce`` (on gfx1250, over AITER's
+``CudaCommunicator``).
 
 vLLM's ``CudaCommunicator`` stores one of these as ``aiter_ar_comm`` (when
 ``VLLM_ROCM_USE_AITER_CUSTOM_AR`` is set) so the plain allreduce and
@@ -34,62 +35,66 @@ class AiterCustomAllreduce:
         register_graph_buffers: bool = True,
         device_group: ProcessGroup | None = None,
     ):
-        from aiter.dist import parallel_state as aiter_parallel_state
-        from aiter.dist.device_communicators.communicator_cuda import (
-            CudaCommunicator as _AiterCudaCommunicator,
-        )
-        from aiter.dist.device_communicators.custom_all_reduce import (
-            CustomAllreduce as _AiterCustomAllreduce,
-        )
+        from vllm.platforms.rocm import on_gfx1250
 
-        if max_size is None:
-            max_size = self.MAX_SIZE
+        self._is_communicator = on_gfx1250()
+        if self._is_communicator:
+            from aiter.dist.device_communicators.communicator_cuda import (
+                CudaCommunicator as _AiterCudaCommunicator,
+            )
 
-        kwargs = {}
-        if not register_graph_buffers:
-            kwargs["enable_register_for_capturing"] = False
-        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
-        self.aiter_comm = None
-        if not self._impl.disabled and device_group is not None:
-            enable_custom_ar = aiter_parallel_state._ENABLE_CUSTOM_ALL_REDUCE
-            aiter_parallel_state.set_custom_all_reduce(False)
-            try:
-                self.aiter_comm = _AiterCudaCommunicator(
-                    group, torch.device(device), device_group
-                )
-            finally:
-                aiter_parallel_state.set_custom_all_reduce(enable_custom_ar)
-            self.aiter_comm.ca_comm = self._impl
+            self._impl = _AiterCudaCommunicator(
+                group, torch.device(device), device_group
+            )
+            assert self._impl.ca_comm is not None, (
+                "AITER's CudaCommunicator built no CustomAllreduce"
+            )
+            if not register_graph_buffers:
+                self._impl.ca_comm.enable_register_for_capturing = False
+        else:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                CustomAllreduce as _AiterCustomAllreduce,
+            )
+
+            if max_size is None:
+                max_size = self.MAX_SIZE
+
+            kwargs = {}
+            if not register_graph_buffers:
+                kwargs["enable_register_for_capturing"] = False
+            self._impl = _AiterCustomAllreduce(
+                group, device, max_size=max_size, **kwargs
+            )
 
     @property
     def aiter_ca(self):
-        return self._impl
+        return self._impl.ca_comm if self._is_communicator else self._impl
 
     @property
     def disabled(self) -> bool:
-        return self._impl.disabled
+        return self.aiter_ca.disabled
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
-        return self._impl.should_custom_ar(inp)
+        return self.aiter_ca.should_custom_ar(inp)
 
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
-        if self.aiter_comm is not None:
-            return self.aiter_comm.all_reduce(inp)
+        if self._is_communicator:
+            return self._impl.all_reduce(inp)
         return self._impl.custom_all_reduce(inp)
 
     def should_custom_ag(self, inp: torch.Tensor) -> bool:
-        return self._impl.should_custom_ag(inp)
+        return self.aiter_ca.should_custom_ag(inp)
 
     def should_custom_rs(self, inp: torch.Tensor, dim: int) -> bool:
-        return self._impl.should_custom_rs(inp, dim)
+        return self.aiter_ca.should_custom_rs(inp, dim)
 
     def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
-        return self._impl.custom_all_gather(inp, dim=dim)
+        return self.aiter_ca.custom_all_gather(inp, dim=dim)
 
     def custom_reduce_scatter(
         self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0
     ) -> torch.Tensor | None:
-        return self._impl.custom_reduce_scatter(inp, out, dim=dim)
+        return self.aiter_ca.custom_reduce_scatter(inp, out, dim=dim)
 
     def use_1stage_fused_ar_rms(self, inp: torch.Tensor) -> bool:
         """Whether AITER's fused allreduce+RMSNorm runs as its one-stage kernel.
@@ -112,7 +117,7 @@ class AiterCustomAllreduce:
         pack_size = 16 // inp.element_size()
         if hidden_dim % pack_size != 0 or hidden_dim // pack_size > 1024:
             return False
-        ca = self._impl
+        ca = self.aiter_ca
         world_size = ca.world_size
         if world_size == 2:
             return True
@@ -126,13 +131,11 @@ class AiterCustomAllreduce:
         return False
 
     def capture(self):
-        return self._impl.capture()
+        return self.aiter_ca.capture()
 
     def close(self) -> None:
-        if self.aiter_comm is not None:
-            # Also closes this CustomAllreduce, which the communicator holds.
-            self.aiter_comm.destroy()
-            self.aiter_comm = None
+        if self._is_communicator:
+            self._impl.destroy()
         else:
             self._impl.close()
 
@@ -146,7 +149,7 @@ class AiterCustomAllreduce:
         skip fusion for unsupported sizes on them.
         Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
         """
-        return hasattr(self._impl, "_pool")
+        return hasattr(self.aiter_ca, "_pool")
 
     @staticmethod
     def build_supports_per_group_quant() -> bool:
