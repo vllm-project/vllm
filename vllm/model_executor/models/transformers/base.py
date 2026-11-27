@@ -1095,9 +1095,13 @@ class Base(
         if is_pp_missing_parameter(fused, self):
             return None
         try:
-            return self.get_submodule(fused.rpartition(".")[0]), shard_id
+            module = self.get_submodule(fused.rpartition(".")[0])
         except AttributeError:
             return None
+        # A LoRA layer wraps it after the first load (e.g. reloading weights)
+        if isinstance(module, BaseLayerWithLoRA):
+            module = module.base_layer
+        return module, shard_id
 
     def _output_size(self, name: str) -> int:
         """The full output size of the linear that loads `name`: what `Split` reads, and
