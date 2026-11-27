@@ -6,14 +6,17 @@ import asyncio
 import itertools
 import math
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 from typing import Any, cast
 
 import msgspec
 from fastapi import Request
 
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -48,6 +51,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import (
     GenerationError,
     PromptUpdateMismatchError,
+    RetryableRequestError,
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
@@ -56,6 +60,15 @@ from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+)
+from vllm.multimodal.s3_transport import S3MMReader
+from vllm.multimodal.tensor_transport import (
+    MMTensorMemoryBudget,
+    MMTensorReservation,
+    MMTensorTransportError,
+    ReleasingStream,
+    run_in_read_slot,
+    validate_mm_tensor_request_size,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
@@ -93,6 +106,7 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    MMTensorReference,
     OutputMode,
     RenderedGenerateResponse,
 )
@@ -106,6 +120,21 @@ _STREAM_RESPONSE_CLS: dict[OutputMode, Callable[..., GenerateStreamResponseBase]
 }
 
 _background_tasks: set[asyncio.Task[None]] = set()
+
+
+class _MMTensorRefs:
+    """Server-wide state for `features.kwargs_refs`, created at startup."""
+
+    def __init__(self, config: MMTensorRefsConfig) -> None:
+        self.config = config
+        self.reader = S3MMReader(config)
+        self.read_slots = asyncio.Semaphore(config.max_concurrent_reads)
+        # Own threads, so slow reads don't hold the loop's default executor.
+        self.read_executor = ThreadPoolExecutor(
+            max_workers=config.max_concurrent_reads,
+            thread_name_prefix="vllm-mm-tensor-read",
+        )
+        self.memory = MMTensorMemoryBudget(config.max_reserved_bytes)
 
 
 async def _close_result_generator(
@@ -169,6 +198,7 @@ class ServingTokens(GenerateBaseServing):
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
         enable_force_include_usage: bool = False,
+        mm_tensor_refs_config: MMTensorRefsConfig | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -192,6 +222,12 @@ class ServingTokens(GenerateBaseServing):
                 "step for incoming requests."
             )
 
+        self._mm_tensor_refs = (
+            None
+            if mm_tensor_refs_config is None
+            else _MMTensorRefs(mm_tensor_refs_config)
+        )
+
         # Mirrors ``OpenAIServingChat`` so we can apply server-side
         # ``max_tokens`` defaulting when the client omits it. Without this,
         # ``SamplingParams.max_tokens`` falls back to its dataclass default
@@ -203,6 +239,31 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+    def _load_external_mm_item(
+        self,
+        modality: str,
+        reference: MMTensorReference,
+    ) -> MultiModalKwargsItem:
+        assert self._mm_tensor_refs is not None
+        tensors = self._mm_tensor_refs.reader.read(reference)
+        processor = self.online_renderer.renderer.get_mm_processor()
+        try:
+            kwargs = processor.build_mm_kwargs_from_processed_tensors(tensors)
+        except Exception as e:
+            raise MMTensorTransportError(
+                f"Multimodal tensor object {reference.uri!r} is not compatible "
+                "with the served model"
+            ) from e
+
+        items = kwargs.get(modality, [])
+        if set(kwargs) != {modality} or len(items) != 1:
+            counts = {m: len(v) for m, v in kwargs.items()}
+            raise MMTensorTransportError(
+                f"Multimodal tensor object {reference.uri!r} must hold exactly "
+                f"one {modality} item; got {counts}"
+            )
+        return items[0]
 
     def _validate_mm_cache_handles(
         self,
@@ -222,6 +283,29 @@ class ServingTokens(GenerateBaseServing):
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
+    ) -> (
+        GenerateResponse | RenderedGenerateResponse | ErrorResponse | AsyncIterator[str]
+    ):
+        # The request keeps its referenced tensors until it finishes, so its
+        # memory reservation lasts as long, through the end of a stream.
+        reservations: list[MMTensorReservation] = []
+        try:
+            response = await self._serve_tokens(request, raw_request, reservations)
+        except BaseException:
+            for reservation in reservations:
+                reservation.release()
+            raise
+        if reservations and isinstance(response, AsyncGenerator):
+            return ReleasingStream(response, reservations)
+        for reservation in reservations:
+            reservation.release()
+        return response
+
+    async def _serve_tokens(
+        self,
+        request: GenerateRequest,
+        raw_request: Request | None,
+        mm_reservations: list[MMTensorReservation],
     ) -> (
         GenerateResponse
         | RenderedGenerateResponse
