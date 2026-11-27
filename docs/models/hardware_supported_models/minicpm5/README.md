@@ -11,6 +11,11 @@ The FP16 standard-decode tuning targets 1–8 live requests (`M=1–8`) per step
 with one query token per request. This count excludes graph padding. The
 serving example selects these decode settings.
 
+For TP2 FP16 standard decode without prefix caching, compatible wheels split
+the four-row decode graph before the attention output projection. The same
+graph supports three live requests with padding. Wheels that lack the
+four-row operator use the full-layer graph for this shape.
+
 ## Launch
 
 Set `MODEL_DIR` to a local MiniCPM5 checkpoint directory. Use online per-tensor

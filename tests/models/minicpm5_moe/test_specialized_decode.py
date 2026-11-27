@@ -647,25 +647,31 @@ def test_tail_only_is_restricted_to_opted_in_tp1_fp16_graph(monkeypatch, bmg_dev
 
 
 @pytest.mark.parametrize(
-    "pre_o,post_o,post_abi,expected",
+    "pre_o,post_o,post_abi,rows,has_pre_o_rows4,expected",
     [
-        (True, False, 1, "pre"),
-        (False, True, 1, "post"),
-        (True, True, 1, "post"),
-        (True, True, 0, "pre"),
+        (True, False, 1, 8, False, "pre"),
+        (False, True, 1, 8, False, "post"),
+        (True, True, 1, 8, True, "post"),
+        (True, True, 0, 8, True, "pre"),
+        (True, True, 1, 4, True, "pre4"),
+        (True, True, 1, 4, False, "full"),
+        (False, True, 1, 4, True, "full"),
     ],
 )
-def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
-    monkeypatch, pre_o, post_o, post_abi, expected
+def test_o_split_uses_native_capability_and_keeps_fa2_split_scoped(
+    monkeypatch, pre_o, post_o, post_abi, rows, has_pre_o_rows4, expected
 ):
     from vllm.models.minicpm5_moe.xpu.specialized_decode import decode as runtime
     from vllm.models.minicpm5_moe.xpu.specialized_decode.config import DecodeConfig
 
     cache = torch.zeros(1, 1, 64, 256, dtype=torch.float16)
     kv = torch.zeros(1, 64, 1, 128, dtype=torch.float16)
-    table = torch.zeros(8, 1, dtype=torch.int32)
-    positions = torch.arange(8)
-    hidden = torch.ones(8, 2048, dtype=torch.float16)
+    table = torch.zeros(rows, 1, dtype=torch.int32)
+    positions = torch.arange(rows)
+    slots = positions.clone()
+    if rows == 4:
+        slots[-1] = -1
+    hidden = torch.ones(rows, 2048, dtype=torch.float16)
     fa2_splits, native_calls = [], []
     projection_calls: list[int] = []
 
@@ -680,7 +686,7 @@ def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
 
         def __call__(self, q, k, v):
             return self.impl.dense_attention_kernel(
-                q=q.reshape(8, 16, 128),
+                q=q.reshape(rows, 16, 128),
                 k=kv,
                 v=kv,
                 block_table=table,
@@ -711,12 +717,20 @@ def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
         ),
     )
 
-    def native(kind, value, residual, slots, out, next_residual, *args):
+    def native(kind, value, residual, slot_mapping, out, next_residual, *args):
+        assert slot_mapping is slots
         native_calls.append(kind)
         out.copy_(value)
         next_residual.copy_(residual)
 
+    def full(value, residual, pos, blocks, lengths, slots, out, next_res, *args, **kw):
+        assert kw["ignore_padding"] and pos is positions and blocks is table
+        if residual is None:
+            residual = value
+        native("full", value, residual, slots, out, next_res)
+
     ops = NS(
+        decode=full,
         pre_o_abi_version=lambda: 1,
         post_o_abi_version=lambda: post_abi,
         decode_pre_o=lambda *args: native("pre", *args),
@@ -727,6 +741,8 @@ def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
         padding_mask_version=lambda: 1,
         padding_mask_rows=lambda: [4, 8],
     )
+    if has_pre_o_rows4:
+        ops.decode_pre_o_rows4 = lambda *args: native("pre4", *args)
     monkeypatch.setattr(runtime, "layer_weights", lambda layer: [hidden])
     monkeypatch.setattr(runtime, "tiled_qkv_supported", lambda *args: False)
     config = DecodeConfig(
@@ -739,18 +755,23 @@ def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
     mono = runtime.MonoLayer(layer, 1, config, [], None, ops)
     mono.bind()
     assert layer.self_attn.attn.impl.dense_attention_kernel is mono.pre_o_fa2
-    metadata = NS(block_table=table, max_query_len=1, slot_mapping=positions)
+    metadata = NS(
+        block_table=table,
+        max_query_len=1,
+        seq_lens=torch.ones(rows, dtype=torch.int32),
+        slot_mapping=slots,
+    )
     for force_one in (False, True, False):
         # The alternate Graph toggles the same wrapper only while capturing.
         mono.pre_o_fa2.force_one = force_one
         output, residual = mono.launch(metadata, positions, hidden, None)
         assert torch.equal(output, hidden + (3 if expected == "post" else 0))
         assert torch.equal(residual, hidden)
-    assert fa2_splits == [0, 1, 0]
+    assert fa2_splits == {"pre4": [0, 0, 0], "full": []}.get(expected, [0, 1, 0])
     assert native_calls == [expected] * 3
     assert len(projection_calls) == (3 if expected == "post" else 0)
-    assert mono.pre_o_hits[8] == (3 if expected == "pre" else 0)
-    assert mono.post_o_hits[8] == (3 if expected == "post" else 0)
+    assert mono.pre_o_hits[rows] == (3 if expected in ("pre", "pre4") else 0)
+    assert mono.post_o_hits[rows] == (3 if expected == "post" else 0)
 
 
 @pytest.mark.parametrize(

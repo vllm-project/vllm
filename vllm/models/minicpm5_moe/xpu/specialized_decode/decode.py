@@ -48,6 +48,11 @@ class MonoLayer:
             version = getattr(ops, "pre_o_abi_version", None)
             if version is not None and version() == 1:
                 self.pre_o_decode = getattr(ops, "decode_pre_o", None)
+        self.pre_o_rows4_decode = (
+            getattr(ops, "decode_pre_o_rows4", None)
+            if config.tp == 2 and self.pre_o_decode is not None
+            else None
+        )
         self.post_o_decode = None
         if getattr(config, "post_o_split", False) and not self.dense:
             projection = layer.self_attn.o_proj
@@ -156,6 +161,12 @@ class MonoLayer:
             return self._launch_tail(
                 self.tail_rows4_decode, metadata, positions, hidden, residual
             )
+        if self.pre_o_rows4_decode is not None and self._supports_split(
+            metadata, positions, hidden, cache, 4
+        ):
+            return self._launch_o_split(
+                metadata, positions, hidden, residual, rows4=True
+            )
         if any(
             op is not None
             for op in (self.tail_decode, self.pre_o_decode, self.post_o_decode)
@@ -250,14 +261,16 @@ class MonoLayer:
         self.tail_hits[rows] += 1
         return output, residual
 
-    def _launch_o_split(self, metadata, positions, hidden, residual):
+    def _launch_o_split(self, metadata, positions, hidden, residual, *, rows4=False):
         hidden, residual = self._split_input_norm(hidden, residual)
         attention_layer = self.layer.self_attn
         attention = attention_before_output_projection(
-            attention_layer, positions, hidden, self.pre_o_fa2
+            attention_layer, positions, hidden, None if rows4 else self.pre_o_fa2
         )
         decode, hits = self.pre_o_decode, self.pre_o_hits
-        if self.post_o_decode is not None:
+        if rows4:
+            decode = self.pre_o_rows4_decode
+        elif self.post_o_decode is not None:
             attention = rank_local_output_projection(attention_layer.o_proj, attention)
             decode, hits = self.post_o_decode, self.post_o_hits
         assert decode is not None
@@ -277,8 +290,9 @@ class MonoLayer:
             self.region,
             self.index,
         )
-        self.hits[8] += 1
-        hits[8] += 1
+        rows = hidden.shape[0]
+        self.hits[rows] += 1
+        hits[rows] += 1
         return output, new_residual
 
 
