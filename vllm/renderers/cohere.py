@@ -159,7 +159,7 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 
 
 # Reserved ``chat_template_kwargs`` key carrying the original Cohere v2
-# tool-message content, keyed by request-message index. Populated by
+# tool-message content. Populated by
 # :meth:`CohereServingChatV2._apply_cohere_template_kwargs` and consumed
 # by :func:`_conversation_to_melody_messages`, which runs each block
 # through :func:`_v2_tool_content_to_melody_block` to produce the
