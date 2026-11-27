@@ -59,6 +59,7 @@ def _run_ar(
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
+    uniform_decode: bool,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
@@ -66,14 +67,32 @@ def _run_ar(
     device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
-    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32, pin_memory=pin_memory)
+    tensor_cpu = torch.zeros(5, dp_size, dtype=torch.int32, pin_memory=pin_memory)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
+    tensor_cpu[4][dp_rank] = 1 if uniform_decode else 0
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
+
+
+def _post_process_uniform_decode(tensor: torch.Tensor) -> bool:
+    """Whether *every* DP rank is running a single-token decode this step.
+
+    Each rank knows only its own batch shape, but a policy that issues a
+    collective from inside the forward -- expert-placement refresh, say --
+    has to reach the same verdict on every rank or the ranks that took the
+    branch wait in their collective for ranks that did not. A rank with no
+    requests runs `_dummy_run(uniform_decode=True)` and looks like a decode
+    to itself while its peers run real prefill, so the local flag is exactly
+    the wrong thing to gate on. Reduced with `all`, not `any`: one rank still
+    prefilling makes the step globally not-decode, which is the conservative
+    direction -- it keeps the step eligible for whatever work the local flag
+    would have skipped, on every rank alike.
+    """
+    return bool(torch.all(tensor[4] == 1).item())
 
 
 def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
@@ -124,8 +143,9 @@ def _synchronize_dp_ranks(
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
     cudagraph_mode: int,
+    uniform_decode: bool,
     parallel_config: ParallelConfig,
-) -> tuple[bool, torch.Tensor | None, int]:
+) -> tuple[bool, torch.Tensor | None, int, bool]:
     """1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
 
@@ -135,11 +155,14 @@ def _synchronize_dp_ranks(
 
     3. Synchronizes cudagraph_mode across ranks by taking the minimum.
 
+    4. Synchronizes uniform_decode across ranks by taking the conjunction.
+
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including any DP padding.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        synced_uniform_decode: Whether every DP rank is running a decode
     ]
 
     """
@@ -153,6 +176,7 @@ def _synchronize_dp_ranks(
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
+        uniform_decode=uniform_decode,
         parallel_config=parallel_config,
     )
 
@@ -184,7 +208,14 @@ def _synchronize_dp_ranks(
         # should_dp_pad is True
         num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
-    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
+    synced_uniform_decode = _post_process_uniform_decode(tensor)
+
+    return (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_uniform_decode,
+    )
 
 
 def coordinate_batch_across_dp(
@@ -194,7 +225,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
-) -> tuple[bool, torch.Tensor | None, int]:
+) -> tuple[bool, torch.Tensor | None, int, bool]:
     """Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
 
@@ -204,8 +235,10 @@ def coordinate_batch_across_dp(
         parallel_config: The parallel config
         num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
             TP, etc)
-        uniform_decode: Only used if allow_microbatching is True. True if the batch
-            only contains single token decodes
+        uniform_decode: True if this rank's batch only contains single token
+            decodes. Used for the microbatching precondition check when
+            allow_microbatching is True, and -- independently of that --
+            reduced across ranks into the returned synced_uniform_decode.
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
 
@@ -216,12 +249,15 @@ def coordinate_batch_across_dp(
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when cudagraph is enabled.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        synced_uniform_decode: True only if every DP rank is running a decode.
+        False outside DP, where there is no peer to disagree with the caller's
+        own view of its batch.
     ]
 
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return False, None, cudagraph_mode
+        return False, None, cudagraph_mode, bool(uniform_decode)
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -248,16 +284,31 @@ def coordinate_batch_across_dp(
             num_tokens_padded,
             dtype=torch.int32,
         )
-        return should_ubatch, num_tokens_after_padding, cudagraph_mode
-
-    (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
-        _synchronize_dp_ranks(
-            num_tokens_unpadded,
-            num_tokens_padded,
-            should_attempt_ubatching,
+        # No peer to disagree with: this rank's own view of its batch stands.
+        return (
+            should_ubatch,
+            num_tokens_after_padding,
             cudagraph_mode,
-            parallel_config,
+            bool(uniform_decode),
         )
+
+    (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_uniform_decode,
+    ) = _synchronize_dp_ranks(
+        num_tokens_unpadded,
+        num_tokens_padded,
+        should_attempt_ubatching,
+        cudagraph_mode,
+        bool(uniform_decode),
+        parallel_config,
     )
 
-    return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)
+    return (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_uniform_decode,
+    )

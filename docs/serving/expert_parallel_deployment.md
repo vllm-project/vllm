@@ -268,7 +268,10 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
-| `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `policy` | The policy type for expert parallel load balancing: `"default"` (built-in) or `"evenmoe"` (EvenMoE, formerly MoE Load Balancer; see below) | `"default"` |
+| `l2_algorithm` | EvenMoE replica-routing expression (only with `policy: "evenmoe"`); empty keeps vLLM's built-in replica choice | `""` |
+| `init_placement_path` | Load a saved expert placement at start-up instead of the trivial layout | `null` |
+| `save_placement_path` | Save the expert placement to this path after every rearrangement | `null` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
 
 For example:
@@ -289,6 +292,59 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+### EvenMoE (MoE Load Balancer) policy
+
+`policy: "evenmoe"` delegates expert placement, and optionally per-token replica routing, to the
+[EvenMoE](https://github.com/ai-dynamo/evenmoe) (`evenmoe`, formerly the MoE Load Balancer), a
+framework-neutral library of expert-parallel load-balancing policies. vLLM imports it lazily, so
+nothing changes unless the policy is selected; install it into the serving environment first.
+
+Two stages are configurable:
+
+- **L1, placement** (`VLLM_EVENMOE_L1_ALGORITHM`): which logical expert lives in which physical slot,
+  decided at every rearrangement. `auto` (default) selects the balancer's default algorithm for the
+  model's expert-group layout; `ultraep` re-solves placement and per-replica quotas online every
+  `EVENMOE_ULTRAEP_REFRESH_INTERVAL` representative batches and moves the affected expert weights itself.
+  What the planner needs from vLLM is read from its own declarations: a planner that solves from each
+  rank's counts (`ultraep`) gets the load windows gathered per rank instead of summed, and a planner
+  with a layout of its own (`ultraep`: each rank's block of master experts followed by its redundant
+  slots) has the loaded weights moved into it at start-up, so its first online solve only touches the
+  redundant slots. An `init_placement_path` checkpoint takes precedence over that layout.
+- **L2, replica routing** (`--eplb-config.l2_algorithm` or `VLLM_EVENMOE_L2_ALGORITHM`): which replica
+  of a logical expert serves each token. Expressions combine a routed-expert policy (`static`,
+  `lplb`, `ultraep`) with an optional shared-expert policy (`+waterfill`), e.g. `lplb+waterfill`.
+  `waterfill` dispatches the shared expert through the expert-parallel all-to-all so that it can be
+  assigned to the least-loaded rank; this widens the expert space by one slot per rank and can be
+  enabled on its own with `VLLM_FUSE_SHARED_EXPERTS=1`. L2 routing is skipped automatically when
+  there are no redundant experts, where it could only reproduce the built-in choice, and when a
+  policy's layout preconditions cannot hold on the configured EP group (`ultraep` needs the redundant
+  experts and the logical experts to split evenly across the EP ranks), or when the expression requires
+  a particular placement policy that `VLLM_EVENMOE_L1_ALGORITHM` does not select (`ultraep` routes by
+  the quota its own planner publishes, so both stages must be `ultraep`); the log states the reason.
+
+```bash
+# Placement fitted by the balancer, online UltraEP refresh, Waterfill for the shared expert
+VLLM_EVENMOE_L1_ALGORITHM=ultraep EVENMOE_ULTRAEP_REFRESH_INTERVAL=8 \
+vllm serve deepseek-ai/DeepSeek-V3 \
+    --tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel \
+    --enable-eplb \
+    --eplb-config '{"policy":"evenmoe","use_async":false,"num_redundant_experts":16,"l2_algorithm":"ultraep+waterfill","log_balancedness":true}'
+```
+
+`use_async` must be `false` with this policy: the balancer plans synchronously on the caller's
+thread. To fit a placement once and serve with it held, run a short profiling serve with
+`"save_placement_path": "/path/placement.pt"` and start production with
+`"init_placement_path": "/path/placement.pt"` and a `step_interval` that is never reached.
+
+Tuning knobs for the online UltraEP refresh (all read through `vllm.envs`):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `EVENMOE_ULTRAEP_REFRESH_INTERVAL` | `64` | Re-solve every N representative batches; `8` is a good production value, `1` maximizes balance at the cost of one refresh per step |
+| `EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS` | `512` | A batch counts as representative when it routes at least this many tokens |
+| `EVENMOE_ULTRAEP_MOVER` | `direct` | How re-solved replica weights move between ranks: `direct` (send/recv over the EPLB communicator), `symm` (torch symmetric memory; one host or a multi-node NVLink fabric), `auto` (symm when every rank agrees it can, otherwise direct) |
+| `EVENMOE_ULTRAEP_LAGGED_APPLY` | `0` | `1` lands a plan on the layer's next forward, avoiding a per-layer device sync at the price of one step of staleness; worth about +3% at interval 1 on Blackwell-class step times, nothing at interval 8 |
 
 For speculative decoding with a MoE draft, configure both speculative decoding
 and the draft-specific EPLB count:
