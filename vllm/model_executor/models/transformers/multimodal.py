@@ -27,10 +27,12 @@ import numpy as np
 import torch
 import transformers
 from torch.nn.utils.rnn import pad_sequence
+from transformers.video_utils import make_batched_metadata
 
 import vllm.envs as envs
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataBuiltins, MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
@@ -42,7 +44,13 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalFieldConfig
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+    VideoProcessorItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -54,6 +62,7 @@ from vllm.multimodal.processing import (
     TimingContext,
     cached_encode,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.processor import (
     HFMultiModalInputs,
     MultiModalProcessingResult,
@@ -972,14 +981,81 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         except (AttributeError, KeyError, TypeError):
             return None
 
+    def _validate_num_mm_tokens(
+        self, mm_data: Mapping[str, object], mm_kwargs: Mapping[str, object]
+    ) -> None:
+        """Reject a prompt whose images and videos alone are longer than
+        `max_model_len`, as the engine would, before the HF processor allocates
+        their tensors."""
+        images = mm_data.get("images", [])
+        videos = mm_data.get("videos", [])
+        assert isinstance(images, Sequence) and isinstance(videos, Sequence)
+        if is_profiling_media() or not (images or videos):
+            return
+
+        sizes = dict[str, list[tuple[int, ...]]]()
+        if images:
+            image_items = ImageProcessorItems(images)
+            image_sizes = [image_items.get_image_size(i) for i in range(len(images))]
+            sizes["image_sizes"] = [(size.height, size.width) for size in image_sizes]
+        if videos:
+            video_items = VideoProcessorItems(videos)
+            frame_sizes = [video_items.get_frame_size(i) for i in range(len(videos))]
+            num_frames = [video_items.get_num_frames(i) for i in range(len(videos))]
+            if mm_kwargs.get("do_sample_frames"):
+                # The frames the video processor keeps, from the kwargs
+                # `BaseVideoProcessor.preprocess` resolves for `sample_frames`
+                hf_processor = self.info.get_hf_processor()
+                video_processor = hf_processor.video_processor
+                video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                    hf_processor, mm_kwargs, scope="videos_kwargs"
+                )
+                sample_kwargs = {
+                    key: video_kwargs.get(key, getattr(video_processor, key, None))
+                    for key in video_processor.valid_kwargs.__annotations__
+                }
+                metadata = make_batched_metadata(videos, mm_data["video_metadata"])
+                try:
+                    num_frames = [
+                        len(video_processor.sample_frames(item, **sample_kwargs))
+                        for item in metadata
+                    ]
+                except (ArithmeticError, AttributeError, IndexError, TypeError):
+                    # The HF processor fails on the same sampling, e.g. at fps 0
+                    return
+            sizes["video_sizes"] = [
+                (frames, size.height, size.width)
+                for frames, size in zip(num_frames, frame_sizes)
+            ]
+
+        mm_tokens = self.info._get_num_mm_tokens(**sizes)
+        num_tokens = sum(
+            sum(mm_tokens[key])
+            for key in ("num_image_tokens", "num_video_tokens")
+            if key in mm_tokens
+        )
+        max_model_len = self.info.ctx.model_config.max_model_len
+        if num_tokens > max_model_len:
+            raise VLLMValidationError(
+                f"The prompt's images and videos alone need {num_tokens} tokens, "
+                f"more than the maximum model length of {max_model_len}."
+            )
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
+        # Transformers' counts don't follow every processor kwarg (Qwen2-VL's ignores
+        # `size`), so prompts are only counted when the server and the request set
+        # none but `device`, taken before `_get_hf_mm_inputs` adds vLLM's own
+        # TODO: count with the kwargs once Transformers' counts read `size`
+        user_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs).keys() - {"device"}
         hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
+        if not user_kwargs:
+            self._validate_num_mm_tokens(hf_data, hf_kwargs)
 
         if not hf_data:
             return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
