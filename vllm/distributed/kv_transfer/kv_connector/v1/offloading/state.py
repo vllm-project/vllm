@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -247,6 +248,49 @@ class SchedulerOffloadConfig(NamedTuple):
         )
 
 
+class FinishedPartialTail(NamedTuple):
+    boundary: int
+    # (Block ID, block index), in offloading group order.
+    sources: list[tuple[int, int]]
+
+
+def resolve_partial_tail_sources(
+    config: SchedulerOffloadConfig,
+    boundary: int,
+    recurrent_sources: Mapping[int, int],
+    group_block_ids: Mapping[int, list[int]],
+    *,
+    finished: bool = False,
+) -> list[tuple[int, int]] | None:
+    """Resolve one source per group at the exact token boundary."""
+    if finished and recurrent_sources.keys() != {
+        group.group_idx
+        for group in config.kv_group_configs
+        if group.requires_cow_source
+    }:
+        return None
+    sources = []
+    for group in config.kv_group_configs:
+        block_index = (boundary - 1) // group.tokens_per_block
+        group_table = group_block_ids.get(group.group_idx, [])
+        if group.requires_cow_source:
+            block_id = recurrent_sources.get(group.group_idx, 0)
+            if finished and (
+                boundary % group.tokens_per_block == 0
+                or block_index >= len(group_table)
+                or group_table[block_index] != block_id
+            ):
+                return None
+        else:
+            if block_index >= len(group_table):
+                return None
+            block_id = group_table[block_index]
+        if block_id <= 0:
+            return None
+        sources.append((block_id, block_index))
+    return sources
+
+
 @dataclass(slots=True)
 class RequestGroupState:
     offload_keys: list[OffloadKey] = field(default_factory=list)
@@ -281,6 +325,8 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # Core keeps the request blocks alive until this finish-time offer drains.
+    finished_partial_tail: FinishedPartialTail | None = None
     # Loaded attention keys cover their token positions. Recurrent state
     # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)

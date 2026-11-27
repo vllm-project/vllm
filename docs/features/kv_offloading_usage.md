@@ -66,7 +66,10 @@ cache groups. Under DCP, each recurrent block must divide the full-attention
 block, and the hash unit must be divisible by the DCP size.
 
 Partial-tail reuse follows the hit alignment and the EAGLE/MTP hash lookahead
-resolved by the core prefix cache.
+resolved by the core prefix cache. When a request ends at an eligible partial
+boundary, OffloadingConnector can also save the state handed off by the core
+prefix cache. Later requests can reuse that boundary from the offloading tier
+after the GPU copy is evicted.
 
 ## Single-Tier Setup (CPU Only)
 

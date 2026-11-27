@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -27,11 +28,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _TransferMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    FinishedPartialTail,
     GroupOffloadConfig,
     RequestGroupState,
     RequestOffloadState,
     SchedulerOffloadConfig,
     resolve_mamba_align_size,
+    resolve_partial_tail_sources,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
     OnComputeStoreHandler,
@@ -70,6 +73,12 @@ logger = init_logger(__name__)
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
+
+
+class _FinishedTailReleaseState(Enum):
+    WAITING_FOR_STORES = auto()
+    WAITING_FOR_CORE = auto()
+
 
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
@@ -236,6 +245,7 @@ class OffloadingConnectorScheduler:
         self.config = SchedulerOffloadConfig.from_spec(
             spec, vllm_config, kv_cache_config
         )
+        self._num_gpu_blocks = kv_cache_config.num_blocks
         self._group_configs_by_id = {
             config.group_idx: config for config in self.config.kv_group_configs
         }
@@ -295,6 +305,7 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
+        self._finished_tail_releases: dict[ReqId, _FinishedTailReleaseState] = {}
         # Requests loading synchronously in the current engine step
         self._current_batch_sync_loads: set[ReqId] = set()
         self._current_batch_sync_load_bytes = 0
@@ -1433,10 +1444,25 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
+            req_status.finished_partial_tail = None
             req_status.finished_signaled = True
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
                 self._remove_request(req_id)
+
+        # Reset removes request state before its dispatched jobs are flushed.
+        # Wait for those reports before telling Core it can reuse the sources.
+        if not self._reset_fence:
+            for req_id, state in self._finished_tail_releases.items():
+                if (
+                    state is _FinishedTailReleaseState.WAITING_FOR_STORES
+                    and req_id not in self._req_status
+                ):
+                    meta.finished_store_reqs.add(req_id)
+                    self._finished_tail_releases[req_id] = (
+                        _FinishedTailReleaseState.WAITING_FOR_CORE
+                    )
+
         self._current_batch_load_jobs = {}
         self._current_batch_sync_loads = set()
         self._current_batch_sync_load_bytes = 0
@@ -1465,23 +1491,27 @@ class OffloadingConnectorScheduler:
         A cache reset fence also keeps it stepping: the flush must reach the
         workers and their reports come back before on_reset_flushed().
         """
-        if self._job_statuses or self._reset_fence:
+        if self._job_statuses or self._reset_fence or self._finished_tail_releases:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
-        """Update KVConnector state from worker-side connectors output.
+    def has_pending_block_frees(self) -> bool:
+        return bool(self._finished_tail_releases)
 
-        Args:
-            connector_output (KVConnectorOutput): the worker-side
-                connectors output.
-
-        """
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Process job completions and acknowledgments of request releases."""
         with self._manager_locked():
             self._update_connector_output(connector_output)
 
-    def _update_connector_output(self, connector_output: KVConnectorOutput):
+    def _update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        for req_id in connector_output.finished_sending or ():
+            if (
+                self._finished_tail_releases.get(req_id)
+                is _FinishedTailReleaseState.WAITING_FOR_CORE
+            ):
+                del self._finished_tail_releases[req_id]
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
@@ -1619,6 +1649,69 @@ class OffloadingConnectorScheduler:
 
         return stats
 
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Keep eligible request blocks alive for the next store-handler pass."""
+        if (
+            not self.config.supports_partial_tail
+            or not self._offloading_enabled
+            or not self.access_mode.can_write
+            or not partial_tail_offloads
+        ):
+            return False
+
+        req_status = self._req_status.get(request.request_id)
+        if (
+            req_status is None
+            or req_status.req is not request
+            or req_status.finished_signaled
+            or not request.is_finished()
+            or request.num_in_flight_tokens
+        ):
+            return False
+        pending_jobs = (self._job_statuses[jid] for jid in req_status.transfer_jobs)
+        if any(not (job.is_store or job.is_sync_load) for job in pending_jobs):
+            return False
+
+        boundary = request.num_computed_tokens
+        alignment = self.config.cache_hit_alignment_tokens
+        assert alignment is not None
+        if (
+            not 0 < boundary <= request.num_prompt_tokens
+            or boundary > req_status.num_offloadable_tokens(boundary)
+            or boundary % self.config.tokens_per_hash != 0
+            or boundary % alignment != 0
+            or boundary % self.config.partial_tail_block_size == 0
+        ):
+            return False
+
+        recurrent_sources: dict[int, int] = {}
+        for group_id, block_id, token_end in partial_tail_offloads:
+            if token_end != boundary:
+                return False
+            if recurrent_sources.setdefault(group_id, block_id) != block_id:
+                return False
+
+        sources = resolve_partial_tail_sources(
+            self.config,
+            boundary,
+            recurrent_sources,
+            dict(enumerate(block_ids)),
+            finished=True,
+        )
+        if sources is None or any(bid >= self._num_gpu_blocks for bid, _ in sources):
+            return False
+
+        req_status.finished_partial_tail = FinishedPartialTail(boundary, sources)
+        self._finished_tail_releases[request.request_id] = (
+            _FinishedTailReleaseState.WAITING_FOR_STORES
+        )
+        return True
+
     def request_finished(
         self,
         request: Request,
@@ -1672,7 +1765,8 @@ class OffloadingConnectorScheduler:
             for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
 
-        return False, None
+        # MultiConnector counts delayed releases through request_finished.
+        return request.request_id in self._finished_tail_releases, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Drain pending KV cache events.

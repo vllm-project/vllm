@@ -97,6 +97,8 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
     jobs_to_flush: set[int] | None = None
     # False until every worker reported ready under async_init.
     offloading_enabled: bool = True
+    # Workers echo these releases through finished_sending.
+    finished_store_reqs: set[ReqId] = field(default_factory=set)
 
 
 @dataclass
