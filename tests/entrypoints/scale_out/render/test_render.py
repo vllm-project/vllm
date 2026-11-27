@@ -41,7 +41,7 @@ from vllm.multimodal.utils import encode_image_url, encode_video_url
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
 
