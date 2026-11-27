@@ -398,7 +398,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     )
 
     def cached(block_id):
-        return KVCacheBlock(block_id=block_id, _block_hash=object())
+        return KVCacheBlock(block_id=block_id, block_hash=object())
 
     def uncached(block_id):
         return KVCacheBlock(block_id=block_id)
@@ -451,7 +451,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         select_transfer_block_ids=lambda block_ids: block_ids
     )
 
-    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, _block_hash=object())],))
+    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, block_hash=object())],))
     request = create_request(do_remote_prefill=True)
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
@@ -704,6 +704,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
@@ -719,7 +720,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
+        block_size=16 * local_physical_per_logical,
+        swa_enabled=has_swa,
+        mamba_enabled=has_mamba,
     )
 
     remote_engine_id = "remote-engine"
@@ -735,7 +738,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     # tp_ratio not exercised (all_source_ranks is empty so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
+    worker.transfer_topo.block_size_ratio.return_value = 1
     remote_info = MagicMock()
+    remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
@@ -757,6 +762,7 @@ def test_read_blocks_for_req_expands_remote_ids(
             "remote_host": "localhost",
             "remote_port": 1234,
             "tp_size": 1,
+            "remote_num_tokens": 1000,
         },
     )
 
@@ -1478,7 +1484,7 @@ def test_post_process_zeroes_untransferred_tail(
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
     # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], range(6))])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
     assert torch.equal(attn_cache[2], expected[2])
@@ -2423,28 +2429,32 @@ def _make_host_buffer_worker(copy_op):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_block_ids,expected_ids",
+    "group_block_ids",
     [
-        # Single group (non-hybrid model): one copy, as before.
-        ([[1, 2, 3]], [1, 2, 3]),
-        # Hybrid model: three groups collapse into a single copy.
-        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
+        # Single group (non-hybrid model).
+        [[1, 2, 3]],
+        # Hybrid model: each group copies only its own layers.
+        [[1, 2], [3, 4], [5]],
         # An empty group contributes no ids.
-        ([[1, 2], []], [1, 2]),
+        [[1, 2], []],
     ],
 )
-def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
-    """h2d copies are issued once per request, not once per KV cache group."""
+def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
 
     calls = []
     worker = _make_host_buffer_worker(
         lambda src, dst, src_ids, dst_ids, direction: calls.append(
-            (src_ids, dst_ids, direction)
+            (list(src), list(dst), src_ids, dst_ids, direction)
         )
     )
-    worker.host_xfer_buffers = {"layer": None}
-    worker.device_kv_caches = {"layer": None}
+    names = [f"layer.{g}" for g in range(len(group_block_ids))]
+    # "shared" reuses another layer's KV cache: a host buffer, no transfer group.
+    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
+    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[SimpleNamespace(layer_names=[name]) for name in names]
+    )
 
     meta = ReqMeta(
         local_block_ids=group_block_ids,
@@ -2453,4 +2463,6 @@ def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_id
     )
     worker.sync_recved_kv_to_device("req", meta)
 
-    assert calls == [(expected_ids, expected_ids, "h2d")]
+    assert calls == [
+        ([name], [name], ids, ids, "h2d") for name, ids in zip(names, group_block_ids)
+    ]

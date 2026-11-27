@@ -9,46 +9,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.workspace import current_workspace_manager
-
-
-@triton.jit
-def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    end = tl.load(row_ends_ptr + row)
-    src_ptr += row.to(tl.int64) * stride
-    dst_ptr += row.to(tl.int64) * stride
-    for start in range(tl.program_id(1) * BLOCK, end, tl.num_programs(1) * BLOCK):
-        offs = start + tl.arange(0, BLOCK)
-        mask = offs < end
-        vals = tl.load(src_ptr + offs, mask=mask)
-        tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
-
-
-def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
-    """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
-
-    Only columns below ``row_ends`` (int32, one per row) are converted, the
-    span the consumers read; DeepGEMM's aligned row stride is kept.
-    """
-    if logits.dtype == torch.float32:
-        return logits
-    out = torch.empty_strided(
-        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
-    )
-    num_rows, width = logits.shape
-    if num_rows == 0 or width == 0:
-        return out
-    assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
-    block = 1024
-    splits = min(triton.cdiv(width, block), max(1, 1024 // num_rows))
-    _upcast_logits_kernel[(num_rows, splits)](
-        logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
-    )
-    return out
-
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
@@ -197,6 +159,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self._has_flashinfer_topk = has_flashinfer()
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(110)
             and not current_platform.is_device_capability_family(120)
         )
         self._is_rocm = current_platform.is_rocm()
@@ -221,8 +184,8 @@ class SparseIndexerTopk(torch.nn.Module):
         if self._backend == "cooperative":
             failures = self._cooperative_constraints(logits, topk_tokens, num_rows)
         elif self._backend == "persistent":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
+            if not (self._is_cuda or self._is_rocm):
+                failures.append("requires a CUDA or ROCm platform")
             if topk_tokens not in (512, 1024, 2048):
                 failures.append(
                     f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
@@ -275,7 +238,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> bool:
         """Whether this decode call can consume BF16 without a full FP32 copy."""
-        if logits.dtype != torch.bfloat16:
+        if logits.dtype != torch.bfloat16 or logits.stride(1) != 1:
             return False
         if self._backend == "deep_select":
             return (
@@ -283,11 +246,17 @@ class SparseIndexerTopk(torch.nn.Module):
                 and _HAS_DEEP_SELECT_C
                 and is_deep_select_supported(logits, topk_tokens)
             )
+        if self._backend == "cooperative":
+            return not self._cooperative_constraints(logits, topk_tokens, num_rows)
+        if (
+            self._backend == "auto"
+            and self._resolve_auto(logits, topk_tokens, num_rows) == "cooperative"
+        ):
+            return True
         return (
             self._backend in ("auto", "persistent")
             and self._is_cuda
             and current_platform.is_device_capability_family(100)
-            and logits.stride(1) == 1
             and topk_tokens in (512, 1024, 2048)
             and self.resolve_backend(logits, topk_tokens, num_rows) == "persistent"
         )
@@ -326,19 +295,24 @@ class SparseIndexerTopk(torch.nn.Module):
             failures.append(
                 f"num_rows must be <= {AUTO_COOPERATIVE_MAX_ROWS}, got {num_rows}"
             )
-        if logits.stride(0) % 4 != 0:
+        if logits.dtype not in (torch.float32, torch.bfloat16):
+            failures.append(f"logits must be fp32 or bf16, got {logits.dtype}")
+        # Rows are TMA-loaded in 16-byte units.
+        align = 16 // logits.element_size()
+        if logits.stride(0) % align != 0:
             failures.append(
-                f"logits.stride(0) must be divisible by 4, got {logits.stride(0)}"
+                f"logits.stride(0) must be divisible by {align}, got {logits.stride(0)}"
             )
         if self._is_cuda and not self._cooperative_capable:
-            failures.append("requires SM90+ and is not supported on the SM12x family")
+            failures.append(
+                "requires SM90+ and is not supported on the SM11x/SM12x families"
+            )
         return failures
 
     @staticmethod
     def _row_ends(seq_lens: torch.Tensor, next_n: int, num_rows: int) -> torch.Tensor:
         """Per-row exclusive end offsets (int32, (num_rows,)) for top-k
-        kernels that take ragged lengths (DeepSelect, FlashInfer, torch
-        reference).
+        kernels that take ragged lengths.
 
         seq_lens is (B, next_n) per-row effective lens for native spec decode
         and (B, 1) otherwise, in which case per-row lens are derived the same
@@ -380,7 +354,7 @@ class SparseIndexerTopk(torch.nn.Module):
             )
             torch.ops._C.cooperative_topk(
                 logits,
-                seq_lens,
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
@@ -397,7 +371,7 @@ class SparseIndexerTopk(torch.nn.Module):
             # long-row kernels on short-context batches.
             torch.ops._C.persistent_topk(
                 logits,
-                seq_lens,
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
                 topk_indices,
                 topk_workspace,
                 topk_tokens,

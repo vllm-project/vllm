@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers shared by the weight cache daemon, the IPC loader and the engine.
 
-These live outside ``protocol`` so callers that only need to know whether a
+These live outside `protocol` so callers that only need to know whether a
 draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -17,7 +21,46 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+@dataclass
+class ExternalWeightCharges:
+    """Track a worker's external weight charges and those freed by disk fallback."""
+
+    fallback_bytes: int = field(default=0, init=False)
+    _charges: dict[tuple[str, bool], int] = field(default_factory=dict, init=False)
+
+    @property
+    def current_bytes(self) -> int:
+        """External bytes held right now: charges minus fallback removals."""
+        return sum(self._charges.values())
+
+    @contextmanager
+    def track(self) -> Generator[None, None, None]:
+        token = _active_external_weight_charges.set(self)
+        try:
+            yield
+        finally:
+            _active_external_weight_charges.reset(token)
+
+
+_active_external_weight_charges: ContextVar[ExternalWeightCharges | None] = ContextVar(
+    "active_external_weight_charges", default=None
+)
+
+
+def record_external_weight_charge(
+    socket_path: str, is_draft: bool, memory_bytes: int
+) -> None:
+    if accounting := _active_external_weight_charges.get():
+        accounting._charges[socket_path, is_draft] = memory_bytes
+
+
+def record_external_weight_fallback(socket_path: str, is_draft: bool) -> None:
+    if accounting := _active_external_weight_charges.get():
+        accounting.fallback_bytes += accounting._charges.pop((socket_path, is_draft), 0)
+
 
 # Speculative methods whose draft model the daemon caches in its own group.
 # Other drafts keep loading from disk in the engine.
@@ -69,11 +112,6 @@ def build_warmup_runner(
         )
     device = torch.device(current_platform.device_type, local_rank)
     with set_current_vllm_config(vllm_config):
-        if vllm_config.use_v2_model_runner:
-            from vllm.v1.worker.gpu.model_runner import GPUModelRunner as Runner
-        else:
-            from vllm.v1.worker.gpu_model_runner import GPUModelRunner as Runner
-        runner = Runner(vllm_config, device)
-    # The two runner classes share the warmup surface; the nominal type
-    # stays V1's GPUModelRunner.
-    return cast("GPUModelRunner", runner)
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+        return GPUModelRunner(vllm_config, device)

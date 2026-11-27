@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Torch reference of MiniMax-M3's NVFP4 K/V and index-K pages on ROCm.
 
-A 128-token page is ``[K side | V side]``; a side holds every KV head's e2m1
+A 128-token page is `[K side | V side]`; a side holds every KV head's e2m1
 data (8192 B per head), then every head's e4m3 block scales (1024 B per head).
-Within a head: K data ``[token][64 B]``, K scales in the FlyDSL prefill's lane
-order, V data ``[token octet][dim octet][8 dims][4 B]`` (a byte holds two
-consecutive tokens of one dim), V scales ``[group][token]``. An index page is
-``[128 x 64 B data][128 x 8 B scales]``.
+Within a head: K data `[token][64 B]`, K scales in the FlyDSL prefill's lane
+order, V data `[token octet][dim octet][8 dims][4 B]` (a byte holds two
+consecutive tokens of one dim), V scales `[group][token]`. An index page is
+`[128 x 64 B data][128 x 8 B scales]`.
 """
 
 import torch
@@ -18,7 +18,7 @@ E2M1_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def quantize_nvfp4(x: torch.Tensor, global_scale: float):
-    """E2M1 codes ``[T, 128]`` and e4m3 scale bytes ``[T, 8]`` of fp32 rows.
+    """E2M1 codes `[T, 128]` and e4m3 scale bytes `[T, 8]` of fp32 rows.
 
     The CUDA encoder's scale math and a nearest-grid E2M1 rounding with ties to
     the even code, written independently of the kernels' bit arithmetic.
@@ -44,7 +44,7 @@ def quantize_nvfp4(x: torch.Tensor, global_scale: float):
 
 
 def dequant(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """Token-major NVFP4 rows -> fp32 e2m1 x block scale, ``[..., 128]``."""
+    """Token-major NVFP4 rows -> fp32 e2m1 x block scale, `[..., 128]`."""
     codes = torch.stack((data & 15, data >> 4), -1).flatten(-2).long()
     grid = torch.tensor(E2M1_GRID, device=data.device)
     mag = grid[codes & 7] * torch.where(codes >= 8, -1.0, 1.0)
@@ -55,8 +55,8 @@ def dequant(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
 def head_offsets(side: int, device):
     """Byte offsets inside one head's regions of side 0 (K) or 1 (V).
 
-    Returns the data byte and nibble shift of each (token, dim) ``[128, 128]``
-    and the scale byte of each (token, group) ``[128, 8]``.
+    Returns the data byte and nibble shift of each (token, dim) `[128, 128]`
+    and the scale byte of each (token, group) `[128, 8]`.
     """
     t = torch.arange(BLOCK, device=device)[:, None]
     d = torch.arange(D, device=device)[None, :]
@@ -75,7 +75,7 @@ def head_offsets(side: int, device):
 
 
 def _region_bases(side: int, heads: int, device):
-    """``[H, 1, 1]`` page offsets of each head's data and scale regions."""
+    """`[H, 1, 1]` page offsets of each head's data and scale regions."""
     h = torch.arange(heads, device=device)[:, None, None]
     side0 = side * heads * BLOCK * 72
     return side0 + h * BLOCK * 64, side0 + heads * BLOCK * 64 + h * BLOCK * 8
@@ -108,13 +108,13 @@ def _insert_side(cache, rows, slots, side, global_scale):
 
 
 def insert_nvfp4_kv(k, v, kv_cache, slots, k_scale, v_scale):
-    """Quantize K / V ``[T, Hkv, 128]`` into their pages; slots < 0 skip."""
+    """Quantize K / V `[T, Hkv, 128]` into their pages; slots < 0 skip."""
     _insert_side(kv_cache, k, slots, 0, float(k_scale))
     _insert_side(kv_cache, v, slots, 1, float(v_scale))
 
 
 def insert_nvfp4_index(index_cache, keys, slots):
-    """Quantize index keys ``[T, 128]`` into their pages (no global scale)."""
+    """Quantize index keys `[T, 128]` into their pages (no global scale)."""
     codes, scales = quantize_nvfp4(keys.float(), 1.0)
     slots = slots.long()
     keep = slots >= 0
@@ -131,10 +131,10 @@ def insert_nvfp4_index(index_cache, keys, slots):
 
 
 def nvfp4_kv_cache_token_major(kv_cache: torch.Tensor):
-    """``(k_data, k_scale, v_data, v_scale)`` of a main cache, token-major.
+    """`(k_data, k_scale, v_data, v_scale)` of a main cache, token-major.
 
-    Data ``[blocks, Hkv, 128, 64]`` (the low nibble the even dim), scales
-    ``[blocks, Hkv, 128, 8]``, all uint8.
+    Data `[blocks, Hkv, 128, 64]` (the low nibble the even dim), scales
+    `[blocks, Hkv, 128, 8]`, all uint8.
     """
     blocks, heads = kv_cache.shape[0], kv_cache.shape[1] // 2
     pages = kv_cache.reshape(blocks, -1)

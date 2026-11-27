@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm import LLM
+from vllm import LLM, ModelRegistry
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -33,7 +33,7 @@ from .registry import (
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import dummy_hf_overrides, skip_unavailable_models
 
 logger = init_logger(__name__)
 
@@ -66,16 +66,22 @@ OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
+
+
 @pytest.fixture(autouse=True)
 def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
     """Reclaim GPU memory left over by each test's forked subprocess.
 
     These tests are known to leave behind GPU memory (see the comment at
-    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    `gpu_memory_utilization=0.80` below). Each parametrized case builds an
     LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
     when the subprocess exits, so the leftovers can OOM a later test in this
     module (observed with the heavier multimodal archs, e.g.
-    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    InternVLChatModel). Mirrors `clean_gpu_memory_between_tests` in the
     top-level conftest, but unconditionally for this module.
     """
     yield
@@ -109,12 +115,6 @@ def can_initialize(
     become ineffective.
     """
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
-    )
 
     hf_overrides_fn = partial(
         dummy_hf_overrides,
@@ -264,28 +264,33 @@ def can_initialize(
         )
 
 
-@pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(MINIMAL_MODEL_ARCH_LIST, HF_EXAMPLE_MODELS.get_hf_info),
+)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """Test initializing small subset of supported models."""
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
-@pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(OTHER_MODEL_ARCH_LIST, HF_EXAMPLE_MODELS.get_hf_info),
+)
 def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """Test initializing large subset of supported models.
 
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
-    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel"):
-        from vllm.platforms import current_platform
-
-        if current_platform.is_rocm():
-            pytest.skip("HY V4 ROCm initialization requires #54405")
-
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
-@pytest.mark.parametrize("model_arch", AUTO_EXAMPLE_MODELS.get_supported_archs())
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(
+        AUTO_EXAMPLE_MODELS.get_supported_archs(), AUTO_EXAMPLE_MODELS.get_hf_info
+    ),
+)
 def test_implicit_converted_models(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     can_initialize(model_arch, monkeypatch, AUTO_EXAMPLE_MODELS)

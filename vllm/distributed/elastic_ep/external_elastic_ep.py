@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 POLL_BACKOFF_STEPS_S = (0.1, 0.2, 0.4, 0.8)
 
 
-class ExternalElasticEPScalePhase(str, enum.Enum):
+class ExternalElasticEPScalePhase(enum.StrEnum):
     """Lifecycle phases shared for an epoch-scoped external EEP operation.
 
     These values are stored in the control and reconfiguration stores and

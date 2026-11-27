@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
+"""SM120 implementation variant for `FLASHINFER_MLA_SPARSE_SM120`."""
 
 from typing import TYPE_CHECKING, cast
 

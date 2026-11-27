@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -179,7 +179,7 @@ class EncoderDecoderModelState(ModelState):
             # is captured with the correct value for cross-attention.
             encoder_seq_lens_np[:] = self.max_encoder_len
 
-        self.encoder_seq_lens_gpu[:num_reqs].copy_(encoder_seq_lens, non_blocking=True)
+        async_tensor_h2d(encoder_seq_lens, out=self.encoder_seq_lens_gpu[:num_reqs])
         self.encoder_seq_lens_gpu[num_reqs:].fill_(0)
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 

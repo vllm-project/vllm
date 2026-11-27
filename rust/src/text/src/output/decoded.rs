@@ -10,8 +10,9 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
+    AuxOutputRows, FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
     WeightVersionSpan,
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
@@ -84,6 +85,9 @@ pub struct Finished {
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     /// Weight-version spans over all generated token positions.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, without the rows of tokens
+    /// cut off by a stop string. Boxed like `kv_transfer_params`.
+    pub routed_experts: Option<Box<WireNdArray>>,
     pub timestamps: RequestTimestamps,
 }
 
@@ -181,6 +185,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
@@ -208,12 +213,7 @@ pub async fn decoded_text_event_stream(
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
-                        decode_prompt_logprobs(
-                            text_tokenizer,
-                            prompt_token_ids,
-                            logprobs,
-                            decode_options.skip_special_tokens,
-                        )
+                        decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
                     })
                     .transpose()?,
             })
@@ -270,9 +270,13 @@ pub async fn decoded_text_event_stream(
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
         let mut new_sampling_mask = output.sampling_mask;
+        let mut new_routed_experts = output.routed_experts;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
+            // Like Python's `_trim_surplus_tokens`, drop the routed-expert
+            // rows of the cut tokens from the end of this output's rows.
+            new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens)?;
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -283,15 +287,14 @@ pub async fn decoded_text_event_stream(
         }
 
         output_token_count += new_token_ids.len();
+        routed_experts.append(new_routed_experts);
         if let Some(mut mask) = new_sampling_mask {
             sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
         }
 
         let mut decoded_logprobs = new_logprobs
             .as_ref()
-            .map(|logprobs| {
-                decode_logprobs(text_tokenizer, logprobs, decode_options.skip_special_tokens)
-            })
+            .map(|logprobs| decode_logprobs(text_tokenizer, logprobs))
             .transpose()?;
 
         if !intermediate {
@@ -323,6 +326,7 @@ pub async fn decoded_text_event_stream(
                     last.end = last.end.min(output_token_count);
                 }
             }
+            let routed_experts = std::mem::take(&mut routed_experts).concat()?;
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();
@@ -373,6 +377,7 @@ pub async fn decoded_text_event_stream(
                     sampling_mask,
                     spec_decode_metrics,
                     weight_versions,
+                    routed_experts: routed_experts.map(Box::new),
                     timestamps: output.timestamps,
                 })),
             })
@@ -654,6 +659,7 @@ mod tests {
                                 last_token_ts: 11.5,
                             },
                             weight_versions: None,
+                            routed_experts: None,
                         }),
                     ),
                 ],
@@ -688,6 +694,7 @@ mod tests {
                             sampling_mask: None,
                             spec_decode_metrics: None,
                             weight_versions: None,
+                            routed_experts: None,
                             timestamps: Default::default(),
                         }),
                     ),
@@ -784,6 +791,98 @@ mod tests {
             &collected.finish_reason,
             logprob_tokens,
         ));
+    }
+
+    /// `skip_special_tokens` applies to the output text only: sampled,
+    /// candidate and prompt logprob tokens keep special tokens' spelling either
+    /// way, like Python's `convert_ids_list_to_tokens`.
+    #[tokio::test]
+    async fn logprob_tokens_keep_special_token_spelling() {
+        const BOS: u32 = 300;
+        const SEP: u32 = 301;
+        const EOS: u32 = 302;
+        let entries = |token_ids: &[u32]| PositionLogprobs {
+            entries: token_ids
+                .iter()
+                .map(|&token_id| TokenLogprob {
+                    token_id,
+                    logprob: -0.5,
+                    rank: 1,
+                })
+                .collect(),
+        };
+
+        let mut results = Vec::new();
+        for skip_special_tokens in [true, false] {
+            let tokenizer: DynTokenizer = Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("<s>", BOS)
+                    .with_special_token("<sep>", SEP)
+                    .with_special_token("</s>", EOS),
+            );
+            let mut output = GenerateOutput::for_test(
+                Some(Arc::from([BOS, b'h' as u32])),
+                vec![b'a' as u32, SEP, b'b' as u32, EOS],
+                Some(FinishReason::Stop(Some(StopReason::TokenId(EOS)))),
+            );
+            output.prompt_info.as_mut().unwrap().prompt_logprobs = Some(Logprobs {
+                positions: vec![entries(&[b'h' as u32, BOS])],
+            });
+            output.logprobs = Some(Logprobs {
+                positions: vec![
+                    entries(&[b'a' as u32, EOS]),
+                    entries(&[SEP]),
+                    entries(&[b'b' as u32]),
+                    entries(&[EOS]),
+                ],
+            });
+
+            let collected = decoded_text_event_stream(
+                "test".into(),
+                tokenizer,
+                stream::iter([Ok(output)]),
+                TextDecodeOptions {
+                    skip_special_tokens,
+                    ..Default::default()
+                },
+                false,
+            )
+            .collect_output()
+            .await
+            .unwrap();
+
+            let prompt = collected.prompt_logprobs.as_ref().unwrap();
+            let logprob_tokens: Vec<_> = std::iter::once(prompt.first_token.clone())
+                .chain(
+                    prompt
+                        .scored_positions
+                        .iter()
+                        .chain(collected.logprobs.iter().flat_map(|logprobs| &logprobs.positions))
+                        .flat_map(|position| &position.entries)
+                        .map(|entry| entry.token.clone()),
+                )
+                .collect();
+            results.push((
+                skip_special_tokens,
+                collected.text,
+                logprob_tokens.join(" "),
+            ));
+        }
+        expect_test::expect![[r#"
+            [
+                (
+                    true,
+                    "ab",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+                (
+                    false,
+                    "a<sep>b",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&results);
     }
 
     struct DropRecordingStream {

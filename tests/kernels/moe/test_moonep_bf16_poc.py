@@ -4,7 +4,7 @@
 
 Two paths, both compared against the pure-PyTorch reference MoE:
 - MoonEPPrepareAndFinalize + a reference segment-loop expert runner over
-  MoonEP's expert-grouped ``[NvS, H]`` layout;
+  MoonEP's expert-grouped `[NvS, H]` layout;
 - the full modular kernel, MoonEPPrepareAndFinalize + MoonEPExperts through
   FusedMoEKernel.
 Requires NVSwitch multicast capable GPUs.
@@ -102,8 +102,8 @@ def reference_moonep_experts(
 ) -> torch.Tensor:
     """Segment loop over MoonEP's expert-grouped layout.
 
-    ``prefetch_weight`` has already materialized redundant experts' weights
-    in rows ``[E, E+B)``, so every segment reads its own row. Route weights
+    `prefetch_weight` has already materialized redundant experts' weights
+    in rows `[E, E+B)`, so every segment reads its own row. Route weights
     are applied here; MoonEP's combine does the K-sum.
     """
     output = torch.empty_like(hidden_nvsh)

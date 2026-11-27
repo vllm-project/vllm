@@ -46,7 +46,7 @@ def subtests(request):
 def should_do_global_cleanup_after_test() -> bool:
     """Drop the per-test global cleanup for this directory.
 
-    A full ``gc.collect()`` plus an emptied caching allocator after each of the
+    A full `gc.collect()` plus an emptied caching allocator after each of the
     ~1450 small kernel tests per shard costs more than the tests themselves.
     The tests that depend on isolation get a clean state on entry instead, in
     the hook below.

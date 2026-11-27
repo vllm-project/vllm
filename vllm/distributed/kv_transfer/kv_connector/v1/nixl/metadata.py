@@ -139,7 +139,6 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
-        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
@@ -268,6 +267,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Worker-only, per-group range of the remote-sized sub-blocks of each local
+    # group a pull covers. None derives it from the block counts.
+    covered_sub_blocks: list[range] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

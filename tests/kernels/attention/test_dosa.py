@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native-score, recovery and lifetime properties of the real DoSA owner."""
+"""Exact prefill selection, workspace reuse, and capacity recovery on SM100."""
 
 import pytest
 import torch
@@ -9,194 +9,160 @@ from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda()
-    or not current_platform.is_device_capability(100)
+    or not current_platform.is_device_capability_family(100)
     or current_platform.get_cuda_runtime_major() < 13,
     reason="DoSA kernels require SM100 and CUDA 13",
 )
-TOPK = 2048
-CANARY = -77
+TOPK, CANARY = 2048, -77
 
 
-@pytest.fixture(scope="module", params=(32, 64))
-def workspace(request):
+def _owner(heads, rows, keys, dtype=torch.bfloat16, alternate=False):
     from vllm.model_executor.layers.dosa import DoSAWorkspace
 
-    device = torch.device("cuda", torch.accelerator.current_device_index())
-    owner = DoSAWorkspace(device, max_queries=128, max_keys=196608, heads=request.param)
-    alternate = (device.index + 1) % torch.accelerator.device_count()
-    with torch.accelerator.device_index(alternate):
+    device = torch.accelerator.current_device_index()
+    owner = DoSAWorkspace(
+        torch.device("cuda", device),
+        max_queries=rows,
+        max_keys=keys,
+        heads=heads,
+        logits_dtype=dtype,
+    )
+    prepare_device = (device + int(alternate)) % torch.accelerator.device_count()
+    with torch.accelerator.device_index(prepare_device):
         owner.prepare()
     return owner
 
 
-def _inputs(heads, rows, keys, seed, positive_heads=16):
-    generator = torch.Generator(device="cuda").manual_seed(seed)
-    options = dict(device="cuda", dtype=torch.float32, generator=generator)
-    q = torch.randint(-2, 3, (rows, heads, 128), **options).to(torch.float8_e4m3fn)
-    k = torch.randint(-2, 3, (keys, 128), **options).to(torch.float8_e4m3fn)
-    weights = (
-        torch.randint(1, 3, (rows, heads), device="cuda", generator=generator) / 8
-    ).to(torch.bfloat16)
-    positive = torch.where(
-        torch.arange(rows, device="cuda") % 2 == 0, positive_heads, heads // 2 + 4
-    )
-    sign = torch.arange(heads, device="cuda")[None, :] < positive[:, None]
-    weights = torch.where(sign, weights, -weights)
-    exponent = torch.arange(keys, device="cuda", dtype=torch.int32) % 5 + 125
-    packed = exponent.to(torch.uint8).repeat_interleave(4).view(torch.int32)
-    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+def _inputs(heads, rows, keys, seed, dtype, *, hot=False):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    opts = dict(device="cuda", generator=g)
+    weights = torch.full((rows, heads), -0.125, dtype=dtype, device="cuda")
+    idx = torch.arange(keys, device="cuda", dtype=torch.int32)
+    if hot:
+        q = torch.zeros((rows, heads, 128), device="cuda")
+        q[:, 0] = 2 * torch.randint(0, 2, (128,), **opts) - 1
+        k = 2 * torch.randint(0, 2, (keys, 128), dtype=torch.int8, **opts) - 1
+        weights[:, 0] = 0.125
+        exponent = 126 + (idx >= keys // 2).to(torch.int32)
+    else:
+        q = torch.randint(-2, 3, (rows, heads, 128), dtype=torch.float32, **opts)
+        k = torch.randint(-2, 3, (keys, 128), dtype=torch.float32, **opts)
+        weights[:, :14] = 0.125
+        exponent = 125 + idx % 5
+    packed = exponent * 0x01010101
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
-    return q, k, packed, weights, starts, ends
+    q, k = q.to(torch.float8_e4m3fn), k.to(torch.float8_e4m3fn)
+    return q, k, packed, weights, torch.zeros_like(ends), ends
 
 
-def _scores(q, k, weights, packed):
-    from vllm.utils.deep_gemm import fp8_fp4_mqa_logits, mqa_logits_mx_inputs
-
-    starts = torch.zeros(len(q), device=q.device, dtype=torch.int32)
-    ends = torch.full_like(starts, len(k))
-    q_scale, native_weights = mqa_logits_mx_inputs(q, None, weights)
-    return fp8_fp4_mqa_logits(
-        (q, q_scale), (k, packed), native_weights, starts, ends, len(k)
-    ).float()
-
-
-def _output(rows):
-    shape = (rows + 2, TOPK + 17)
-    storage = torch.full(shape, CANARY, device="cuda", dtype=torch.int32)
+def _output(rows, padding=17):
+    storage = torch.full(
+        (rows + 2, TOPK + padding), CANARY, device="cuda", dtype=torch.int32
+    )
     return storage, storage[1:-1, :TOPK]
 
 
-def _check(scores, ends, storage, output):
+def _check(data, storage, output, dtype, *, probes=None):
+    from vllm.utils.deep_gemm import fp8_fp4_mqa_logits, mqa_logits_mx_inputs
+
+    q, k, packed, weights, starts, ends = data
+    if probes is not None:
+        index = torch.tensor(probes, device=q.device)
+        q = q.view(torch.uint8)[index].view(torch.float8_e4m3fn)
+        weights, starts, ends, output = (
+            x[index] for x in (weights, starts, ends, output)
+        )
+    q_scale, weights = mqa_logits_mx_inputs(q, None, weights, dtype)
+    scores = fp8_fp4_mqa_logits(
+        (q, q_scale), (k, packed), weights, starts, ends, len(k), logits_dtype=dtype
+    ).float()
     assert torch.all((output >= 0) & (output < ends[:, None]))
     assert torch.all(output.sort(dim=1).values.diff(dim=1) > 0)
-    scores = scores.masked_fill(
-        torch.arange(scores.shape[1], device="cuda")[None, :] >= ends[:, None],
-        -torch.inf,
-    )
-    selected = scores.gather(1, output.long()).sort(dim=1, descending=True).values
-    assert torch.equal(selected, scores.topk(TOPK, dim=1).values)
+    valid = torch.arange(len(k), device=k.device) < ends[:, None]
+    selected = scores.gather(1, output.long()).sort(descending=True).values
+    expected = scores.masked_fill(~valid, -torch.inf).topk(TOPK).values
+    assert torch.equal(selected, expected)
     assert torch.all(storage[0] == CANARY) and torch.all(storage[-1] == CANARY)
     assert torch.all(storage[1:-1, TOPK:] == CANARY)
 
 
-def test_dosa_dirty_reuse_orders_streams_and_preserves_strided_output(workspace):
-    """Independent requests may change Q/K while sharing only serialized scratch."""
-    first = _inputs(workspace.heads, 16, 131072, 41)
-    second = _inputs(workspace.heads, 11, 196601, 92, positive_heads=14)
-    expected = [_scores(data[0], data[1], data[3], data[2]) for data in (first, second)]
-    outputs = [_output(len(data[0])) for data in (first, second)]
+@pytest.mark.parametrize("heads", [32, 64])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_dosa_reuses_scratch_across_streams(heads, dtype):
+    owner = _owner(heads, 128, 196608, dtype, alternate=True)
+    cases = [
+        _inputs(heads, q, k, seed, dtype)
+        for q, k, seed in ((16, 131073, 41), (11, 196601, 92))
+    ]
+    # The second call introduces both an inadmissible row and a mixed MX scale.
+    cases[1][3][0].zero_()
+    if dtype == torch.float32:
+        cases[1][2][-1] = 0x817F7E80 - (1 << 32)
     caller = torch.cuda.current_stream()
-    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
-    for data, (_, output), stream in zip((first, second), outputs, streams):
+    streams = [torch.cuda.Stream() for _ in cases]
+    outputs = [_output(len(case[0])) for case in cases]
+    for case, stream, (_, ids) in zip(cases, streams, outputs):
         with torch.cuda.stream(stream):
             stream.wait_stream(caller)
-            common_end = len(data[1]) - len(data[0]) + 1
-            assert workspace.run(*data, output, common_end=common_end)
-    for stream in streams:
+            assert owner.run(*case, ids, common_end=len(case[1]) - len(case[0]) + 1)
+    for case, stream, (storage, ids) in zip(cases, streams, outputs):
         stream.synchronize()
-    for scores, data, (storage, output) in zip(expected, (first, second), outputs):
-        _check(scores, data[5], storage, output)
-    storage, output = _output(16)
-    assert workspace.run(*first, output, common_end=131057)
-    _check(expected[0], first[5], storage, output)
+        _check(case, storage, ids, dtype)
+    assert owner.error_original[0].item() & 1024
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_dosa_hot_keeps_native_scores_across_slabs(dtype):
+    owner = _owner(32, 2048, 530432, dtype)
+    rows, keys = owner.rows + 17, 530432
+    data = _inputs(32, rows, keys, 947, dtype, hot=True)
+    mixed_key = 12288 + 1024
+    if dtype == torch.float32:
+        data[2][mixed_key] = 0x77767574
+    storage, ids = _output(rows)
+    assert owner.run(*data, ids, common_end=keys - rows + 1)
+    assert owner._layout_active.item() == 1
+    assert 12288 < owner._hot_end.item() < owner._second_end.item()
+    if dtype == torch.float32:
+        physical = owner.pair_rank[mixed_key].item()
+        assert owner.fp32.packed_scales[physical].item() == 0x77767574
+        assert owner.rho[physical].item() == 255
+    _check(data, storage, ids, dtype, probes=[0, owner.rows - 1, owner.rows, rows - 1])
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_dosa_tight_compaction_fits_partial_pages(monkeypatch, dtype):
+    from vllm.model_executor.layers import dosa
+
+    budget = (
+        "CANDIDATE_SCRATCH_BYTES"
+        if dtype == torch.float32
+        else "BF16_PACKED_CANDIDATE_SCRATCH_BYTES"
+    )
+    page_bytes = 512 if dtype == torch.float32 else dosa.PACKED_ID_PAGE_BYTES
+    monkeypatch.setattr(dosa, budget, 32 * page_bytes)
+    owner = _owner(32, 128, 1048576, dtype)
+    data = _inputs(32, 16, dosa.SEED + 1, 117, dtype)
+    data[0].zero_()
+    data[3].fill_(-0.125)
+    data[3][:, 0] = 0.125
+    data[-1].fill_(dosa.SEED + 1)
+    storage, ids = _output(16)
+    assert owner.run(*data, ids, common_end=dosa.SEED, causal=False)
+    assert not owner.error_original[:16].any()
+    assert owner.pool_head.item() == owner.rows // 4
+    _check(data, storage, ids, dtype)
 
 
 @pytest.mark.parametrize(
-    "zero_weights", [False, True], ids=["record_overflow", "guard"]
+    "heads,dtype", [(32, torch.bfloat16), (64, torch.bfloat16), (32, torch.float32)]
 )
-def test_dosa_exact_recovery_of_sixteen_equal_score_rows(workspace, zero_weights):
-    """Overflow and inadmissible certificates must both recover complete rows."""
-    data = _inputs(workspace.heads, 16, 131072, 117)
-    if zero_weights:
-        data[3].zero_()
-    else:
-        data[0].zero_()
-        data[3].fill_(-0.125)
-        data[3][:, 0] = 0.125
-    storage, output = _output(16)
-    assert workspace.run(*data, output, common_end=131057)
-    error_bit = 1024 if zero_weights else 16
-    assert torch.all((workspace.error_original[:16] & error_bit) != 0)
-    scores = torch.zeros((16, 131072), device="cuda", dtype=torch.float32)
-    _check(scores, data[5], storage, output)
+def test_short_prefill_keeps_native_scores(heads, dtype):
+    from vllm.model_executor.layers.sparse_attn_indexer import _short_native_prefill
 
-
-def test_seed_rejects_short_output(workspace):
-    outputs = (workspace.values, workspace.ids[:, : TOPK - 1], workspace.counts)
-    status = (workspace.seed_tau, workspace.error, workspace.seed_status)
-    with pytest.raises(RuntimeError, match="Record5 seed outputs"):
-        workspace._op("select_prepare5", workspace.seed_logits, *outputs, *status)
-
-
-@pytest.mark.parametrize("short", [True, False], ids=["short", "strided"])
-def test_seed_validator_reads_logical_words(workspace, short):
-    ids = torch.arange(2 * TOPK, device="cuda", dtype=torch.int32)
-    words = (0x40000000 + ids).view(1, -1)
-    view = words[:, : TOPK - 1] if short else words[:, ::2]
-    if not short:
-        words[:, 1::2] = -1
-    counts = words.new_tensor([TOPK])
-    start = torch.zeros_like(counts)
-    live = torch.full_like(counts, 12288)
-    tau, error = start.float(), start.clone()
-    validate = workspace._kernel("refine_validate_seed5_live_nk")
-    validate(view, counts, tau, tau, start, live, error, 12288, live, 12288)
-    assert (counts.item(), error.item()) == ((0, 1) if short else (TOPK, 0))
-
-
-def test_dosa_dense_scores_match_native_bf16_rounding(workspace):
-    q = torch.zeros((4, workspace.heads, 128), device="cuda")
-    q[:, 0, 0], q[:, 0, 1] = 1, 2.0**-4
-    k = torch.zeros((128, 128), device="cuda")
-    k[:, 0], k[:, 1] = 1, 2.0**-4
-    q, k = q.to(torch.float8_e4m3fn), k.to(torch.float8_e4m3fn)
-    weights = torch.zeros((4, workspace.heads), device="cuda", dtype=torch.bfloat16)
-    weights[:, 0] = 1
-    scales = torch.ones(128, device="cuda")
-    packed = torch.full((128,), 0x7F7F7F7F, device="cuda", dtype=torch.int32)
-    native = _scores(q, k, weights, packed)
-    actual = torch.empty_like(native)
-    score = getattr(torch.ops._C, f"dosa_h{workspace.heads}_sample_dense_score")
-    score(q, k, scales, weights.float(), actual, workspace.sms)
-    # The true dot is 1+2^-8; native rounds the head's BF16 midpoint to 1.
-    assert torch.all(native == 1)
-    assert torch.equal(actual.view(torch.int32), native.view(torch.int32))
-
-
-def test_dosa_batch_offsets_and_fallback_before_writes(workspace):
-    from vllm.model_executor.layers.sparse_attn_indexer import _dosa_prefill
-    from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
-
-    full = workspace.max_q
-    first = _inputs(workspace.heads, full, 131072, 41)
-    second = _inputs(workspace.heads, full, 131072, 92, positive_heads=14)
-    q = torch.cat((first[0], second[0]))
-    keys = torch.cat((first[1], second[1]))
-    packed = torch.cat((first[2], second[2])).view(torch.uint8).reshape(-1, 4)
-    weights = torch.cat((first[3], second[3])).float()
-    queries_cpu = torch.tensor([0, full, 2 * full], dtype=torch.int32)
-    lengths_cpu = torch.tensor([131072, 131072], dtype=torch.int32)
-    lengths = lengths_cpu.to("cuda")
-    blocks = torch.arange(4096, device="cuda", dtype=torch.int32).view(2, -1)
-    chunk = build_prefill_chunk_metadata(
-        start_idx=0,
-        end_idx=2,
-        query_start_loc=queries_cpu.to("cuda"),
-        query_start_loc_cpu=queries_cpu,
-        uncompressed_seq_lens=lengths,
-        compressed_seq_lens=lengths,
-        compressed_seq_lens_cpu=lengths_cpu,
-        block_table=blocks,
-        compress_ratio=1,
-        collect_request_ranges=True,
-    )
-    assert chunk is not None
-    storage, output = _output(2 * full)
-    tensors = (q, keys, packed, weights, output)
-    assert not _dosa_prefill(workspace, chunk, 0, 2 * full - 1, *tensors)
-    torch.accelerator.synchronize()
-    assert torch.all(storage == CANARY)
-    assert _dosa_prefill(workspace, chunk, 0, 2 * full, *tensors)
-    for index, data in enumerate((first, second)):
-        expected = _scores(data[0], data[1], data[3], data[2])
-        _check(expected, data[5], storage, output[index * full : (index + 1) * full])
+    if dtype == torch.bfloat16 and not hasattr(torch.ops.deep_select, "topk"):
+        pytest.skip("DeepSelect is unavailable")
+    q, k, packed, weights, starts, ends = data = _inputs(heads, 16, 131072, 93, dtype)
+    storage, ids = _output(len(q), 8 if dtype == torch.bfloat16 else 0)
+    _short_native_prefill(q, None, k, packed, weights, starts, ends, len(k), ids, dtype)
+    _check(data, storage, ids, dtype)

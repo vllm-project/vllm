@@ -4,7 +4,7 @@ meta:
   provider: "Muse (Meta)"
   description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
   date_added: 2026-10-15
-  date_updated: 2026-10-16
+  date_updated: 2026-10-23
   tasks:
     - text
     - multimodal
@@ -380,6 +380,19 @@ guide: |
   parallelism, DSpark is validated up to `--max-num-seqs 128`; with plain TP,
   keep `--max-num-seqs 32`. For throughput beyond about 64 concurrent
   requests, use expert parallelism without DSpark.
+
+  ### Monokernel decode (MI355X, manual opt-in)
+
+  On MI355X, `--monokernel` runs decoder layers 1-60 of the DSpark verify
+  steps of 1 to 16 requests as persistent FlyDSL launches: one launch a layer
+  for one or two requests, three for 3-16 requests, with the verify attention
+  fused into the launches for up to four requests. Add it to the MXFP4
+  command with **Tensor + Expert Parallel** (TP8 + `--enable-expert-parallel`)
+  and the seven-token DSpark profile above (AITER FA, bf16 KV cache). vLLM
+  refuses other deployments at startup; prefill and larger steps keep the
+  regular path. The launches keep the expert activations in bf16 (MXFP4
+  weights x bf16 activations) instead of the checkpoint's W4A4, so outputs
+  are close to, but not bit-identical with, the regular path.
 
   ### Adaptive DSpark (manual opt-in, Triton attention)
 

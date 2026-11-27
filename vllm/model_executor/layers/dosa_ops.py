@@ -95,7 +95,7 @@ def query_check(
     GROUP: tl.constexpr,
     DOT: tl.constexpr,
     G: tl.constexpr,
-    BF16_FACTOR: tl.constexpr,
+    NATIVE_FACTOR: tl.constexpr,
     HEADS: tl.constexpr,
     HIGH: tl.constexpr,
 ):
@@ -123,7 +123,7 @@ def query_check(
     )
     pre = ld.mul_ru(ld.mul_ru(d, sw), ld.add_ru(one, tl.full((), G, tl.float64)))
     double_pre = ld.mul_ru(tl.full((), 2.0, tl.float64), pre)
-    native_pre = ld.mul_ru(ld.mul_ru(d, sw), tl.full((), BF16_FACTOR, tl.float64))
+    native_pre = ld.mul_ru(ld.mul_ru(d, sw), tl.full((), NATIVE_FACTOR, tl.float64))
     smax = ld.add_ru(
         ld.mul_ru(tl.load(S).to(tl.float64), native_pre),
         tl.full((), 4 * 2.0**-126, tl.float64),
@@ -181,6 +181,7 @@ def key_parts_live(
     SEED: tl.constexpr,
     WORKERS: tl.constexpr,
     BLOCK: tl.constexpr,
+    MIXED_MX: tl.constexpr = False,
 ):
     worker = tl.program_id(0)
     nk = tl.load(LIVE)
@@ -195,13 +196,16 @@ def key_parts_live(
             scale = tl.load(KS + i, m, 1.0)
             bits = scale.to(tl.int32, bitcast=True)
             rho = tl.load(RHO + i, m, 0)
+            # Nonuniform native MX keys are never pruned by a scalar certificate.
+            valid_rho = (rho >= 0) & (rho < 127)
+            if MIXED_MX:
+                valid_rho |= rho == 255
             # Repeated UE8M0 scale: raw/MX commutation requires e in [-108,100].
             ok = (
                 (bits >= 0x09800000)
                 & (bits <= 0x71800000)
                 & ((bits & 0x007FFFFF) == 0)
-                & (rho >= 0)
-                & (rho < 127)
+                & valid_rho
             )
             maximum = tl.maximum(maximum, tl.where(m & ok, scale, 0.0))
             bad = bad | (m & ~ok).to(tl.int32)
@@ -221,7 +225,7 @@ def _add_votes(IDS, VOTES, N: tl.constexpr, NV, BLOCK: tl.constexpr):
 @triton.jit(do_not_specialize=["NQ"])
 def _spread_queries(Q, W, OQ, OW, NQ, HEADS: tl.constexpr):
     anchor = tl.program_id(0)
-    row = (anchor * (NQ - 1) // 3).to(tl.int64)
+    row = (anchor * (NQ - 1) // (tl.num_programs(0) - 1)).to(tl.int64)
     i = tl.arange(0, HEADS * 128)
     tl.store(OQ + anchor * HEADS * 128 + i, tl.load(Q + row * HEADS * 128 + i))
     weight = tl.load(W + row * HEADS + i, i < HEADS, 0.0)
@@ -235,120 +239,29 @@ def _decoded_ue8m0(exponent):
     return bits.to(tl.float32, bitcast=True)
 
 
-@triton.jit(do_not_specialize=["N"])
-def decode_ue8m0(SOURCE, OUTPUT, N, BLOCK: tl.constexpr):
-    """Decode the repeated UE8M0 byte of each FP8 index-K scale losslessly."""
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    exponent = tl.load(SOURCE + i * 4, i < N, 127).to(tl.int32)
-    tl.store(OUTPUT + i, _decoded_ue8m0(exponent), i < N)
-
-
 @triton.jit(do_not_specialize=["KEYS"])
 def recovery_pack_scales(SCALE, PACKED, KEYS, BLOCK: tl.constexpr):
     key = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    bits = tl.load(SCALE + key, key < KEYS, 0.0).to(tl.uint32, bitcast=True)
-    exponent = (bits >> 23) & 255
+    scale = tl.load(SCALE + key, key < KEYS, 0)
+    bits = scale.to(tl.uint32, bitcast=True)
+    exponent = ((bits >> 23) if SCALE.dtype.element_ty == tl.float32 else bits) & 255
     # Code0 decodes to F32 bits0x00400000; unused zero padding also has exponent0.
     # Valid intervals exclude the owner's zero K/scale padding.
     packed = exponent * tl.full((), 0x01010101, tl.uint32)
     tl.store(PACKED + key, packed, key < KEYS)
 
 
-@triton.jit(do_not_specialize=["ROWS", "CAPACITY"])
-def recovery_intervals(
-    START, END, ERROR, OUT_START, OUT_END, LENGTH, LIVE, ROWS, CAPACITY
-):
-    row = tl.program_id(0) * 128 + tl.arange(0, 128)
-    active = (row < ROWS) & (tl.load(ERROR + row, row < ROWS, 0) != 0)
-    begin = tl.load(START + row, active, 0)
-    end = tl.load(END + row, active, 0)
-    logical = tl.load(LIVE)
-    valid = (logical >= 0) & (logical <= CAPACITY) & (begin >= 0)
-    valid &= (begin <= end) & (end <= logical)
-    tl.atomic_or(ERROR + row, 2, active & ~valid)
-    begin = tl.where(active & valid, begin, 0)
-    end = tl.where(active & valid, end, 0)
-    tl.store(OUT_START + row, begin, row < ROWS)
-    tl.store(OUT_END + row, end, row < ROWS)
-    tl.store(LENGTH + row, end - begin, row < ROWS)
-
-
 @triton.jit
-def recovery_publish(
-    SELECTED, ERROR, ORDER, ORIGIN, OUTPUT, TOPK: tl.constexpr, STRIDE: tl.constexpr
-):
-    row = tl.program_id(0)
-    column = tl.program_id(1) * 256 + tl.arange(0, 256)
-    failed = tl.load(ERROR + row) != 0
-    destination = tl.load(ORDER + row)
-    selected = tl.load(SELECTED + row * TOPK + column, failed, -1)
-    begin = tl.load(ORIGIN + row, failed, 0)
-    selected = tl.where(selected >= 0, selected + begin, -1)
-    tl.store(OUTPUT + destination * STRIDE + column, selected, failed)
-
-
-@triton.jit(do_not_specialize=["ROWS", "CAPACITY"])
-def recovery_classify_errors(SAFE, ERROR, START, END, LIVE, FAST, SLOW, ROWS, CAPACITY):
-    row = tl.program_id(0) * 128 + tl.arange(0, 128)
-    active = row < ROWS
-    error = tl.load(ERROR + row, active, 0)
-    safe = tl.load(SAFE + row, active, -float("inf"))
-    begin = tl.load(START + row, active, 0)
-    end = tl.load(END + row, active, 0)
-    logical = tl.load(LIVE)
-    valid = (logical >= 0) & (logical <= CAPACITY) & (begin >= 0)
-    valid &= (begin <= end) & (end <= logical) & (end - begin >= 2048)
-    finite = (safe.to(tl.uint32, bitcast=True) & 0x7F800000) != 0x7F800000
-    fast = finite & ((error & (16 | 2048)) != 0) & ((error & ~(17 | 2048)) == 0) & valid
-    tl.store(FAST + row, tl.where(fast, error, 0), active)
-    tl.store(SLOW + row, tl.where(fast, 0, error), active)
-
-
-@triton.jit
-def finish_slab(ERRORS, COUNTS, ORDER, ORIGINAL, ROWS: tl.constexpr):
-    """Join recovery flags and publish both summaries in original query order."""
-    error, fast, slow = ERRORS
+def finish_slab(ERROR, COUNTS, ORDER, ORIGINAL, ROWS: tl.constexpr):
+    """Publish counts and recovery flags in original query order."""
     counts_out, error_out = ORIGINAL
     row = tl.program_id(0) * 128 + tl.arange(0, 128)
     active = row < ROWS
     dest = tl.load(ORDER + row, active, 0)
     valid = (dest >= 0) & (dest < ROWS)
     _trap_if(tl.sum((active & ~valid).to(tl.int32), 0) != 0)
-    merged = (
-        tl.load(error + row, active, 0)
-        | tl.load(fast + row, active, 0)
-        | tl.load(slow + row, active, 0)
-    )
-    tl.store(error + row, merged, active)
-    tl.store(error_out + dest, merged, active & valid)
+    tl.store(error_out + dest, tl.load(ERROR + row, active, 0), active & valid)
     tl.store(counts_out + dest, tl.load(COUNTS + row, active, 0), active & valid)
-
-
-@triton.jit(do_not_specialize=["ROWS"])
-def recovery_row_map(ERROR, END, MAP, STATE, LENGTH, ROWS, BLOCK: tl.constexpr):
-    """Compact current classifier-admitted rows; lengths retain original row order."""
-    row = tl.arange(0, BLOCK)
-    failed = (row < ROWS) & (tl.load(ERROR + row, row < ROWS, 0) != 0)
-    slot = tl.cumsum(failed.to(tl.int32)) - 1
-    tl.store(MAP + slot, row, failed)
-    tl.store(LENGTH + row, tl.load(END + row, failed, 0), row < ROWS)
-    count = tl.sum(failed.to(tl.int32))
-    tl.store(STATE, count)
-    tl.store(STATE + 1, (count > 0).to(tl.int32))
-
-
-@triton.jit
-def recovery_gather_rows(Q, W, MAP, STATE, PACKED_Q, PACKED_W, HEADS: tl.constexpr):
-    """Write every packed slot, including Q4 padding, before native raw scoring."""
-    slot = tl.program_id(0)
-    active = slot < tl.load(STATE)
-    row = tl.load(MAP + slot, active, 0)
-    column = tl.arange(0, HEADS * 128)
-    q = tl.load(Q + row.to(tl.int64) * HEADS * 128 + column, active, 0)
-    tl.store(PACKED_Q + slot.to(tl.int64) * HEADS * 128 + column, q)
-    head = tl.arange(0, HEADS)
-    w = tl.load(W + row * HEADS + head, active, 0.0)
-    tl.store(PACKED_W + slot * HEADS + head, w)
 
 
 @triton.jit
@@ -363,19 +276,18 @@ def _trap_if(condition):
     )
 
 
-@triton.jit(do_not_specialize=["N", "FIRST", "MAX"])
+@triton.jit(do_not_specialize=["N", "MAX"])
 def _carry_histogram(
     V,
     P,
     N,
-    FIRST,
     MAX,
     STRIDE: tl.constexpr,
     BINS: tl.constexpr,
 ):
     """Publish I16 cumulative counts for each original 8192-ID block."""
     ids = tl.program_id(0) * 8192 + tl.arange(0, 8192)
-    live = (ids < N) & (ids >= FIRST)
+    live = ids < N
     votes = tl.minimum(tl.maximum(tl.load(V + ids, ids < N, 0), 0), MAX)
     hist = tl.histogram(votes, BINS, mask=live & (votes != 0))
     bins = tl.arange(0, BINS)
@@ -411,65 +323,27 @@ def _carry_cutoff(
     quota = tl.minimum(tl.maximum(needed - before, 0), eq)
     sizes = gt + quota
     offsets = tl.cumsum(sizes) - sizes
-    boundary = live & (needed > before) & (needed <= before + eq)
-    tie_block = tl.min(tl.where(boundary, blocks, BLOCKS - 1))
-    tie_take = tl.sum(tl.where(boundary, needed - before, 0))
-    tl.store(S + 6 + blocks, offsets, live)
-    tl.store(S + 1, lo)
-    tl.store(S + 2, tie_block)
-    tl.store(S + 3, tie_take)
+    tl.store(S + blocks, offsets, live)
+    tl.store(S + BLOCK_PAD + blocks, quota, live)
+    tl.store(S + 2 * BLOCK_PAD, lo)
 
 
-@triton.jit(do_not_specialize=["N", "FIRST", "MAX"])
-def _carry_emit(V, HOT, S, N, FIRST, MAX):
-    """Emit globally ascending HOT IDs; reset all N votes, including excluded IDs."""
+@triton.jit(do_not_specialize=["N", "MAX"])
+def _carry_emit(V, HOT, S, N, MAX, BLOCK_PAD: tl.constexpr):
+    """Emit ascending HOT IDs and reset votes."""
     block = tl.program_id(0)
     ids = block * 8192 + tl.arange(0, 8192)
     live = ids < N
     votes = tl.minimum(tl.maximum(tl.load(V + ids, live, 0), 0), MAX)
-    threshold, tie_block, tie_take = tl.load(S + 1), tl.load(S + 2), tl.load(S + 3)
-    eq = live & (ids >= FIRST) & (votes == threshold)
-    eq_rank = tl.cumsum(eq.to(tl.int32)) - 1
-    quota = tl.where(block < tie_block, 8192, tl.where(block == tie_block, tie_take, 0))
-    selected = live & (ids >= FIRST) & ((votes > threshold) | (eq & (eq_rank < quota)))
+    threshold = tl.load(S + 2 * BLOCK_PAD)
+    match = live & (votes == threshold)
+    quota = tl.load(S + BLOCK_PAD + block)
+    selected = live & (
+        (votes > threshold) | (match & (tl.cumsum(match.to(tl.int32)) <= quota))
+    )
     rank = tl.cumsum(selected.to(tl.int32)) - 1
-    tl.store(HOT + tl.load(S + 6 + block) + rank, ids.to(tl.int64), selected)
+    tl.store(HOT + tl.load(S + block) + rank, ids.to(tl.int64), selected)
     tl.store(V + ids, 0, live)
-
-
-@triton.jit(do_not_specialize=["END", "epoch"])
-def _mark_hot(HOT, STATE, SIZE: tl.constexpr, END, epoch, TILE: tl.constexpr):
-    """Mark HOT uniquely and preserve sticky metadata errors."""
-    EPOCH, _, _, _, _, C = STATE
-    ids = tl.program_id(0) * TILE + tl.arange(0, TILE)
-    hot = tl.load(HOT + ids, ids < SIZE, 0)
-    valid = (ids < SIZE) & (hot >= 0) & (hot < END)
-    previous = tl.atomic_xchg(EPOCH + hot, epoch, valid, sem="relaxed")
-    duplicate = tl.where(valid, previous == epoch, False)
-    error = tl.where(duplicate, 1, 0)
-    error |= tl.where((ids < SIZE) & ~valid, 2, 0)
-    tl.atomic_or(C + 2, tl.max(error), sem="relaxed")
-    if tl.program_id(0) == 0:
-        tl.store(C, 0)
-        tl.store(C + 1, 0)
-
-
-@triton.jit(do_not_specialize=["END", "epoch"])
-def _compact_pairs(HOT, STATE, SIZE: tl.constexpr, END, epoch, TILE: tl.constexpr):
-    """Reserve endpoint ranks in scratch disjoint from the final permutation."""
-    EPOCH, RANK, _, A, B, C = STATE
-    ids = tl.program_id(0) * TILE + tl.arange(0, TILE)
-    hot = tl.load(HOT + ids, ids < SIZE, 0)
-    take_a = (ids < SIZE) & (hot >= SIZE) & (hot < END)
-    take_b = (ids < SIZE) & (tl.load(EPOCH + ids, ids < SIZE, 0) != epoch)
-    rank_a, rank_b = tl.cumsum(take_a.to(tl.int32)), tl.cumsum(take_b.to(tl.int32))
-    base_a = tl.atomic_add(C, tl.sum(take_a.to(tl.int32)), sem="relaxed")
-    base_b = tl.atomic_add(C + 1, tl.sum(take_b.to(tl.int32)), sem="relaxed")
-    rank_a, rank_b = base_a + rank_a - 1, base_b + rank_b - 1
-    tl.store(A + rank_a, hot, take_a)
-    tl.store(B + rank_b, ids, take_b)
-    tl.store(RANK + hot, rank_a, take_a)
-    tl.store(RANK + ids, rank_b, take_b)
 
 
 @triton.jit
@@ -507,62 +381,56 @@ def _exact_rho(square, kappa, live):
     return result
 
 
-@triton.jit(do_not_specialize=["N", "PREVIOUS", "epoch"])
-def _publish_gather(
+@triton.jit
+def _gather_key_rows(
     K,
     SCALE,
     DK,
     DS,
     RHO,
-    STATE,
-    N,
-    PREVIOUS,
-    SIZE: tl.constexpr,
-    epoch,
+    PACKED_KS,
+    source,
+    rows,
+    update,
+    gather_live,
     TILE_ROWS: tl.constexpr,
 ):
-    """Publish pair swaps while gathering raw K/scales and integer-certified rho."""
-    EPOCH, RANK, PERM, A, B, C = STATE
-    count_a, count_b, status = tl.load(C), tl.load(C + 1), tl.load(C + 2)
-    if tl.program_id(0) == 0:
-        tl.atomic_or(C + 2, tl.where(count_a != count_b, 8, 0), sem="relaxed")
-    _trap_if((status != 0) | (count_a != count_b))
-    rows = tl.program_id(0) * TILE_ROWS + tl.arange(0, TILE_ROWS)
-    live = rows < N
-    marked = tl.load(EPOCH + rows, live, 0) == epoch
-    take_a = live & (rows >= SIZE) & marked
-    take_b = live & (rows < SIZE) & ~marked
-    endpoint = take_a | take_b
-    stored = tl.load(RANK + rows, endpoint, 0)
-    rank_ok = (stored >= 0) & (stored < count_a)
-    _trap_if(tl.sum((endpoint & ~rank_ok).to(tl.int32)) != 0)
-    opposite = tl.load(tl.where(take_a, B, A) + stored, endpoint & rank_ok, 0)
-    source = tl.where(endpoint, opposite, rows)
-    source_ok = (source >= 0) & (source < N)
-    _trap_if(tl.sum((live & ~source_ok).to(tl.int32)) != 0)
-    update = live
-    if PREVIOUS > 0:
-        old = tl.load(PERM + rows, live & (rows < PREVIOUS), -1)
-        update = live & ((rows >= PREVIOUS) | (source != old))
-        if tl.sum(update.to(tl.int32)) == 0:
-            return
-    tl.store(PERM + rows, source, update)
     dims = tl.arange(0, 128)
-    gather_live = update & source_ok
     raw = tl.load(K + source[:, None] * 128 + dims[None, :], gather_live[:, None], 0)
     tl.store(DK + rows[:, None] * 128 + dims[None, :], raw, update[:, None])
     scale = tl.load(SCALE + source, gather_live, 0)
+    packed_bad = tl.full((TILE_ROWS,), False, tl.int1)
+    mixed = tl.full((TILE_ROWS,), False, tl.int1)
     if SCALE.dtype.element_ty == tl.int32:
-        scale = _decoded_ue8m0(scale.to(tl.uint32) & 255)
+        packed = scale.to(tl.uint32)
+        exponent = packed & 255
+        if PACKED_KS is not None:
+            tl.store(PACKED_KS + rows, scale, update)
+            mixed = packed != exponent * tl.full((), 0x01010101, tl.uint32)
+            second = (packed >> 8) & 255
+            third = (packed >> 16) & 255
+            fourth = packed >> 24
+            # Use the largest component for the native score overflow bound.
+            # Out-of-envelope packed values retain the original recovery.
+            minimum = tl.minimum(
+                tl.minimum(exponent, second), tl.minimum(third, fourth)
+            )
+            packed_bad = mixed & (minimum < 19)
+            exponent = tl.maximum(
+                tl.maximum(exponent, second), tl.maximum(third, fourth)
+            )
+        scale = _decoded_ue8m0(exponent)
     tl.store(DS + rows, scale, update)
     bits = scale.to(tl.uint32, bitcast=True)
     codes = (raw & 127).to(tl.int32)
     units = _magnitude_unit(codes).to(tl.int64)
     units = tl.where(codes == 127, 0, units)
     square, kappa = tl.sum(units * units, 1), tl.max(codes, 1)
-    bad = ((bits - 1).to(tl.uint32) >= 0x5F800000) | (kappa == 127)
-    rho = _exact_rho(square, kappa, update & ~bad)
-    tl.store(RHO + rows, tl.where(bad, 127, rho), update)
+    bad = ((bits - 1).to(tl.uint32) >= 0x5F800000) | (kappa == 127) | packed_bad
+    rho = _exact_rho(square, kappa, update & ~bad & ~mixed)
+    # E4M3 NaN makes all three screens keep the key; native MX reads its
+    # original packed scales during seed scoring, refinement and recovery.
+    tl.store(RHO + rows, tl.where(bad, 127, tl.where(mixed, 255, rho)), update)
 
 
 @triton.jit(do_not_specialize=["TOTAL", "ROWS", "MAP_SIZE", "VOTE_SIZE", "RECENT"])
@@ -675,6 +543,7 @@ def prepare_live(
     PAID: tl.constexpr,
     B: tl.constexpr,
     WHOLE_WAVES: tl.constexpr = False,
+    OFFSET=None,
 ):
     tl.static_assert(SMS > 0)
     tl.static_assert((PAID == 14 and TILE == 256) or (PAID == 16 and TILE == 128))
@@ -698,3 +567,5 @@ def prepare_live(
         chosen = choose_parts(count - bulk, tiles, SMS, GRID - bulk, PAID == 14)
     tl.store(CONFIG, tl.where(valid, count, -1))
     tl.store(CONFIG + 1, chosen)
+    if OFFSET is not None:
+        tl.store(CONFIG + 2, tl.load(OFFSET) * (256 // TILE))

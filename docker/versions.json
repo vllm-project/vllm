@@ -16,6 +16,12 @@
     "NCCL_VERSION": {
       "default": "2.31.2"
     },
+    "EFA_INSTALLER_VERSION": {
+      "default": "1.51.0"
+    },
+    "EFA_INSTALLER_SHA256": {
+      "default": "83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
     },
@@ -35,9 +41,6 @@
       "default": "disabled"
     },
     "INSTALL_KV_CONNECTORS": {
-      "default": "false"
-    },
-    "BUILD_NIXL": {
       "default": "false"
     },
     "SCCACHE_BUCKET_NAME": {
@@ -62,7 +65,7 @@
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "d4f41e4e93"
+      "default": "a56d6156febcd9976e55adc85b5155bfac9f28f8"
     },
     "GIT_REPO_CHECK": {
       "default": "0"

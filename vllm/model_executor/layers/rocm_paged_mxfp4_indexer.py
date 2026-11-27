@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sparse attention indexer layers on aiter's paged MXFP4 kernels, for ROCm.
 
-With ``indexer_kv_dtype="mxfp4"`` on gfx950, the model writes the indexer K
+With `indexer_kv_dtype="mxfp4"` on gfx950, the model writes the indexer K
 cache in the order aiter's MQA-logits kernel reads (see
 `rocm_paged_mxfp4_cache_layout`), and the kernel scores the cache in place.
 Requires `RocmMxfp4IndexerMetadataBuilder` metadata.

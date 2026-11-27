@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the ``vllm serve`` CLI subcommand."""
+"""Unit tests for the `vllm serve` CLI subcommand."""
 
 import argparse
 from unittest.mock import MagicMock, patch

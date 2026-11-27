@@ -7,10 +7,12 @@ import pytest
 import torch
 from transformers import AutoModelForImageTextToText
 
+from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
+from ....utils import multi_gpu_test
 from .vlm_utils import model_utils
 
 MODEL = "google/gemma-3-4b-it"
@@ -19,6 +21,7 @@ PROMPT = (
     "<start_of_image>What is the content in the center of the image?"
     "<end_of_turn>\n<start_of_turn>model\n"
 )
+TINY_MODEL = "hf-internal-testing/tiny-random-Gemma3ForConditionalGeneration"
 
 
 def _install_prefill_hidden_capture(model):
@@ -37,6 +40,30 @@ def _install_prefill_hidden_capture(model):
         return hidden_states
 
     language_model.forward = forward
+
+
+def _record_hidden_states(model):
+    model = getattr(model, "module", model)
+    model._hidden_by_position = {}
+
+    language_model = model.language_model.model
+    original_forward = language_model.forward
+
+    def forward(input_ids, positions, *args, **kwargs):
+        hidden_states = original_forward(input_ids, positions, *args, **kwargs)
+        # A deliberate D2H, copied: the runner reuses its buffers next step.
+        with gpu_sync_allowed():
+            rows = hidden_states.to("cpu", torch.float32, copy=True)
+            model._hidden_by_position.update(zip(positions.tolist(), rows))
+        return hidden_states
+
+    language_model.forward = forward
+
+
+def _pop_recorded_hidden_states(model):
+    model = getattr(model, "module", model)
+    hidden, model._hidden_by_position = model._hidden_by_position, {}
+    return hidden
 
 
 def _get_prefill_hidden(model):
@@ -120,3 +147,94 @@ def test_mm_prefix_lm_e2e(
         "Gemma3 mm-prefix-LM image prefill hidden states should be close to HF; "
         f"got {image_cos=}"
     )
+
+
+@pytest.mark.core_model
+def test_mm_prefix_lm_cache_hit_inside_image(
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A prefix cache hit can end inside an image. The rest of the image must
+    still be prefilled in one step, or its first part misses the rest."""
+    # One process, so that all requests of a generate() call share a step.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Triton attention uses TF32 for fp32 by default.
+    monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
+    # The image tokens span [100, 356), so a two-block hit ends inside it.
+    prompt = {
+        "prompt": "<bos><start_of_turn>user\n"
+        + "word " * 92
+        + "<start_of_image>What color is it?<end_of_turn>\n<start_of_turn>model\n",
+        "multi_modal_data": {"image": image_assets[0].pil_image},
+    }
+
+    def image_after_hit(vllm_model: VllmRunner) -> torch.Tensor:
+        hidden = vllm_model.apply_model(_pop_recorded_hidden_states)[0]
+        return torch.stack([hidden[position] for position in range(256, 356)])
+
+    with vllm_runner(
+        TINY_MODEL,
+        dtype="float32",
+        block_size=128,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=512,
+        enable_prefix_caching=True,
+        disable_chunked_mm_input=True,
+        limit_mm_per_prompt={"image": 1},
+    ) as vllm_model:
+        llm = vllm_model.get_llm()
+        vllm_model.apply_model(_record_hidden_states)
+
+        # Prefilled in one step; caches the first two blocks for the hit below.
+        alone = SamplingParams(max_tokens=1, skip_reading_prefix_cache=True)
+        llm.generate([prompt], alone)
+        expected = image_after_hit(vllm_model)
+
+        # Text-only requests below position 256 leave 40 tokens of budget for
+        # the 112 after the hit.
+        fillers = [{"prompt_token_ids": [10 + i] * 118} for i in range(4)]
+        output = llm.generate([*fillers, prompt], SamplingParams(max_tokens=1))[-1]
+        assert output.num_cached_tokens == 256
+
+        torch.testing.assert_close(image_after_hit(vllm_model), expected)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_mm_prefix_lm_pipeline_parallel(
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
+    """Regression: every PP stage must attend bidirectionally over image
+    tokens, not only the first one (which owns the encoder cache)."""
+    prompt = {
+        "prompt": PROMPT,
+        "multi_modal_data": {"image": image_assets[0].pil_image},
+    }
+    params = SamplingParams(max_tokens=1, prompt_logprobs=0)
+    prompt_logprobs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            MODEL,
+            max_model_len=4096,
+            enforce_eager=True,
+            limit_mm_per_prompt={"image": 1},
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            output = vllm_model.get_llm().generate([prompt], params)[0]
+        prompt_logprobs[pp_size] = torch.tensor(
+            [
+                position[token_id].logprob
+                for token_id, position in zip(
+                    output.prompt_token_ids[1:], output.prompt_logprobs[1:]
+                )
+            ]
+        )
+
+    # A single request keeps the batch identical across PP sizes. Without the
+    # image ranges on the second stage the mean difference is about 10.
+    mean_diff = (prompt_logprobs[1] - prompt_logprobs[2]).abs().mean().item()
+    assert mean_diff < 0.5, f"PP=2 prompt logprobs differ from PP=1: {mean_diff=}"

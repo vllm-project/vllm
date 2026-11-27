@@ -20,9 +20,6 @@ meta:
     mi325x: verified
     # FP8 + 5-token MTP validated 2026-10-03 on 8×MI350X (TP8).
     mi350x: verified
-    # Validated 2026-08-30 on one Atlas A5 node (8×950PR, TP8, graph mode).
-    # Native FP8 path needs vllm-ascend#15346.
-    ascend_950pr_8x: verified
     # NVFP4 + --cpu-offload-gb on 1× GB300 (252 GB HBM + unified host RAM).
     # Do not raise taxonomy vram_gb — host RAM is recipe-specific, not HBM.
     dgx_station_gb300: verified
@@ -76,10 +73,6 @@ features:
           - "--speculative-config"
           - '{"method":"mtp","num_speculative_tokens":5}'
         hardware_overrides:
-          npu:
-            args:
-              - "--speculative-config"
-              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
           dgx_station_gb300:
             args:
               - "--speculative-config"
@@ -90,7 +83,6 @@ features:
         variants: [default]
         hardware:
           amd: unsupported
-          npu: unsupported
         args:
           - "--speculative-config"
           - '{"method":"dflash","model":"incoai/GLM-5.3-DFlash2","num_speculative_tokens":7}'
@@ -118,13 +110,6 @@ variants:
         extra_args:
           - "--max-model-len"
           - "262144"
-      # Exact-GPU pin: computeDockerMeta has no Huawei brand, so a model-level
-      # docker_image string would only affect NVIDIA. Hide pip — official
-      # wheels have no NPU kernels.
-      ascend_950pr_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a5"
-        install:
-          pip: false
   nvfp4:
     model_id: "Inferact/GLM-5.3-NVFP4"
     precision: nvfp4
@@ -193,22 +178,6 @@ compatible_strategies:
   - multi_node_dep
   - pd_cluster
 
-# EP/MC2 cannot acquire HCCL links on Atlas 350 (950PR). Multi-node and PD
-# were not validated. Only single-node TP8 is offered on NPU.
-strategy_hardware:
-  single_node_tep:
-    npu: unsupported
-  multi_node_tp:
-    npu: unsupported
-  multi_node_tp_pp:
-    npu: unsupported
-  multi_node_tep:
-    npu: unsupported
-  multi_node_dep:
-    npu: unsupported
-  pd_cluster:
-    npu: unsupported
-
 hardware_overrides:
   hopper:
     # H100/H200 use plain fp8 KV cache; Blackwell keeps base_args' fp8_e4m3.
@@ -225,35 +194,10 @@ hardware_overrides:
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
-  # Shared by 950PR 8x (8×128 GB). last-wins shadows --kv-cache-dtype fp8_e4m3
-  # from base_args; SFA on 950 needs --block-size 512.
-  npu:
-    extra_args:
-      - "--trust-remote-code"
-      - "--kv-cache-dtype"
-      - "auto"
-      - "--block-size"
-      - "512"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-seqs"
-      - "16"
-      - "--gpu-memory-utilization"
-      - "0.9"
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-      HCCL_BUFFSIZE: "1024"
-      HCCL_OP_EXPANSION_MODE: "AIV"
 
 strategy_overrides: {}
 
 hardware_notes:
-  ascend_950pr_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vllm-ascend#15346 for native FP8. EP is not available on this interconnect. Set HCCL_BUFFSIZE=1024 before launch."
   dgx_station_gb300:
     title: "CPU weight offload (NVFP4)"
     body: "1× GB300 (252 GB HBM) plus unified host RAM. NVFP4 offloads MoE expert weights (w13_weight, w2_weight) with --offload-backend uva and --cpu-offload-gb 222. Set VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY=1. Context is capped at 262K / 8 seqs. FP8/BF16 still do not fit this box."

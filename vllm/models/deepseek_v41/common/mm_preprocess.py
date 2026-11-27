@@ -3,14 +3,14 @@
 """Multimodal preprocessing for the DeepSeek-V4.1 vision variant.
 
 The image transform and image-span construction are ported from the
-official repository's ``image_processor.py`` so that token counts bit-match
-the reference. Each ``<｜deepseek_image｜>`` placeholder in the prompt expands
-to ``[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
-[IMAGE_END]``; every span position carries ``image_token_id`` (129264) in
-``input_ids`` and the roles ride along in a per-image ``types`` tensor
-(the reference's out-of-band ``token_types``). IMAGE slots receive aligner
-rows in reading order; the delimiters take the learned ``image_start`` /
-``image_newline`` / ``image_end`` vectors.
+official repository's `image_processor.py` so that token counts bit-match
+the reference. Each `<｜deepseek_image｜>` placeholder in the prompt expands
+to `[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
+[IMAGE_END]`; every span position carries `image_token_id` (129264) in
+`input_ids` and the roles ride along in a per-image `types` tensor
+(the reference's out-of-band `token_types`). IMAGE slots receive aligner
+rows in reading order; the delimiters take the learned `image_start` /
+`image_newline` / `image_end` vectors.
 
 The token stream matches the reference exactly: no compressor-alignment
 pad is inserted (the reference pools image tokens across compressor-group
@@ -29,7 +29,12 @@ from transformers import BatchFeature
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -129,7 +134,7 @@ def load_image(
 ):
     """Transform one PIL image into ViT patches.
 
-    Same math as the reference ``load_image``, except the image is already
+    Same math as the reference `load_image`, except the image is already
     decoded (vLLM supplies PIL images instead of a record dict).
     """
     p = patch_size
@@ -171,7 +176,7 @@ def image_token_types(n_llm_h: int, n_llm_w: int) -> torch.Tensor:
 
 class DeepseekV4VLImageProcessor:
     """Per-image transform (the PIL-input equivalent of the reference
-    ``load_image``)."""
+    `load_image`)."""
 
     def __init__(self, config: DeepseekV41Config) -> None:
         super().__init__()
@@ -196,18 +201,18 @@ class DeepseekV4VLProcessor:
     """Minimal stand-in for the HF processor of DeepSeek-V4.1 vision models.
 
     The official repository ships image preprocessing as plain functions in
-    ``image_processor.py`` (no ``auto_map`` processor), so this class wraps
-    their ports directly and the model loads without ``--trust-remote-code``.
+    `image_processor.py` (no `auto_map` processor), so this class wraps
+    their ports directly and the model loads without `--trust-remote-code`.
 
-    ``__call__`` returns a ``BatchFeature`` with one entry per image
+    `__call__` returns a `BatchFeature` with one entry per image
     (flattened across images):
 
-    - ``patches``: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` bf16 ViT patches.
-    - ``vit_grid``: ``(num_images, 2)`` int64 ``[n_vit_h, n_vit_w]``.
-    - ``llm_grid``: ``(num_images, 2)`` int64 ``[n_llm_h, n_llm_w]``.
-    - ``types``: concatenated per-image pad-free span roles
+    - `patches`: `(sum(n_vit_h * n_vit_w), 3, p, p)` bf16 ViT patches.
+    - `vit_grid`: `(num_images, 2)` int64 `[n_vit_h, n_vit_w]`.
+    - `llm_grid`: `(num_images, 2)` int64 `[n_llm_h, n_llm_w]`.
+    - `types`: concatenated per-image pad-free span roles
       (IMAGE_START/IMAGE/IMAGE_NEW_LINE/IMAGE_END); every span position
-      carries ``image_token_id`` in the prompt's token ids.
+      carries `image_token_id` in the prompt's token ids.
     """
 
     def __init__(self, config: DeepseekV41Config) -> None:
@@ -246,14 +251,61 @@ class DeepseekV4VLProcessor:
         )
 
 
+def _get_image_fields(
+    inputs: Mapping[str, torch.Tensor],
+) -> Mapping[str, MultiModalFieldConfig]:
+    vit_grid = inputs.get("vit_grid")
+    llm_grid = inputs.get("llm_grid")
+    empty = torch.empty(0, dtype=torch.long)
+    patch_sizes = empty if vit_grid is None else vit_grid.prod(-1)
+    span_sizes = (
+        empty if llm_grid is None else llm_grid[:, 0] * (llm_grid[:, 1] + 1) + 2
+    )
+    return {
+        "patches": MultiModalFieldConfig.flat_from_sizes("image", patch_sizes),
+        "vit_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        "llm_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        "types": MultiModalFieldConfig.flat_from_sizes(
+            "image", span_sizes, keep_on_cpu=True
+        ),
+        "image_embeds": MultiModalFieldConfig.flat_from_sizes("image", span_sizes),
+    }
+
+
+class DeepseekV4VLMultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "image": {"image_embeds": "values", "llm_grid": "metadata"},
+    }
+
+    def _parse_image_data(self, data):
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_get_image_fields,
+            )
+        return super()._parse_image_data(data)
+
+
 class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> DeepseekV41Config:
         return self.ctx.get_hf_config(DeepseekV41Config)
 
-    def get_hf_processor(self, **kwargs: object) -> DeepseekV4VLProcessor:
+    def get_hf_processor(  # type: ignore[override]
+        self, **kwargs: object
+    ) -> DeepseekV4VLProcessor:
         if kwargs:
             raise ValueError(f"Unexpected processor kwargs: {sorted(kwargs)}")
         return DeepseekV4VLProcessor(self.get_hf_config())
+
+    def get_data_parser(self) -> DeepseekV4VLMultiModalDataParser:
+        return DeepseekV4VLMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -330,25 +382,7 @@ class DeepseekV4VLMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        vit_grid = hf_inputs.get("vit_grid")
-        llm_grid = hf_inputs.get("llm_grid")
-
-        if vit_grid is None or llm_grid is None:
-            empty = torch.empty(0, dtype=torch.long)
-            patch_sizes = types_sizes = empty
-        else:
-            patch_sizes = vit_grid.prod(-1)
-            n_llm_h, n_llm_w = llm_grid[:, 0], llm_grid[:, 1]
-            types_sizes = n_llm_h * (n_llm_w + 1) + 2
-
-        return {
-            "patches": MultiModalFieldConfig.flat_from_sizes("image", patch_sizes),
-            "vit_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            "llm_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            "types": MultiModalFieldConfig.flat_from_sizes(
-                "image", types_sizes, keep_on_cpu=True
-            ),
-        }
+        return _get_image_fields(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -360,11 +394,11 @@ class DeepseekV4VLMultiModalProcessor(
         validate_image_sentinel_ids(self.info.get_tokenizer())
 
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
-            types: torch.Tensor = out_mm_kwargs["image"][item_idx]["types"].data
+            grid: torch.Tensor = out_mm_kwargs["image"][item_idx]["llm_grid"].data
             # Every span position carries image_token_id; the roles live in
             # ``types``. All of them are embed positions (delimiters get the
             # learned vectors from embed_multimodal, not the embed table).
-            full = [image_token_id] * types.numel()
+            full = [image_token_id] * num_image_tokens(*grid.tolist())
             return PromptUpdateDetails.select_token_id(full, image_token_id)
 
         return [

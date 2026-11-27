@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the manual AllReduce + GemmaRMSNorm fusion used by MiniMax M3.
 
-``fused_allreduce_gemma_rms_norm`` must match the unfused model path, i.e.
-``GemmaRMSNorm(all_reduce(partial), residual)``, both on the flashinfer fast
+`fused_allreduce_gemma_rms_norm` must match the unfused model path, i.e.
+`GemmaRMSNorm(all_reduce(partial), residual)`, both on the flashinfer fast
 path (TP>1 with flashinfer + NVSwitch) and on the eager fallback (TP==1, or when
 flashinfer is unavailable / the GPU has no NVSwitch).
 """
@@ -22,13 +22,6 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
-
-
-@pytest.mark.parametrize("budget, expected", [(0, None), (8192, 1), (65536, 8)])
-def test_explicit_flashinfer_workspace_budget(budget, expected):
-    from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import _max_token_num
-
-    assert _max_token_num(8, 4096, torch.bfloat16, max_size_bytes=budget) == expected
 
 
 @ensure_current_vllm_config()
@@ -77,8 +70,8 @@ def _worker_fused_ar_norm(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUDA required",
+    not current_platform.is_cuda_alike(),
+    reason="CUDA or ROCm required",
 )
 # world_size=1 exercises the TP==1 identity branch on a single GPU; >1 exercises
 # the all_reduce + GemmaRMSNorm equivalence (flashinfer kernel or fallback).

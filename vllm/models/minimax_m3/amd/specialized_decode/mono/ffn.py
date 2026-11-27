@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 FFN launch: one persistent kernel from the unreduced ``o_proj``
-partial to the reduced MoE output (``MiniMaxM3DecoderLayer.forward`` after its
+"""MiniMax-M3 FFN launch: one persistent kernel from the unreduced `o_proj`
+partial to the reduced MoE output (`MiniMaxM3DecoderLayer.forward` after its
 attention).
 
-``BLOCKS`` x ``THREADS``, S rows, one launch per sparse layer and rank:
+`BLOCKS` x `THREADS`, S rows, one launch per sparse layer and rank:
 
     push    (192 x 32 columns): the partial's bf16 pairs to every rank
     reduce  (192): the ranks' pairs in rank order, f32 -> bf16; + residual
@@ -220,13 +220,13 @@ assert slots(MAX_TOKENS) <= 80
 
 # ---------------------------------------------------------------- helpers
 def put_word(c, addr, i, word):
-    """Pair i of ``addr`` := (word, tag) at its space's scope."""
+    """Pair i of `addr` := (word, tag) at its space's scope."""
     c["mb"].put_words(addr, i, [word])
 
 
 @traced
 def flag_after_stores(c, addr, i, who):
-    """Pair i := 1 (thread ``who``), released after the CTA's earlier stores."""
+    """Pair i := 1 (thread `who`), released after the CTA's earlier stores."""
     cta_sync(drain=True)
     if who:
         c["mb"].publish(addr, i, fx.Int32(1))
@@ -265,8 +265,8 @@ def bf16_bits_f32(bits):
 
 @traced
 def block_sum(c, v, slot):
-    """``v`` summed over the CTA: each wave's butterfly, then waves in order
-    (LDS ``red`` words ``slot * WAVES ..``). Every thread gets the sum."""
+    """`v` summed over the CTA: each wave's butterfly, then waves in order
+    (LDS `red` words `slot * WAVES ..`). Every thread gets the sum."""
     lane, wave, red = c["lane"], c["wave"], c["red"]
     v = butterfly(v, (32, 16, 8, 4, 2, 1))
     if lane == 0:
@@ -357,7 +357,7 @@ def stage_norm(c, t):
 
 @traced
 def await_x(c, tokens_n):
-    """XRDY of the first ``tokens_n`` tokens (thread t polls token t)."""
+    """XRDY of the first `tokens_n` tokens (thread t polls token t)."""
     tid = c["tid"]
     if tid < tokens_n:
         c["mb"].poll([(c["xrdy"], tid, 1)], site=SITE_ROUTER)
@@ -384,9 +384,9 @@ def mfma_f32(a, b, acc):
 
 @traced
 def stage_router(c, task):
-    """Experts 16 tile .. over K part ``part`` (384 columns, 48 a wave) for
+    """Experts 16 tile .. over K part `part` (384 columns, 48 a wave) for
     every token: FP32 weight x f32(X) on f32 MFMAs, the waves summed in order
-    -> ``LOGIT[token][expert][part]``. A lane's float4 of weights and four bf16 of
+    -> `LOGIT[token][expert][part]`. A lane's float4 of weights and four bf16 of
     X feed four MFMAs (K slot = its lane group), the same K order on both."""
     s, tid, lane, wave, red, a = (
         c["S"],
@@ -629,7 +629,7 @@ def slot_count(c, u):
 
 
 def slot_col(c, cnt):
-    """The lane's column of a slot of ``cnt`` columns (past them: the last)."""
+    """The lane's column of a slot of `cnt` columns (past them: the last)."""
     return fx.max(fx.min(c["lane"] % 16, cnt - 1), 0)
 
 
@@ -641,8 +641,8 @@ def _swiglu(g, u):
 
 
 def x_operands(c, base, row, k_dwords, st0, steps):
-    """The lane's B operands of steps st0 ..: row ``row`` of a bf16 [*, K]
-    scratch (``k_dwords`` a row), 8 K values an MFMA."""
+    """The lane's B operands of steps st0 ..: row `row` of a bf16 [*, K]
+    scratch (`k_dwords` a row), 8 K values an MFMA."""
     lane = c["lane"]
     at = row * k_dwords + (lane // 16) * 16
     return [
@@ -655,7 +655,7 @@ def x_operands(c, base, row, k_dwords, st0, steps):
 def stage_up(c, u, j, weights=None):
     """Slot u's tile pair j: gate rows 16 j .., up rows 768 + 16 j .. of its
     expert over this wave's K steps; waves summed in order; SwiGLU-OAI ->
-    bf16 ``MID[u][column][16 j ..]``, then UPF."""
+    bf16 `MID[u][column][16 j ..]`, then UPF."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     e = tab_ld(c, T_SLOT_E + u)
     cnt = slot_count(c, u)
@@ -697,9 +697,9 @@ def up_weights(c, rgs, st0):
 
 @traced
 def stage_down(c, tasks):
-    """Rows 16 task .. of every task in ``tasks``: a slot a wave, round robin,
+    """Rows 16 task .. of every task in `tasks`: a slot a wave, round robin,
     its MID columns loaded once for every task; a column's result ->
-    LDS ``CONTRIB[task][pick]``, then each token's routed picks (top-k order) x
+    LDS `CONTRIB[task][pick]`, then each token's routed picks (top-k order) x
     their weights + the shared expert -> bf16 pairs pushed to every rank's FFN
     region."""
     s, tid, lane, wave, a = c["S"], c["tid"], c["lane"], c["wave"], c["args"]
@@ -996,7 +996,7 @@ def refuse_wrap(c, ep):
 @traced
 def finish(c, key, epoch, tag, handshake, inject, peers):
     """Every CTA marks the launch done after its work; CTA 0 waits for the
-    marks, then moves the epoch on. The step's last launch (``handshake``)
+    marks, then moves the epoch on. The step's last launch (`handshake`)
     then trades every rank's failure flag over the peers: a fault anywhere in
     the step is in every rank's error word before this launch ends."""
     tid, bid = c["tid"], fx.block_idx.x
@@ -1013,8 +1013,8 @@ def finish(c, key, epoch, tag, handshake, inject, peers):
 
 @traced
 def injected_fault(c, inject):
-    """Fault injection (qualification): rank ``inject[0] - 1`` fails after
-    ``inject[1]`` ticks at the end of the step's last launch."""
+    """Fault injection (qualification): rank `inject[0] - 1` fails after
+    `inject[1]` ticks at the end of the step's last launch."""
     target = load32(inject, 0, "agent")
     if target == c["rank"] + 1:
         ticks = fx.Int64(load32(inject, 1, "agent"))

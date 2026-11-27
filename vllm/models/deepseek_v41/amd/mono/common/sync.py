@@ -4,7 +4,7 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/mono/device/sync.py
 """The tagged mailbox: hand-offs between the CTAs of one GPU (device scope) and
-between GPUs (system scope), every address a named region (``Addr``)."""
+between GPUs (system scope), every address a named region (`Addr`)."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -27,7 +27,7 @@ POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
 @traced
 def _spin(load_all, pending):
-    """Re-issue ``load_all`` until ``pending`` clears; a side-effecting op in the
+    """Re-issue `load_all` until `pending` clears; a side-effecting op in the
     loop keeps the loads from being hoisted."""
     v = load_all()
     while pending(v):
@@ -53,13 +53,13 @@ class Addr:
 
 
 def sreg(base, offset, region):
-    """Scratch region ``region`` at byte ``offset`` of ``base``."""
+    """Scratch region `region` at byte `offset` of `base`."""
     return Addr(region, Space.SCRATCH, base + fx.Int64(offset))
 
 
 def preg(base, offset, region):
-    """Peer-symmetric region ``region`` at byte ``offset`` of a rank's buffer
-    ``base``."""
+    """Peer-symmetric region `region` at byte `offset` of a rank's buffer
+    `base`."""
     return Addr(region, Space.PEER, base + fx.Int64(offset))
 
 
@@ -73,8 +73,8 @@ class Mailbox:
     Every 32-bit value is stored next to this launch's tag; a consumer
     polls the payload until all tags match, so a hand-off costs one round trip
     (no store drain, no separate flag). The mono layer's launches tag their
-    hand-offs with their epoch (``layer.py``), so a pair from an earlier step
-    never carries a live tag. Every address is an ``Addr``: its space picks the
+    hand-offs with their epoch (`layer.py`), so a pair from an earlier step
+    never carries a live tag. Every address is an `Addr`: its space picks the
     scope.
     """
 
@@ -118,7 +118,7 @@ class Mailbox:
         )
 
     def poll(self, specs, batch=POLL_MAX):
-        """Batched poll of pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})],
+        """Batched poll of pairs `specs` = [(Addr, pair index, npairs in {1, 2})],
         all of one space.
 
         All pairs are re-loaded together while any tag is stale, so a batch costs
@@ -166,8 +166,8 @@ class Mailbox:
 
 @traced
 def publish(put, a, i, v, who):
-    """This CTA's plain stores made readable by every CTA, then (thread ``who``)
-    the mailbox pair (``a``, i) := v. The stores are drained first: a flag may
+    """This CTA's plain stores made readable by every CTA, then (thread `who`)
+    the mailbox pair (`a`, i) := v. The stores are drained first: a flag may
     not overtake the data it announces, and a workgroup-scope release fence does
     not wait for them (LLVM's AMDGPU memory model omits vmcnt outside tgsplit
     mode: the workgroup's waves share one CU, the readers here do not)."""

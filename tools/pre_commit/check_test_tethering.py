@@ -3,38 +3,38 @@
 """Check that test files are wired into ("tethered to") the Buildkite CI.
 
 A test file is *tethered* when at least one Buildkite job actually collects it -
-some job's ``commands`` run ``pytest`` (or ``python`` / ``torchrun``, or a
-``find ... | xargs pytest`` pipeline) over a path that includes the file. A test
+some job's `commands` run `pytest` (or `python` / `torchrun`, or a
+`find ... | xargs pytest` pipeline) over a path that includes the file. A test
 that is collected by no job silently never runs: it passes review, merges, and
 rots.
 
 How it works
 ------------
-1. Parse every job in every Buildkite pipeline yaml (and each ``mirror.amd``
-   sub-step), and turn each shell command into a :class:`Selection` describing
+1. Parse every job in every Buildkite pipeline yaml (and each `mirror.amd`
+   sub-step), and turn each shell command into a `Selection` describing
    which test files it runs. The pipeline directories are read from
-   ``.buildkite/ci_config*.yaml`` (``job_dirs:``) - currently ``test_areas/``,
-   ``hardware_tests/`` and ``intel_jobs/`` across the CUDA, ROCm and Intel
-   pipelines - plus the legacy ``.buildkite/test-amd.yaml``.
-2. Build the inventory of test files under ``tests/``.
+   `.buildkite/ci_config*.yaml` (`job_dirs:`) - currently `test_areas/`,
+   `hardware_tests/` and `intel_jobs/` across the CUDA, ROCm and Intel
+   pipelines - plus the legacy `.buildkite/test-amd.yaml`.
+2. Build the inventory of test files under `tests/`.
 3. A file is a problem if no selection runs it and it is not in the allowlist
-   (``tools/pre_commit/test_tethering_allowlist.txt`` - the set of pre-existing
+   (`tools/pre_commit/test_tethering_allowlist.txt` - the set of pre-existing
    gaps, which is only ever meant to shrink). Every allowlist entry must carry a
-   trailing ``# <reason>``; a bare path line is itself an error.
+   trailing `# <reason>`; a bare path line is itself an error.
 
 Modes
 -----
 * **changed-files** (default): pre-commit passes the changed test files as
   arguments; each one must be tethered or allowlisted.
-* **full scan**: ``--all``, or automatically whenever the change set touches a
+* **full scan**: `--all`, or automatically whenever the change set touches a
   pipeline yaml or the allowlist itself - because editing a job command can
   orphan a test that is not otherwise in the diff. The full scan also reports
   allowlist entries that have since become tethered, or whose file is gone, so
   the list stays honest.
 
 Coverage from *any* of those pipelines counts - the question is "does some
-Buildkite job run this test", not "which pipeline". ``test-amd.yaml`` is being
-folded into ``test_areas/`` a group at a time; when it is gone the checker stops
+Buildkite job run this test", not "which pipeline". `test-amd.yaml` is being
+folded into `test_areas/` a group at a time; when it is gone the checker stops
 parsing it automatically.
 
 Usage::
@@ -106,8 +106,8 @@ FILE_RUNNER_COMMANDS = {"python", "python3", "torchrun", "coverage"}
 
 
 def _is_env_assignment(token: str) -> bool:
-    """True for a leading ``FOO=bar`` shell env-var assignment - the kind some
-    commands put before ``pytest`` (``VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest``).
+    """True for a leading `FOO=bar` shell env-var assignment - the kind some
+    commands put before `pytest` (`VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest`).
     """
     if "=" not in token:
         return False
@@ -117,12 +117,12 @@ def _is_env_assignment(token: str) -> bool:
 
 def normalize_test_path(raw: str) -> str:
     """Reduce a path as it appears in a command to one comparable form:
-    relative to ``tests/``, no surrounding quotes, no ``::nodeid`` selector, no
+    relative to `tests/`, no surrounding quotes, no `::nodeid` selector, no
     trailing slash.
 
-    Commands run from either the repo root or from ``tests/``, so both a
-    ``tests/`` and a ``/vllm-workspace/tests/`` prefix are stripped, as is a
-    leading ``$VAR/`` (``"${GIT_ROOT}/tests/..."``).
+    Commands run from either the repo root or from `tests/`, so both a
+    `tests/` and a `/vllm-workspace/tests/` prefix are stripped, as is a
+    leading `$VAR/` (`"${GIT_ROOT}/tests/..."`).
     """
     path = raw.strip().strip("'\"")
     path = path.split("::", 1)[0]
@@ -135,11 +135,11 @@ def normalize_test_path(raw: str) -> str:
 
 def _token_is_test_path(token: str) -> bool:
     """True if a shell token is a path argument rather than a flag, an env-var
-    assignment, a Buildkite ``$VAR``, or a ``-m`` / ``-k`` expression value.
+    assignment, a Buildkite `$VAR`, or a `-m` / `-k` expression value.
 
-    A token with a ``/`` or a ``.py`` ending is always a path. A bare word
-    (``samplers``) only counts if it is really a directory under ``tests/``. A
-    leading ``$VAR/`` is dropped first, but a ``$`` anywhere else means the token
+    A token with a `/` or a `.py` ending is always a path. A bare word
+    (`samplers`) only counts if it is really a directory under `tests/`. A
+    leading `$VAR/` is dropped first, but a `$` anywhere else means the token
     can't be resolved to a known path.
     """
     if not token or token.startswith("-"):
@@ -155,18 +155,18 @@ def _token_is_test_path(token: str) -> bool:
 
 
 def _path_is_within(parent: str, path: str) -> bool:
-    """True if ``path`` is ``parent`` itself or nested underneath it. A ``''`` /
-    ``'.'`` parent (a command run with no path arg) contains everything."""
+    """True if `path` is `parent` itself or nested underneath it. A `''` /
+    `'.'` parent (a command run with no path arg) contains everything."""
     if parent in ("", "."):
         return True
     return path == parent or path.startswith(parent + "/")
 
 
 def _glob_match_path(pattern: str, path: str) -> bool:
-    """Like :func:`fnmatch.fnmatch`, but ``*`` and ``?`` do not match across a
-    ``/`` - the way the shell and ``pytest`` treat an unexpanded glob path
-    argument (``kernels/test_foo_*.py`` selects one directory, not the tree).
-    A ``**`` component keeps the cross-separator meaning."""
+    """Like `fnmatch.fnmatch`, but `*` and `?` do not match across a
+    `/` - the way the shell and `pytest` treat an unexpanded glob path
+    argument (`kernels/test_foo_*.py` selects one directory, not the tree).
+    A `**` component keeps the cross-separator meaning."""
     if not any(ch in pattern for ch in "*?["):
         return pattern == path
     if "**" in pattern:
@@ -185,9 +185,9 @@ def _glob_match_path(pattern: str, path: str) -> bool:
 
 @dataclass
 class PytestSelection:
-    """A ``pytest``-style command: run everything under ``included_paths``
-    except what an ``--ignore`` (path prefix) or ``--ignore-glob`` (whole-path
-    ``fnmatch``) removes."""
+    """A `pytest`-style command: run everything under `included_paths`
+    except what an `--ignore` (path prefix) or `--ignore-glob` (whole-path
+    `fnmatch`) removes."""
 
     included_paths: list[str] = field(default_factory=list)
     ignored_paths: list[str] = field(default_factory=list)
@@ -208,7 +208,7 @@ class PytestSelection:
 
     @staticmethod
     def _arg_covers(path_arg: str, test_file: str) -> bool:
-        """True if a single pytest path argument selects ``test_file`` - by
+        """True if a single pytest path argument selects `test_file` - by
         exact match, by being a parent directory, or as a glob."""
         path_arg = normalize_test_path(path_arg)
         if _path_is_within(path_arg, test_file):
@@ -218,8 +218,8 @@ class PytestSelection:
 
 @dataclass
 class FindSelection:
-    """A ``find <root> -name ... [-not -name ...] [-maxdepth N] | xargs pytest``
-    pipeline. ``pytest`` runs one file per ``find`` hit, so the ``find``
+    """A `find <root> -name ... [-not -name ...] [-maxdepth N] | xargs pytest`
+    pipeline. `pytest` runs one file per `find` hit, so the `find`
     expression alone defines the selected set."""
 
     root: str
@@ -258,12 +258,12 @@ def _glob_any(name: str, globs: list[str]) -> bool:
 
 
 def _parse_pytest_command(tokens: list[str]) -> PytestSelection:
-    """Read a ``pytest ...`` invocation's tokens into a :class:`PytestSelection`.
+    """Read a `pytest ...` invocation's tokens into a `PytestSelection`.
 
-    Positional path args are the included paths; ``--ignore`` values (and a
-    bare-path ``--deselect``) are ignored paths, ``--ignore-glob`` values are
+    Positional path args are the included paths; `--ignore` values (and a
+    bare-path `--deselect`) are ignored paths, `--ignore-glob` values are
     ignored globs. Value-taking options and their values, and every other flag,
-    are skipped. ``-k`` / ``-m`` filtering is intentionally *not* modelled - a
+    are skipped. `-k` / `-m` filtering is intentionally *not* modelled - a
     file that a marker expression narrows is still "run".
     """
     selection = PytestSelection()
@@ -299,8 +299,8 @@ def _parse_pytest_command(tokens: list[str]) -> PytestSelection:
 
 
 def _parse_find_command(tokens: list[str]) -> FindSelection | None:
-    """Read a ``find <root> -name ...`` command's tokens into a
-    :class:`FindSelection`, or return ``None`` if there is no usable ``find``."""
+    """Read a `find <root> -name ...` command's tokens into a
+    `FindSelection`, or return `None` if there is no usable `find`."""
     if "find" not in tokens:
         return None
 
@@ -333,11 +333,11 @@ def _parse_find_command(tokens: list[str]) -> FindSelection | None:
 
 
 def _dash_c_code_operand(tokens: list[str]) -> str | None:
-    """For ``bash -c '<code>' [$0] [args]`` / ``sh -c ...`` / a combined short
-    group with ``c`` anywhere in it (``-ec``, ``-ce``, ``-euxc``), the ``<code>``
-    string the shell runs. ``None`` when this is not a ``-c`` invocation (plain
-    ``bash script.sh`` / ``bash -x script.sh``). Everything after the code
-    operand is a positional parameter (``$0``, ``$1``, ...), not a script or
+    """For `bash -c '<code>' [$0] [args]` / `sh -c ...` / a combined short
+    group with `c` anywhere in it (`-ec`, `-ce`, `-euxc`), the `<code>`
+    string the shell runs. `None` when this is not a `-c` invocation (plain
+    `bash script.sh` / `bash -x script.sh`). Everything after the code
+    operand is a positional parameter (`$0`, `$1`, ...), not a script or
     command that executes."""
     if not tokens or tokens[0].rsplit("/", 1)[-1] not in ("bash", "sh"):
         return None
@@ -351,8 +351,8 @@ def _dash_c_code_operand(tokens: list[str]) -> str | None:
 
 
 def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]:
-    """Follow a ``bash tests/foo.sh`` command: read the script and parse the
-    pytest / runner lines inside it. ``visited`` stops a script that (directly or
+    """Follow a `bash tests/foo.sh` command: read the script and parse the
+    pytest / runner lines inside it. `visited` stops a script that (directly or
     otherwise) refers back to itself; nesting is one level deep in practice.
     """
     if _dash_c_code_operand(tokens) is not None:
@@ -390,9 +390,9 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
 
 
 def _expand_vars(line: str, var_values: dict[str, str]) -> str:
-    """Substitute known ``$VAR`` / ``${VAR}`` in a script line - but not inside
-    single quotes, where the shell does not expand (``pytest '$X'`` passes a
-    literal ``$X``, collecting nothing)."""
+    """Substitute known `$VAR` / `${VAR}` in a script line - but not inside
+    single quotes, where the shell does not expand (`pytest '$X'` passes a
+    literal `$X`, collecting nothing)."""
 
     def sub(segment: str) -> str:
         return re.sub(
@@ -418,9 +418,9 @@ _COMMAND_WRAPPERS = {"if", "!", "then", "time", "exec", "nice", "command", "buil
 
 def _effective_command_index(tokens: list[str]) -> int:
     """Index of the token that names the command actually executed, past leading
-    ``FOO=bar`` assignments and simple wrappers - ``if ! env FOO=1 bash x.sh``
-    resolves to the ``bash``, so ``echo x.sh`` stays ``echo`` and is not
-    followed. Returns ``len(tokens)`` when nothing executable is left."""
+    `FOO=bar` assignments and simple wrappers - `if ! env FOO=1 bash x.sh`
+    resolves to the `bash`, so `echo x.sh` stays `echo` and is not
+    followed. Returns `len(tokens)` when nothing executable is left."""
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -448,9 +448,9 @@ def _effective_command_index(tokens: list[str]) -> int:
 def _split_shell_stages(command: str) -> list[tuple[str, list[str]]]:
     """Tokenize a shell line - honouring quotes - and split it at the shell
     operators, tagging each stage with the operator token that *precedes* it
-    (``""`` for the first stage, then ``"|"`` / ``"&&"`` / ``"||"`` / ``";"`` /
-    ``"&"`` / a subshell paren). Knowing which operator joins two stages is what
-    lets a ``find`` sweep count only when it is genuinely piped into ``pytest``,
+    (`""` for the first stage, then `"|"` / `"&&"` / `"||"` / `";"` /
+    `"&"` / a subshell paren). Knowing which operator joins two stages is what
+    lets a `find` sweep count only when it is genuinely piped into `pytest`,
     not merely on the same line as one. A line that cannot be tokenized
     (unbalanced quote, ...) yields nothing: better to miss a selection than to
     misparse one. Splitting *after* tokenizing means an operator inside a quoted
@@ -484,14 +484,14 @@ def _split_shell_stages(command: str) -> list[tuple[str, list[str]]]:
 
 def _looks_like_command_string(token: str) -> bool:
     """True for a single token that is itself a command line - e.g. a quoted
-    ``"pytest a.py && torchrun b.py"`` passed as an argument to a runner
+    `"pytest a.py && torchrun b.py"` passed as an argument to a runner
     script."""
     return " " in token and any(word in _RUNNER_KEYWORDS for word in token.split())
 
 
 def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection]:
     """Map one already-tokenized sub-command to the selections it implies:
-    find / pytest / ``bash <script>`` / direct file runner. Anything else
+    find / pytest / `bash <script>` / direct file runner. Anything else
     contributes nothing - better to miss a real selection than to invent
     coverage that isn't there."""
     if not tokens:
@@ -568,9 +568,9 @@ _XARGS_VALUE_FLAGS = {
 
 
 def _xargs_command_tokens(tokens: list[str]) -> list[str]:
-    """The command (plus its args) that ``xargs`` will exec, with ``xargs``' own
-    options stripped: ``xargs -0 -n1 -I{} env FOO=1 pytest`` -> ``['env',
-    'FOO=1', 'pytest']``."""
+    """The command (plus its args) that `xargs` will exec, with `xargs`' own
+    options stripped: `xargs -0 -n1 -I{} env FOO=1 pytest` -> `['env',
+    'FOO=1', 'pytest']`."""
     i = 0
     while i < len(tokens):
         if tokens[i] in _XARGS_VALUE_FLAGS:
@@ -583,9 +583,9 @@ def _xargs_command_tokens(tokens: list[str]) -> list[str]:
 
 
 def _runs_pytest(tokens: list[str]) -> bool:
-    """True if ``tokens`` is a command that executes ``pytest``, seeing through
-    ``env FOO=1`` / ``timeout`` / ``if !`` wrappers (``xargs echo pytest`` is
-    not - ``echo`` is what runs)."""
+    """True if `tokens` is a command that executes `pytest`, seeing through
+    `env FOO=1` / `timeout` / `if !` wrappers (`xargs echo pytest` is
+    not - `echo` is what runs)."""
     idx = _effective_command_index(tokens)
     return idx < len(tokens) and tokens[idx] in PYTEST_COMMANDS
 
@@ -598,12 +598,12 @@ _PIPE_PASSTHROUGH = {"sort", "tee", "cat", "tac"}
 
 
 def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> bool:
-    """True if the ``find`` stage at ``find_index`` actually runs its matches
-    through ``pytest``: a *terminated* ``-exec pytest ... \\;`` / ``... +`` in the
-    ``find`` itself, or an ``xargs`` whose command operand is ``pytest``, reached
-    through ``|`` pipes of non-filtering stages only. A ``find`` piped to
-    ``wc`` / ``head`` / an ``xargs echo``, an unterminated ``-exec``, or a
-    ``pytest`` in a separate ``;`` / ``&&`` command, runs nothing (or not the
+    """True if the `find` stage at `find_index` actually runs its matches
+    through `pytest`: a *terminated* `-exec pytest ... \\;` / `... +` in the
+    `find` itself, or an `xargs` whose command operand is `pytest`, reached
+    through `|` pipes of non-filtering stages only. A `find` piped to
+    `wc` / `head` / an `xargs echo`, an unterminated `-exec`, or a
+    `pytest` in a separate `;` / `&&` command, runs nothing (or not the
     whole sweep)."""
     find_tokens = stages[find_index][1]
     for i, token in enumerate(find_tokens):
@@ -623,16 +623,16 @@ def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> 
 
 
 def _terminated(exec_action: list[str]) -> bool:
-    """A ``find -exec`` action only runs if it ends with a ``;`` or ``+`` token
-    (from ``\\;`` / ``+`` on the command line)."""
+    """A `find -exec` action only runs if it ends with a `;` or `+` token
+    (from `\\;` / `+` on the command line)."""
     return ";" in exec_action or "+" in exec_action
 
 
 def _exec_runs_matches_through_pytest(action: list[str]) -> bool:
-    """True if a ``find -exec``/``-execdir`` action runs ``pytest`` over each
-    *matched* file: ``pytest`` is the command, the action is terminated
-    (``\\;`` / ``+``), and the ``{}`` placeholder lands as a positional test-path
-    argument - not as the value of an option (``-exec pytest --ignore {} \\;``
+    """True if a `find -exec`/`-execdir` action runs `pytest` over each
+    *matched* file: `pytest` is the command, the action is terminated
+    (`\\;` / `+`), and the `{}` placeholder lands as a positional test-path
+    argument - not as the value of an option (`-exec pytest --ignore {} \\;`
     only ever runs whatever positional file is also on the line)."""
     if not action or action[0] not in PYTEST_COMMANDS or not _terminated(action):
         return False
@@ -644,13 +644,13 @@ def _exec_runs_matches_through_pytest(action: list[str]) -> bool:
 
 
 def _parse_command(command: str, visited: set[str] | None = None) -> list[Selection]:
-    """Turn one yaml ``commands:`` entry into the selections it implies.
+    """Turn one yaml `commands:` entry into the selections it implies.
 
     The line is tokenized (respecting quotes) and split into stages at the shell
     operators, and each stage is classified independently so that, e.g., a
-    ``find`` and a ``pytest`` on the same line are both handled. A ``find -name``
-    sweep is kept only when :func:`_find_feeds_pytest` confirms its output
-    actually reaches ``pytest`` - otherwise it would invent coverage.
+    `find` and a `pytest` on the same line are both handled. A `find -name`
+    sweep is kept only when `_find_feeds_pytest` confirms its output
+    actually reaches `pytest` - otherwise it would invent coverage.
     """
     visited = visited if visited is not None else set()
     stages = _split_shell_stages(command)
@@ -667,7 +667,7 @@ def _parse_command(command: str, visited: set[str] | None = None) -> list[Select
 
 def _iter_job_steps(yaml_doc: dict):
     """Yield each job step in a test_areas yaml, plus a merged view of each
-    ``mirror.*`` sub-step. The AMD mirror can override ``commands``, so it has to
+    `mirror.*` sub-step. The AMD mirror can override `commands`, so it has to
     be checked as its own step."""
     for step in yaml_doc.get("steps") or []:
         if not isinstance(step, dict):
@@ -682,10 +682,10 @@ def _iter_job_steps(yaml_doc: dict):
 
 
 def _pipeline_job_dirs() -> list[Path]:
-    """The Buildkite job directories, read from every ``.buildkite/ci_config*.yaml``
-    (``job_dirs:``). Buildkite itself uses these files to assemble each pipeline,
+    """The Buildkite job directories, read from every `.buildkite/ci_config*.yaml`
+    (`job_dirs:`). Buildkite itself uses these files to assemble each pipeline,
     so a test wired into any job under any of them is genuinely run by CI. Falls
-    back to ``test_areas/`` alone if no config is readable."""
+    back to `test_areas/` alone if no config is readable."""
     job_dirs: set[Path] = {TEST_AREAS_DIR}
     for config in sorted((REPO_ROOT / ".buildkite").glob("ci_config*.yaml")):
         try:
@@ -699,8 +699,8 @@ def _pipeline_job_dirs() -> list[Path]:
 
 def _pipeline_yaml_paths() -> list[Path]:
     """Every Buildkite pipeline yaml whose jobs count as CI coverage: the yamls
-    in every :func:`_pipeline_job_dirs` directory plus the legacy ``test-amd.yaml``
-    (see ``TEST_AMD_YAML``)."""
+    in every `_pipeline_job_dirs` directory plus the legacy `test-amd.yaml`
+    (see `TEST_AMD_YAML`)."""
     paths: list[Path] = []
     for job_dir in _pipeline_job_dirs():
         paths.extend(sorted(job_dir.glob("*.yaml")))
@@ -740,7 +740,7 @@ def load_selections() -> list[Selection]:
 
 
 def is_tethered(test_file: str, selections: list[Selection]) -> bool:
-    """True if any CI selection runs ``test_file`` (path relative to ``tests/``
+    """True if any CI selection runs `test_file` (path relative to `tests/`
     or to the repo root - both are accepted)."""
     normalized = normalize_test_path(test_file)
     return any(selection.runs(normalized) for selection in selections)
@@ -752,9 +752,9 @@ def is_tethered(test_file: str, selections: list[Selection]) -> bool:
 
 
 def is_test_module(repo_path: str) -> bool:
-    """True if ``repo_path`` is a pytest test module CI is expected to run - a
-    ``tests/**/test_*.py`` or ``*_test.py``, but not ``conftest.py`` /
-    ``__init__.py`` or other helper modules."""
+    """True if `repo_path` is a pytest test module CI is expected to run - a
+    `tests/**/test_*.py` or `*_test.py`, but not `conftest.py` /
+    `__init__.py` or other helper modules."""
     if not repo_path.startswith("tests/") or not repo_path.endswith(".py"):
         return False
     filename = repo_path.rsplit("/", 1)[-1]
@@ -764,10 +764,10 @@ def is_test_module(repo_path: str) -> bool:
 
 
 def all_test_modules() -> list[str]:
-    """Every test module under ``tests/``, sorted. Prefers ``git ls-files`` so a
+    """Every test module under `tests/`, sorted. Prefers `git ls-files` so a
     developer's local scratch files are never flagged; falls back to a
     filesystem walk when run outside a git checkout - the CI test images bake in
-    ``tests/`` with no ``.git``, and there are no untracked scratch files there.
+    `tests/` with no `.git`, and there are no untracked scratch files there.
     """
     try:
         tracked = subprocess.run(
@@ -784,7 +784,7 @@ def all_test_modules() -> list[str]:
 
 def load_allowlist() -> set[str]:
     """Read the allowlist file into a set of repo-relative paths. Blank lines and
-    ``#`` comments (whole-line or trailing) are ignored."""
+    `#` comments (whole-line or trailing) are ignored."""
     if not ALLOWLIST_PATH.exists():
         return set()
 
@@ -797,8 +797,8 @@ def load_allowlist() -> set[str]:
 
 
 def allowlist_entries_missing_reason() -> list[str]:
-    """Allowlist paths with no trailing ``# reason`` on their own line. Every gap
-    has to say why the test can't be wired into a job, so a bare ``path`` line
+    """Allowlist paths with no trailing `# reason` on their own line. Every gap
+    has to say why the test can't be wired into a job, so a bare `path` line
     (the easy way to silence the gate) is itself an error."""
     if not ALLOWLIST_PATH.exists():
         return []
@@ -821,8 +821,8 @@ def run_full_scan(
 ) -> int:
     """Scan every test module. Untethered files that aren't allowlisted are
     always errors. Allowlist entries that have become tethered, or whose file no
-    longer exists, are reported either way but are only errors when ``strict``
-    (an explicit ``--all`` run, as opposed to a PR that happened to touch CI
+    longer exists, are reported either way but are only errors when `strict`
+    (an explicit `--all` run, as opposed to a PR that happened to touch CI
     config - which shouldn't be blocked by unrelated allowlist cleanup).
     """
     untethered = [

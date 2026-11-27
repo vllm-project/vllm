@@ -18,9 +18,8 @@ from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -43,7 +42,7 @@ def _recursively_merge_mm_processor_kwargs(
     defaults: Mapping[str, object],
     overrides: Mapping[str, object],
 ) -> dict[str, object]:
-    """Merge two mappings recursively, with ``overrides`` taking precedence.
+    """Merge two mappings recursively, with `overrides` taking precedence.
 
     Nested values are merged only when both values are mappings; otherwise the
     override replaces the existing value.
@@ -670,28 +669,32 @@ class MultiModalConfig:
             device_type,
         )
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        factors: list[Any] = [
-            self.mm_encoder_attn_backend.name
-            if self.mm_encoder_attn_backend is not None
-            else None,
-            self.mm_encoder_tp_mode,
-            self.mm_encoder_attn_dtype,
-            self.mm_encoder_fp8_scale_path,
-            self.mm_device_do_normalize,
-        ]
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            "language_model_only",
+            "limit_per_prompt",
+            "enable_mm_embeds",
+            "media_io_kwargs",
+            "mm_processor_kwargs",
+            "mm_processor_cache_gb",
+            "mm_processor_cache_type",
+            "mm_hasher_algorithm",
+            "mm_shm_cache_max_object_size_mb",
+            "mm_encoder_only",
+            "mm_encoder_fp8_scale_save_path",
+            "mm_encoder_fp8_scale_save_margin",
+            "interleave_mm_strings",
+            "skip_mm_profiling",
+            "video_pruning_rate",
+            "video_pruning_method",
+            "mm_tensor_ipc",
+            "allow_missing_mm_embeddings",
+            "mm_ipc_gpu_memory_gb",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """Get the maximum number of input items allowed per prompt

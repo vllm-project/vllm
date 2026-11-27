@@ -129,9 +129,7 @@ def create_cross_attention_backend(
             attn_metadata.slot_mapping = slot_mapping  # type: ignore[attr-defined]
             return attn_metadata
 
-    # NOTE(Lucas): we need a custom impl so we can use the slot-mapping computed by
-    # `CrossAttentionBuilder` instead of the one computed by `BlockTable`
-    # (gpu_model_runner)
+    # Use the slot mapping computed by CrossAttentionBuilder.
     class CrossAttentionImpl(underlying_impl):  # type: ignore[valid-type,misc]
         def forward(
             self,

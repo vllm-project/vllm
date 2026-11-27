@@ -380,7 +380,6 @@ def v4_dspark_config(dist_init):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(draft_model_config=model_config),
-        use_v2_model_runner=False,
     )
 
 

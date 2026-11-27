@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     KVConnectorOutput,
@@ -47,7 +48,7 @@ class StepTimingEvents:
 
 
 class StepTimingCollector:
-    """Times the steps run inside ``collect``; record calls no-op outside it.
+    """Times the steps run inside `collect`; record calls no-op outside it.
 
     Every step gets its own events, so the steps queue back-to-back and the
     block resolves them all behind one sync on the way out.
@@ -134,6 +135,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._has_fault_gpu: torch.Tensor | None = None
+        if check_ep_fault:
+            # Computed on the main stream: the copy stream only carries copies.
+            self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -166,9 +171,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
+            if self._has_fault_gpu is not None:
+                self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
@@ -272,6 +276,19 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream for non_blocking D2H copies.
+
+    It must only carry copies: compute anything it copies on the producer stream
+    first (see `conf_compute_utils.new_external_d2h_stream()`).
+    """
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    from vllm.v1.conf_compute_utils import new_external_d2h_stream
+
+    return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager

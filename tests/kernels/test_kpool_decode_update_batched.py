@@ -2,24 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit test for the batched kpool decode-update kernel.
 
-Validates ``kpool_decode_update_and_maybe_write_cache_batched`` against an
+Validates `kpool_decode_update_and_maybe_write_cache_batched` against an
 independent pure-torch reference that replicates the per-request, in-position
 order semantics: stash each token into a paged tail ring; on pool completion
-(``pos % pool_size == pool_size-1``) softmax(gate+ape)-weighted sum + Hadamard-128
+(`pos % pool_size == pool_size-1`) softmax(gate+ape)-weighted sum + Hadamard-128
 + per-vector fp8 absmax quant + write to the indexer K cache. Covers
 no-completion, completion-at-end, completion-mid-batch, non-uniform padding,
 plain decode, plus a randomized fuzz pass.
 
-The kernel iterates each request's ``next_n`` tokens in position order inside
+The kernel iterates each request's `next_n` tokens in position order inside
 one program (grid = num_requests) to preserve the pool-completion
 read-after-stash dependency; the reference mirrors that ordering.
 
-``test_decode_writer_matches_prefill_writer`` is deliberately NOT
+`test_decode_writer_matches_prefill_writer` is deliberately NOT
 reference-based: it checks the decode writer against the *prefill* writer
-(``kpool_compress_and_write_cache``), the invariant that actually matters in
+(`kpool_compress_and_write_cache`), the invariant that actually matters in
 production. A hand-written reference can drift to match a buggy kernel -- that
 is exactly how the stash-gating bug (intra-pool tokens never entering the tail
-ring, because the stash was gated on the pool-granular ``slot_mapping``) stayed
+ring, because the stash was gated on the pool-granular `slot_mapping`) stayed
 green here.
 """
 
@@ -499,7 +499,7 @@ def test_leading_invalid_tail_slot():
 def test_prefill_seed_honors_padded_tail_block_stride():
     """The tail shares a padded indexer allocation in production.
 
-    ``get_kv_cache_config_from_groups`` aliases each tail tensor onto its
+    `get_kv_cache_config_from_groups` aliases each tail tensor onto its
     indexer tensor with the indexer's block stride (38016 B for GLM-5.3-Flash
     vs a dense 2048 B tail block), so a seed kernel that addresses blocks
     densely writes into an unrelated indexer block and leaves the request's

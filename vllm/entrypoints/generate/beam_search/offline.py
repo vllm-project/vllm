@@ -111,7 +111,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
-        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534
         base_sampling_params = SamplingParams(
             logprobs=2 * beam_width,
             max_tokens=1,
@@ -374,7 +374,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 key=sort_beams_key,
                 reverse=True,
             )
-            instance.beams = sorted_beams[:beam_width]
+            instance.beams = []
+            for beam in sorted_beams[:beam_width]:
+                if len(beam.tokens) >= self.model_config.max_model_len:
+                    beam.finish_reason = "length"
+                    instance.completed.append(beam)
+                else:
+                    instance.beams.append(beam)
 
         return False
 

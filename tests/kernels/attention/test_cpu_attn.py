@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     cpu_attention_with_kv_cache,
     cpu_attn_get_scheduler_metadata,
     cpu_attn_reshape_and_cache,

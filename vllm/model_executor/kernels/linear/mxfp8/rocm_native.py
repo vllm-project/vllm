@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
+"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton `tl.dot_scaled`.
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
 activations are MXFP8-quantized per token (inside the GEMM for small M), or
-arrive pre-quantized as a ``QuantizedActivation`` with row-major (not swizzled)
-E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. ``dot_scaled``
+arrive pre-quantized as a `QuantizedActivation` with row-major (not swizzled)
+E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
 tiles K by 128; a weight whose K is not a multiple of that is dequantized to
-BF16 once at load and served by a plain linear instead, since ``can_implement``
+BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
 """
 
@@ -47,7 +47,7 @@ _TINY = float(torch.finfo(torch.float32).tiny)
 @triton.jit
 def _quant_mxfp8_tile(x, FP8_MAX: tl.constexpr, TINY: tl.constexpr):
     """MXFP8-quantize a [BLOCK_M, BLOCK_K] tile: bit-exact with
-    ``mxfp8_e4m3_quantize`` (see ``_mxfp8_quant_triton_kernel`` for why the
+    `mxfp8_e4m3_quantize` (see `_mxfp8_quant_triton_kernel` for why the
     scale is applied as a reciprocal)."""
     BM: tl.constexpr = x.shape[0]
     BK: tl.constexpr = x.shape[1]
@@ -156,7 +156,7 @@ def _launch(
     num_warps: int,
     num_stages: int,
 ) -> None:
-    """``out = x @ w.T``. ``x_scale`` None means ``x`` is the unquantized
+    """`out = x @ w.T`. `x_scale` None means `x` is the unquantized
     activation and is MXFP8-quantized inside the kernel."""
     M, K = x.shape
     N = w.shape[0]
@@ -258,12 +258,95 @@ def _mxfp8_dot_scaled_gemm(
 # room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
 _ON_GFX950 = False
+_ON_CDNA4 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version, on_gfx950
 
     _ON_GFX950 = on_gfx950()
+    _ON_CDNA4 = get_cdna_version() == 4
     if _ON_GFX950:
         _BK256_STAGES = 2
+
+
+# gfx950 tiles for the MiniMax-M3.1 MXFP8 linears (TP4, and TP2 qkv / dense gate_up),
+# keyed by the local (N, K).
+# Each row is (largest M it covers, tile); None, or an M past the last row, uses
+# the generic selection below. Tuned by CUDA-graph replay over rotating weights.
+_M31_TILES = {
+    (2560, 6144): (
+        (16, (16, 16, 1024, 2, 3)),
+        (32, (32, 16, 1024, 2, 3)),
+        (48, (16, 16, 1024, 2, 2)),
+        (96, (32, 32, 512, 2, 3)),
+        (192, (64, 32, 512, 2, 3)),
+        (256, (64, 64, 512, 4, 2)),
+    ),
+    (2304, 6144): (
+        (16, (16, 16, 1024, 2, 3)),
+        (32, (32, 16, 1024, 2, 3)),
+        (48, (16, 16, 1024, 2, 2)),
+        (96, (32, 32, 512, 2, 3)),
+        (192, (64, 32, 512, 2, 3)),
+        (256, (64, 64, 512, 4, 2)),
+    ),
+    (6144, 2048): (
+        (16, (16, 32, 512, 2, 3)),
+        (32, (32, 32, 512, 2, 3)),
+        (64, (64, 32, 512, 2, 3)),
+        (128, (64, 64, 512, 4, 2)),
+        (256, (128, 64, 256, 8, 3)),
+    ),
+    (1536, 6144): (
+        (32, (16, 16, 1024, 2, 3)),
+        (64, (32, 16, 1024, 2, 3)),
+        (80, (16, 16, 1024, 2, 2)),
+        (160, (32, 32, 512, 2, 3)),
+        (256, (64, 32, 512, 2, 3)),
+    ),
+    (6144, 768): (
+        (16, (16, 16, 256, 2, 3)),
+        (32, (32, 16, 256, 2, 3)),
+        (64, (64, 32, 256, 4, 3)),
+        (128, (64, 64, 256, 4, 3)),
+        (256, (128, 64, 256, 8, 3)),
+    ),
+    (6144, 6144): (
+        (16, None),
+        (32, (32, 32, 512, 2, 3)),
+        (64, (64, 32, 512, 2, 3)),
+        (128, (64, 64, 512, 4, 2)),
+        (256, (128, 64, 256, 8, 2)),
+    ),
+    (6144, 3072): (
+        (16, (16, 32, 1024, 2, 3)),
+        (32, (32, 32, 512, 2, 3)),
+        (64, (64, 32, 512, 2, 3)),
+        (128, (64, 64, 512, 4, 2)),
+        (256, (128, 64, 256, 8, 2)),
+    ),
+    (4992, 6144): (
+        (16, None),
+        (32, (32, 32, 512, 2, 3)),
+        (64, (64, 32, 512, 2, 3)),
+        (128, (64, 64, 512, 4, 2)),
+        (192, None),
+        (256, (64, 64, 256, 4, 2)),
+    ),
+    (12288, 6144): (
+        (16, None),
+        (32, (32, 16, 512, 2, 2)),
+        (64, (64, 64, 512, 4, 2)),
+        (192, (64, 64, 256, 4, 2)),
+        (256, (64, 64, 512, 4, 2)),
+    ),
+}
+
+
+def _select_m31_cfg(M, N, K):
+    for max_m, cfg in _M31_TILES.get((N, K), ()):
+        if max_m >= M:
+            return cfg
+    return None
 
 
 def _select_cfg(M, N, K):
@@ -277,11 +360,10 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
-    if _ON_GFX950 and M <= 16:
-        if K == 6144 and N in (1536, 2560):
-            return 16, 16, 1024, 2, 3
-        if K == 768 and N == 6144:
-            return 16, 16, 256, 2, 3
+    if _ON_CDNA4:
+        cfg = _select_m31_cfg(M, N, K)
+        if cfg is not None:
+            return cfg
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
@@ -361,7 +443,7 @@ def _as_block32_scale(weight_scale: torch.Tensor) -> torch.Tensor | None:
 
 
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
-    """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
+    """Native CDNA4 (gfx950) MXFP8 linear via Triton `tl.dot_scaled`."""
 
     supports_pre_processed_weights = True
 
@@ -408,8 +490,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @staticmethod
     def supports_quantized_input(layer: torch.nn.Module) -> bool:
-        """Whether ``apply_weights`` reads a ``QuantizedActivation`` for
-        ``layer`` as is (fp8 weights), rather than dequantizing it back."""
+        """Whether `apply_weights` reads a `QuantizedActivation` for
+        `layer` as is (fp8 weights), rather than dequantizing it back."""
         return layer.weight.element_size() == 1 and (
             layer.weight_scale.shape[0] != layer.weight.shape[0]
             or layer.weight.shape[1] % _DOT_SCALED_K_ALIGN == 0

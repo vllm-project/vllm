@@ -350,7 +350,7 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,

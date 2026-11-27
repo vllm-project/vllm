@@ -32,10 +32,12 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    copy_pp_buffers,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -69,10 +71,6 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        pass_config = vllm_config.compilation_config.pass_config
-        self.fi_allreduce_max_bytes = pass_config.flashinfer_max_size(
-            parallel_config.tensor_parallel_size
-        )
 
         self.hidden_size = config.hidden_size
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
@@ -146,10 +144,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             # The previous layer's MLP/MoE output is left un-reduced; fuse its
             # all-reduce into this input_layernorm.
             hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states,
-                residual,
-                self.input_layernorm,
-                max_size_bytes=self.fi_allreduce_max_bytes,
+                hidden_states, residual, self.input_layernorm
             )
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -163,10 +158,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             )
         else:
             hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm,
-                max_size_bytes=self.fi_allreduce_max_bytes,
+                hidden_states, residual, self.post_attention_layernorm
             )
 
         if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
@@ -191,10 +183,6 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        pass_config = vllm_config.compilation_config.pass_config
-        self.fi_allreduce_max_bytes = pass_config.flashinfer_max_size(
-            parallel_config.tensor_parallel_size
-        )
         self.use_sequence_parallel = (
             parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size == 1
@@ -242,8 +230,11 @@ class DeepseekV32Model(torch.nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, range(config.num_hidden_layers)
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+            ["hidden_states"], config.hidden_size, self.pp_buffers
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -280,6 +271,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
         # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
@@ -312,7 +304,12 @@ class DeepseekV32Model(torch.nn.Module):
             )
             # PP send/recv needs TP-replicated tensors; reduce the partial sum.
             hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
-            return IntermediateTensors({"hidden_states": hidden_states})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **{k: v[:full_num_tokens] for k, v in self.pp_buffers.items()},
+                }
+            )
 
         if self.use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
@@ -330,10 +327,7 @@ class DeepseekV32Model(torch.nn.Module):
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         else:
             hidden_states, _ = fused_allreduce_rms_norm(
-                hidden_states,
-                residual,
-                self.norm,
-                max_size_bytes=self.fi_allreduce_max_bytes,
+                hidden_states, residual, self.norm
             )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

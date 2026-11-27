@@ -4,14 +4,16 @@
 import math
 from functools import cached_property
 from itertools import pairwise
-from typing import Any, Literal
+from typing import Literal
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
 
 from vllm import version
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 DetailedTraceModules = Literal["model", "worker", "all"]
 
@@ -84,9 +86,9 @@ class ObservabilityConfig:
     dispatch modes, and their observed frequencies at every logging interval)."""
 
     enable_layerwise_nvtx_tracing: bool = False
-    """Enable layerwise NVTX tracing. This traces the execution of each layer or
-    module in the model and attach information such as input/output shapes to
-    nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
+    """Deprecated: per-layer tracing was only implemented by the removed Model Runner
+    V1. This now only adds NVTX range markers around calls to the compiled model, and
+    will be removed in a future release. It doesn't work with CUDA graphs enabled."""
 
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
@@ -125,22 +127,14 @@ class ObservabilityConfig:
             or "all" in self.collect_detailed_traces
         )
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod
@@ -218,5 +212,11 @@ class ObservabilityConfig:
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+            )
+        if self.enable_layerwise_nvtx_tracing:
+            logger.warning_once(
+                "enable_layerwise_nvtx_tracing is deprecated and no longer traces "
+                "each layer; it only marks calls to the compiled model. It will be "
+                "removed in a future release."
             )
         return self

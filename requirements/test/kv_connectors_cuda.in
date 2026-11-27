@@ -1,0 +1,8 @@
+# KV connectors baked into the CUDA 13 CI test image (docker/Dockerfile,
+# test-deps stage): requirements/kv_connectors.txt with the CUDA 13 wheel
+# variants. tools/kv_connector_lock.py checks that the two stay aligned.
+lmcache == 0.5.6
+cupy-cuda13x != 14.1.0
+nixl == 1.5.2
+nixl-cu13 == 1.5.2
+mooncake-transfer-engine-cuda13 >= 0.3.14

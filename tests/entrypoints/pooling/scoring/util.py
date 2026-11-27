@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 from transformers import AutoModel, AutoTokenizer
 
 from tests.conftest import HfRunner
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.types import ScoreMultiModalParam
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageParam,

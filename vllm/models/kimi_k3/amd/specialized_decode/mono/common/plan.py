@@ -14,10 +14,10 @@ tuple) its launcher's closures capture; an object in a closure is not keyed, and
 a parameter used only by build-time Python (a placement table, a layout) is in no
 closure at all. Two builds differing only there would share one binary -- every
 TP rank ran rank 3's kernel once that way. So a build's parameters are one frozen
-dataclass of scalars, ``key_tuple`` turns it into one (name, value) tuple, and the
+dataclass of scalars, `key_tuple` turns it into one (name, value) tuple, and the
 launcher references that tuple: every field is keyed, whatever the body uses.
 
-The tuple also carries the model's kernel sources (``source_digest``): FlyDSL
+The tuple also carries the model's kernel sources (`source_digest`): FlyDSL
 keys a helper's source only when its walk reaches it, and it does not reach a
 helper called inside a traced function's dynamic loop or branch (the rewriter
 moves those bodies into nested functions it does not scan) nor one outside the
@@ -41,8 +41,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 @functools.cache
 def source_digest(*paths: str) -> str:
-    """sha256 of every ``.py`` file under ``paths`` (files or directories,
-    relative to the ``mono`` package), each file's path and contents: one model's
+    """sha256 of every `.py` file under `paths` (files or directories,
+    relative to the `mono` package), each file's path and contents: one model's
     kernel sources, so an edit to another model's rebuilds none of these."""
     h = hashlib.sha256()
     for rel in paths:
@@ -57,8 +57,8 @@ def source_digest(*paths: str) -> str:
 
 
 def key_tuple(key, sources: str) -> tuple:
-    """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+    """`key`'s (field name, value) pairs, every value a scalar, then
+    ("sources", `sources`): the model's `source_digest`."""
     out = []
     for f in fields(key):
         value = getattr(key, f.name)
@@ -70,16 +70,6 @@ def key_tuple(key, sources: str) -> tuple:
         out.append((f.name, value))
     out.append(("sources", sources))
     return tuple(out)
-
-
-def symbol_params(key) -> dict:
-    """The fields that name the kernel symbol (``metadata={"sym": short name}``),
-    short name -> value, in field order."""
-    return {
-        f.metadata["sym"]: getattr(key, f.name)
-        for f in fields(key)
-        if "sym" in f.metadata
-    }
 
 
 # The execution model every mono kernel is written for.
@@ -96,7 +86,7 @@ LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
 
 
 def first_task(bid, base):
-    """CTA ``bid``'s first task of a stage placed from CTA ``base`` (any count of
+    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of
     CTAs past 0: placements that add task counts run past the grid), then every
     BLOCKS-th."""
     return (bid - base % BLOCKS + BLOCKS) % BLOCKS
@@ -110,8 +100,8 @@ HEALTH_WORDS = health_words(BLOCKS)
 
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
-    """``items`` (name, pairs) laid out in order: name -> (byte offset, bytes),
-    each region from an ``align``-byte boundary at or past ``start``."""
+    """`items` (name, pairs) laid out in order: name -> (byte offset, bytes),
+    each region from an `align`-byte boundary at or past `start`."""
     out, off = {}, start
     for name, pairs in items:
         off = (off + align - 1) // align * align
@@ -130,8 +120,8 @@ def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
 
 
 def _python_params(fn) -> tuple[str, ...]:
-    """Parameter names of a ``@flyc.kernel`` / ``@flyc.jit`` object's Python
-    function (FlyDSL keeps it as ``_func`` / ``func``)."""
+    """Parameter names of a `@flyc.kernel` / `@flyc.jit` object's Python
+    function (FlyDSL keeps it as `_func` / `func`)."""
     py = getattr(fn, "func", None) or getattr(fn, "_func", None)
     if py is None:
         raise TypeError(f"no Python function behind {fn!r}")
@@ -143,7 +133,7 @@ class KernelAbi:
     names: tuple[str, ...]
 
     def check(self, kernel, launcher) -> None:
-        """The kernel takes exactly ``names``; the launcher too, then ``stream``."""
+        """The kernel takes exactly `names`; the launcher too, then `stream`."""
         got = _python_params(kernel)
         if got != self.names:
             raise TypeError(f"kernel parameters {got} != ABI {self.names}")
@@ -152,7 +142,7 @@ class KernelAbi:
             raise TypeError(f"launcher parameters {got} != ABI {self.names} + stream")
 
     def pack(self, values: dict) -> list:
-        """``values`` (every name, nothing else) in ABI order."""
+        """`values` (every name, nothing else) in ABI order."""
         try:
             if len(values) == len(self.names):
                 return [values[n] for n in self.names]
@@ -198,7 +188,6 @@ class Access:
 class Record:
     stages: list[str] = field(default_factory=list)  # in the order entered
     accesses: list[Access] = field(default_factory=list)
-    unnamed: list[tuple[str, str]] = field(default_factory=list)  # (stage, kind)
 
 
 _record: Record | None = None
@@ -228,10 +217,3 @@ def _stage() -> str:
 def note(region: str, space: Space, kind: str) -> None:
     if _record is not None:
         _record.accesses.append(Access(_stage(), region, space, kind))
-
-
-def note_unnamed(kind: str) -> None:
-    """A put / poll on a raw address: the check reports it (every mailbox access of
-    a checked kernel names its region)."""
-    if _record is not None:
-        _record.unnamed.append((_stage(), kind))

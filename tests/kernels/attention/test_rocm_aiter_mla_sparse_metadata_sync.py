@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
@@ -25,12 +26,15 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
+from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
 
 class _FakeAiter(ModuleType):
     get_mla_metadata_v1: Mock
+    get_mla_metadata_info_v1: Mock
+    dtypes: SimpleNamespace
 
 
 @pytest.mark.parametrize("block_size", [16, 64, 128])
@@ -128,9 +132,15 @@ def test_rocm_index_conversion_respects_packed_valid_counts():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def _make_builder():
+def _cpu_token_to_req(metadata):
+    return torch.repeat_interleave(
+        torch.arange(metadata.num_reqs, dtype=torch.int32),
+        metadata.query_start_loc_cpu.diff(),
+    )
+
+
+def _make_builder(max_num_batched_tokens: int = 8):
     builder = object.__new__(sparse_mod.ROCMAiterMLASparseMetadataBuilder)
-    max_num_batched_tokens = 8
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
@@ -142,15 +152,10 @@ def _make_builder():
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
+    builder.use_shardq = False
     builder._prefill_backend = None
 
-    def cpu_token_to_req(metadata):
-        return torch.repeat_interleave(
-            torch.arange(metadata.num_reqs, dtype=torch.int32),
-            metadata.query_start_loc_cpu.diff(),
-        )
-
-    builder._build_req_id_per_token = cpu_token_to_req  # type: ignore[method-assign]
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
     )
@@ -219,7 +224,7 @@ def _make_mixed_common_metadata():
 
 
 def _patch_build_deps(monkeypatch, events=None):
-    """Stub the aiter kernel, triton helper and CUDA sync so ``build()`` runs
+    """Stub the aiter kernel, triton helper and CUDA sync so `build()` runs
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
@@ -276,6 +281,99 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.prefill is None
 
 
+def _construct_builder(monkeypatch, impl: SimpleNamespace, cache_dtype: str):
+    """Drive the real builder __init__ with a stubbed vllm_config and a fake
+    aiter module, so the production persistent-metadata selection runs."""
+    hf_text_config = SimpleNamespace(
+        index_topk=4,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=448,
+        qk_rope_head_dim=64,
+        v_head_dim=512,
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_text_config=hf_text_config,
+        max_model_len=64,
+        get_num_attention_heads=lambda parallel_config: 16,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=16),
+    )
+    # Real default configs for everything but the model and the layer.
+    defaults = VllmConfig()
+    defaults.cache_config.cache_dtype = cache_dtype
+    defaults.cache_config.block_size = 1
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=defaults.cache_config,
+        parallel_config=defaults.parallel_config,
+        scheduler_config=defaults.scheduler_config,
+        attention_config=defaults.attention_config,
+        speculative_config=None,
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layers.0": SimpleNamespace(impl=impl, prefill_backend=None)
+            }
+        ),
+    )
+    fake_aiter = _FakeAiter("aiter")
+    fake_aiter.dtypes = SimpleNamespace(
+        bf16=torch.bfloat16,
+        fp8=current_platform.fp8_dtype(),
+        d_dtypes={"fp8": torch.uint8, "bf16": torch.bfloat16},
+    )
+    fake_aiter.get_mla_metadata_info_v1 = Mock(
+        return_value=tuple((1, torch.int32) for _ in range(6))
+    )
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    return sparse_mod.ROCMAiterMLASparseMetadataBuilder(
+        SimpleNamespace(block_size=1),
+        ["layers.0"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("impl_kwargs", "expected"),
+    [
+        ({}, True),  # ordinary fp8 consumer: persistent metadata
+        ({"kv_cache_dtype": "fp8_ds_mla"}, False),  # Triton-only reader
+    ],
+)
+def test_persistent_metadata_selection_via_constructor(
+    monkeypatch, impl_kwargs, expected
+):
+    """fp8_ds_mla reads through aiter's Triton sparse_mla_fwd, which never
+    touches the persistent work metadata."""
+    fields = dict(sinks=None, use_aiter_sparse_mla=False, kv_cache_dtype="fp8")
+    fields.update(impl_kwargs)
+    impl = SimpleNamespace(**fields)
+    builder = _construct_builder(monkeypatch, impl, impl.kv_cache_dtype)
+    assert builder._use_persistent_metadata is expected
+
+
+def test_fp8_ds_mla_build_skips_persistent_planner_and_sync(monkeypatch):
+    """Constructor-selected fp8_ds_mla (Triton) reader: build() must not run
+    the persistent planner, its GPU->CPU seq-len copy, or the stream sync."""
+    impl = SimpleNamespace(
+        sinks=None, use_aiter_sparse_mla=False, kv_cache_dtype="fp8_ds_mla"
+    )
+    builder = _construct_builder(monkeypatch, impl, "fp8_ds_mla")
+    assert not builder._use_persistent_metadata
+    events: list[str] = []
+    fake_aiter = _patch_build_deps(monkeypatch, events)
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    fake_aiter.get_mla_metadata_v1.assert_not_called()
+    assert events == []
+    assert md.work_meta_data is None
+
+
 def test_build_fills_paged_kv_indptr_tail(monkeypatch):
     """Rows past num_tokens must read as empty: the tail repeats the total."""
     builder = _make_builder()
@@ -314,7 +412,8 @@ def test_sink_build_skips_persistent_metadata(monkeypatch):
     assert builder._prev_metadata_key is None
 
 
-def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
+def test_sparse_persistent_metadata_recomputes_without_host_sync(monkeypatch):
+    """The metadata kernel and its consumers share torch's current stream."""
     builder = _make_builder()
     common_metadata = _make_common_metadata()
     events: list[str] = []
@@ -341,7 +440,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
 
-    assert events == ["metadata", "sync"]
+    assert events == ["metadata"]
     assert fake_get_mla_metadata_v1_mock.call_count == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["max_split_per_batch"] == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["dtype_q"] == torch.bfloat16
@@ -355,13 +454,62 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
     assert fake_get_mla_metadata_v1_mock.call_count == 1
 
 
+@pytest.mark.parametrize("offset", [-1, 0])
+def test_build_skips_metadata_aiter_ignores(monkeypatch, offset):
+    """At AITER's gfx950 BF16 16-head batch gate, AITER drops persistent
+    metadata, so the builder must neither launch it nor read seq_lens."""
+    aiter_mla = pytest.importorskip("aiter.mla")
+    if not hasattr(aiter_mla, "_use_persistent_mla_decode"):
+        pytest.skip("AITER has no persistent MLA decode batch gate")
+    max_batch = aiter_mla._MLA_DECODE_PERSISTENT_MAX_BATCH_DEFAULT
+    monkeypatch.setattr(aiter_mla, "get_gfx", lambda: "gfx950")
+    monkeypatch.setattr(
+        aiter_mla, "_persistent_mla_decode_max_batch", lambda: max_batch
+    )
+    num_tokens = max_batch + offset
+    builder = _make_builder(max_num_batched_tokens=num_tokens)
+    builder.kv_cache_dtype = "auto"
+    fake_aiter = _patch_build_deps(monkeypatch)
+    host_reads: list[bool] = []
+
+    @contextlib.contextmanager
+    def record_host_read():
+        host_reads.append(True)
+        yield
+
+    monkeypatch.setattr(sparse_mod, "gpu_sync_allowed", record_host_read)
+    query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32)
+    seq_lens = torch.full((num_tokens,), 16, dtype=torch.int32)
+    common_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        num_reqs=num_tokens,
+        num_actual_tokens=num_tokens,
+        max_query_len=1,
+        max_seq_len=16,
+        block_table_tensor=torch.arange(num_tokens * 8, dtype=torch.int32).view(
+            num_tokens, 8
+        ),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int64),
+    )
+
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
+
+    uses_persistent = num_tokens < max_batch
+    assert fake_aiter.get_mla_metadata_v1.called == uses_persistent
+    assert bool(host_reads) == uses_persistent
+    assert (md.work_meta_data is not None) == uses_persistent
+
+
 def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     """Dense prefill must exclude prefill tokens from AITER sparse metadata.
 
     A mixed batch is routed as sparse MQA for its leading decode requests and
     dense MHA for its trailing short prefill requests.  The AITER metadata
     buffers therefore must describe only the decode subset; including prefill
-    tokens would mismatch the query passed to ``forward_mqa``.
+    tokens would mismatch the query passed to `forward_mqa`.
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
@@ -533,7 +681,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
 def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     """The sparse kernel inputs must have the same token extent as its query.
 
-    In a mixed dense-prefill batch, ``forward_mqa`` receives only decode query
+    In a mixed dense-prefill batch, `forward_mqa` receives only decode query
     tokens while some metadata buffers may represent the full batch.  This
     guards the slicing that prevents the index conversion from writing beyond
     the decode-sized output.
@@ -640,18 +788,24 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
     assert captured["token_indices"].shape == (2, 4)
 
 
+@pytest.mark.parametrize(
+    ("gfx942", "num_heads"), [(True, 128), (False, 32), (False, 64), (False, 128)]
+)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("length_relation", ["short", "long"])
 @pytest.mark.parametrize("workload", ["prefill", "mixed", "decode"])
 def test_sparse_metadata_workload_length_dtype_matrix(
-    monkeypatch, workload, length_relation, kv_cache_dtype
+    monkeypatch, workload, length_relation, kv_cache_dtype, gfx942, num_heads
 ):
     """Cover routing and persistent metadata across the ROCm support matrix.
 
     The matrix crosses pure prefill, mixed prefill/decode, and decode-only
     workloads with sequence lengths below/above top-k and BF16/FP8 KV cache.
+    Only gfx942 drops persistent metadata for long BF16 prefills (Triton).
     """
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
     builder = _make_builder()
+    builder._num_attention_heads = num_heads
     builder.vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
     )
@@ -738,7 +892,9 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     assert result.qo_indptr.numel() == expected_sparse_tokens + 1
     assert result.paged_kv_indptr.numel() == expected_sparse_tokens + 1
 
-    uses_fallback = workload == "prefill" and is_long and kv_cache_dtype == "auto"
+    uses_fallback = (
+        gfx942 and workload == "prefill" and is_long and kv_cache_dtype == "auto"
+    )
     if expected_sparse_tokens == 0 or uses_fallback:
         get_persistent_metadata.assert_not_called()
     else:

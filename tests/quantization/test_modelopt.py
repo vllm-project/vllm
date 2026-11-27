@@ -36,6 +36,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
     ModelOptFp8Config,
+    ModelOptInt8Config,
     ModelOptLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
@@ -197,9 +198,9 @@ def test_modelopt_mxfp8_routes_nvfp4_experts_to_compressed_tensors(monkeypatch):
 
 
 def test_per_token_nvfp4_moe_backends_match_the_experts_that_implement_it():
-    """``make_nvfp4_moe_kernel`` dispatches unquantized inputs for a per-token
-    scheme and only forwards ``per_token_activation`` to this set, so it has to
-    be exactly the experts that take that argument. ``_supports_quant_scheme``
+    """`make_nvfp4_moe_kernel` dispatches unquantized inputs for a per-token
+    scheme and only forwards `per_token_activation` to this set, so it has to
+    be exactly the experts that take that argument. `_supports_quant_scheme`
     cannot be used for the check: several NVFP4 backends match on the weight
     key alone and accept any activation key."""
     import inspect
@@ -311,6 +312,9 @@ def test_modelopt_linear_algos_table_matches_resolve():
     class _Cfg:
         group_size = 16
 
+        def layer_group_size(self, prefix):
+            return self.group_size
+
     for algo in LINEAR_ALGOS:
         spec, _, _ = resolve(algo, _Cfg(), "layer")
         assert spec.weight is not None, algo
@@ -323,6 +327,7 @@ def test_modelopt_linear_algos_table_matches_resolve():
     )
     assert algos_owned_by("modelopt_fp4") == ("NVFP4", "W4A16_NVFP4")
     assert algos_owned_by("modelopt_mxfp8") == ("MXFP8",)
+    assert algos_owned_by("modelopt_int8") == ("INT8_PB_WO",)
 
 
 @pytest.mark.parametrize("algo", list(LINEAR_ALGOS))
@@ -343,6 +348,7 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
                 "group_size": 16,
                 "quantized_layers": {
                     "model.layers.0.mlp.down_proj": {"quant_algo": algo}
+                    | ({"group_size": 32} if algo == "INT8_PB_WO" else {})
                 },
             }
         }
@@ -383,6 +389,103 @@ def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
     assert called_layer is layer
     assert fp8_config.weight_block_size == [128, 128]
     assert fp8_config.activation_scheme == "dynamic"
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "quantization"),
+    [
+        (ModelOptInt8Config, {"quant_algo": "INT8_PB_WO", "group_size": 32}),
+        (
+            ModelOptMixedPrecisionConfig,
+            {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.0.mlp.experts.0.down_proj": {
+                        "quant_algo": "INT8_PB_WO",
+                        "group_size": 32,
+                    }
+                },
+            },
+        ),
+    ],
+)
+def test_modelopt_int8_pb_wo_rejects_moe(config_cls, quantization):
+    """INT8_PB_WO is linear-only: routed experts must fail rather than load as
+    an unquantized or FP8 MoE."""
+    config = config_cls.from_config({"quantization": quantization})
+    with pytest.raises(NotImplementedError):
+        config.get_quant_method(
+            MagicMock(spec=RoutedExperts), "model.layers.0.mlp.experts"
+        )
+
+
+@pytest.mark.parametrize("mixed", [False, True], ids=["whole_model", "per_layer"])
+def test_modelopt_int8_pb_wo_requires_group_size(mixed):
+    """An INT8_PB_WO layer without a group_size must fail rather than load
+    with scales of a guessed shape."""
+    from vllm.model_executor.layers.linear import LinearBase
+
+    prefix = "model.layers.0.mlp.down_proj"
+    layer = {"quant_algo": "INT8_PB_WO"}
+    with pytest.raises(ValueError):
+        if mixed:
+            quantization = {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {prefix: layer},
+            }
+            config = ModelOptMixedPrecisionConfig.from_config(
+                {"quantization": quantization}
+            )
+            config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+        else:
+            ModelOptInt8Config.from_config({"quantization": layer})
+
+
+@pytest.mark.parametrize(
+    ("config_file", "quant_config", "expected"),
+    [
+        (
+            "config.json",
+            {"quant_method": "modelopt", "quant_algo": "INT8_PB_WO", "group_size": 32},
+            ModelOptInt8Config,
+        ),
+        (
+            "hf_quant_config.json",
+            {
+                "producer": {"name": "modelopt"},
+                "quantization": {"quant_algo": "INT8_PB_WO", "group_size": 32},
+            },
+            ModelOptInt8Config,
+        ),
+        (
+            "config.json",
+            {"quant_method": "modelopt", "quant_algo": "FP8"},
+            ModelOptFp8Config,
+        ),
+    ],
+    ids=["int8_config_json", "int8_hf_quant_config", "fp8_config_json"],
+)
+def test_modelopt_int8_pb_wo_routes_to_its_config(
+    tmp_path, config_file, quant_config, expected
+):
+    """An INT8_PB_WO checkpoint declares quant_method "modelopt" (or only has a
+    legacy hf_quant_config.json) and must land on ModelOptInt8Config, while FP8
+    stays on ModelOptFp8Config."""
+    from transformers import LlamaConfig
+
+    hf_config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
+    if config_file == "config.json":
+        hf_config.quantization_config = quant_config
+    hf_config.save_pretrained(tmp_path)
+    if config_file == "hf_quant_config.json":
+        (tmp_path / config_file).write_text(json.dumps(quant_config))
+
+    model_config = ModelConfig(
+        str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+    )
+    config = get_quant_config(model_config, LoadConfig())
+    assert isinstance(config, expected)
+    assert model_config.quantization == config.get_name()
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
@@ -731,6 +834,128 @@ def _pack_fp8_weight(weights: dict[str, torch.Tensor], name: str, algorithm: str
         weights[f"{name}.input_scale"] = torch.tensor(1.0 / 448)
 
 
+def _pack_int8_pb_wo_weight(
+    weights: dict[str, torch.Tensor],
+    reference: dict[str, torch.Tensor],
+    name: str,
+    group_size: int,
+    dtype: torch.dtype,
+):
+    """Store `name` as ModelOpt INT8_PB_WO in `weights` and the `dtype`
+    weight the kernels dequantize it to in `reference`."""
+    value = weights[f"{name}.weight"].float()
+    groups = value.reshape(value.shape[0], -1, group_size)
+    scale = groups.abs().amax(dim=-1) / 127
+    q = (groups / scale[..., None]).round().clamp(-128, 127).to(torch.int8)
+    weights[f"{name}.weight"] = q.reshape(value.shape)
+    weights[f"{name}.weight_scale"] = scale
+    reference[f"{name}.weight"] = (q.to(dtype) * scale.to(dtype)[..., None]).reshape(
+        value.shape
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="WNA16 kernels are CUDA")
+@pytest.mark.parametrize(
+    ("quant_algo", "dtype"),
+    [
+        ("INT8_PB_WO", "float16"),
+        ("MIXED_PRECISION", "bfloat16"),
+    ],
+)
+def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype):
+    """INT8_PB_WO layers (group 16 and 32, fused or not) next to FP8 and
+    unquantized layers match the checkpoint holding their dequantized weights."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from vllm import SamplingParams
+
+    config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = LlamaForCausalLM(config).to(torch.bfloat16)
+        prompt = torch.randint(config.vocab_size, (48,)).tolist()
+    attn, mlp = "model.layers.0.self_attn", "model.layers.0.mlp"
+    weights = model.state_dict()
+    if quant_algo == "INT8_PB_WO":
+        group_sizes = dict.fromkeys(
+            (
+                name.removesuffix(".weight")
+                for name in weights
+                if name.endswith("_proj.weight")
+            ),
+            32,
+        )
+        quantization: dict[str, Any] = {"quant_algo": "INT8_PB_WO", "group_size": 32}
+        reference_quantization: dict[str, Any] | None = None
+    else:
+        # q/k/v and lm_head stay unquantized.
+        group_sizes = {
+            f"{mlp}.gate_proj": 16,
+            f"{mlp}.up_proj": 16,
+            f"{mlp}.down_proj": 32,
+        }
+        fp8_layers = {f"{attn}.o_proj": {"quant_algo": "FP8"}}
+        _pack_fp8_weight(weights, f"{attn}.o_proj", "FP8")
+        quantization = {
+            "quant_algo": "MIXED_PRECISION",
+            "quantized_layers": {
+                **fp8_layers,
+                **{
+                    name: {"quant_algo": "INT8_PB_WO", "group_size": group_size}
+                    for name, group_size in group_sizes.items()
+                },
+            },
+        }
+        reference_quantization = {
+            "quant_algo": "MIXED_PRECISION",
+            "quantized_layers": fp8_layers,
+        }
+    reference = dict(weights)
+    for name, group_size in group_sizes.items():
+        _pack_int8_pb_wo_weight(
+            weights, reference, name, group_size, getattr(torch, dtype)
+        )
+
+    params = SamplingParams(max_tokens=1, prompt_logprobs=0)
+    logprobs = []
+    for name, state_dict, quant in (
+        ("int8", weights, quantization),
+        ("reference", reference, reference_quantization),
+    ):
+        model_path = tmp_path / name
+        model.config.__dict__.pop("quantization_config", None)
+        if quant is not None:
+            model.config.quantization_config = {
+                "quant_method": "modelopt",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": ["lm_head"],
+                **quant,
+            }
+        model.save_pretrained(model_path, state_dict=state_dict)
+        with vllm_runner(
+            str(model_path),
+            dtype=dtype,
+            skip_tokenizer_init=True,
+            trust_remote_code=False,
+            enforce_eager=True,
+            enable_flashinfer_autotune=False,
+            max_model_len=64,
+            max_num_seqs=1,
+            kv_cache_memory_bytes=16 << 20,
+        ) as llm:
+            output = llm.llm.generate([{"prompt_token_ids": prompt}], params)[0]
+        assert output.prompt_logprobs is not None
+        logprobs.append(
+            torch.tensor(
+                [
+                    position[token].logprob
+                    for position, token in zip(output.prompt_logprobs[1:], prompt[1:])
+                ]
+            )
+        )
+    torch.testing.assert_close(logprobs[0], logprobs[1], rtol=0, atol=0.02)
+
+
 def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
     """Native and flattened ModelOpt metadata load the same FP8/BF16 weights."""
     from transformers import LlamaConfig, LlamaForCausalLM
@@ -810,7 +1035,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
     from vllm import SamplingParams
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     target, draft = tmp_path / "target", tmp_path / "draft"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
@@ -935,7 +1159,7 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
 )
 def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
@@ -985,7 +1209,7 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_i
 )
 def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
@@ -1029,9 +1253,9 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
-    """``quant_method="NVFP4"`` (W4A4) resolves to a
-    ``(kNvfp4Static, kNvfp4Dynamic)`` QuantSpec under the generic
-    ``ModelOptLinearMethod``."""
+    """`quant_method="NVFP4"` (W4A4) resolves to a
+    `(kNvfp4Static, kNvfp4Dynamic)` QuantSpec under the generic
+    `ModelOptLinearMethod`."""
     from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
@@ -1051,11 +1275,11 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` resolves to a weight-only QuantSpec
-    (``activation=None``) — distinct from the W4A4 sibling.
+    """`quant_method="W4A16_NVFP4"` resolves to a weight-only QuantSpec
+    (`activation=None`) — distinct from the W4A4 sibling.
 
     A regression here would mean a W4A16 NVFP4 checkpoint silently loaded
-    with a dynamic fp4 activation key, registering an ``input_scale`` and
+    with a dynamic fp4 activation key, registering an `input_scale` and
     routing to the cutlass W4A4 NVFP4 GEMM instead of FP4 Marlin.
     """
     from vllm.model_executor.layers.linear import LinearBase
@@ -1078,9 +1302,9 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
 
 def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     """The bespoke-method escape hatch: a format registered in
-    ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
-    generic ``ModelOptLinearMethod``. This is how a format that cannot be a
-    ``(weight, activation)`` key pair plugs into dispatch."""
+    `LINEAR_METHOD_BUILDERS` routes that algo to its own method instead of the
+    generic `ModelOptLinearMethod`. This is how a format that cannot be a
+    `(weight, activation)` key pair plugs into dispatch."""
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
@@ -1110,9 +1334,9 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
-    """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` follows platform priorities, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``."""
+    """W4A16 (`activation=None`) kernel selection honors `--linear-backend`:
+    `use_a16=True` follows platform priorities, but an explicit backend wins. The
+    generic method routes this through `select_linear_kernel`."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
@@ -1156,12 +1380,12 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
 def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     quant_method, expected_use_a16, act_key_is_none
 ):
-    """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
-    ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
-    ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
-    (their ``_supports_quant_scheme`` requires
-    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin survives because
-    it only checks ``weight_key``. A regression here would mean a W4A16
+    """`ModelOptNvFp4FusedMoE`: when the ckpt's `quant_method` is
+    `W4A16_NVFP4`, the MoE class must pass `activation_key=None` to
+    `select_nvfp4_moe_backend`. That filters out every W4A4 backend
+    (their `_supports_quant_scheme` requires
+    `(kNvfp4Static, kNvfp4Dynamic)` exactly); Marlin survives because
+    it only checks `weight_key`. A regression here would mean a W4A16
     ckpt silently went to the cutlass W4A4 path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -1284,11 +1508,11 @@ def test_modelopt_nvfp4_moe_validates_activation_override(
 def test_modelopt_mixed_precision_dispatches_linear_layer(
     per_layer_algo, expected_weight, expected_activation
 ):
-    """``ModelOptMixedPrecisionConfig.get_quant_method`` routes a Linear layer
-    to the generic ``ModelOptLinearMethod`` with the ``QuantSpec`` resolved
-    from its per-layer ``quant_algo`` entry in ``quantized_layers``. A
-    regression here would mean a layer got the wrong ``(weight, activation)``
-    key pair or fell through to ``UnquantizedLinearMethod`` — e.g. a W4A16
+    """`ModelOptMixedPrecisionConfig.get_quant_method` routes a Linear layer
+    to the generic `ModelOptLinearMethod` with the `QuantSpec` resolved
+    from its per-layer `quant_algo` entry in `quantized_layers`. A
+    regression here would mean a layer got the wrong `(weight, activation)`
+    key pair or fell through to `UnquantizedLinearMethod` — e.g. a W4A16
     layer picking up a dynamic fp4 activation key (cutlass W4A4 path) instead
     of the weight-only Marlin path.
     """
@@ -1317,9 +1541,9 @@ def test_modelopt_mixed_precision_dispatches_linear_layer(
 
 
 def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
-    """Sanity: ``ModelOptMixedPrecisionConfig._from_config`` builds **two**
+    """Sanity: `ModelOptMixedPrecisionConfig._from_config` builds **two**
     NVFP4 sub-configs — one for W4A4 (default) and one tagged
-    ``quant_method='W4A16_NVFP4'`` — so per-layer dispatch can hand
+    `quant_method='W4A16_NVFP4'` — so per-layer dispatch can hand
     Marlin-bound layers the right config without re-instantiating it on
     every call.
     """
@@ -1375,7 +1599,6 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     method.wkey = mo.SCHEME_FOR[kFp8Static128BlockSym]
     method.akey = mo.SCHEME_FOR[kFp8Dynamic128Sym]
     method.input_dtype = method.out_dtype = torch.bfloat16
-    method.marlin_input_dtype = None
 
     layer = torch.nn.Module()
     with (

@@ -416,6 +416,44 @@ async def test_named_tool_use(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_response_format_with_thinking_disabled(
+    client: openai.AsyncOpenAI, stream: bool
+):
+    """With thinking disabled the chat template closes reasoning in the prompt,
+    so the response format holds from the first generated token."""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "legs": {"type": "integer"}},
+        "required": ["name", "legs"],
+    }
+    kwargs = dict(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Describe a cat."}],
+        max_completion_tokens=200,
+        temperature=0.0,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "animal", "schema": schema},
+        },
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    if stream:
+        chunks = await client.chat.completions.create(**kwargs, stream=True)
+        content = "".join(
+            [
+                chunk.choices[0].delta.content or ""
+                async for chunk in chunks
+                if chunk.choices
+            ]
+        )
+    else:
+        response = await client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
+    jsonschema.validate(instance=json.loads(content), schema=schema)
+
+
+@pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(
     client: openai.AsyncOpenAI, sample_json_schema
 ):

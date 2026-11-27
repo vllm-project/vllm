@@ -28,6 +28,8 @@ from vllm.triton_utils import LOG2E, tl, triton
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
 
+LOG2E = tl.constexpr(LOG2E)
+
 
 @triton.jit
 def _deepencoder_rel_pos_attention_kernel(
@@ -209,8 +211,8 @@ class MLPBlock(nn.Module):
         return self.lin2(self.act(self.lin1(x)))
 
 
-# From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
-# Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
+# From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py
+# Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119
 class LayerNorm2d(nn.Module):
     def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -644,7 +646,7 @@ def add_decomposed_rel_pos(
     q_size: tuple[int, int],
     k_size: tuple[int, int],
 ) -> torch.Tensor:
-    """Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
+    """Calculate decomposed Relative Positional Embeddings from MViTv2.
     https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py
     Args:
         q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).

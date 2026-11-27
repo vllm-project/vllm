@@ -8,7 +8,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-from vllm._custom_ops import cpu_gemm_wna16  # noqa: E402
+from vllm._cpu_ops import cpu_gemm_wna16  # noqa: E402
 from vllm.model_executor.kernels.linear.mixed_precision.cpu import (  # noqa: E402
     _get_isa_hint,
 )
@@ -53,7 +53,7 @@ def test_cpu_gemm_wna16_3d_input():
 
 
 MODELS = [
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
+    "vllm-project/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
     "RedHatAI/Qwen3-1.7B-quantized.w4a16",  # with zp
     "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",

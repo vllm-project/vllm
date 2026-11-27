@@ -292,7 +292,7 @@ class BailingMoeV3VLForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
 ):
-    """Native vLLM wrapper for ``BailingMoeV3VLConfig`` checkpoints."""
+    """Native vLLM wrapper for `BailingMoeV3VLConfig` checkpoints."""
 
     packed_modules_mapping = {
         **BailingMoeV3ForCausalLM.packed_modules_mapping,

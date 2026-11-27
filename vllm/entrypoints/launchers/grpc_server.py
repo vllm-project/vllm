@@ -103,7 +103,7 @@ class _InflightRpcs(grpc.aio.ServerInterceptor):
 async def _wait_for_requests(
     rpcs: asyncio.Future, async_llm: AsyncLLM, inflight: _InflightRpcs
 ) -> None:
-    """Return once ``rpcs`` is done or nothing can still send EngineCore a request.
+    """Return once `rpcs` is done or nothing can still send EngineCore a request.
 
     EngineCore rejects every request it reads once its shutdown has started,
     even one an RPC forwarded before SIGTERM, so it must keep running while
@@ -123,16 +123,16 @@ async def _wait_for_requests(
 async def _drain_and_stop(
     server, async_llm: AsyncLLM, shutdown_timeout: int, inflight: _InflightRpcs
 ) -> None:
-    """Stop the gRPC server and AsyncLLM within ``--shutdown-timeout``.
+    """Stop the gRPC server and AsyncLLM within `--shutdown-timeout`.
 
-    0 keeps the abort behavior: in-flight RPCs get ``_RPC_GRACE_S``, then
+    0 keeps the abort behavior: in-flight RPCs get `_RPC_GRACE_S`, then
     EngineCore gets its default join. Otherwise the server refuses new RPCs at
-    once and EngineCore keeps serving until the in-flight RPCs (``inflight``)
+    once and EngineCore keeps serving until the in-flight RPCs (`inflight`)
     and their requests are done; RPCs still running at the deadline
-    (``--shutdown-timeout``, but no less than ``_RPC_GRACE_S``) are cancelled
+    (`--shutdown-timeout`, but no less than `_RPC_GRACE_S`) are cancelled
     and abort their requests. EngineCore then drains work that outlives an
     RPC, such as NIXL prefill blocks the decode side has not read yet, until
-    the same deadline plus ``_ENGINE_TEARDOWN_S`` for teardown.
+    the same deadline plus `_ENGINE_TEARDOWN_S` for teardown.
     """
     loop = asyncio.get_running_loop()
     if shutdown_timeout == 0:

@@ -39,9 +39,15 @@ struct CandidateChunk {
 namespace dosa_geometry {
 constexpr int Heads = DOSA_SCORE_HEADS;
 static_assert(Heads == 32 || Heads == 64, "DoSA supports H32 or H64");
+constexpr int NativeDenseBudget = 24;
+constexpr int NativeDenseStatus = 1 << 12;
 __host__ __device__ constexpr bool valid_certificate_budget(int budget) {
   return budget == 14 || budget == 16 || budget == 20 ||
          (Heads == 64 && budget == 28);
+}
+__device__ __forceinline__ bool native_dense_route(int budget, const int* status) {
+  return Heads == 32 && budget == NativeDenseBudget &&
+         ((status[0] & status[1] & status[2] & status[3]) & NativeDenseStatus);
 }
 using HeadMask = std::conditional_t<Heads == 32, int32_t, int64_t>;
 using UnsignedHeadMask = std::make_unsigned_t<HeadMask>;
@@ -242,11 +248,32 @@ __device__ __forceinline__ uint32_t encode(float score) {
 
 }  // namespace record5
 
+namespace record12 {
+// Rank zero groups scores above the represented window. Selection can
+// include the whole bucket when it fits in TopK.
+__device__ __forceinline__ uint32_t pack_word(uint32_t witness, uint32_t score,
+                                             uint32_t id) {
+  const uint32_t delta = witness - score;
+  const uint32_t rank = delta < 4095 ? 4095 - delta : 0;
+  return (rank << 20) | (id & 0xFFFFFu);
+}
+}  // namespace record12
+
 namespace dosa_screen {
 using certicascade_streaming_exact::fp8_map;
 using certicascade_streaming_exact::make_map;
 using certicascade_streaming_exact::scale_row_stride;
 using Barrier = cutlass::arch::ClusterTransactionBarrier;
+// A positive normal E4M3 exponent and mantissa occupy the same bit
+// positions after the FP32 bias is added. Preserve subnormal and NaN decoding.
+__device__ __forceinline__ float decode_rho(uint32_t code) {
+  if constexpr (dosa_geometry::Heads == 32) {
+    if (code - 8u < 119u) return __uint_as_float((code << 20) + 0x3c000000u);
+  }
+  const __half_raw half =
+      __nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(code), __NV_E4M3);
+  return __half2float(static_cast<__half>(half));
+}
 struct BitmapArgs {
   unsigned* words;
   int word_count;
@@ -257,9 +284,11 @@ struct Param {
 };
 struct Args {
   const float *fine_scale, *meta, *raw, *out, *tau;
-  const int *hint, *starts, *ends, *budget;
+  const int *hint, *starts, *ends;
+  int* budget;
   int *ids, *counts, *error, *members;
   int nq, nk, seed;
+  bool pitched_plan;
 };
 
 template <int Width, bool Trusted>
@@ -310,7 +339,7 @@ __device__ __forceinline__ void initialize_screen(Storage& s, int warp,
   __syncthreads();
 }
 
-template <int Tile, class Storage>
+template <int Tile, bool Uniform, class Storage>
 __device__ __forceinline__ void produce_keys(Storage& s,
                                              const cute::TmaDescriptor& keys,
                                              const cute::TmaDescriptor& scales,
@@ -323,11 +352,13 @@ __device__ __forceinline__ void produce_keys(Storage& s,
     const int offset = seed + (first + block) * Tile;
     deep_gemm::tma::copy<128, Tile, 128>(&keys, &s.full_kv[slot], s.raw_k[slot],
                                          0, offset);
-    deep_gemm::tma::copy<Tile, 1, 0>(&scales, &s.full_kv[slot],
-                                     s.raw_scale[slot], offset, 0);
-    deep_gemm::tma::copy<Tile, 1, 0>(&rho, &s.full_kv[slot], s.raw_rho[slot],
-                                     offset, 0);
-    s.full_kv[slot].arrive_and_expect_tx(Tile * 128 + 2 * Tile * 4);
+    if constexpr (!Uniform) {
+      deep_gemm::tma::copy<Tile, 1, 0>(&scales, &s.full_kv[slot],
+                                       s.raw_scale[slot], offset, 0);
+      deep_gemm::tma::copy<Tile, 1, 0>(&rho, &s.full_kv[slot], s.raw_rho[slot],
+                                       offset, 0);
+    }
+    s.full_kv[slot].arrive_and_expect_tx(Tile * (Uniform ? 128 : 136));
   }
 }
 
@@ -373,6 +404,7 @@ inline std::pair<dosa_screen::Args, dosa_screen::BitmapArgs> bind(
   a.nq = nq;
   a.nk = nk;
   a.seed = seed;
+  a.pitched_plan = x[5].stride(0) != x[5].size(1) * 128;
   a.error = error.mutable_data_ptr<int>();
 
   dosa_screen::BitmapArgs pg{};

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The draft model must honour ``moe_backend`` from --speculative-config.
+"""The draft model must honour `moe_backend` from --speculative-config.
 
 The draft is loaded with the target's VllmConfig, so without an explicit
 override it inherits the target's --moe-backend. An MTP head on a quantized

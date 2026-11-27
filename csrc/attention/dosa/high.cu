@@ -3,12 +3,14 @@
 namespace DOSA_NAMESPACE {
 namespace f2_h22_late {
 using namespace dosa_screen;
+enum class Range { Stock, Cold, Uniform };
 constexpr int kHighPaid = dosa_geometry::Heads == 64 ? 28 : 20;
 constexpr int kScanHeads = kHighPaid + 2;
 constexpr int kWeightPairs = kHighPaid / 2;
 constexpr int kWeightWords = 4 * kWeightPairs;
 constexpr int kRecordWords = kWeightWords + 24;
 constexpr int kTileColumns = 4 * kScanHeads;
+constexpr bool kSharedCutoffs = dosa_geometry::Heads == 32;
 // Packed-domain failures use raw recovery only with independent SAFE admission;
 // all other failures use exhaustive native-MX recovery.
 constexpr int kPackedDomainError = 2048;
@@ -31,7 +33,8 @@ __global__ void prepare_kernel(const __grid_constant__ Args a, uint32_t* record,
   }
 
   if (old_budget != kHighPaid) {
-    if (t < 4 && !dosa_geometry::valid_certificate_budget(old_budget))
+    if (t < 4 && !dosa_geometry::valid_certificate_budget(old_budget) &&
+        !dosa_geometry::native_dense_route(old_budget, a.error + group * 4))
       atomicOr(a.error + group * 4 + t, 1);
     return;  // Uniform, before any inactive plan read.
   }
@@ -153,6 +156,7 @@ __device__ float addition_boundary(float tau, float offset) {
 }
 // Stream across query boundaries, keeping only one pair of accumulation
 // chains live. The four original per-head RN chains remain in the same order.
+template <bool Uniform>
 struct QuadFold {
   PackedStorage& s;
   const uint32_t (&dd)[2], (&span)[4];
@@ -190,11 +194,22 @@ struct QuadFold {
         const float2 total = __fadd2_rn(sum0, sum1);
         const float paid = __fmul_rn(__fadd_rn(total.x, total.y), 0.5f);
         const float signed_score = __fadd_rn(paid, -fmaxf(neg, 0.f));
-        const float tail =
-            __fadd_rn(__fadd_rn(signed_score, raw), __fmul_rn(rho, guard[q]));
-        const float u = __fmul_rn(scale, tail);
-        const bool admitted = scale > 0.f && scale <= 0x1p64f;
-        mask |= delta < span[q] && (!admitted || !(u < tau[q])) ? 1u << q : 0u;
+        if constexpr (Uniform) {
+          const float cutoff =
+              kSharedCutoffs && q < 2
+                  ? __uint_as_float(deep_gemm::ptx::ld_shared(
+                        s.record + kWeightWords + 17 + q))
+                  : tau[q];
+          // The uniform bands lie entirely in the owner's common prefix.
+          const bool visible = dosa_geometry::Heads == 32 || delta < span[q];
+          mask |= visible && !(signed_score <= cutoff) ? 1u << q : 0u;
+        } else {
+          const float tail =
+              __fadd_rn(__fadd_rn(signed_score, raw), __fmul_rn(rho, guard[q]));
+          const float u = __fmul_rn(scale, tail);
+          const bool admitted = scale > 0.f && scale <= 0x1p64f;
+          mask |= delta < span[q] && (!admitted || !(u < tau[q])) ? 1u << q : 0u;
+        }
       }
     }
   }
@@ -227,6 +242,7 @@ struct QuadFold {
     return mask;
   }
 };
+template <Range Window>
 __global__ __launch_bounds__(384, 2) void packed_kernel(
     const __grid_constant__ Args a,
     const __grid_constant__ cute::TmaDescriptor mq,
@@ -235,7 +251,8 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
     const __grid_constant__ cute::TmaDescriptor ms,
     const __grid_constant__ cute::TmaDescriptor mr,
     const __grid_constant__ BitmapArgs page, const uint32_t* records,
-    const int32_t* live_nk) {
+    const int32_t* live_nk, const int32_t* first_tile,
+    const float* cutoff) {
   int t = threadIdx.x, g = blockIdx.x, warp = t / 32, lane = t & 31;
   const int logical_nk = __ldg(live_nk);
   if (logical_nk < a.seed || logical_nk > a.nk) {
@@ -250,12 +267,31 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
     return;
   }
   if (logical_nk == a.seed) return;
+  constexpr bool Uniform = Window == Range::Uniform;
+  const int total = (logical_nk - a.seed + 255) / 256;
+  int begin_window = 0;
+  if constexpr (Window != Range::Stock) {
+    begin_window = __ldg(first_tile);
+    if (begin_window < 0 || begin_window > total) {
+      if (blockIdx.y == 0 && t < 4) atomicOr(a.error + 4 * g + t, 1);
+      return;
+    }
+  }
+  int part = int(blockIdx.y) & 7;
+  int width = total - begin_window;
+  int first = begin_window + width * part / 8;
+  int stop = begin_window + width * (part + 1) / 8;
+  int blocks = stop - first;
+  if constexpr (Window != Range::Stock) {
+    if (blocks == 0) return;
+  }
   extern __shared__ __align__(1024) uint8_t memory[];
   auto& s = *reinterpret_cast<PackedStorage*>(memory);
-  initialize_screen<8, 256, 256, 128>(s, warp, mq, mp, mk, ms, mr);
-  int total = (logical_nk - a.seed + 255) / 256,
-      first = total * int(blockIdx.y) / 8,
-      stop = total * int(blockIdx.y + 1) / 8, blocks = stop - first;
+  if constexpr (Uniform) {
+    initialize_screen<8, 256, 256, 128>(s, warp, mq, mp, mk);
+  } else {
+    initialize_screen<8, 256, 256, 128>(s, warp, mq, mp, mk, ms, mr);
+  }
   if (warp >= 8) cutlass::arch::warpgroup_reg_dealloc<40>();
   if (warp == 8) {
     if (cute::elect_one_sync()) {
@@ -263,7 +299,7 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
                                                    g * kTileColumns);
       deep_gemm::tma::copy<kRecordWords, 1, 0>(&mp, &s.full_q, s.record, 0, g);
       s.full_q.arrive_and_expect_tx(kTileColumns * 128 + kRecordWords * 4);
-      produce_keys<256>(s, mk, ms, mr, a.seed, first, blocks);
+      produce_keys<256, Uniform>(s, mk, ms, mr, a.seed, first, blocks);
     }
   } else if (warp == 9 || warp == 10) {
     int wg = warp - 9;
@@ -291,11 +327,18 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
       uint32_t bits = deep_gemm::ptx::ld_shared(s.record + i);
       s.decoded_weights[i] = make_uint2(bits << 16, bits & 0xffff0000u);
     }
-    if (lane < 4) {
-      const float tau = __uint_as_float(s.record[kWeightWords + 8 + lane]);
-      const float out = __uint_as_float(s.record[kWeightWords + 3]);
-      s.record[kWeightWords + 17 + lane] =
-          __float_as_uint(addition_boundary(tau, out));
+    if constexpr (Uniform && kSharedCutoffs) {
+      // Broadcasting the first two cutoffs avoids spilling them in the fold.
+      if (lane < 2)
+        s.record[kWeightWords + 17 + lane] =
+            __float_as_uint(__ldg(cutoff + 4 * int64_t(g) + lane));
+    } else if constexpr (!Uniform) {
+      if (lane < 4) {
+        const float tau = __uint_as_float(s.record[kWeightWords + 8 + lane]);
+        const float out = __uint_as_float(s.record[kWeightWords + 3]);
+        s.record[kWeightWords + 17 + lane] =
+            __float_as_uint(addition_boundary(tau, out));
+      }
     }
     __syncwarp();
     if (cute::elect_one_sync()) s.full_coeff.arrive();
@@ -322,13 +365,19 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
     }
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      tau[i] = __uint_as_float(
-          deep_gemm::ptx::ld_shared(s.record + kWeightWords + 17 + i));
-      guard[i] = __uint_as_float(
-          deep_gemm::ptx::ld_shared(s.record + kWeightWords + 12 + i));
+      if constexpr (Uniform) {
+        if (!kSharedCutoffs || i >= 2)
+          tau[i] = __ldg(cutoff + 4 * int64_t(g) + i);
+        guard[i] = 0.0f;
+      } else {
+        tau[i] = __uint_as_float(
+            deep_gemm::ptx::ld_shared(s.record + kWeightWords + 17 + i));
+        guard[i] = __uint_as_float(
+            deep_gemm::ptx::ld_shared(s.record + kWeightWords + 12 + i));
+      }
     }
-    float raw =
-        __uint_as_float(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 2));
+    float raw = Uniform ? 0.0f
+        : __uint_as_float(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 2));
     int start = int(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 4)),
         end_base = int(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 5));
     uint32_t visible_span[4];
@@ -343,18 +392,18 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
     for (int block = 0; block < blocks; ++block) {
       int stage = block % 2, phase = (block / 2) & 1, up = block & 1;
       s.full_kv[stage].wait(phase);
-      float scale = deep_gemm::ptx::ld_shared(&s.raw_scale[stage][t]);
-      uint32_t code = deep_gemm::ptx::ld_shared(&s.raw_rho[stage][t]) & 255u;
+      float scale = Uniform ? 0.0f
+          : deep_gemm::ptx::ld_shared(&s.raw_scale[stage][t]);
+      uint32_t code = Uniform ? 0u
+          : deep_gemm::ptx::ld_shared(&s.raw_rho[stage][t]) & 255u;
       s.full_umma[wg].wait(up);
       deep_gemm::ptx::tcgen05_after_thread_sync();
       s.empty_kv[stage].arrive();
-      __half_raw half = __nv_cvt_fp8_to_halfraw(
-          static_cast<__nv_fp8_storage_t>(code), __NV_E4M3);
-      float rho = __half2float(static_cast<__half>(half));
+      float rho = Uniform ? 0.0f : decode_rho(code);
       int key = a.seed + (first + block) * 256 + t;
       const uint32_t key_delta = uint32_t(key) - uint32_t(start);
-      QuadFold fold{s,   dd,    visible_span, tau,      guard,
-                    raw, scale, rho,          key_delta};
+      QuadFold<Uniform> fold{s, dd, visible_span, tau, guard,
+                             raw, scale, rho, key_delta};
       const uint32_t m = fold.run(math_tmem_base, wg);
       int word = (first + block) * 8 + warp;
       unsigned value = 0;
@@ -383,8 +432,10 @@ void prepare_live(std::vector<Tensor> x, Tensor error, Tensor record,
       admitted.mutable_data_ptr<int>(), page,
       live_nk.mutable_data_ptr<int32_t>());
 }
-void emit_fast_live(std::vector<Tensor> x, Tensor error, int64_t seed,
-                    Tensor words, Tensor record, Tensor live_nk) {
+template <f2_h22_late::Range Window>
+void emit_window(const std::vector<Tensor>& x, Tensor error, int64_t seed,
+                 Tensor words, Tensor record, Tensor live_nk,
+                 const int32_t* first_tile, const float* cutoff) {
   auto [a, pg] = dosa_emit_host::bind(x, error, seed, words);
   DeviceGuard guard(x[0].get_device_index());
   auto maps = dosa_emit_host::key_maps(x, 256);
@@ -394,10 +445,31 @@ void emit_fast_live(std::vector<Tensor> x, Tensor error, int64_t seed,
       {f2_h22_late::kRecordWords, (cuuint64_t)a.nq / 4},
       {f2_h22_late::kRecordWords * 4}, {f2_h22_late::kRecordWords, 1},
       CU_TENSOR_MAP_SWIZZLE_NONE);
-  launch<f2_h22_late::packed_kernel, 384, sizeof(f2_h22_late::PackedStorage),
+  launch<f2_h22_late::packed_kernel<Window>, 384, sizeof(f2_h22_late::PackedStorage),
          true>(dim3(a.nq / 4, 8), a, mq, mp, maps.keys, maps.scales, maps.rho,
                pg, reinterpret_cast<uint32_t*>(record.mutable_data_ptr<int>()),
-               live_nk.mutable_data_ptr<int32_t>());
+               live_nk.mutable_data_ptr<int32_t>(), first_tile, cutoff);
+}
+
+void emit_fast_live(std::vector<Tensor> x, Tensor error, int64_t seed,
+                    Tensor words, Tensor record, Tensor live_nk) {
+  emit_window<f2_h22_late::Range::Stock>(
+      x, error, seed, words, record, live_nk, nullptr, nullptr);
+}
+
+void emit_cold(std::vector<Tensor> x, Tensor error, int64_t seed, Tensor words,
+               Tensor record, Tensor live_nk, Tensor first_tile) {
+  emit_window<f2_h22_late::Range::Cold>(
+      x, error, seed, words, record, live_nk, first_tile.const_data_ptr<int32_t>(),
+      nullptr);
+}
+
+void emit_uniform(std::vector<Tensor> x, Tensor error, int64_t seed,
+                         Tensor words, Tensor record, Tensor live_nk,
+                         Tensor first_tile, Tensor cutoff) {
+  emit_window<f2_h22_late::Range::Uniform>(
+      x, error, seed, words, record, live_nk, first_tile.const_data_ptr<int32_t>(),
+      cutoff.const_data_ptr<float>());
 }
 }  // namespace f2_h22_late_host
 
@@ -416,3 +488,12 @@ DOSA_REGISTER("emit_fp16_candidates_live_k",
               "(Tensor[] x, Tensor! error, int seed, Tensor! words, Tensor "
               "record, Tensor live_nk) -> ()",
               CUDA, f2_h22_late_host::emit_fast_live)
+
+DOSA_REGISTER("emit_fp16_cold_candidates_live_k",
+              "(Tensor[] x, Tensor! error, int seed, Tensor! words, Tensor "
+              "record, Tensor live_nk, Tensor first_tile) -> ()",
+              CUDA, f2_h22_late_host::emit_cold)
+DOSA_REGISTER("emit_fp16_uniform_candidates_live_k",
+              "(Tensor[] x, Tensor! error, int seed, Tensor! words, Tensor "
+              "record, Tensor live_nk, Tensor first_tile, Tensor cutoff) -> ()",
+              CUDA, f2_h22_late_host::emit_uniform)

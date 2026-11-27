@@ -18,11 +18,12 @@ __host__ __device__ constexpr double gn(int n, double u) {
 }
 constexpr double DOTG = gn(128, 0x1p-23);
 constexpr double SCREENG = (1 + DOTG) * (1 + gn(32, 0x1p-24)) - 1;
-// Original-head chain position: conversion, remaining FMAs, then two adds.
-__device__ double native_chain_gain(int position) {
+// BF16: conversion, remaining FMAs and two adds. FP32: remaining FMAs,
+// two adds and the final half. The absolute floor covers underflow.
+__device__ double native_chain_gain(int position, bool native_fp32) {
   double factor = 1.;
   for (int i = 0; i < ScoreHeads / 4 - position + 3; ++i)
-    factor = __dmul_ru(factor, 1. + 0x1p-8);
+    factor = __dmul_ru(factor, 1. + (native_fp32 ? 0x1p-24 : 0x1p-8));
   return factor;
 }
 __device__ float decode_e4(uint8_t b) {
@@ -120,7 +121,8 @@ template <int Paid>
 __global__ void quotient_plan(const uint8_t* q, const float* weights,
                               const HeadMask* capture, uint8_t* fine,
                               float* scales, float* meta, float* raw,
-                              float* out, int* hint, const int* budget_tags) {
+                              float* out, int* hint, const int* budget_tags,
+                              bool native_fp32, int fine_stride) {
   static_assert(Paid == 14 || Paid == 16 || Paid == 20 || Paid == 28);
   constexpr int K = 4;
   constexpr double ScreenG =
@@ -145,12 +147,12 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
   q += uint64_t(b) * ScoreHeads * 128;
   weights += b * ScoreHeads;
   capture += uint64_t(b) * 129;
-  fine += uint64_t(b) * Width * 128;
+  fine += uint64_t(b) * fine_stride;
   scales += b * Width;
   meta += b * MetaStride;
   if (t < ScoreHeads) {
     const float value = weights[t];
-    const double gain = native_chain_gain(t / 4);
+    const double gain = native_chain_gain(t / 4, native_fp32);
     original_w[t] = value;
     w[t] = __double2float_ru(__dadd_ru(
         double(value), __dmul_ru(__dadd_ru(gain, -1.), fabs(double(value)))));
@@ -647,7 +649,8 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
 namespace minority_planner_host {
 template <int Paid>
 void launch_plan(Tensor q, Tensor w, Tensor capture,
-                 const std::vector<Tensor>& p, Tensor budget) {
+                 const std::vector<Tensor>& p, Tensor budget,
+                 bool native_fp32) {
   launch<prefill_plan_minority::quotient_plan<Paid>, 256>(
       q.size(0), static_cast<const uint8_t*>(q.data_ptr()),
       w.mutable_data_ptr<float>(),
@@ -656,20 +659,20 @@ void launch_plan(Tensor q, Tensor w, Tensor capture,
       p[0].mutable_data_ptr<uint8_t>(), p[1].mutable_data_ptr<float>(),
       p[2].mutable_data_ptr<float>(), p[3].mutable_data_ptr<float>(),
       p[4].mutable_data_ptr<float>(), p[5].mutable_data_ptr<int>(),
-      budget.mutable_data_ptr<int>());
+      budget.mutable_data_ptr<int>(), native_fp32, int(p[0].stride(0)));
 }
 void plan128(int64_t paid, Tensor q, Tensor w, Tensor capture,
-             std::vector<Tensor> outputs, Tensor budget) {
+             std::vector<Tensor> outputs, Tensor budget, bool native_fp32) {
   DeviceGuard guard(q.get_device_index());
   if (paid == 14)
-    launch_plan<14>(q, w, capture, outputs, budget);
+    launch_plan<14>(q, w, capture, outputs, budget, native_fp32);
   else if (paid == 16)
-    launch_plan<16>(q, w, capture, outputs, budget);
+    launch_plan<16>(q, w, capture, outputs, budget, native_fp32);
   else if (paid == 20)
-    launch_plan<20>(q, w, capture, outputs, budget);
+    launch_plan<20>(q, w, capture, outputs, budget, native_fp32);
   else if (paid == 28) {
     if constexpr (dosa_geometry::Heads == 64)
-      launch_plan<28>(q, w, capture, outputs, budget);
+      launch_plan<28>(q, w, capture, outputs, budget, native_fp32);
     else
       STD_TORCH_CHECK(false, "Paid28 requires H64");
   } else
@@ -680,7 +683,8 @@ void plan128(int64_t paid, Tensor q, Tensor w, Tensor capture,
 
 }  // namespace DOSA_NAMESPACE
 
-DOSA_REGISTER("plan128",
-              "(int paid, Tensor q, Tensor weights, Tensor capture, "
-              "Tensor(a!)[] outputs, Tensor budget) -> ()",
-              CUDA, minority_planner_host::plan128)
+DOSA_REGISTER(
+    "plan128",
+    "(int paid, Tensor q, Tensor weights, Tensor capture, "
+    "Tensor(a!)[] outputs, Tensor budget, bool native_fp32=False) -> ()",
+    CUDA, minority_planner_host::plan128)

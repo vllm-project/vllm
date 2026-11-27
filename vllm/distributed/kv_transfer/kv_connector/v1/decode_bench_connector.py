@@ -684,7 +684,7 @@ class DecodeBenchConnectorWorker:
         fill_mean: float,
         fill_std: float,
     ) -> torch.Tensor:
-        """Create constant or random fill values of ``dtype``, clamped to its
+        """Create constant or random fill values of `dtype`, clamped to its
         finite range. Non-floating dtypes (packed layouts) are filled with
         zeros.
         """

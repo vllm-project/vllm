@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder CUDA graph support for the DeepSeek-V4.1 vision tower.
 
-Mixin implementing the ``SupportsEncoderCudaGraph`` protocol
-(``vllm/model_executor/models/interfaces.py``) on top of the shared
-``DeepseekV4ViT``/``DeepseekV4Aligner``. The captured graph packs a whole
+Mixin implementing the `SupportsEncoderCudaGraph` protocol
+(`vllm/model_executor/models/interfaces.py`) on top of the shared
+`DeepseekV4ViT`/`DeepseekV4Aligner`. The captured graph packs a whole
 batch of images into one varlen run: ViT blocks attend per image via
-``cu_seqlens``, and the aligner's spatial merge becomes a gather+mask
+`cu_seqlens`, and the aligner's spatial merge becomes a gather+mask
 against precomputed indices. Span assembly (IMAGE_START/IMAGE_NEW_LINE/
-IMAGE_END delimiters) stays eager in ``postprocess_encoder_output`` but is
+IMAGE_END delimiters) stays eager in `postprocess_encoder_output` but is
 batched over all items of the packed batch.
 
-Enabled via ``--compilation-config '{"cudagraph_mm_encoder": true}'``; the
-manager (``vllm/v1/worker/encoder_cudagraph.py``) handles budget packing, DP
+Enabled via `--compilation-config '{"cudagraph_mm_encoder": true}'`; the
+manager (`vllm/v1/worker/encoder_cudagraph.py`) handles budget packing, DP
 sharding and eager fallback.
 """
 
@@ -46,11 +46,11 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4VLEncoderCudaGraphMixin:
-    """``SupportsEncoderCudaGraph`` for ``DeepseekV41ForCausalLM``.
+    """`SupportsEncoderCudaGraph` for `DeepseekV41ForCausalLM`.
 
-    Expects ``self.vision``/``self.aligner``/``self.config``/
-    ``self.multimodal_config`` and the ``image_start``/``image_newline``/
-    ``image_end`` parameters from the host model.
+    Expects `self.vision`/`self.aligner`/`self.config`/
+    `self.multimodal_config` and the `image_start`/`image_newline`/
+    `image_end` parameters from the host model.
     """
 
     # Provided by the host model; declared here so mixin methods type-check.
@@ -63,15 +63,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
     image_newline: torch.nn.Parameter
 
     # -- helpers shared with the eager multimodal path --
-
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
 
     def _build_image_span(
         self, image_embeds: torch.Tensor, types: torch.Tensor
@@ -326,19 +317,19 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        patches = mm_kwargs["patches"].to(self.aligner.w1.weight.dtype)
+        """Run all images as one unpadded varlen batch."""
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
-        outs: list[torch.Tensor] = []
-        offset = 0
-        for n_vit_h, n_vit_w in vit_grid:
-            n_vit = n_vit_h * n_vit_w
-            outs.append(
-                self._encode_image(patches[offset : offset + n_vit], n_vit_h, n_vit_w)
+        if not vit_grid:
+            return mm_kwargs["patches"].new_zeros(
+                (0, self.config.hidden_size), dtype=self.aligner.w1.weight.dtype
             )
-            offset += n_vit
-        if not outs:
-            return patches.new_zeros((0, self.config.hidden_size))
-        return torch.cat(outs, dim=0)
+        inputs = self.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            max_batch_size=len(vit_grid),
+            max_frames_per_batch=0,
+            path=path,
+        )
+        return self.encoder_cudagraph_forward(inputs.values, path=path)
 
     def postprocess_encoder_output(
         self,

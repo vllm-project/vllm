@@ -7,18 +7,18 @@ indicates a cache miss or unexpected input shape that causes a latency spike.
 This module registers hooks in supported runtimes to detect such events so
 they can be investigated.
 
-Set ``--jit-monitor-mode=error`` to fail fast on unexpected runtime
-compilation. Set ``--jit-monitor-verbose`` to log every JIT compile with
+Set `--jit-monitor-mode=error` to fail fast on unexpected runtime
+compilation. Set `--jit-monitor-verbose` to log every JIT compile with
 additional runtime details. Verbose logging is intentionally opt-in because it
 can emit many logs and add overhead.
 
 Currently monitors:
 - CuTeDSL cute.compile calls
-- Triton ``@triton.autotune`` cache misses (via ``knobs.autotuning.print``)
-- Triton ``@triton.jit`` first-time compilations
-  (via ``knobs.runtime.jit_post_compile_hook``)
-- TileLang ``@tilelang.jit`` first-time compilations
-- FlyDSL ``MlirCompiler.compile`` calls
+- Triton `@triton.autotune` cache misses (via `knobs.autotuning.print`)
+- Triton `@triton.jit` first-time compilations
+  (via `knobs.runtime.jit_post_compile_hook`)
+- TileLang `@tilelang.jit` first-time compilations
+- FlyDSL `MlirCompiler.compile` calls
 """
 
 import contextlib
@@ -54,13 +54,13 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     """Enable JIT compilation monitoring after warmup.
 
     Call once per worker process at the end of
-    :func:`compile_or_warm_up_model`. After activation every monitored kernel
+    `compile_or_warm_up_model`. After activation every monitored kernel
     compilation or autotuning benchmark that happens during inference will be
-    logged as a warning or raised as an error, depending on ``mode``.
+    logged as a warning or raised as an error, depending on `mode`.
 
     Safe to call multiple times; subsequent calls are no-ops.
 
-    If the user has explicitly set ``TRITON_PRINT_AUTOTUNING=0`` in
+    If the user has explicitly set `TRITON_PRINT_AUTOTUNING=0` in
     their environment, autotuning printing is left disabled; the JIT
     compilation hook is still registered regardless.
     """
@@ -97,7 +97,7 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
 
 
 def _setup_triton_autotuning_print() -> None:
-    """Enable ``TRITON_PRINT_AUTOTUNING`` unless the user opted out."""
+    """Enable `TRITON_PRINT_AUTOTUNING` unless the user opted out."""
     if not HAS_TRITON:
         return
     from triton import knobs  # type: ignore[import-untyped]
@@ -292,7 +292,7 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
 
 
 class _MonitoredCuteCompile:
-    """Logs JIT compilations; a plain function would break ``cute.compile[opts]``."""
+    """Logs JIT compilations; a plain function would break `cute.compile[opts]`."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -312,7 +312,7 @@ class _MonitoredCuteCompile:
 
 
 def _setup_cutedsl_jit_hook() -> None:
-    """Wrap ``cutlass.cute.compile`` to warn on compilation."""
+    """Wrap `cutlass.cute.compile` to warn on compilation."""
     global _cutedsl_hook_installed
     if _cutedsl_hook_installed:
         return
@@ -342,10 +342,10 @@ def _log_flydsl_jit_compile(fn_name: str, detail: str | None = None) -> None:
 
 
 def _flydsl_kernel_symbols(module: object, infer_kernel_names) -> str | None:
-    """Name the ``gpu.func`` kernels in a module about to be compiled.
+    """Name the `gpu.func` kernels in a module about to be compiled.
 
-    ``func_name`` is the Python launcher name, which many kernels share
-    verbatim (``launch``), so the ``gpu.func`` symbols are what identify the
+    `func_name` is the Python launcher name, which many kernels share
+    verbatim (`launch`), so the `gpu.func` symbols are what identify the
     kernel and the width that needs warmup.
     """
     if module is None:
@@ -355,7 +355,7 @@ def _flydsl_kernel_symbols(module: object, infer_kernel_names) -> str | None:
 
 
 def _setup_flydsl_jit_hook() -> None:
-    """Wrap ``MlirCompiler.compile`` to warn on compilation."""
+    """Wrap `MlirCompiler.compile` to warn on compilation."""
     global _flydsl_hook_installed
     if _flydsl_hook_installed:
         return

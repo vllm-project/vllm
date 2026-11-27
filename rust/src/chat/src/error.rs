@@ -42,6 +42,8 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error("`{0}` content parts are not supported by this chat renderer")]
+    UnsupportedContentPart(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -104,6 +106,10 @@ pub enum Error {
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
     ToolChoiceFunctionNotFound { name: String },
+    #[error("tool_reference `{name}` was not found in the available tools")]
+    ToolReferenceNotFound { name: String },
+    #[error("at least one tool must have defer_loading=false; all tools cannot be deferred")]
+    AllToolsDeferred,
     #[error("failed to build output grammar")]
     OutputGrammar {
         #[source]
@@ -127,12 +133,16 @@ impl Error {
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::ToolReferenceNotFound { .. }
+            | Self::AllToolsDeferred
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate => true,
+            | Self::UnsupportedRequestChatTemplate
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedContentPart(_)
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
@@ -149,6 +159,12 @@ impl Error {
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
             _ => None,
         }
+    }
+
+    /// Whether the request could not be taken now, so retrying later may
+    /// succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Text(error) if error.is_unavailable())
     }
 }
 

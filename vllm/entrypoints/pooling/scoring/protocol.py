@@ -13,7 +13,7 @@ from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
-from .typing import ScoreContentPartParam, ScoreInput
+from .types import ScoreContentPartParam, ScoreInput
 
 
 class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):

@@ -18,7 +18,7 @@ handing off through the tagged mailbox:
     push    (160): a rank's partial given in memory (an attention vLLM ran)
             to every rank's ATTN region, ahead of the slice's reduce
 
-Every elementwise step follows aiter's ``mhc_fused_post_pre_delayed_rmsnorm``
+Every elementwise step follows aiter's `mhc_fused_post_pre_delayed_rmsnorm`
 rounding; the mix projection and the sums of squares, split-K reductions,
 differ only in their split and order.
 """
@@ -33,6 +33,8 @@ from flydsl.expr.typing import T
 
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
     batched_rounds,
+    bf2_f32,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -50,6 +52,7 @@ from vllm.models.deepseek_v41.amd.mono.common.sync import preg
 from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
     ld_bf,
     ld_f32,
+    ld_vec,
     plus,
     token_tiles,
 )
@@ -81,7 +84,7 @@ def scratch_layout(tokens: int) -> dict[str, tuple[int, int]]:
 
 
 def attn_peer_bytes(tokens: int, tp: int) -> int:
-    """ATTN: ``[source rank][token][hidden / 2]`` bf16 pairs."""
+    """ATTN: `[source rank][token][hidden / 2]` bf16 pairs."""
     return tp * tokens * HIDDEN // 2 * 8
 
 
@@ -94,7 +97,7 @@ def fma(a, b, c):
 
 
 def sigmoid(z):
-    """Triton's ``tl.sigmoid``: 1 / (1 + exp2(-z log2(e)))."""
+    """Triton's `tl.sigmoid`: 1 / (1 + exp2(-z log2(e)))."""
     return fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(z * fx.Float32(-LOG2E)))
 
 
@@ -104,7 +107,7 @@ def lane_f32(v, src):
 
 def pend_value(c, t, col, cc):
     """The owed post's sublayer output at (token t, column col): read from
-    ``pend``, or where a caller staged it (``pend_lds``, ``[token][32]`` of this
+    `pend`, or where a caller staged it (`pend_lds`, `[token][32]` of this
     task's columns: a reduction it did first)."""
     if const_expr(c.get("pend_lds") is None):
         return ld_bf(c["args"]["pend"], t * HIDDEN + col)
@@ -114,7 +117,7 @@ def pend_value(c, t, col, cc):
 # ---------------------------------------------------------------- slice
 @traced
 def slice_input(c, task, idx):
-    """Thread ``idx``'s pair of the layer input (token idx / 16, columns
+    """Thread `idx`'s pair of the layer input (token idx / 16, columns
     32 task + 2 (idx % 16) ..)."""
     s, rl = c["S"], c["rl"]
     a = c["args"]
@@ -138,7 +141,7 @@ def slice_at(c0, e):
 
 
 def slice_loads(c, c0, e):
-    """Element e's loads of ``stage_slice`` (e clamped into the step's)."""
+    """Element e's loads of `stage_slice` (e clamped into the step's)."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -149,7 +152,7 @@ def slice_loads(c, c0, e):
 
 
 def slice_row(c, c0, e, got):
-    """Element e of ``stage_slice``'s R_new from ``slice_loads``' values."""
+    """Element e of `stage_slice`'s R_new from `slice_loads`' values."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -215,7 +218,7 @@ def stage_slice(c, task):
 
 @traced
 def slice_mix(c, task, t0, n):
-    """The mix projection partials of tokens t0 .. t0 + n (``stage_slice``)."""
+    """The mix projection partials of tokens t0 .. t0 + n (`stage_slice`)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl, red = c["rl"], c["fl"], c["red"]
     tok = plus(t0, fx.min(lane % 16, n - 1))
@@ -246,9 +249,174 @@ def slice_mix(c, task, t0, n):
     gpu.barrier()
 
 
+# ---------------------------------------------------------------- reduce + slice
+QUAD = 4  # columns a thread of ``stage_reduce_slice``
+
+
+@traced
+def stage_reduce_slice(c, task, reduce=True):
+    """`stage_reduce` then `stage_slice` (fold), the same values (tuned
+    builds; `reduce` False: K1's seam, its pend row for the TP partials). A
+    thread takes four columns of a token through the TP sum (rank order), R_new
+    of the four streams and the layer input in registers, every operand that
+    does not depend on the partials (residual, mixes, fn weights) loaded before
+    their poll: the layer input leaves as soon as the partials land."""
+    s, tid, a = c["S"], c["tid"], c["args"]
+    c0 = task * COLS
+    n = s * COLS // QUAD
+    assert n <= THREADS
+    fs = []
+    for i in range_constexpr(-(-MIX * KT // THREADS)):
+        e = fx.min(tid + THREADS * i, MIX * KT - 1)
+        j, o = e // KT, (e % KT) // COLS
+        fs.append(ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS))
+    idx = fx.min(tid, n - 1)
+    t = idx // (COLS // QUAD)
+    col = c0 + QUAD * (idx % (COLS // QUAD))
+    rw = [ld_vec(a["res_in"], ((t * HC + h) * HIDDEN + col) // 2, 2) for h in range(HC)]
+    cmv = [ld_vec(a["comb_in"], (t * HC + h) * HC, 4, True) for h in range(HC)]
+    postv = ld_vec(a["post_in"], t * HC, 4, True)
+    prev = ld_vec(a["pre_in"], t * HC, 4, True)
+    if const_expr(reduce):
+        if tid < n:
+            own = preg(c["sym"], 0, "attn")
+            ws = [
+                (own, attn_region_pair(src, t, s, col), 2) for src in range(c["d"].tp)
+            ]
+            reduce_slice_quad(c, task, t, col, c["poll"](ws), rw, cmv, postv, prev)
+    else:
+        # K1: the owed post's sublayer output is the caller's ``pend`` row
+        pw = ld_vec(a["pend"], (t * HIDDEN + col) // 2, 2)
+        if tid < n:
+            reduce_slice_quad(c, task, t, col, None, rw, cmv, postv, prev, pw)
+    # the fn weights as the original's two bf16 MFMAs take them: hi = bf16(fn),
+    # lo = bf16(fn - hi), their sum exact in fp32
+    for i in range_constexpr(len(fs)):
+        if tid + THREADS * i < MIX * KT:
+            hi = bf16_round(fs[i])
+            fx.ptr_store(hi + bf16_round(fs[i] - hi), c["fl"] + (tid + THREADS * i))
+    gpu.barrier()
+    slice_rest(c, task)
+
+
+@traced
+def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
+    """A thread's (token t, columns col .. col + 3) of `stage_reduce_slice`
+    (`ws`: the TP partials' words; None: `pw`, the pend row's)."""
+    rl, a = c["rl"], c["args"]
+    if const_expr(ws is None):
+        pend = [x for p in range(2) for x in bf2_f32(fx.Int32(pw[p]))]
+    else:
+        pend = []
+        for p in range_constexpr(2):
+            acc0, acc1 = bf2_f32(ws[0][p])
+            for src in range_constexpr(1, len(ws)):
+                lo, hi = bf2_f32(ws[src][p])
+                acc0, acc1 = acc0 + lo, acc1 + hi
+            pend += [bf16_round(acc0), bf16_round(acc1)]
+    cc = col - task * COLS
+    r = [[x for q in range(2) for x in bf2_f32(fx.Int32(rw[h][q]))] for h in range(HC)]
+    rows = []
+    for o in range_constexpr(HC):
+        cm = [fx.Float32(cmv[h][o]) for h in range(HC)]
+        post = fx.Float32(postv[o])
+        vs = []
+        for k in range_constexpr(QUAD):
+            v = post * pend[k] + (r[0][k] * cm[0])
+            for h in range_constexpr(1, HC - 1):
+                v = v + cm[h] * r[h][k]
+            v = bf16_round(fma(cm[HC - 1], r[HC - 1][k], v))
+            fx.ptr_store(v, rl + (t * KT + o * COLS + cc + k))
+            vs.append(v)
+        w = [bf16_pair(vs[2 * m], vs[2 * m + 1]).bitcast(fx.Int32) for m in range(2)]
+        at = ((t * HC + o) * HIDDEN + col) // 2
+        bo.buffer_store(fx.Vector.from_elements(w, fx.Int32), rsrc(a["res_out"]), at)
+        rows.append(vs)
+    outs = []
+    for k in range_constexpr(QUAD):
+        acc = fx.Float32(0.0)
+        for h in range_constexpr(HC):
+            acc = acc + fx.Float32(prev[h]) * rows[h][k]
+        outs.append(acc)
+    c["put_bf"](c["lin"], t * HIDDEN + col, outs)
+
+
+@traced
+def slice_rest(c, task):
+    """`stage_slice` past the layer input: the sums of squares and the mix
+    projection partials (`fl` filled, `rl` complete)."""
+    s, lane, wave = c["S"], c["lane"], c["wave"]
+    rl = c["rl"]
+    for t in range_constexpr(s):
+        if wave == t % WAVES:
+            x0 = fx.ptr_load(rl + (t * KT + 2 * lane))
+            x1 = fx.ptr_load(rl + (t * KT + 2 * lane + 1))
+            sq = butterfly(x0 * x0 + x1 * x1, (32, 16, 8, 4, 2, 1))
+            if lane == 0:
+                c["put"](c["pmix"], (task * s + t) * PART + MIX, sq)
+    slice_mix_all(c, task)
+
+
+RED_TILE = WAVES * 2 * 64 * 4  # ``slice_mix``'s MFMA partials of a token tile
+
+
+def red_words(s, tuned=False):
+    """The seam's LDS `red`: `slice_mix`'s partials of a token tile, or
+    (`tuned`) `slice_mix_all`'s of every token tile."""
+    return RED_TILE * (len(token_tiles(s)) if tuned else 1)
+
+
+@traced
+def slice_mix_all(c, task):
+    """`slice_mix` of every token tile, the same sums: all tiles' MFMAs, one
+    barrier, then all tiles' wave sums (two barriers in all, not two a tile)."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    rl, fl, red = c["rl"], c["fl"], c["red"]
+    kw = KT // WAVES
+    tiles = token_tiles(s)
+    for ti in range_constexpr(len(tiles)):
+        t0, n = tiles[ti]
+        tok = plus(t0, fx.min(lane % 16, n - 1))
+        cs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(2)]
+        for kk in range_constexpr(kw // 4):
+            colk = wave * kw + lane // 16 + 4 * kk
+            b = fx.ptr_load(rl + (tok * KT + colk))
+            for h in range_constexpr(2):
+                row = h * 16 + lane % 16
+                av = fx.ptr_load(fl + (fx.min(row, MIX - 1) * KT + colk))
+                av = (row < MIX).select(av, fx.Float32(0.0))
+                ops = rocdl._split_mfma_operands([av, b, cs[h], 0, 0, 0])
+                cs[h] = fx.Vector(
+                    rocdl.mfma_f32_16x16x4f32(T.vec(4, T.f32), *ops).result
+                )
+        for h in range_constexpr(2):
+            fx.ptr_store(
+                cs[h], red + (ti * RED_TILE + ((wave * 2 + h) * 64 + lane) * 4)
+            )
+    gpu.barrier()
+    total = MIX * s
+    for pas in range_constexpr(0, total, THREADS):
+        u = pas + tid
+        if u < total:
+            ti = u // (MIX * 16)
+            loc = u % (MIX * 16)
+            tl = loc // MIX
+            j = loc % MIX
+            t = ti * 16 + tl
+            h = j // 16
+            ln = 16 * ((j % 16) // 4) + tl
+            tot = fx.Float32(0.0)
+            for w in range_constexpr(WAVES):
+                tot = tot + fx.ptr_load(
+                    red + (ti * RED_TILE + ((w * 2 + h) * 64 + ln) * 4 + j % 4)
+                )
+            c["put"](c["pmix"], (task * s + t) * PART + j, tot)
+    gpu.barrier()
+
+
 # ---------------------------------------------------------------- gate
 def _row(v, lane, q):
-    """Comb lanes 8..23 hold ``comb[r][c]`` at lane 8 + 4 r + c: element q of
+    """Comb lanes 8..23 hold `comb[r][c]` at lane 8 + 4 r + c: element q of
     the row."""
     return lane_f32(v, (lane - 8) // 4 * 4 + 8 + q)
 
@@ -324,10 +492,10 @@ def stage_gate(c, t):
 
 # ---------------------------------------------------------------- norm
 @traced
-def stage_norm(c, t, store):
+def stage_norm(c, t, store, tail_barrier=True):
     """Token t's RMSNorm (rstd = rsq(fma(sum, 1/H, eps)), bf16((x rstd) w));
     256 threads, 3 chunks of 8 at 8 t + 2048 c, each chunk's bf16 values handed
-    to ``store(t, col, ys, live)`` by every thread (``live``: a thread's chunk
+    to `store(t, col, ys, live)` by every thread (`live`: a thread's chunk
     in the row; threads 256.. mirror thread 255)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a = c["args"]
@@ -335,9 +503,24 @@ def stage_norm(c, t, store):
     mine = tid < 256
     cols = [tt * 8 + 2048 * ch for ch in range(3)]
     xs = []
+    if const_expr(c["tuned"]):
+        # the norm weights in flight before the row's wait (they do not depend
+        # on it), then the three chunks' pairs in one poll batch: one round trip
+        at = [fx.min(cols[ch], HIDDEN - 8) for ch in range(3)]
+        wv = [ld_vec(a["norm_w"], at[ch] // 2, 4) for ch in range(3)]
+        got = c["poll"](
+            [
+                (c["lin"], (t * HIDDEN + at[ch]) // 2 + k, 1)
+                for ch in range(3)
+                for k in range(4)
+            ]
+        )
     for ch in range_constexpr(3):
         base = t * HIDDEN + fx.min(cols[ch], HIDDEN - 8)
-        words = c["poll"]([(c["lin"], base // 2 + k, 1) for k in range(4)])
+        if const_expr(c["tuned"]):
+            words = got[4 * ch : 4 * ch + 4]
+        else:
+            words = c["poll"]([(c["lin"], base // 2 + k, 1) for k in range(4)])
         v = []
         for k in range_constexpr(4):
             v += [bf_lo(words[k][0]), bf_hi(words[k][0])]
@@ -354,19 +537,26 @@ def stage_norm(c, t, store):
     r = hw_rsq(fma(tot, fx.Float32(1.0 / HIDDEN), fx.Float32(EPS)))
     for ch in range_constexpr(3):
         col = fx.min(cols[ch], HIDDEN - 8)
-        ys = [
-            bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j)) for j in range(8)
-        ]
+        if const_expr(c["tuned"]):
+            nw = [f(fx.Int32(wv[ch][k])) for k in range(4) for f in (bf_lo, bf_hi)]
+            ys = [bf16_round((xs[ch][j] * r) * nw[j]) for j in range(8)]
+        else:
+            ys = [
+                bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j))
+                for j in range(8)
+            ]
         store(t, col, ys, mine & (cols[ch] < HIDDEN))
-    gpu.barrier()
+    if const_expr(tail_barrier):
+        # (a caller that publishes next has the drain's barrier instead)
+        gpu.barrier()
 
 
 # ---------------------------------------------------------------- reduce
 @traced
 def stage_reduce(c, task):
     """The attention output at this slice's 32 columns: the TP ranks' partials
-    in the all-reduce's order (``sum_partials``), in fp32 -> bf16 ->
-    ``pend_lds``."""
+    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 ->
+    `pend_lds`."""
     s, tid = c["S"], c["tid"]
     for pas in range_constexpr(0, s * COLS // 2, THREADS):
         reduce_attn_pair(c, task, plus(pas, tid))
@@ -375,7 +565,7 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_attn_pair(c, task, idx):
-    """Thread ``idx``'s column pair of token idx / 16 (``stage_reduce``)."""
+    """Thread `idx`'s column pair of token idx / 16 (`stage_reduce`)."""
     s = c["S"]
     c0 = task * COLS
     if idx < s * COLS // 2:
@@ -395,9 +585,9 @@ def reduce_attn_pair(c, task, idx):
 
 @traced
 def stage_push(c, task, part):
-    """This rank's attention partial (``part``: bf16 [S, HIDDEN], wo_b's
+    """This rank's attention partial (`part`: bf16 [S, HIDDEN], wo_b's
     unreduced output) at this slice's 32 columns, every token, to every rank's
-    ATTN region: the pairs ``stage_reduce`` polls, as the bits vLLM wrote."""
+    ATTN region: the pairs `stage_reduce` polls, as the bits vLLM wrote."""
     s, tid, tp = c["S"], c["tid"], c["d"].tp
     for pas in range_constexpr(0, s * COLS // 2, THREADS):
         idx = plus(pas, tid)

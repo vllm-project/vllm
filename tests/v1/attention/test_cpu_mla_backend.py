@@ -4,11 +4,11 @@
 
 Two levels of coverage are provided:
 
-* :func:`test_kv_cache_cpu_write` checks that the kv-cache write logic
+* `test_kv_cache_cpu_write` checks that the kv-cache write logic
   inlined in the CPU MLA backend writes the latent KV cache in the same
   layout the CPU decode kernel expects. This runs without downloading
   any model weights and is safe for CI.
-* :func:`test_cpu_mla_backend_smoke` exercises the full end-to-end path
+* `test_cpu_mla_backend_smoke` exercises the full end-to-end path
   (LLM engine, model construction, prefill + decode) against a shrunk
   DeepSeek-V2-Lite with `hf_overrides`. It uses `dummy` weights so the
   outputs are not meaningful, only shape / plumbing correctness is

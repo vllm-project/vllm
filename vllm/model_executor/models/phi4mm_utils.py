@@ -1121,7 +1121,7 @@ class NemoConvSubsampling(torch.nn.Module):
             in_channels = conv_channels
             layers.append(activation)
 
-            for i in range(self._sampling_num - 1):
+            for _ in range(self._sampling_num - 1):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(
@@ -1172,7 +1172,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 self._right_padding = (self._kernel_size - 1) // 2
                 self._max_cache_len = 0
 
-            for i in range(self._sampling_num):
+            for _ in range(self._sampling_num):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(

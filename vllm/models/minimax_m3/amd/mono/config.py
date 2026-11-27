@@ -5,7 +5,7 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Shapes the mono kernels are compiled for: one MiniMax-M3 TP4 rank.
 
-Every value here is checked against the loaded model in ``weights.py``; a
+Every value here is checked against the loaded model in `weights.py`; a
 model that does not match is never routed to the mono path.
 """
 
@@ -26,7 +26,7 @@ LOCAL_Q_HEADS = 16
 
 def qkv_rows(idx_heads: int) -> int:
     """Rows of a rank's fused projection, q | k | v | index_q | index_k: 16 q
-    heads, one k and v head, ``idx_heads`` index q heads (the rank's one, or every
+    heads, one k and v head, `idx_heads` index q heads (the rank's one, or every
     one under indexer context parallelism) and the index k head."""
     return (LOCAL_Q_HEADS + 3 + idx_heads) * HEAD_DIM
 
@@ -61,8 +61,8 @@ INDEX_CP_FROM_BLOCKS = 288
 @dataclass(frozen=True)
 class IndexHeads:
     """The index q heads in a rank's fused projection, a build parameter:
-    ``count`` of them (1, or all TP in head order under indexer context
-    parallelism) and ``own``, the one this rank's selection scores."""
+    `count` of them (1, or all TP in head order under indexer context
+    parallelism) and `own`, the one this rank's selection scores."""
 
     count: int = 1
     own: int = 0

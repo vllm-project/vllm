@@ -1,4 +1,8 @@
 #include "common.cuh"
+#include "graph_capture.cuh"
+#include "paged_record5.cuh"
+#include <optional>
+#include "native_fp32_boundary.cuh"
 #include "../../fused_mqa_topk/common.cuh"
 
 namespace DOSA_NAMESPACE::record_selection {
@@ -12,8 +16,10 @@ struct Args {
   const int64_t* order;
   const int *counts, *starts, *ends, *permutation;
   int *words, *error, *output, *partition;
-  int rows, cap, nk;
-  int64_t low_stride, word_stride;
+  int rows, cap, nk, low_cells;
+  int64_t boundary_stride;
+  const int* page_table;
+  int* boundary;
 };
 
 __device__ bool failed(const Args& a, int row, unsigned bad) {
@@ -89,7 +95,7 @@ __device__ __forceinline__ void publish_partition(
 template <int Items>
 __device__ void finish(Args a, int row, int certain, int uncertain,
                        void* storage) {
-  const int* boundary = a.words + int64_t(row) * a.word_stride;
+  const int* boundary = a.boundary + int64_t(row) * a.boundary_stride;
   int keys[Items], values[Items];
 #pragma unroll
   for (int i = 0; i < Items; ++i) {
@@ -123,6 +129,31 @@ __global__ void complete(Args a) {
     finish<4>(a, row, certain, uncertain, storage);
 }
 
+// A vector covers four cells per lane. Publish only full warp tiles before
+// the masked scalar tail so callbacks can use full-warp collectives.
+template <class Offset, class Collect>
+__device__ __forceinline__ void collect_words(const int* words, int count,
+                                              Offset offset, Collect collect) {
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  int first = 0;
+  if ((reinterpret_cast<uintptr_t>(words) & 15u) == 0) {
+    first = (count / 128) * 128;
+    for (int begin = warp * 128; begin < first; begin += Threads * 4) {
+      const int slot = begin + lane * 4;
+      const uint4 quad = *reinterpret_cast<const uint4*>(words + offset(slot));
+      const unsigned values[] = {quad.x, quad.y, quad.z, quad.w};
+#pragma unroll
+      for (int item = 0; item < 4; ++item) collect(values[item], slot + item, true);
+    }
+  }
+  for (int begin = first + warp * 32; begin < count; begin += Threads) {
+    const int slot = begin + lane;
+    const bool live = slot < count;
+    collect(live ? unsigned(words[offset(slot)]) : 0u, slot, live);
+  }
+}
+
+template <bool Rank12>
 __global__ __launch_bounds__(Threads) void select(Args a) {
   const int row = a.rows - 1 - int(blockIdx.x), t = threadIdx.x, warp = t / 32,
             lane = t % 32;
@@ -149,15 +180,30 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
   __syncthreads();
   if (failed(a, row, bad)) return;
 
-  int* const words = a.words + int64_t(row) * a.word_stride;
-  const uint8_t* const low = a.low + int64_t(row) * a.low_stride;
+  const int* const words = a.words;
+  const uint8_t* const low = a.low;
+  int* const boundary = a.boundary + int64_t(row) * a.boundary_stride;
+  auto offset = [&](int64_t slot) {
+    constexpr int PageCells = paged_record5::PageCells,
+                  RowPages = paged_record5::RowPages;
+    const int page = int(slot / PageCells);
+    const int prefix = paged_record5::prefix_page(a.rows, row, page);
+    const int physical =
+        prefix >= 0 ? prefix : a.page_table[int64_t(row) * RowPages + page];
+    return int64_t(physical) * PageCells + slot % PageCells;
+  };
+  auto low_at = [&](int64_t slot) {
+    constexpr int SeedCells = paged_record5::SeedCells;
+    const int64_t seed_bias = int64_t(a.rows) * SeedCells;
+    return low[offset(slot) - seed_bias + (slot < SeedCells ? a.low_cells : 0)];
+  };
   // Row bounds stay live until reads drain, before prefix reuse.
   const unsigned row_start = unsigned(a.starts[row]);
   const unsigned row_end = unsigned(a.ends[row]);
   {
     auto count_word = [&](unsigned word) {
       const unsigned cp = word >> 20, id = word & IdMask;
-      if (cp < 0x8u || cp > 0xFF7u)
+      if (!Rank12 && (cp < 0x8u || cp > 0xFF7u))
         atomicOr(&bad, 2u);
       else if (id >= unsigned(a.nk) || id < row_start || id >= row_end)
         atomicOr(&bad, 4u);
@@ -168,7 +214,8 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     if ((reinterpret_cast<uintptr_t>(words) & 15u) == 0) {
       const int64_t vectors = count / 4;
       for (int64_t vector = t; vector < vectors; vector += Threads) {
-        const uint4 quad = *reinterpret_cast<const uint4*>(words + vector * 4);
+        const uint4 quad =
+            *reinterpret_cast<const uint4*>(words + offset(vector * 4));
         const unsigned values[4] = {quad.x, quad.y, quad.z, quad.w};
 #pragma unroll
         for (int item = 0; item < 4; ++item) count_word(values[item]);
@@ -176,7 +223,7 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
       scalar_begin = vectors * 4 + t;
     }
     for (int64_t slot = scalar_begin; slot < count; slot += Threads)
-      count_word(unsigned(words[slot]));
+      count_word(unsigned(words[offset(slot)]));
   }
   __syncthreads();
   if (failed(a, row, bad)) return;
@@ -212,6 +259,32 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     }
   }
   __syncthreads();
+  if constexpr (Rank12) {
+    if (t == 0) {
+      if (pivot < 0 || pivot >= Bins || certain < 0 || certain >= Top ||
+          uncertain <= 0 || certain + uncertain < Top)
+        bad |= 16;
+      // Bin zero contains only scores above the represented range.
+      if (uncertain > Bins || (pivot == 0 && uncertain > Top)) bad |= 32;
+    }
+    __syncthreads();
+    if (failed(a, row, bad)) return;
+    auto collect = [&](unsigned word, int, bool live) {
+      const unsigned code = word >> 20;
+      publish_partition(a, row, word & IdMask,
+                        live && code < unsigned(pivot),
+                        live && code == unsigned(pivot),
+                        reinterpret_cast<unsigned*>(boundary), nullptr,
+                        written_b, written_e, bad);
+    };
+    collect_words(words, count, offset, collect);
+    __syncthreads();
+    if (t == 0 && (written_b != certain || written_e != uncertain)) bad |= 16;
+    __syncthreads();
+    if (failed(a, row, bad)) return;
+    if (t == 0) a.partition[row] = (certain << 13) | uncertain;
+    return;
+  }
   {
     __shared__ unsigned fine_hist[256];
     // The coarse histogram is dead. Reuse its4096 words for the selected cell
@@ -228,34 +301,17 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
         const unsigned hi = word >> 20, id = word & IdMask;
         const bool is_b = live && hi < coarse, is_e = live && hi == coarse;
         // Only cached E entries carry their low score byte above the key ID.
-        const unsigned payload = is_e ? id | (unsigned(low[slot]) << 20) : id;
+        const unsigned payload =
+            is_e ? id | (unsigned(low_at(slot)) << 20) : id;
         publish_partition<true>(a, row, payload, is_b, is_e, hist, fine_hist,
                                 written_b, written_e, bad);
       };
-      int64_t scalar_first = 0;
-      if ((reinterpret_cast<uintptr_t>(words) & 15u) == 0) {
-        scalar_first = (count / 128) * 128;
-        for (int64_t begin = warp * 128; begin < scalar_first;
-             begin += Threads * 4) {
-          const int64_t slot = begin + lane * 4;
-          const uint4 quad = *reinterpret_cast<const uint4*>(words + slot);
-          const unsigned values[4] = {quad.x, quad.y, quad.z, quad.w};
-#pragma unroll
-          for (int item = 0; item < 4; ++item)
-            collect(values[item], slot + item, true);
-        }
-      }
-      for (int64_t begin = scalar_first + warp * 32; begin < count;
-           begin += Threads) {
-        const int64_t slot = begin + lane;
-        const bool live = slot < count;
-        collect(live ? unsigned(words[slot]) : 0u, slot, live);
-      }
+      collect_words(words, count, offset, collect);
     } else {
       for (int64_t slot = t; slot < count; slot += Threads) {
-        const unsigned word = unsigned(words[slot]);
+        const unsigned word = unsigned(words[offset(slot)]);
         if ((word >> 20) == coarse)
-          atomicAdd(fine_hist + unsigned(low[slot]), 1u);
+          atomicAdd(fine_hist + unsigned(low_at(slot)), 1u);
       }
     }
     __syncthreads();
@@ -289,10 +345,11 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     for (int64_t begin = warp * 32; begin < count; begin += Threads) {
       const int64_t slot = begin + lane;
       const bool live = slot < count;
-      const unsigned word = live ? unsigned(words[slot]) : 0u;
+      const unsigned word = live ? unsigned(words[offset(slot)]) : 0u;
       const unsigned coarse = word >> 20, id = word & IdMask;
       unsigned cp = coarse << 8;
-      if (live && coarse == (unsigned(pivot) >> 8)) cp |= unsigned(low[slot]);
+      if (live && coarse == (unsigned(pivot) >> 8))
+        cp |= unsigned(low_at(slot));
       const bool is_b = live && cp < unsigned(pivot),
                  is_e = live && cp == unsigned(pivot);
       publish_partition(a, row, id, is_b, is_e, hist, nullptr, written_b,
@@ -309,8 +366,8 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
       const bool is_b = live && code < (unsigned(pivot) & 255u);
       const bool is_e = live && code == (unsigned(pivot) & 255u);
       publish_partition(a, row, id, is_b, is_e,
-                        reinterpret_cast<unsigned*>(words), nullptr, written_b,
-                        written_e, bad);
+                        reinterpret_cast<unsigned*>(boundary), nullptr,
+                        written_b, written_e, bad);
     }
   }
 
@@ -320,7 +377,8 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
   if (failed(a, row, bad)) return;
   // Both paths joined after all input reads before the prefix becomes E.
   if (!winning_warp)
-    for (int at = t; at < uncertain; at += Threads) words[at] = int(hist[at]);
+    for (int at = t; at < uncertain; at += Threads)
+      boundary[at] = int(hist[at]);
   if (t == 0) a.partition[row] = (certain << 13) | uncertain;
 }
 }  // namespace DOSA_NAMESPACE::record_selection
@@ -328,12 +386,19 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
 namespace DOSA_NAMESPACE {
 void select_dense5(Tensor low, Tensor packed, Tensor counts, Tensor starts,
                    Tensor ends, Tensor error, Tensor output, Tensor order,
-                   Tensor permutation, Tensor partition, int64_t nk) {
+                   Tensor permutation, Tensor partition, int64_t nk,
+                   bool finish, Tensor page_table, Tensor boundary,
+                   bool rank12) {
   using namespace record_selection;
   DeviceGuard guard(packed.get_device_index());
-  const int cap = record5::checked_capacity(low, packed);
-  STD_TORCH_CHECK(low.size(0) >= packed.size(0),
-                  "Record5 low plane has insufficient query rows");
+  const int width = rank12 ? int(packed.size(1))
+                           : record5::checked_capacity(low, packed);
+  STD_TORCH_CHECK(width == paged_record5::PageCells &&
+                      page_table.is_contiguous() &&
+                      page_table.size(1) == paged_record5::RowPages &&
+                      boundary.size(0) == page_table.size(0) &&
+                      boundary.size(1) >= Bins && boundary.stride(1) == 1,
+                  "Paged Record5 requires its row table and boundary plane");
   Args args{low.const_data_ptr<uint8_t>(),
             order.const_data_ptr<int64_t>(),
             counts.const_data_ptr<int>(),
@@ -344,13 +409,20 @@ void select_dense5(Tensor low, Tensor packed, Tensor counts, Tensor starts,
             error.mutable_data_ptr<int>(),
             output.mutable_data_ptr<int>(),
             partition.mutable_data_ptr<int>(),
-            int(packed.size(0)),
-            cap,
+            int(page_table.size(0)),
+            paged_record5::MaxCells,
             int(nk),
-            low.stride(0),
-            packed.stride(0)};
-  launch<record_selection::select, Threads, Bins * sizeof(unsigned)>(args.rows,
-                                                                     args);
+            int(low.numel()),
+            boundary.stride(0),
+            page_table.const_data_ptr<int>(),
+            boundary.mutable_data_ptr<int>()};
+  if (rank12)
+    launch<record_selection::select<true>, Threads, Bins * sizeof(unsigned)>(
+        args.rows, args);
+  else
+    launch<record_selection::select<false>, Threads, Bins * sizeof(unsigned)>(
+        args.rows, args);
+  if (!finish) return;
   // A small boundary does not need the 32-items/thread sort's register pool.
   constexpr size_t small_bytes =
       std::max(sizeof(typename Sort<1>::TempStorage),
@@ -381,107 +453,214 @@ __device__ __forceinline__ uint32_t score_bits(__nv_bfloat16 v) {
 __device__ __forceinline__ unsigned ordered16(unsigned bits) {
   return bits < 0x8000u ? bits ^ 0x7fffu : bits;
 }
-template <class Score>
-__global__ void prepare(const Score* scores, int64_t stride, Output a) {
+struct Scratch {
+  unsigned hist[4 * 256], pivot, before, written;
+};
+
+template <bool FullPrecision, class Score>
+__device__ __forceinline__ unsigned score_key(Score score) {
+  if constexpr (FullPrecision) {
+    return native_fp32_boundary::score_key(score);
+  } else {
+    const unsigned bits = score_bits(score) >> 16;
+    return ordered16((bits & 0x7fffu) ? bits : 0u);
+  }
+}
+
+template <bool FullPrecision, bool Rank12, class Score>
+__device__ __forceinline__ void prepare_row(const Score* scores, int64_t stride,
+                                            Output out, int capacity,
+                                            Scratch& s, unsigned* ties) {
   const int row = blockIdx.x, t = threadIdx.x;
   const Score* input = scores + int64_t(row) * stride;
-  __shared__ unsigned hist[4 * 256], pivot, before, written;
   if (t == 0) {
-    a.counts[row] = a.status[row] = 0;
-    a.tau[row] = -INFINITY;
-    written = 0;
+    out.counts[row] = out.status[row] = 0;
+    out.tau[row] = -INFINITY;
+    s.pivot = s.before = s.written = 0;
+    if constexpr (FullPrecision) *ties = 0;
   }
-  bool bad = false;
+  bool bad = FullPrecision && (capacity < Top || out.error[row] != 0);
   for (int j = t; j < Seed; j += Threads) {
     const uint32_t bits = score_bits(input[j]);
-    bad |= (bits & 0x7f800000u) == 0x7f800000u || (bits & 0xffffu) != 0;
+    bad |= (bits & 0x7f800000u) == 0x7f800000u;
+    if constexpr (!FullPrecision) bad |= (bits & 0xffffu) != 0;
   }
   if (__syncthreads_or(bad)) {
     if (t == 0) {
-      atomicOr(a.error + row, 1);
-      a.status[row] = 3;
+      atomicOr(out.error + row, 1);
+      out.status[row] = 3;
     }
     return;
   }
-  auto key = [](Score value) {
-    const unsigned b = score_bits(value) >> 16;
-    return ordered16((b & 0x7fffu) ? b : 0u);
-  };
-  for (int pass = 0; pass < 2; ++pass) {
-    for (int j = t; j < 4 * 256; j += Threads) hist[j] = 0;
+
+  constexpr int HighByte = FullPrecision ? 24 : 8;
+  for (int shift = HighByte; shift >= 0; shift -= 8) {
+    for (int j = t; j < 4 * 256; j += Threads) s.hist[j] = 0;
     __syncthreads();
-    const int shift = pass == 0 ? 8 : 0;
     for (int j = t; j < Seed; j += Threads) {
-      const unsigned code = key(input[j]);
-      if (pass == 0 || (code >> 8) == (pivot >> 8))
-        atomicAdd(hist + (t / 64) * 256 + ((code >> shift) & 255u), 1u);
+      const unsigned code = score_key<FullPrecision>(input[j]);
+      if (shift == HighByte || (code >> (shift + 8)) == (s.pivot >> (shift + 8)))
+        atomicAdd(s.hist + (t / 64) * 256 + ((code >> shift) & 255u), 1u);
     }
     __syncthreads();
     const unsigned count =
-        hist[t] + hist[256 + t] + hist[512 + t] + hist[768 + t];
+        s.hist[t] + s.hist[256 + t] + s.hist[512 + t] + s.hist[768 + t];
     __syncthreads();
-    hist[t] = count;
+    s.hist[t] = count;
     __syncthreads();
-    if (t < 32) {
-      const unsigned previous = pass == 0 ? 0u : before;
-      const auto boundary =
-          record_selection::find_boundary<8>(hist, Top - previous);
+
+    if constexpr (FullPrecision) {
       if (t == 0) {
-        pivot = (pass ? pivot : 0u) | (unsigned(boundary.bin) << shift);
-        before = previous + unsigned(boundary.before);
+        unsigned skipped = 0;
+        for (unsigned bin = 0; bin < 256; ++bin) {
+          if (s.before + skipped + s.hist[bin] >= Top) {
+            s.pivot |= bin << shift;
+            s.before += skipped;
+            break;
+          }
+          skipped += s.hist[bin];
+        }
+      }
+    } else if (t < 32) {
+      const unsigned previous = s.before;
+      const auto boundary =
+          record_selection::find_boundary<8>(s.hist, Top - previous);
+      if (t == 0) {
+        s.pivot |= unsigned(boundary.bin) << shift;
+        s.before = previous + unsigned(boundary.before);
       }
     }
     __syncthreads();
   }
-  if (t == 0) hist[0] = 0;
-  __syncthreads();
-  const unsigned needed = Top - before;
-  // Seed ties affect only the witness subset: every chosen score is >=tau.
+  if constexpr (!FullPrecision) {
+    if (t == 0) *ties = 0;
+    __syncthreads();
+  }
+
+  const unsigned needed = Top - s.before;
+  // Seed ties affect only the witness subset; each chosen score reaches tau.
   for (int j = t; j < Seed; j += Threads) {
-    const unsigned code = key(input[j]);
-    const bool chosen =
-        code < pivot || (code == pivot && atomicAdd(hist, 1u) < needed);
-    if (!chosen) continue;
-    const unsigned slot = atomicAdd(&written, 1u);
+    const unsigned code = score_key<FullPrecision>(input[j]);
+    if (!(code < s.pivot || (code == s.pivot && atomicAdd(ties, 1u) < needed)))
+      continue;
+    const unsigned slot = atomicAdd(&s.written, 1u);
     if (slot < Top) {
-      const unsigned record = (code << 4) | (code < 0x8000u ? 15u : 0u);
-      a.low[int64_t(row) * a.low_stride + slot] = uint8_t(record);
-      a.words[int64_t(row) * a.word_stride + slot] =
-          int32_t(record5::pack_word(record, unsigned(j)));
+      const int64_t at = int64_t(row) * out.word_stride + slot;
+      if constexpr (Rank12) {
+        out.words[at] = int32_t(record12::pack_word(s.pivot, code, unsigned(j)));
+      } else {
+        // Full precision chooses witnesses and tau before encoding Record5.
+        const unsigned record = FullPrecision
+                                    ? code >> 12
+                                    : (code << 4) | (code < 0x8000u ? 15u : 0u);
+        out.low[int64_t(row) * out.low_stride + slot] = uint8_t(record);
+        out.words[at] = int32_t(record5::pack_word(record, unsigned(j)));
+      }
     }
   }
   __syncthreads();
   if (t == 0) {
-    a.tau[row] = __uint_as_float(ordered16(pivot) << 16);
-    a.counts[row] = int(written);
-    if (written != Top) atomicOr(a.error + row, 1);
+    if constexpr (FullPrecision) {
+      if (s.written != Top) {
+        atomicOr(out.error + row, 1);
+        out.status[row] = 3;
+        return;
+      }
+      const unsigned bits =
+          s.pivot < 0x80000000u ? s.pivot ^ 0x7fffffffu : s.pivot;
+      out.tau[row] = __uint_as_float(bits);
+    } else {
+      out.tau[row] = __uint_as_float(ordered16(s.pivot) << 16);
+      if (s.written != Top) atomicOr(out.error + row, 1);
+    }
+    out.counts[row] = int(s.written);
   }
+}
+
+template <class Score, bool Rank12 = false>
+__global__ void prepare(const Score* scores, int64_t stride, Output out) {
+  __shared__ Scratch scratch;
+  prepare_row<false, Rank12>(scores, stride, out, Top, scratch, scratch.hist);
+}
+
+__global__ __launch_bounds__(Threads) void prepare_fp32(
+    const float* scores, int64_t stride, Output out, int cap) {
+  __shared__ Scratch scratch;
+  __shared__ unsigned ties;
+  prepare_row<true, false>(scores, stride, out, cap, scratch, &ties);
+}
+
+inline Output bind(Tensor low, Tensor words, Tensor counts,
+                   Tensor tau, Tensor error, Tensor status) {
+  return {low.mutable_data_ptr<uint8_t>(), words.mutable_data_ptr<int>(),
+          counts.mutable_data_ptr<int>(), tau.mutable_data_ptr<float>(),
+          error.mutable_data_ptr<int>(), status.mutable_data_ptr<int>(),
+          low.stride(0), words.stride(0)};
 }
 }  // namespace native_seed
 
 void prepare5(Tensor scores, Tensor low, Tensor words, Tensor counts,
-              Tensor tau, Tensor error, Tensor status) {
+              Tensor tau, Tensor error, Tensor status, bool rank12) {
+  using namespace native_seed;
   DeviceGuard guard(scores.get_device_index());
-  STD_TORCH_CHECK(record5::checked_capacity(low, words) >= native_seed::Top &&
-                      std::min(low.size(0), words.size(0)) >= scores.size(0),
-                  "Record5 seed outputs must hold 2048 entries per input row");
-  native_seed::Output output{low.mutable_data_ptr<uint8_t>(),
-                             words.mutable_data_ptr<int>(),
-                             counts.mutable_data_ptr<int>(),
-                             tau.mutable_data_ptr<float>(),
-                             error.mutable_data_ptr<int>(),
-                             status.mutable_data_ptr<int>(),
-                             low.stride(0),
-                             words.stride(0)};
-  if (scores.scalar_type() == torch::headeronly::ScalarType::BFloat16)
-    launch<native_seed::prepare<__nv_bfloat16>, 256>(
-        scores.size(0), static_cast<const __nv_bfloat16*>(scores.data_ptr()),
-        scores.stride(0), output);
-  else
-    launch<native_seed::prepare<float>, 256>(scores.size(0),
-                                             scores.const_data_ptr<float>(),
-                                             scores.stride(0), output);
+  const bool bf16 = scores.scalar_type() == torch::headeronly::ScalarType::BFloat16;
+  const int cap = rank12 ? int(words.size(1)) : record5::checked_capacity(low, words);
+  const int rows = rank12 ? int(words.size(0)) : std::min(low.size(0), words.size(0));
+  STD_TORCH_CHECK(rows >= scores.size(0) &&
+                      (bf16 ? cap >= Top : !rank12 && scores.dim() == 2 &&
+                       scores.stride(1) == 1 && scores.size(1) >= Seed),
+                  "seed scores and output storage must cover all rows");
+  auto output = bind(low, words, counts, tau, error, status);
+  if (bf16) {
+    const auto* data = static_cast<const __nv_bfloat16*>(scores.data_ptr());
+    if (rank12)
+      launch<prepare<__nv_bfloat16, true>, Threads>(
+          scores.size(0), data, scores.stride(0), output);
+    else
+      launch<prepare<__nv_bfloat16>, Threads>(
+          scores.size(0), data, scores.stride(0), output);
+  } else {
+    launch<prepare_fp32, Threads>(scores.size(0), scores.const_data_ptr<float>(),
+                                  scores.stride(0), output, cap);
+  }
 }
+
+void finish_boundary_native_fp32(Tensor scores, Tensor ids, Tensor partition,
+                                 Tensor permutation, Tensor order,
+                                 Tensor output, Tensor error) {
+  DeviceGuard guard(scores.get_device_index());
+  STD_TORCH_CHECK(
+      scores.scalar_type() == torch::headeronly::ScalarType::Float &&
+          scores.dim() == 2 && scores.stride(1) == 1 &&
+          ids.scalar_type() == torch::headeronly::ScalarType::Int &&
+          ids.dim() == 2 && ids.stride(1) == 1 && ids.size(0) == scores.size(0),
+      "native FP32 E finish requires aligned F32 score / I32 ID rows");
+  STD_TORCH_CHECK(
+      output.dim() == 2 && output.stride(1) == 1 &&
+          output.size(1) >= native_fp32_boundary::Top &&
+          partition.numel() >= scores.size(0) &&
+          error.numel() >= scores.size(0) && order.numel() >= scores.size(0),
+      "native FP32 E finish requires complete output and row metadata");
+  native_fp32_boundary::Args a{scores.const_data_ptr<float>(),
+                               ids.const_data_ptr<int>(),
+                               partition.const_data_ptr<int>(),
+                               permutation.const_data_ptr<int>(),
+                               order.const_data_ptr<int64_t>(),
+                               output.mutable_data_ptr<int>(),
+                               error.mutable_data_ptr<int>(),
+                               int(scores.size(0)),
+                               int(std::min(scores.size(1), ids.size(1))),
+                               int(permutation.numel()),
+                               int(output.size(0)),
+                               scores.stride(0),
+                               ids.stride(0),
+                               output.stride(0)};
+  launch<native_fp32_boundary::finish_small, native_fp32_boundary::Threads>(
+      (a.rows + 3) / 4, a);
+  launch<native_fp32_boundary::finish, native_fp32_boundary::Threads>(a.rows,
+                                                                      a);
+}
+
 __global__ void set_if_any(cudaGraphConditionalHandle handle,
                            const int32_t* values, int count, int inactive) {
   bool active = false;
@@ -496,36 +675,40 @@ void attach_if_any(Tensor values, int64_t inactive, int64_t body_address) {
   STD_TORCH_CHECK(body_address != 0,
                   "conditional body must name a live child graph");
   DeviceGuard guard(values.get_device_index());
-  cudaStream_t stream = get_current_cuda_stream();
-  cudaStreamCaptureStatus status;
-  cudaGraph_t graph;
-  DOSA_CUDA_CHECK(cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph,
-                                           nullptr, nullptr, nullptr));
-  STD_TORCH_CHECK(status == cudaStreamCaptureStatusActive,
-                  "conditional attachment requires active stream capture");
-  cudaGraphConditionalHandle handle;
-  DOSA_CUDA_CHECK(cudaGraphConditionalHandleCreate(&handle, graph, 0,
-                                                   cudaGraphCondAssignDefault));
+  const cudaStream_t stream = get_current_cuda_stream();
+  const cudaGraph_t graph = current_capture_graph(stream);
+  const auto handle = create_conditional(graph);
   launch<set_if_any, 256>(1, handle, values.const_data_ptr<int32_t>(),
                           int(values.numel()), int(inactive));
-  const cudaGraphNode_t* dependencies;
-  const cudaGraphEdgeData* edges;
-  size_t count;
-  DOSA_CUDA_CHECK(cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph,
-                                           &dependencies, &edges, &count));
-  cudaGraphNodeParams params{};
-  params.type = cudaGraphNodeTypeConditional;
-  params.conditional.handle = handle;
-  params.conditional.type = cudaGraphCondTypeIf;
-  params.conditional.size = 1;
-  cudaGraphNode_t conditional, child;
-  DOSA_CUDA_CHECK(cudaGraphAddNode(&conditional, graph, dependencies, edges,
-                                   count, &params));
-  DOSA_CUDA_CHECK(cudaGraphAddChildGraphNode(
-      &child, params.conditional.phGraph_out[0], nullptr, 0,
-      reinterpret_cast<cudaGraph_t>(body_address)));
-  DOSA_CUDA_CHECK(cudaStreamUpdateCaptureDependencies(
-      stream, &conditional, nullptr, 1, cudaStreamSetCaptureDependencies));
+  append_if_body(stream, graph, handle, body_address);
+}
+
+__global__ void set_two_way(cudaGraphConditionalHandle handle,
+                            const int32_t* layout, const int32_t* values,
+                            int count, int inactive) {
+  int route = *layout != 0;
+  if (values != nullptr) {
+    bool active = false;
+    for (int i = threadIdx.x; i < count; i += blockDim.x)
+      active |= values[i] != inactive;
+    if (!__syncthreads_or(active)) route = 2;
+  }
+  if (threadIdx.x == 0) cudaGraphSetConditional(handle, route);
+}
+
+void attach_two_way(Tensor layout, int64_t stock, int64_t hot,
+                    std::optional<Tensor> values, int64_t inactive) {
+  DeviceGuard guard(layout.get_device_index());
+  const auto stream = get_current_cuda_stream();
+  const auto graph = current_capture_graph(stream);
+  const auto handle = create_conditional(graph);
+  launch<set_two_way, 256>(
+      1, handle, layout.const_data_ptr<int32_t>(),
+      values ? values->const_data_ptr<int32_t>() : nullptr,
+      values ? int(values->numel()) : 0, int(inactive));
+  const int64_t bodies[] = {stock, hot};
+  append_conditional_bodies(stream, graph, handle, cudaGraphCondTypeSwitch,
+                            bodies, 2);
 }
 
 }  // namespace DOSA_NAMESPACE
@@ -534,12 +717,24 @@ DOSA_REGISTER(
     "select_dense5",
     "(Tensor low, Tensor! packed, Tensor counts, Tensor starts, Tensor ends, "
     "Tensor! error, Tensor! output, Tensor order, Tensor permutation, Tensor! "
-    "partition, int nk) -> ()",
+    "partition, int nk, bool finish, Tensor page_table, "
+    "Tensor(a!) boundary, bool rank12=False) -> ()",
     CUDA, select_dense5)
 DOSA_REGISTER("prepare5",
               "(Tensor scores, Tensor! low, Tensor! words, Tensor! counts, "
-              "Tensor! tau, Tensor! error, Tensor! status) -> ()",
+              "Tensor! tau, Tensor! error, Tensor! status, bool rank12=False) -> ()",
               CUDA, prepare5)
 DOSA_REGISTER("attach_if_any",
               "(Tensor values, int inactive, int body_address) -> ()", CUDA,
               attach_if_any)
+
+DOSA_REGISTER("attach_two_way",
+              "(Tensor layout, int stock, int hot, Tensor? values=None, "
+              "int inactive=0) -> ()",
+              CUDA, attach_two_way)
+
+DOSA_REGISTER(
+    "finish_boundary_native_fp32",
+    "(Tensor scores, Tensor ids, Tensor partition, Tensor permutation, "
+    "Tensor order, Tensor! output, Tensor! error) -> ()",
+    CUDA, finish_boundary_native_fp32)

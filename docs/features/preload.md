@@ -88,36 +88,92 @@ falls back to local tuning.
 Source replica:
 
 ```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --warmup-cache-stores mooncake
 ```
 
 Mirror replica (possibly on another node):
 
 ```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-source-host <source-host> --seed-source-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --warmup-cache-stores mooncake
 ```
 
 Each rank binds and dials `base_port + group offset + its global rank`, so one
 `host:base_port` pair covers a whole replica, including the draft daemon group
-when speculative decoding is configured.
+when speculative decoding is configured. The Store options in these examples
+enable compiled-cache reuse; autotune-only D2D seeding does not require them.
 
-The exchange is keyed by the on-disk cache layout: a request names the cache
-by kind, configuration hash, DP rank and world rank, and the source resolves
-it to files under its cache root. Before installing, the target rejects a
-payload whose FlashInfer environment metadata (GPU, CUDA/cuDNN stack) differs
-from its own — such a table would never load anyway, and a hard conflict is
-never overwritten, which would poison the cache file into re-tuning on every
-start. Tables are shareable across vLLM versions as long as the configuration
-hash matches.
+Compiled-cache reuse requires a live D2D source and the same Store
+configuration on source and target. After warmup, the source publishes a
+content-addressed compiled bundle as
+`vllm-warmup-cache/compile_cache/<bundle-sha256>/bundle.tar`. Its authenticated
+D2D response carries the cache manifest, bundle key, byte length and SHA256
+digest, not the bundle itself. The target fetches the bundle from the Store,
+verifies its length and digest, and installs it before model loading. A Store
+miss or error, an invalid or incompatible bundle, or a D2D failure falls back
+to local compilation. A Store without a source cannot provide a compiled-cache
+cold start.
+
+For autotune tables, the exchange is keyed by the on-disk cache layout: a
+request names the cache by kind, configuration hash, DP rank and world rank,
+and the source resolves it to files under its cache root. Before installing,
+the target rejects a payload whose FlashInfer environment metadata (GPU,
+CUDA/cuDNN stack) differs from its own — such a table would never load anyway,
+and a hard conflict is never overwritten, which would poison the cache file
+into re-tuning on every start. Tables are shareable across vLLM versions as
+long as the configuration hash matches.
 
 The channel is a generic seeding point: warmup caches are the first kind, and
 further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
-as additional kinds — small JSON payloads travel inline, while large binary
-state rides the data plane.
+as additional kinds. Small JSON payloads and bundle descriptors travel over
+the authenticated control plane; compiled bundles are fetched separately from
+the configured shared Store.
+
+### Sharing warmup caches through Mooncake (optional)
+
+For autotune tables, pluggable shared stores are an alternative to D2D seeding
+and let a new node fetch them even when no source replica is online.
+`--warmup-cache-stores` takes a comma-separated list of store backends; the
+`mooncake` backend uses a
+[Mooncake](https://github.com/kvcache-ai/Mooncake) distributed store. Point
+`MOONCAKE_CONFIG_PATH` at the same JSON configuration used by
+[MooncakeStoreConnector](mooncake_store_connector_usage.md#configure-mooncake):
+
+```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --warmup-cache-stores mooncake
+```
+
+After tuning, each daemon publishes its per-rank autotune table to every
+configured store under keys of the form
+`vllm-warmup-cache/<kind>/<config-hash>/<filename>`, in addition to writing
+its local disk cache. All tiers share one interface: the local disk is always
+tier zero, and the stores listed in `--warmup-cache-stores` follow it in list
+order — reads take the first tier that hits, writes fan out to all of them.
+During warmup a daemon pulls its table from the shared stores first, in list
+order; when no store has it — or none are configured — it falls back to D2D
+seeding from a live source daemon, and finally tunes in place. Stores come
+first because they are built for read fan-out, while a D2D fetch makes a busy
+peer proxy the same bytes. For autotune tables, this covers a cold start with
+no live source daemon and nodes whose cache root is ephemeral. When serving
+peers, a daemon answers from the same chain: disk first, then the stores.
+Whatever it fetches is validated and installed to the local disk cache as
+usual. A misspelled store name or a store that cannot be configured fails
+daemon startup immediately; at runtime, store operations are best-effort and
+never block warmup.
+
+Prefer the `standalone-store` topology for this use case. In `embedded` mode
+every daemon contributes `global_segment_size` of host memory to the pool,
+which is hard to justify for kilobyte-sized JSON artifacts. Note that the
+store is a trust boundary: any writer in the Mooncake cluster can influence
+the autotune tables and compiled bundles other nodes load, so only point
+daemons at a trusted deployment.
 
 ## How it works
 
@@ -140,6 +196,12 @@ state rides the data plane.
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
+
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
 
 ## Multi-node and data parallelism
 
@@ -242,14 +304,37 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   passes, and a table tuned on the draft model would key on the draft's
   config, which no engine looks up), so those deployments' first engine
   tunes and fills the cache instead.
-- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
-  seeded; single-rank daemons use FlashInfer's managed v2 store and always
-  tune in place. Seeding requires a trusted network — the TCP channel is
-  authenticated by a shared token but unencrypted.
+- **Cache seeding**: autotune seeding supports only the v1 per-rank FlashInfer
+  cache; single-rank daemons use FlashInfer's managed v2 store and always tune
+  in place. Compiled-cache seeding additionally requires a live D2D source and
+  matching Store configuration on source and target; a Store alone cannot
+  cold-start compiled caches. Seeding requires a trusted network — the TCP
+  channel is authenticated by a shared token but unencrypted. Shared stores
+  can serve autotune tables without a live source. Cache misses and errors
+  fall back to local tuning or compilation.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
@@ -273,6 +358,11 @@ with the shared `--seed-token` (constant-time comparison), and
 an unauthenticated peer that stops sending is cut off by a whole-message
 deadline instead of blocking the accept loop. The channel is unencrypted —
 bind it to a trusted network.
+
+The optional shared stores (`--warmup-cache-stores`) trust the store
+they are pointed at: a writer in the store's cluster can influence the
+autotune tables and compiled bundles a daemon installs, so use them only with
+a trusted deployment.
 
 See the [security documentation](../usage/security.md) for vLLM's general
 threat model.

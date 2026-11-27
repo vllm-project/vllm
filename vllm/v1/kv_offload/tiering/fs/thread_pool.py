@@ -140,8 +140,8 @@ class DualQueueThreadPool:
 
         After this returns, every submitted job has had its last task
         finish, so no worker thread is still copying data. Note:
-        completed jobs may still be sitting in ``_finished_q`` waiting
-        for ``get_finished()`` to drain them.
+        completed jobs may still be sitting in `_finished_q` waiting
+        for `get_finished()` to drain them.
         """
         with self._condition:
             self._condition.wait_for(lambda: self._inflight_jobs == 0)

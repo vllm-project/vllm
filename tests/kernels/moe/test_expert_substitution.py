@@ -37,7 +37,7 @@ def _model_config(approximate_experts, **kwargs) -> SimpleNamespace:
 
 
 def _expert_substitution(targets: dict[str, dict[int, str]]) -> dict:
-    """The ``compression_config.transform_config.expert_substitution`` format."""
+    """The `compression_config.transform_config.expert_substitution` format."""
     return {
         "version": 1,
         "router_semantics": {

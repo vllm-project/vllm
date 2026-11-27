@@ -34,8 +34,8 @@ class MxFp4LinearKernel(ABC):
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
-    priority order, calling ``is_supported``, ``_supports_quant_scheme`` and
-    ``can_implement`` to find the best match for the current hardware.
+    priority order, calling `is_supported`, `_supports_quant_scheme` and
+    `can_implement` to find the best match for the current hardware.
     """
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
@@ -60,7 +60,7 @@ class MxFp4LinearKernel(ABC):
         """Return whether this kernel implements *weight_key* x *activation_key*.
 
         Selection uses this to dispatch on the requested activation format
-        (from the checkpoint or ``--quantization-config.linear.activation``).
+        (from the checkpoint or `--quantization-config.linear.activation`).
         The default covers MXFP4 weights with MXFP4 or unquantized activations;
         kernels for other activation formats override it.
         """

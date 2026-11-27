@@ -24,26 +24,21 @@ def fused_allreduce_rms_norm(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     norm: RMSNorm,
-    *,
-    max_size_bytes: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer.
 
-    ``hidden_states`` is the per-rank *partial* output of a row-parallel linear
-    run with ``reduce_results=False``; ``norm`` is the RMSNorm applied right
-    after. Returns ``(normed_output, new_residual)``, equivalent to
-    ``norm(all_reduce(hidden_states), residual)``. Falls back to an explicit
+    `hidden_states` is the per-rank *partial* output of a row-parallel linear
+    run with `reduce_results=False`; `norm` is the RMSNorm applied right
+    after. Returns `(normed_output, new_residual)`, equivalent to
+    `norm(all_reduce(hidden_states), residual)`. Falls back to an explicit
     all-reduce + RMSNorm when the flashinfer fast path is unavailable.
-    ``max_size_bytes`` overrides the default budget; zero disables fusion.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
         return norm(hidden_states, residual)
 
     if flashinfer_trtllm_fused_allreduce_norm is not None:
-        ok, max_token_num = _can_use_flashinfer(
-            hidden_states, tp_size, max_size_bytes=max_size_bytes
-        )
+        ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
         if ok:
             norm_out = torch.empty_like(hidden_states)
             # With norm_out provided, the kernel writes the new residual

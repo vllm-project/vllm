@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the depyf ``load_by_key_path`` patch in compilation/depyf_compat.py.
+"""Tests for the depyf `load_by_key_path` patch in compilation/depyf_compat.py.
 
-depyf replaces ``torch._inductor.codecache.PyCodeCache.load_by_key_path`` with
+depyf replaces `torch._inductor.codecache.PyCodeCache.load_by_key_path` with
 a hook that dumps each generated kernel before loading it. That hook's
-signature is frozen at ``(key, path, linemap, attrs)`` while Inductor also
-passes ``set_sys_modules``, so the patch re-wraps it to forward keywords depyf
+signature is frozen at `(key, path, linemap, attrs)` while Inductor also
+passes `set_sys_modules`, so the patch re-wraps it to forward keywords depyf
 does not know about.
 
 End-to-end coverage lives in
-``tests/compile/fullgraph/test_full_graph.py::test_depyf_integration``, which
+`tests/compile/fullgraph/test_full_graph.py::test_depyf_integration`, which
 needs a GPU and a cold compile cache. These tests pin the same behaviour by
-driving ``PyCodeCache`` directly, so they catch the incompatibility in seconds
+driving `PyCodeCache` directly, so they catch the incompatibility in seconds
 on CPU -- which is where it should have been caught in the first place.
 """
 

@@ -346,6 +346,37 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
         return a1q, a1q_scale, router_logits
 
+    def supports_precomputed_routing(self) -> bool:
+        return True
+
+    def prepare_routed(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Quantize and dispatch topk weights and ids instead of logits."""
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
+        res = get_ep_group().dispatch(
+            a1q,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel=self.is_sequence_parallel,
+            extra_tensors=scales,
+        )
+        if scales is None:
+            assert len(res) == 3
+            a1q, topk_weights, topk_ids = res
+            return a1q, a1q_scale_orig, topk_weights, topk_ids
+        assert len(res) == 4
+        a1q, topk_weights, topk_ids, gathered_scales = res
+        a1q_scale = _unwrap_scale_and_prepare_for_moe(gathered_scales, quant_config)
+        return a1q, a1q_scale, topk_weights, topk_ids
+
     def finalize(
         self,
         fused_expert_output: torch.Tensor,

@@ -41,12 +41,12 @@ def _quantize_moe_weight_to_nvfp4(
     weight: torch.Tensor,
     moe_tp_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize stacked MoE expert weights ``(E, N, K)`` to NVFP4.
+    """Quantize stacked MoE expert weights `(E, N, K)` to NVFP4.
 
     One FP32 global scale per expert plus per-block (group-16) FP8 scales,
     matching the ModelOpt NVFP4 checkpoint layout. Returns packed FP4 weights
-    ``(E, N, K // 2)``, block scales ``(E, N, K // 16)``, and the per-expert
-    global scale ``(E,)`` stored as ``amax / (fp4_max * fp8_max)``.
+    `(E, N, K // 2)`, block scales `(E, N, K // 16)`, and the per-expert
+    global scale `(E,)` stored as `amax / (fp4_max * fp8_max)`.
     """
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
     k = weight.shape[-1]
@@ -198,6 +198,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
                 per_token_activation=self.per_token_activation,
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
         else:
             # Reload creates new scale tensors; derived kernel scales must use
             # their new values before layerwise reload restores captured storage.

@@ -3,19 +3,19 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``CircularBufferSpec`` / ``CircularBufferManager``: exactly one block
+`pos % kpool` (`CircularBufferSpec` / `CircularBufferManager`: exactly one block
 allocated per request, never grown, so only column 0 of its block table is
 ever written; the rest stays zero-initialized).
 
 The generic per-group slot kernel cannot express that layout: it maps
-``pos -> bt[req][pos // bs] * bs + pos % bs`` (``_compute_slot_mappings_kernel``
-in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= kpool``
+`pos -> bt[req][pos // bs] * bs + pos % bs` (`_compute_slot_mappings_kernel`
+in vllm/v1/worker/gpu/block_table.py), so every token at `pos >= kpool`
 reads a zero column and collapses onto physical tail block 0. All concurrent
-requests then share one ``kpool``-slot ring and corrupt each other's pool
+requests then share one `kpool`-slot ring and corrupt each other's pool
 compression.
 
 These tests pin that defect's arithmetic, verify the circular replacement
-(``compute_kpool_tail_slot_mapping``), and mirror the tail kernels' index
+(`compute_kpool_tail_slot_mapping`), and mirror the tail kernels' index
 math to show cross-request pollution before the fix and isolation after.
 """
 
@@ -90,7 +90,7 @@ def make_tail_block_table(own_blocks, width=64):
 
 
 def legacy_generic_tail_slots(block_table, query_start_loc, positions):
-    """Reference of the generic ``_compute_slot_mappings_kernel`` arithmetic
+    """Reference of the generic `_compute_slot_mappings_kernel` arithmetic
     (block_table.py:305-313) applied to the tail group's table."""
     slots = []
     for req in range(block_table.shape[0]):

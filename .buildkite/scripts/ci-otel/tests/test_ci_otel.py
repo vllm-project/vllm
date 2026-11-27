@@ -1209,10 +1209,12 @@ def test_bundled_nvml_load_does_not_import_vllm_or_torch(tmp_path):
         [
             sys.executable,
             "-c",
-            "import sys; import ci_gpu_relocated as ci_gpu; "
-            "binding = ci_gpu.load_nvml(); "
-            "assert callable(binding.nvmlDeviceGetMemoryInfo); "
-            "assert 'vllm' not in sys.modules; assert 'torch' not in sys.modules",
+            (
+                "import sys; import ci_gpu_relocated as ci_gpu; "
+                "binding = ci_gpu.load_nvml(); "
+                "assert callable(binding.nvmlDeviceGetMemoryInfo); "
+                "assert 'vllm' not in sys.modules; assert 'torch' not in sys.modules"
+            ),
         ],
         env={**os.environ, "PYTHONPATH": f"{tmp_path}{os.pathsep}{SCRIPTS_DIR}"},
         capture_output=True,

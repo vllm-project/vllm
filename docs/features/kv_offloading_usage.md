@@ -195,6 +195,11 @@ context provides each key's token position through `get_offload_key_position(key
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
 
+Custom policies must also implement `on_request_finished`, which receives the
+request's keys per KV cache group in head-to-tail order and applies the request's
+cache access once, when it finishes. `CachePolicy` no longer has a `touch` method;
+recency updates belong in this hook.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
@@ -296,6 +301,19 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters, passed through as strings (booleans become `true`/`false`). Use it for options such as `use_virtual_addressing`, `req_checksum`, `resp_checksum`, `accelerated` and `type`; see the [NIXL OBJ plugin README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md). The connection fields above and `num_threads` cannot be overridden here. |
+
+For example, to enable the accelerated (S3-over-RDMA) object-store engine of a specific vendor:
+
+```json
+{
+  "bucket": "kv",
+  "endpoint_override": "s3.example:9000",
+  "backend_params": {"accelerated": true, "type": "dell"}
+}
+```
+
+`type` selects the vendor-specific accelerated engine registered in the NIXL OBJ plugin; which values are available depends on the installed NIXL release (`dell` is the engine shipped in NIXL 1.5.2). `accelerated` without a `type` initializes an accelerated client that still transfers over plain S3 on that release.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
@@ -315,6 +333,10 @@ Block content hashes must match across instances for peers to exchange blocks (s
 | `unbound_store_timeout_s` | no | `60` | Seconds a producer holds stored blocks for a consumer that has not fetched them yet. Raise it for deployments whose prefills outlast the default; the blocks keep primary-tier CPU slots pinned for the whole window. Once it expires a late fetch is rejected in a single round trip, so the consumer falls back to local prefill immediately. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+Fetches queued while the peer handshake is pending fail locally if the request
+finishes or its load deadline expires. They do not wait for an abort
+acknowledgement, and a delayed handshake cannot send these retired fetches.
 
 A producer parks a request's blocks until the consumer's `FetchMsg` arrives; if none arrives
 within `unbound_store_timeout_s` the blocks are released so they stop pinning primary-tier
@@ -407,6 +429,10 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
+A transfer completion or abort acknowledgement already received when the
+connection closes still settles its load. Disconnect suppresses messages that
+would start new work; it does not discard these buffered terminal confirmations.
+
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
@@ -459,6 +485,32 @@ Example (OpenAI-compatible completions request):
   }
 }
 ```
+
+## Huge pages for `SimpleCPUOffloadConnector`
+
+With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
+`"1GB"` in `kv_connector_extra_config` to back the CPU KV caches with Linux
+HugeTLB pages (Linux 5.14 or newer):
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 137438953472,
+    "cpu_hugepage_block_size": "1GB"
+  }
+}
+```
+
+Reserve enough pages on the host for every rank, rounding each rank's cache
+size up to a whole page. Containers also need a matching hugetlb allowance, for
+example Kubernetes `hugepages-1Gi`. If the pool or the limit is too small,
+startup fails; there is no fallback to ordinary pages.
+
+Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
+requests transparent huge pages. In both cases, the memory follows the worker's
+NUMA policy, for example from `--numa-bind`.
 
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 

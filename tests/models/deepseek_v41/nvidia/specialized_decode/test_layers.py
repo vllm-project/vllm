@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 specialized decode through the real model: a five-layer
 DeepSeek-V4.1-Flash on random weights at TP4 with DSpark, served with
-``decode_backend`` ``latency_specialized`` and ``auto``. Unlike
-``test_kernels.py`` and ``test_numerics.py`` next to it, which
+`decode_backend` `latency_specialized` and `auto`. Unlike
+`test_kernels.py` and `test_numerics.py` next to it, which
 check each path against the op it replaces, this runs the engine: the
 executor and its per-step gates, the CUDA graphs, the recorded metadata builds
 and the weights the executor takes off the layers.
@@ -13,8 +13,8 @@ source, 2 a ratio-2 consumer with an Engram, 3 ratio-1 KV, index and
 candidate source, 4 a ratio-1 index source over 3's candidates. Twelve
 requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
-(6 rows each), above 48 rows (inline mHC), padded, row-sharded (12
-requests) and low-batch (one request).
+(6 rows each), above 48 rows (the pinned projections), padded,
+row-sharded (from two requests) and low-batch (one request).
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -57,9 +57,9 @@ TRUNCATED = {
 
 
 def _truncate(config):
-    """``hf_overrides`` for the target and, being callable, the DSpark draft
+    """`hf_overrides` for the target and, being callable, the DSpark draft
     too: the target takes its aux hidden-state layers from the draft's
-    ``dspark_target_layer_ids``. Module level, so engine processes unpickle it."""
+    `dspark_target_layer_ids`. Module level, so engine processes unpickle it."""
     for key, value in TRUNCATED.items():
         setattr(config, key, value)
     return config
@@ -153,9 +153,9 @@ class _Probe:
         # proves that the CUDA graphs hold the executor, not the stock layers.
         self.executor_sublayers = 0
 
-        def sublayer_and_keep(boundaries, layer, ffn, state, step, **kwargs):
+        def sublayer_and_keep(boundaries, layer, ffn, state, **kwargs):
             self.executor_sublayers += 1
-            out = sublayer(boundaries, layer, ffn, state, step, **kwargs)
+            out = sublayer(boundaries, layer, ffn, state, **kwargs)
             i = index.get(layer)
             if ffn and i is not None:
                 residual = out[0].residual
@@ -163,7 +163,7 @@ class _Probe:
                 self._keep_ffn_input(i, out[1])
             return out
 
-        Boundaries.sublayer = sublayer_and_keep
+        Boundaries.sublayer = sublayer_and_keep  # type: ignore[method-assign]
 
     def _keep_residual(self, i):
         def hook(module, args, out):
@@ -198,7 +198,7 @@ class _Probe:
         self.output[: out.shape[0]].copy_(out)
 
     def values(self, rows: torch.Tensor) -> dict:
-        """The kept tensors of ``rows``, the residual streams' hc mean."""
+        """The kept tensors of `rows`, the residual streams' hc mean."""
         return {
             "residual": [
                 t[rows].float().mean(1).bfloat16().cpu() for t in self.residual
@@ -212,7 +212,7 @@ class _Probe:
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
     """Dummy loading with weights in the checkpoint's ranges, before post-load
-    processing, so every processed copy follows. Also puts a ``_Probe`` on
+    processing, so every processed copy follows. Also puts a `_Probe` on
     the target model before its CUDA graphs are captured."""
 
     def load_weights(self, model, model_config) -> None:
@@ -243,7 +243,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class StepRecorder:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers. Rank 0 keeps every step's rows."""
 
     model_runner: "GPUModelRunner"
@@ -296,6 +296,7 @@ class StepRecorder:
             ),
             "stock_fused_mhc_max_rows": getattr(mhc._all_reduce_mhc, "capacity", None),
             "draft_attention": [type(m.attn).__name__ for m in layers(draft)],
+            "embedding": type(getattr(decode, "embedding", None)).__name__,
         }
 
     def record_steps(self, prompt_lens: list[int]) -> None:
@@ -306,13 +307,15 @@ class StepRecorder:
         self._prompt_lens = prompt_lens
         self._steps: list[dict] = []
         self._full = False
-        run_fullgraph = runner.cudagraph_manager.run_fullgraph
+        manager = runner.cudagraph_manager
+        assert manager is not None
+        run_fullgraph = manager.run_fullgraph
 
         def run_and_flag(desc):
             self._full = True
             return run_fullgraph(desc)
 
-        runner.cudagraph_manager.run_fullgraph = run_and_flag
+        manager.run_fullgraph = run_and_flag  # type: ignore[method-assign]
         execute_model = runner.execute_model
 
         def execute_and_record(*args, **kwargs):
@@ -370,8 +373,8 @@ class StepRecorder:
 
 
 def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str):
-    """Greedy decode of ``prompts``: each prompt's output tokens and the
-    paths each rank took; the steps' rows saved under ``path``."""
+    """Greedy decode of `prompts`: each prompt's output tokens and the
+    paths each rank took; the steps' rows saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -437,7 +440,7 @@ def _assert_quantiles(errs: list[float], what, median: float, p99: float) -> Non
 
 
 def _check_close(got: dict, want: dict, keys: list, layers, output: bool) -> None:
-    """The kept tensors of ``keys`` on both runs, close in distribution.
+    """The kept tensors of `keys` on both runs, close in distribution.
 
     Random weights amplify any difference layer by layer, and the stock paths
     do not reproduce either: single decode tokens of two stock runs
@@ -501,6 +504,8 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
+        # The executor embeds from the replicated table.
+        assert rank["embedding"] == "ReplicatedEmbedding", rank
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank

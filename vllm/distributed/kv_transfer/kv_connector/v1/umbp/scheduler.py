@@ -156,7 +156,7 @@ class _LookupBlockPool(BlockPool):
         if block is None:
             block = KVCacheBlock(
                 block_id=len(self.hit_blocks) + 1,
-                _block_hash=make_block_hash_with_group_id(
+                block_hash=make_block_hash_with_group_id(
                     BlockHash(block_hash), kv_cache_group_ids[0]
                 ),
             )
@@ -172,7 +172,7 @@ class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport.
 
     Without a runtime and codec the scheduler neither looks up nor stores
-    until ``bind_namespace`` supplies them.
+    until `bind_namespace` supplies them.
     """
 
     def __init__(
@@ -439,10 +439,11 @@ class UMBPStoreConnectorScheduler:
                 request.request_id,
             )
             return 0, False
-        per_rank = self.topology.rank_count
+        assert self.codec is not None
         offset = 0
         logical_hits_by_group: dict[int, list[bool]] = {}
         for group_id in group_ids:
+            per_rank = self.codec.keys_per_object(self.topology, group_id)
             group_size = len(logical_objects_by_group[group_id]) * per_rank
             group_hits = hits[offset : offset + group_size]
             offset += group_size
@@ -687,7 +688,6 @@ class UMBPStoreConnectorScheduler:
 
         block_state = getattr(scheduler_output, "kv_connector_block_state", None)
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        resumed_ids: set[str] = set(getattr(cached_reqs, "resumed_req_ids", ()))
         for request_id in cached_reqs.req_ids:
             load_plans = self._pending_loads.pop(request_id, [])
             self._load_specs.pop(request_id, None)
@@ -712,10 +712,7 @@ class UMBPStoreConnectorScheduler:
                                 self.kv_cache_config.prefix_cacheable_group_ids
                             )
                         )
-                        if request_id in resumed_ids:
-                            cached_tracker.replace_blocks(selected)
-                        else:
-                            cached_tracker.update_blocks(selected)
+                        cached_tracker.update_blocks(selected)
                     # The appended table keeps blocks core has since freed, such
                     # as sliding-window blocks out of the window, which a store
                     # would read; core's current table does not.
@@ -1101,10 +1098,10 @@ class UMBPStoreConnectorScheduler:
             return {}
         if len(hits) != len(keys):
             return {}
-        ranks = self.topology.rank_count
         offset = 0
         resident = {}
         for group_id, indices in candidates.items():
+            ranks = self.codec.keys_per_object(self.topology, group_id)
             resident[group_id] = {
                 index
                 for position, index in enumerate(indices)
@@ -1318,14 +1315,21 @@ class UMBPStoreConnectorScheduler:
             if not pending.future.done():
                 return
             self._event_lookup = None
+            widths = [
+                self.codec.keys_per_object(self.topology, group_id)
+                for (group_id, _), _ in pending.objects
+            ]
             try:
                 hits = list(pending.future.result())
-                if len(hits) != len(pending.objects) * self.topology.rank_count:
+                if len(hits) != sum(widths):
                     raise ValueError("invalid UMBP event residency result length")
             except Exception as exc:
                 logger.debug("UMBP event residency check failed: %s", exc)
                 hits = None
-            for index, (identity, serial) in enumerate(pending.objects):
+            offset = 0
+            for (identity, serial), width in zip(pending.objects, widths, strict=True):
+                start = offset
+                offset += width
                 record = self._event_objects.get(identity)
                 if record is None or record.serial != serial:
                     continue
@@ -1336,8 +1340,7 @@ class UMBPStoreConnectorScheduler:
                     if record.published:
                         self._event_objects[identity] = record
                     continue
-                ranks = self.topology.rank_count
-                resident = all(hits[index * ranks : (index + 1) * ranks])
+                resident = all(hits[start : start + width])
                 if not resident:
                     if record.published:
                         group_id, block_hash = identity

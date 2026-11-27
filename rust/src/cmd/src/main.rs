@@ -12,6 +12,7 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
 
@@ -89,9 +90,12 @@ fn main() -> ExitCode {
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    vllm_tracing::init_tracing(process_label);
-
-    let cli = Cli::parse();
+    // Parsing warns about no-op arguments before `--log-level` is known.
+    let cli = {
+        let _guard = vllm_tracing::set_default_tracing(process_label, LogLevel::from_env());
+        Cli::parse()
+    };
+    vllm_tracing::init_tracing(process_label, cli.log_level());
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

@@ -4,9 +4,6 @@
 import torch
 
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 
 from .inc_scheme import INCLinearScheme
 
@@ -19,7 +16,6 @@ class INCFp8LinearScheme(INCLinearScheme):
             weight_block_size=list(weight_block_size),
         )
         self.linear_method = Fp8LinearMethod(self.quant_config)
-        self.linear_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
 
     @classmethod
     def get_min_capability(cls) -> int:

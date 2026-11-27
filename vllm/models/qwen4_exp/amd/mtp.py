@@ -6,8 +6,8 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
   - drops all multi-modal handling (text-only),
   - forces PLE off while keeping the main model's HC stream count,
   - fuses the backbone hidden and the new-token embedding via
-    ``residual_linear_shared`` (fc_embedding + shared fc_hidden) instead of
-    the ``Linear(2H, H)`` + repeat used by other MTP variants,
+    `residual_linear_shared` (fc_embedding + shared fc_hidden) instead of
+    the `Linear(2H, H)` + repeat used by other MTP variants,
   - emits TWO hidden streams per step (scheme A): a single stream [T, H]
     (final-mixer collapsed, fed to the LM head) and a pre-final-mixer
     multi stream [T, hc_count*H] (fed to the next draft step).
@@ -119,6 +119,7 @@ def _remap_mtp_weight_name(name: str) -> str | None:
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int,
 ) -> VllmConfig:
     """Ensure that the draft model config is set in the vLLM config."""
     speculative_config = vllm_config.speculative_config
@@ -150,6 +151,15 @@ def _make_draft_vllm_config(
                 draft_quant_config,
                 "quantized_layers",
                 _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
+            )
+        if draft_quant_config.get_name() == "quark":
+            draft_quant_config.apply_vllm_mapper(
+                WeightsMapper(
+                    orig_to_new_prefix={
+                        f"mtp.layers.{i}.": f"mtp.layers.{mtp_start_layer_idx + i}."
+                        for i in range(num_mtp_layers)
+                    }
+                )
             )
 
     draft_vllm_config = replace(
@@ -195,6 +205,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
             self.mtp_start_layer_idx,
+            self.num_mtp_layers,
         )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token

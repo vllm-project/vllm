@@ -7,9 +7,15 @@ description: Time a vLLM model's forward pass on exact batch shapes (decode, pre
 
 Builds the batch without the scheduler, runs it through MRV2's real
 `execute_model`, and times the forward as a one-shot CUDA graph (prefill
-included). The configured drafter is included by default; use
-`--exclude-drafter` for target-only timing. All draft tokens are accepted.
-Target sampling, rejection sampling, and CPU step overhead are excluded.
+included). Target sampling (rejection sampling for verify rows) and the
+configured drafter are included by default; `--exclude-sampler` and
+`--exclude-drafter` drop them (both for forward-only timing). The drafter
+assumes all draft tokens are accepted. Requests use the model's
+`generation_config.json` sampling defaults (else temperature 1.0, no
+top-p/top-k); override with `--override-generation-config` (e.g.
+`'{"temperature": 0}'` for greedy target sampling). The drafter samples
+greedily unless `draft_sample_method` is `probabilistic`. CPU step overhead
+is excluded.
 
 ## Usage
 

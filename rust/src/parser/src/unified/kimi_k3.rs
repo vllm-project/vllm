@@ -56,9 +56,9 @@ use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, special_token};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
     Attributed, AttributedExt as _, Marker, MarkerScanState, SpecialToken,
@@ -380,7 +380,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
             // closing markers; keep the calls already emitted.
             KimiK3Mode::Tools if self.buffer.text.is_empty() => {}
             KimiK3Mode::Tools | KimiK3Mode::Call { .. } => {
-                return Err(parsing_failed!("incomplete Kimi K3 tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Kimi K3" });
             }
         }
 
@@ -658,7 +658,10 @@ fn typed_arguments(input: &mut &str) -> ModalResult<String> {
     let pairs: Vec<(String, Value)> =
         repeat(0.., terminated(argument_block, ws0)).parse_next(input)?;
     let arguments = pairs.into_iter().collect::<Map<String, Value>>();
-    serde_json::to_string(&arguments).map_err(|_| xtml_error("Kimi K3 arguments"))
+    // The template renders compact JSON values.
+    JsonStyle::Compact
+        .to_string(&arguments)
+        .map_err(|_| xtml_error("Kimi K3 arguments"))
 }
 
 /// Parse one typed `argument` block into its key/value pair.

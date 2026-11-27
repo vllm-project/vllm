@@ -15,9 +15,9 @@ class AuthenticationMiddleware:
     """Pure ASGI middleware that authenticates each request by checking
     if the Authorization Bearer token exists and equals anyof "{api_key}".
 
-    Notes
-    -----
-    There are two cases in which authentication is skipped:
+    Note:
+        There are two cases in which authentication is skipped:
+
         1. The HTTP method is OPTIONS.
         2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
 

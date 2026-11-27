@@ -506,16 +506,14 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
-def test_prompt_logprob_token_ids_require_v2_model_runner():
-    """Only the V2 runner scores them; the V1 runner would return None, and
-    kv-sharing fast prefill would score rows the cross-decoder never ran."""
+def test_prompt_logprob_token_ids_reject_fast_prefill():
+    """kv-sharing fast prefill would score rows the cross-decoder never ran."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
             return_sampling_mask=False, enable_trace_replay=False, is_diffusion=False
         ),
         vllm_config=SimpleNamespace(
             reasoning_config=None,
-            use_v2_model_runner=False,
             cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
         ),
         speculative_config=None,
@@ -526,21 +524,15 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
     )
     params = SamplingParams(prompt_logprob_token_ids=[[1, 2]])
     with patch.object(SamplingParams, "verify"):
-        with pytest.raises(VLLMValidationError, match="V2 model runner"):
-            InputProcessor._validate_params(processor, params, ("generate",))
-        processor.vllm_config.use_v2_model_runner = True
         InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
             InputProcessor._validate_params(processor, params, ("generate",))
 
-        # Top-K prompt logprobs only honor prompt_logprob_start on the V2 runner.
+        # Top-K prompt logprobs with prompt_logprob_start are accepted.
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
         params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
         InputProcessor._validate_params(processor, params, ("generate",))
-        processor.vllm_config.use_v2_model_runner = False
-        with pytest.raises(VLLMValidationError, match="V2 model runner"):
-            InputProcessor._validate_params(processor, params, ("generate",))
 
 
 def test_none_logprobs(vllm_model, example_prompts):
@@ -1174,7 +1166,7 @@ def test_correct_decoded_token_preserves_valid_tokens():
 
             # All decoded tokens should be valid strings
             for logprob_dict in result.outputs[0].logprobs:
-                for token_id, logprob_info in logprob_dict.items():
+                for logprob_info in logprob_dict.values():
                     decoded_token = logprob_info.decoded_token
                     # Valid tokens should be non-empty strings (or empty if corrected)
                     assert isinstance(decoded_token, str)
@@ -1417,10 +1409,8 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         print(f"Test passed with {preemptions} preemptions")
 
 
-def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
+def test_prompt_logprob_token_ids_with_chunking_and_preemption():
     """Per-row scores stay row-aligned across chunked prefill and preemption."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-
     prompts = [
         "The following numbers of the sequence "
         + ", ".join(str(i) for i in range(10))
@@ -1548,7 +1538,6 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
     """Prefix reuse preserves every requested suffix score, for both fixed-ID
     scores and top-K prompt logprobs offset by prompt_logprob_start."""
     start = 17
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Cached and uncached prefills have different execution shapes; batch
     # invariance makes their scores comparable bit for bit.
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -1607,7 +1596,7 @@ def test_token_logprobs_large_batch_int64_row_offset():
     illegal memory access. Run over a batch where batch_size * vocab_size > 2**31
     and check the highest-offset row matches a reference log-softmax.
     """
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda_alike():
         pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
     from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 
@@ -1630,21 +1619,32 @@ def test_token_logprobs_large_batch_int64_row_offset():
     )
 
 
+@pytest.mark.parametrize("split_topk", [False, True])
 @pytest.mark.parametrize("num_prompt_logprobs", [-1, 3])
-def test_chunked_prompt_logprobs_match_unchunked(num_prompt_logprobs: int):
-    """Chunks written into preallocated outputs must match one unchunked pass."""
+def test_chunked_prompt_logprobs_match_unchunked(
+    num_prompt_logprobs: int, split_topk: bool, monkeypatch
+):
+    """Chunks, and top-k blocks within them, written into preallocated outputs
+    must match one unchunked pass."""
     if not current_platform.is_cuda_alike():
         pytest.skip("the logprob kernels are Triton")
+    from vllm.v1.worker.gpu.sample import prompt_logprob
     from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
     from vllm.v1.worker.gpu.sample.prompt_logprob import (
         CHUNK_SIZE,
         compute_prompt_logprobs_with_chunking,
     )
 
+    if split_topk:
+        # Blocks of 100 rows at full vocab, straddling the chunk boundaries.
+        monkeypatch.setattr(prompt_logprob, "TOPK_MAX_ELEMENTS", 100 * 513)
     device = torch.device(current_platform.device_type)
     vocab_size = 512
     num_tokens = 2 * CHUNK_SIZE + 3
-    logits = torch.randn(num_tokens, vocab_size, device=device)
+    # Distinct values per row, since topk's order among ties can vary with the
+    # number of rows ranked together.
+    logits = torch.rand(num_tokens, vocab_size, device=device).argsort(dim=-1)
+    logits = logits.float() / vocab_size
     prompt_token_ids = torch.randint(vocab_size, (num_tokens,), device=device)
 
     token_ids, logprobs, ranks = compute_prompt_logprobs_with_chunking(
@@ -1662,9 +1662,7 @@ def test_chunked_prompt_logprobs_match_unchunked(num_prompt_logprobs: int):
     torch.testing.assert_close(ranks, expected.selected_token_ranks)
 
 
-def test_trace_replay_with_spec_decode(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-
+def test_trace_replay_with_spec_decode():
     prompt = "Hello world " * 50
     llm_kwargs = dict(
         max_model_len=512,

@@ -19,6 +19,7 @@ from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, MLAAttentionSpec
@@ -32,10 +33,11 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
     not current_platform.is_device_capability_family(100),
     reason="Native Muse TRTLLM validation requires Blackwell.",
 )
-def test_bench_forward_muse_balanced_routing(tmp_path):
-    """Muse's native router supports finite, reproducible balanced graph replay."""
+@pytest.mark.parametrize("routing", ["balanced", "zipf"])
+def test_bench_forward_muse_synthetic_routing(tmp_path, routing):
+    """Muse's native router supports finite, reproducible synthetic graph replay."""
     config = dict(
-        architectures=["MuseSpark1xForCausalLM"],
+        architectures=["MuseSparkForCausalLM"],
         model_type="muse_spark_text",
         vocab_size=128,
         hidden_size=512,
@@ -69,8 +71,8 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(config))
     entrypoint = (
         "from vllm.model_executor.models import ModelRegistry; "
-        "ModelRegistry.register_model('MuseSpark1xForCausalLM', "
-        "'vllm.models.muse_spark.nvidia.model:MuseSpark1xForCausalLM'); "
+        "ModelRegistry.register_model('MuseSparkForCausalLM', "
+        "'vllm.models.muse_spark.nvidia.model:MuseSparkForCausalLM'); "
         "from vllm.entrypoints.cli.main import main; main()"
     )
     output = tmp_path / "results.json"
@@ -86,7 +88,7 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
         "--moe-backend",
         "flashinfer_trtllm",
         "--routing",
-        "balanced",
+        routing,
         "--max-model-len",
         "64",
         "--max-num-seqs",
@@ -119,8 +121,40 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
     assert len(rows) == 2
     for row in rows:
         (rank,) = row["ranks"]
+        assert rank["routing"] == routing
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["graph_vs_eager"]["relative_rms"] == 0
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_synthetic_expert_ids_preserve_inactive_slots(keyword, dtype):
+    """Replacing routes must not reactivate padding or partially masked rows."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+
+    fixture = torch.from_numpy(zipf_topk_ids(4, 8, 2, np.random.default_rng(0)))
+    expected = fixture.to(dtype).clone()
+    ids = torch.tensor([[1, 2], [-1, -1], [3, -1], [-1, 4]], dtype=dtype)
+    weights = torch.tensor([[0.6, 0.4], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    hook = RoutingFixture._substitute_ids(fixture, 1, [0], 0)
+    context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    with override_forward_context(context):
+        args = (weights,) if keyword else (weights, ids)
+        kwargs = {"topk_ids": ids} if keyword else {}
+        replaced_args, replaced_kwargs = hook(torch.nn.Identity(), args, kwargs)
+        routed = replaced_kwargs["topk_ids"] if keyword else replaced_args[1]
+        assert routed.dtype == dtype
+        assert torch.equal(routed[ids == -1], ids[ids == -1])
+        assert torch.equal(routed[ids >= 0], expected[ids >= 0])
+        assert replaced_args[0] is weights
+
+        # A later replay can activate rows without inheriting an earlier mask.
+        active_ids = torch.zeros_like(ids)
+        args = (weights,) if keyword else (weights, active_ids)
+        kwargs = {"topk_ids": active_ids} if keyword else {}
+        replaced_args, replaced_kwargs = hook(torch.nn.Identity(), args, kwargs)
+        routed = replaced_kwargs["topk_ids"] if keyword else replaced_args[1]
+        assert torch.equal(routed, expected)
 
 
 def test_balanced_routing_restores_expert_bias(dist_init):
@@ -128,7 +162,7 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     from vllm.config import get_current_vllm_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-    from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
+    from vllm.models.muse_spark.common.moe import MuseSparkRouter
 
     device = torch.device(current_platform.device_type)
     layer = torch.nn.Module()
@@ -137,7 +171,7 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     layer.top_k = 2
     bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], device=device)
     layer.register_buffer("expert_bias", bias.clone())
-    selector = MuseSpark1xRouter(
+    selector = MuseSparkRouter(
         top_k=2,
         num_experts=8,
         expert_bias=layer.expert_bias,
@@ -247,7 +281,9 @@ def test_bench_forward_hybrid_verify(tmp_path, routing):
         (rank,) = row["ranks"]
         assert rank["routing"] == ("zipf" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
-        assert rank["timing_scope"] == "target_only"
+        assert rank["timing_scope"] == "target_and_sampler"
+        assert rank["sampler"]["valid_token_ids"]
+        assert rank["sampler"]["graph_deterministic"]
         assert row["median_us"] > 0
 
 
@@ -272,7 +308,8 @@ def test_zipf_expert_selection():
 )
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
 def test_bench_forward_drafter(tmp_path, method):
-    """The CLI captures real proposals, with full acceptance, unless excluded."""
+    """The CLI captures rejection sampling and real proposals, with full
+    acceptance, unless excluded."""
     config = dict(
         architectures=["Qwen3ForCausalLM"],
         model_type="qwen3",
@@ -360,7 +397,7 @@ def test_bench_forward_drafter(tmp_path, method):
         output = tmp_path / f"{exclude}.json"
         args = command + ["--output-json", str(output)]
         if exclude:
-            args.append("--exclude-drafter")
+            args += ["--exclude-drafter", "--exclude-sampler"]
         result = subprocess.run(args, capture_output=True, text=True, timeout=600)
         assert result.returncode == 0, result.stdout + result.stderr
         for row in json.loads(output.read_text()):
@@ -370,9 +407,11 @@ def test_bench_forward_drafter(tmp_path, method):
             assert rank["graph_vs_eager"]["relative_rms"] == 0
             if exclude:
                 assert rank["timing_scope"] == "target_only"
-                assert "drafter" not in rank
+                assert "drafter" not in rank and "sampler" not in rank
             else:
-                assert rank["timing_scope"] == "target_and_drafter"
+                assert rank["timing_scope"] == "target_sampler_and_drafter"
+                assert rank["sampler"]["valid_token_ids"]
+                assert rank["sampler"]["graph_deterministic"]
                 assert rank["drafter"]["acceptance"] == "all"
                 assert rank["drafter"]["num_draft_tokens"] == 3
                 assert rank["drafter"]["graph_matches_eager"]
@@ -422,6 +461,8 @@ def test_bench_forward_pipeline(tmp_path):
     assert [r["pp_rank"] for r in row["ranks"]] == [0, 1]
     for rank in row["ranks"]:
         assert rank["finite"]
+        # Only the last stage samples.
+        assert ("sampler" in rank) == (rank["pp_rank"] == 1)
         summary = json.loads(Path(rank["profile"]["summary"]).read_text())
         assert Path(summary["trace"]).exists()
         assert any("nccl" in k["name"].lower() for k in summary["kernels"])
@@ -612,7 +653,7 @@ def test_bench_forward_rejects_oversized_verify(capacity):
         ValueError,
         match=rf"Case 'verify' needs 3 draft tokens.*supports {capacity}",
     ):
-        run_case(runner, case, SimpleNamespace())
+        run_case(runner, case, SimpleNamespace(), SamplingParams())
 
 
 def test_profile_summary():
@@ -691,6 +732,8 @@ def test_bench_forward(tmp_path):
         rank0 = row["ranks"][0]
         assert len(rank0["batch_order"]) == len(row["requests"])
         assert rank0["finite"] and rank0["graph_deterministic"]
+        assert rank0["timing_scope"] == "target_and_sampler"
+        assert rank0["sampler"]["valid_token_ids"]
         assert row["median_us"] > 0
         profile = rank0["profile"]
         assert profile["top_kernels"] and profile["span_us"] > 0

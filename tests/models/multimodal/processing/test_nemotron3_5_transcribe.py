@@ -240,9 +240,15 @@ def tiny_tower(dist_init):
     from vllm.model_executor.models.nemotron3_5_transcribe_audio import (
         Nemotron3_5TranscribeAudioTower,
     )
+    from vllm.platforms import current_platform
 
     torch.manual_seed(0)
-    tower = Nemotron3_5TranscribeAudioTower(TINY_AUDIO_CONFIG).eval()
+    # vLLM registers the encoder attention ops for the platform's device only.
+    tower = (
+        Nemotron3_5TranscribeAudioTower(TINY_AUDIO_CONFIG)
+        .eval()
+        .to(current_platform.device_type)
+    )
     with torch.no_grad():
         # vLLM's linear layers allocate their weights uninitialized.
         for module in tower.modules():
@@ -458,3 +464,68 @@ def test_audio_tower_encodes_each_clip_as_if_alone(tiny_tower):
         ]
     for got, expected in zip(together, alone):
         torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-4)
+
+
+def test_encoder_packs_each_rows_valid_frames(tiny_tower):
+    encoder = tiny_tower.encoder.asr_encoder
+    packed = encoder.pack(torch.tensor([2, 0, 3]), 4, torch.device("cpu"))
+    assert packed.rows.tolist() == [0, 1, 8, 9, 10]
+    assert packed.positions.tolist() == [0, 1, 0, 1, 2]
+    assert packed.cu_seqlens.tolist() == [0, 2, 5]
+
+
+def test_encoder_runs_only_the_valid_frames(tiny_tower):
+    encoder = tiny_tower.encoder.asr_encoder
+    device = encoder.final_norm.weight.device
+    torch.manual_seed(2)
+    x = torch.randn(3, 6, encoder.d_model, device=device)
+    lengths = torch.tensor([6, 0, 3])
+    with torch.inference_mode():
+        states, _ = encoder(
+            x, lengths.to(device), bypass_pre_encode=True, lengths_cpu=lengths
+        )
+        alone = [
+            encoder(
+                x[row : row + 1, :length],
+                lengths[row : row + 1].to(device),
+                bypass_pre_encode=True,
+            )[0][0]
+            for row, length in ((0, 6), (2, 3))
+        ]
+    assert not states[1].any()
+    assert not states[2, :, 3:].any()
+    torch.testing.assert_close(states[0], alone[0], rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(states[2, :, :3], alone[1], rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("name", ["asr_encoder", "diarization_model.encoder"])
+@pytest.mark.parametrize("num_frames", [0, 6])
+def test_encoder_returns_zeros_when_no_row_has_frames(tiny_tower, name, num_frames):
+    encoder = tiny_tower.encoder.get_submodule(name)
+    device = encoder.final_norm.weight.device
+    x = torch.randn(3, num_frames, encoder.d_model, device=device)
+    lengths = torch.zeros(3, dtype=torch.int64)
+    with torch.inference_mode():
+        states, _ = encoder(
+            x, lengths.to(device), bypass_pre_encode=True, lengths_cpu=lengths
+        )
+    assert states.shape == (3, encoder.d_model, num_frames)
+    assert not states.any()
+
+
+@pytest.mark.usefixtures("dist_init")
+def test_fp8_encoder_attention_is_refused(tmp_path):
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.models.nemotron3_5_transcribe_audio import (
+        Nemotron3_5TranscribeAudioTower,
+    )
+
+    (tmp_path / "config.json").write_text(json.dumps(CHECKPOINT_CONFIG))
+    model_config = ModelConfig(str(tmp_path), mm_encoder_attn_dtype="fp8")
+    # vLLM's encoder attention refuses FP8 with another message, except on the
+    # FlashInfer cuDNN and ROCm AITER backends; the tower refuses it on all.
+    with (
+        set_current_vllm_config(VllmConfig(model_config=model_config)),
+        pytest.raises(ValueError, match=r"Nemotron-3\.5-Transcribe does not support"),
+    ):
+        Nemotron3_5TranscribeAudioTower(TINY_AUDIO_CONFIG)
