@@ -562,7 +562,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "{covers_output: true, priority, duration}]}. Priority 1-100 "
             "protects the range and 0 releases it; ranges no directive covers "
             "are left as they are, so protection is dropped only by an "
-            "explicit release or by expiry. `scope` is not authenticated; "
+            "explicit release or by expiry. Within one priority, eviction "
+            "is LRU: if the ranges protected at one priority do not fit in "
+            "the KV cache together and are reused in turn, each request "
+            "evicts the next one's and that priority gets no hits, as with "
+            "plain prefix caching. `scope` is not authenticated; "
             "deploy behind a trusted gateway if clients are untrusted."
         ),
     )
