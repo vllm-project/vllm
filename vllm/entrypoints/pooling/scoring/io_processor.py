@@ -743,6 +743,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
+        chat_template_kwargs = merge_kwargs(self.template_kwargs, chat_template_kwargs)
         if chat_template is None and self.saved_chat_template is not None:
             chat_template = self.saved_chat_template
             chat_template_kwargs = merge_kwargs(
