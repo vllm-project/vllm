@@ -176,20 +176,35 @@ def test_hash_routing_rejects_monolithic_without_support(
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
 @pytest.mark.parametrize(
-    "ep_config,supported",
+    "ep_config,has_hash_routing,rejection",
     [
-        ({"use_ep": True, "ep_size": 8}, True),
-        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, False),
-        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False),
+        ({"use_ep": True, "ep_size": 8}, True, None),
+        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, True, "parallel config"),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False, None),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, True, "hash routing"),
+        (
+            {
+                "use_ep": True,
+                "ep_size": 8,
+                "dp_size": 2,
+                "all2all_backend": "deepep_high_throughput",
+            },
+            False,
+            "parallel config",
+        ),
     ],
-    ids=["naive_ep", "eplb", "all2all"],
+    ids=["naive_ep", "eplb", "dp_ep_ag_rs", "dp_ep_hash_routing", "dp_ep_deepep"],
 )
 @override_parallel_groups(SingleRankGroup())
 def test_aiter_w4a16_expert_parallel_selection(
-    default_vllm_config, monkeypatch, ep_config, supported
+    default_vllm_config, monkeypatch, ep_config, has_hash_routing, rejection
 ):
-    """Naive EP (no all2all, no EPLB) selects the AITER W4A16 monolithic kernel,
-    including on hash-routed layers."""
+    """EP selects the AITER W4A16 monolithic kernel, on its own and under DP.
+
+    DP + EP rides the naive allgather/reduce-scatter prepare/finalize, so it
+    stays on this kernel; EPLB and a dispatching all2all do not. Hash routing
+    stays rejected under DP, whose all-gather does not carry `input_ids`.
+    """
     from dataclasses import replace
 
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -197,17 +212,17 @@ def test_aiter_w4a16_expert_parallel_selection(
     )
 
     _, config = _dsv4_moe_config(
-        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+        monkeypatch, default_vllm_config, has_hash_routing, "aiter_triton_mxfp4_bf16"
     )
     config = replace(
         config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
     )
-    if supported:
+    if rejection is None:
         _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
         assert experts_cls is not None
         assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
     else:
-        with pytest.raises(ValueError, match="parallel config"):
+        with pytest.raises(ValueError, match=rejection):
             select_deepseek_v4_mxfp4_moe_backend(config)
 
 

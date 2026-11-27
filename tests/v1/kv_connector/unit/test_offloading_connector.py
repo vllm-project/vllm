@@ -51,7 +51,7 @@ elif current_platform.is_xpu():
 #
 # - Llama: tested with each attention backend and a custom block_size.
 # - Gemma-3: HMA (sliding window + full attention), default backend.
-# - Mamba-130m: HMA (attention-free, acts like sliding_window=1),
+# - Mamba2-130m: HMA (attention-free, acts like sliding_window=1),
 #   default backend.  Prefix caching must be force-enabled.
 # - Falcon-H1-0.5B-Instruct: HMA (parallel SSM/attention in every layer).
 #   After page-size unification the mamba and attention groups have
@@ -63,7 +63,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
 if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
-        ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
+        ("vllm-project/mamba2-130m-hf", None, CPU_BLOCK_SIZES, True),
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
@@ -704,10 +704,9 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     "model,block_size,tp_size",
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
-        # ("tiiuae/falcon-mamba-7b", 16, 1),
         # The chunk size must be a multiple of the GPU block size, which
         # defaults to 64 tokens.
-        ("state-spaces/mamba-1.4b-hf", 64, 1),
+        ("vllm-project/mamba2-1.3b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -722,6 +721,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     llm = LLM(
         model=model,
         max_model_len=block_size * 10,
+        max_num_seqs=8,
         gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,
@@ -735,7 +735,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     )
 
     _PROMPT_SIZE: int = block_size * 2
-    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # Cold prefill and offload-resume are not bit-exact (the chunked scan over
     # the whole prompt vs selective_state_update for the recomputed token), so
     # exact-text equality only holds while the rounding difference never flips a
     # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
