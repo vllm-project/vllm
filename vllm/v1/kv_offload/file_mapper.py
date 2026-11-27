@@ -38,6 +38,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        model_weights: str = "",
     ):
         """Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
@@ -50,6 +51,13 @@ class FileMapper:
         self.rank: int = rank
         self.fields: dict = {
             "model_name": model_name,
+            # Even the default must miss old blocks: they could come from an
+            # override. Keep weight URLs out of config.json and peer metadata.
+            "model_weights_hash": (
+                hashlib.sha256(model_weights.encode()).hexdigest()
+                if model_weights
+                else None
+            ),
             "tokens_per_hash": tokens_per_hash,
             "blocks_per_file": blocks_per_file,
             "tp_size": tp_size,
@@ -98,6 +106,7 @@ class FileMapper:
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
+            model_weights=config.model.weights,
             tokens_per_hash=config.cache.tokens_per_hash,
             blocks_per_file=blocks_per_file,
             tp_size=parallel.tp_size,

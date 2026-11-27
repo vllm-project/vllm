@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     MockOffloadingSpec,
@@ -20,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
@@ -42,7 +45,9 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.kv_offload.base import make_offload_key
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.spec import FSOffloadingSpec
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
@@ -63,6 +68,7 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
+    config.model_config.model_weights_for_cache = ""
     config.model_config.max_model_len = 4096
     config.model_config.use_mla = use_mla
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
@@ -762,6 +768,62 @@ def test_group_carries_the_chunks_the_tier_keeps_per_request(
     offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
 
     assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
+
+
+@pytest.fixture
+def local_model(tmp_path):
+    model = tmp_path / "config"
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"], num_hidden_layers=1
+    ).save_pretrained(model)
+    return model
+
+
+@pytest.mark.cpu_test
+def test_disk_blocks_are_isolated_by_weight_source(local_model, tmp_path):
+    key = make_offload_key(b"shared-prefix", 0)
+
+    def block_for(weights: str) -> Path:
+        config = EngineArgs(
+            model=str(local_model),
+            model_weights=weights,
+            skip_tokenizer_init=True,
+            max_model_len=256,
+            block_size=16,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="OffloadingConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"root_dir": str(tmp_path / "cache")},
+            ),
+        ).create_engine_config()
+        spec = FSOffloadingSpec(
+            build_offloading_config(config, _make_kv_cache_config())
+        )
+        return Path(spec.file_mapper.get_file_name(key))
+
+    q4 = block_for("org/model-GGUF:Q4_0")
+    q4.parent.mkdir(parents=True)
+    q4.write_bytes(b"Q4 KV")
+    assert not block_for("org/model-GGUF:Q8_0").exists()
+    assert not block_for("").exists()
+    assert block_for("org/model-GGUF:Q4_0").read_bytes() == b"Q4 KV"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("source", ["model.gguf", "config:Q4_0"])
+def test_local_weight_sources_keep_their_entry_points(
+    local_model, tmp_path, monkeypatch, source
+):
+    (tmp_path / "model.gguf").symlink_to(local_model / "config.json")
+    monkeypatch.chdir(tmp_path)
+    config = EngineArgs(
+        model=str(local_model), model_weights=source
+    ).create_model_config()
+    monkeypatch.chdir(local_model)
+    assert config.model_weights == source
+    assert config.model_weights_for_cache == str(tmp_path / source)
+    config.model_weights = ""
+    assert config.model_weights_for_cache == ""
 
 
 def test_model_config_carries_the_longest_request():

@@ -304,6 +304,10 @@ Each thread group prefers its own queue but pulls from the other when its primar
 
 Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
 
+The filesystem and object tiers use the explicit weight source to identify compatible blocks. P2P peers check the same field when connecting. GGUF variants such as `repo/model:Q4_0` and `repo/model:Q8_0` get separate caches even when they share a model config. Use the same immutable weight reference across instances. If you replace weights at the same path or URI, start with a fresh cache.
+
+The first run after upgrading recomputes existing blocks because older stores did not record their weight source. Once older instances have stopped using them, you can remove the old cache directories or objects.
+
 Inside that subdirectory, blocks are sharded across hash-prefix subdirectories to limit directory fan-out:
 
 ```text

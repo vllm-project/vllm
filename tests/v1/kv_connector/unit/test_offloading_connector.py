@@ -808,6 +808,56 @@ def _num_fs_tier_files(root_dir) -> int:
     return sum(1 for _ in root_dir.rglob("*.bin"))
 
 
+def test_disk_restore_when_switching_weight_source(vllm_runner, tmp_path, monkeypatch):
+    """A restart with a different weight source must prefill the prompt again."""
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    root = tmp_path / "kv"
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    prefix_len = 2 * CPU_BLOCK_SIZES
+    prompt = TokensPrompt(prompt_token_ids=[42] * prefix_len + [7])
+    sampling = SamplingParams(temperature=0, min_tokens=4, max_tokens=4)
+    transfer = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 64 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+            "secondary_tiers": [{"type": "fs", "root_dir": str(root)}],
+        },
+    )
+
+    def wait_for_blocks(llm, expected):
+        def flushed():
+            llm.llm_engine.step()
+            return _num_fs_tier_files(root) >= expected
+
+        _poll_until(flushed, 60, "the prompt to reach the filesystem tier")
+
+    for source, cached, files in (
+        ("", 0, 2),
+        (str(weights), 0, 4),
+        (str(weights), prefix_len, 4),
+    ):
+        with vllm_runner(
+            "facebook/opt-125m",
+            model_weights=source,
+            load_format="sharded_state" if source else "auto",
+            kv_transfer_config=transfer,
+            max_model_len=prefix_len + 16,
+            gpu_memory_utilization=0.2,
+            enforce_eager=True,
+            async_scheduling=False,
+        ) as runner:
+            if not source:
+                runner.llm.llm_engine.engine_core.save_sharded_state(path=str(weights))
+            (output,) = runner.llm.generate(prompt, sampling, use_tqdm=False)
+            assert output.num_cached_tokens == cached
+            wait_for_blocks(runner.llm, files)
+
+
 def test_tiering_cache_reset_resumes_promotions_on_idle_engine(
     tmp_path, monkeypatch
 ) -> None:
