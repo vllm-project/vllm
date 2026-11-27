@@ -918,6 +918,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = False,
         uniform_decode: bool = False,
         context_len: int = 0,
+        num_reqs: int | None = None,
         skip_eplb: bool = False,
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
@@ -935,7 +936,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # accounts for these slots, while dummy runs bypass the scheduler.
         # Adjust the dummy token count only when the expanded draft batch
         # would exceed the token budget.
-        num_reqs = min(num_tokens, self.max_num_reqs)
+        num_reqs = min(num_reqs or num_tokens, self.max_num_reqs)
         if uniform_decode:
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0

@@ -33,6 +33,7 @@ def _run_dummy_batch(
     max_num_reqs=512,
     is_profile=False,
     skip_attn=False,
+    num_reqs=None,
 ):
     captured = {}
 
@@ -60,6 +61,7 @@ def _run_dummy_batch(
             num_tokens=2048,
             skip_attn=skip_attn,
             is_profile=is_profile,
+            num_reqs=num_reqs,
         )
 
     return captured["scheduler_output"]
@@ -98,3 +100,8 @@ def test_dummy_run_keeps_already_fitting_parallel_draft_batch():
 def test_dummy_run_keeps_default_speculator_batch():
     scheduler_output = _run_dummy_batch(_DefaultSpeculator())
     assert len(scheduler_output.num_scheduled_tokens) == 512
+
+
+def test_dummy_run_keeps_requested_request_count():
+    scheduler_output = _run_dummy_batch(_DefaultSpeculator(), num_reqs=256)
+    assert list(scheduler_output.num_scheduled_tokens.values()) == [8] * 256
