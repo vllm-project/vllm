@@ -4,8 +4,7 @@
 
 Automatic Prefix Caching (APC in short) caches the KV cache of existing queries, so that a new query can directly reuse the KV cache if it shares the same prefix with one of the existing queries, allowing the new query to skip the computation of the shared part.
 
-!!! note
-    Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
+APC reuses only the longest run of full blocks at the start of the prompt that is already cached. Each block's hash covers every token before it, so a prompt that differs at one token recomputes that block and every block after it, even if the later text is identical. Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
 
 ## Enabling APC in vLLM
 
@@ -31,6 +30,14 @@ vllm serve <hybrid-model> \
 `--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, matches the block size of any group that requires block-aligned lookups (such as sliding-window attention), and is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates these at startup and fails if an explicit value would disable partial cache hits. Read the served block size from the startup log. 64 is a reasonable starting point.
+
+### Superseded Mamba state eviction
+
+With prefix caching enabled, vLLM automatically deprioritizes superseded Mamba checkpoints in multi-turn workloads with no extra configuration:
+
+- **Eviction order**: `uncached -> deprioritized (FIFO) -> normal LRU cached`. Deprioritized blocks keep their prefix hashes while free blocks remain and are only evicted ahead of normal LRU-cached blocks under memory pressure.
+- **One-turn fallback protection**: when a finished request advances a conversation's cached Mamba tip, the immediate predecessor (`t-1`) stays in normal LRU to shield against small tail rollbacks (such as tool retries), while states two or more turns behind (`t-2` and older) are deprioritized.
+- **Shared-prefix protection**: shared-prefix junctions and multi-branch fork points keep normal LRU priority.
 
 ### FlashInfer ReplaySSM
 
@@ -87,7 +94,13 @@ With `--prefix-match-unit`, a request can resume inside a Mamba block, so Replay
 We describe two example workloads, where APC can provide huge performance benefit:
 
 - Long document query, where the user repeatedly queries the same long document (e.g. software manual or annual report) with different queries. In this case, instead of processing the long document again and again, APC allows vLLM to process this long document *only once*, and all future requests can avoid recomputing this long document by reusing its KV cache. This allows vLLM to serve future requests with much higher throughput and much lower latency.
-- Multi-round conversation, where the user may chat with the application multiple times in the same chatting session. In this case, instead of processing the whole chatting history again and again, APC allows vLLM to reuse the processing results of the chat history across all future rounds of conversation, allowing vLLM to serve future requests with much higher throughput and much lower latency.
+- Multi-round conversation, where the user may chat with the application multiple times in the same chatting session. In this case, instead of processing the whole chatting history again and again, APC allows vLLM to reuse the processing results of the chat history across all future rounds of conversation, allowing vLLM to serve future requests with much higher throughput and much lower latency. This only works while earlier messages stay token-identical between rounds and new content is appended at the end.
+
+## Measuring the hit rate
+
+Divide the increase in `vllm:prefix_cache_hits` by the increase in `vllm:prefix_cache_queries` (both count tokens).
+
+For per-request counts, start the server with `--enable-prompt-tokens-details` to get `usage.prompt_tokens_details.cached_tokens` from `/v1/chat/completions` and `/v1/completions` (streaming needs `stream_options: {"include_usage": true}`). `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`.
 
 ## Limits
 
