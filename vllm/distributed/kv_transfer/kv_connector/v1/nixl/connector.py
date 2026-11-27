@@ -45,6 +45,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
     NixlPullConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_metrics import (
+    NixlPushPromMetrics,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
     NixlPushConnectorScheduler,
 )
@@ -80,6 +83,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     _cache_hit_source = CacheHitSource.P2P
+    _prom_metrics_cls = NixlPromMetrics
 
     @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
@@ -321,7 +325,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
-        return NixlPromMetrics(
+        return cls._prom_metrics_cls(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
@@ -419,6 +423,8 @@ class NixlPullConnector(NixlBaseConnector):
 
 class NixlPushConnector(NixlBaseConnector):
     """Push-based (WRITE) NIXL KV transfer connector."""
+
+    _prom_metrics_cls = NixlPushPromMetrics
 
     def __init__(
         self,

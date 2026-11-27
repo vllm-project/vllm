@@ -32,7 +32,7 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, list[float | int]] = {
+        self.data = {
             "transfer_duration": [],
             "post_duration": [],
             "bytes_transferred": [],
@@ -93,11 +93,17 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_kv_expired_reqs"]) == 0
             and len(self.data["num_notifications_after_expiry"]) == 0
             and len(self.data["num_declined_expired_reads"]) == 0
+            and not self.data.get("push_backlog")
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             for k, v in other.data.items():
+                if k == "push_backlog":
+                    # The latest pair per rank survives both worker aggregation
+                    # and successive observations within a logging interval.
+                    self.data.setdefault(k, {}).update(v)
+                    continue
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
                 accumulator.extend(v)
@@ -121,6 +127,9 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Num declined expired reads": len(self.data["num_declined_expired_reads"]),
         }
         if self.num_successful_transfers == 0:
+            if self.data.get("push_backlog") and not any(failure_counts.values()):
+                # Per-rank backlog levels are exported by Prometheus.
+                return {}
             # Timing / throughput stats only cover successful transfers. If
             # all requests in the interval were unsuccessful, the failure
             # counts above still surface what happened.

@@ -355,6 +355,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
+        w._backlog_rank = "0"
+        w._push_backlog = (0, 0)
+        w._reported_push_backlog = None
         w._reg_send_inbox = queue.Queue()
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
@@ -532,6 +535,96 @@ class TestPushWriterRegSend:
         assert errors == []
         assert failures == []
         assert w.nixl_wrapper.send_notif.call_count == 1
+
+
+def test_push_backlog_tracks_matching_and_lease_cleanup():
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+
+    def poll(*registrations: str):
+        def get_notifs():
+            # Run exactly one production writer pass, without a timer or a race.
+            w._push_writer_stop.set()
+            return {
+                "remote": [
+                    PUSH_REG_NOTIF_PREFIX
+                    + msgspec.msgpack.encode(_registration_data(r))
+                    for r in registrations
+                ]
+            }
+
+        w.nixl_wrapper.get_new_notifs.side_effect = get_notifs
+        w._push_writer_stop.clear()
+        w._push_writer_wake.set()
+        w._push_writer_loop()
+        stats = w.get_kv_connector_stats()
+        assert stats is not None and not stats.is_empty()
+        assert w.get_kv_connector_stats() is None
+        return stats.data["push_backlog"]["0"]
+
+    assert poll() == (0, 0)
+    w._finished_blocks_inbox.put(("P-first", ([1, 2, 3],)))
+    assert poll("D-first", "D-first") == (1, 1)
+    assert poll("P-first") == (1, 0)
+    w._finished_blocks_inbox.put(("D-first", ([4],)))
+    assert poll() == (0, 0)
+    w._finished_blocks_inbox.put(("expired-P", ([5],)))
+    assert poll("expired-D") == (1, 1)
+    w._evict_finished_inbox.put("expired-P")
+    w._evict_finished_inbox.put("expired-D")
+    assert poll() == (0, 0)
+
+
+def test_push_backlog_exports_latest_pair_per_engine_and_rank(default_vllm_config):
+    from functools import partial
+
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+        NixlPullConnector,
+        NixlPushConnector,
+    )
+
+    def exporter(connector, registry):
+        return connector.build_prom_metrics(
+            default_vllm_config,
+            {m: partial(m, registry=registry) for m in (Counter, Gauge, Histogram)},
+            ["engine"],
+            {0: ["P0"], 1: ["P1"]},
+        )
+
+    registry = CollectorRegistry()
+    prom = exporter(NixlPushConnector, registry)
+    w = _StubWriterWorker.fresh()
+    w._push_backlog = (2, 1)
+    stats = w.get_kv_connector_stats()
+    other = _StubWriterWorker.fresh()
+    other._backlog_rank = "1"
+    other._push_backlog = (1, 3)
+    stats.aggregate(other.get_kv_connector_stats())
+    prom.observe(stats.to_dict(), engine_idx=0)
+    prom.observe(stats.to_dict(), engine_idx=1)
+    w._push_backlog = (0, 0)
+    stats.aggregate(w.get_kv_connector_stats())
+    assert stats.reduce() == {}
+    prom.observe(stats.to_dict(), engine_idx=0)
+    for name, rank1 in (("registrations", 1), ("finished_blocks", 3)):
+        metric = "vllm:nixl_push_unmatched_" + name
+        assert registry.get_sample_value(metric, {"engine": "P0", "rank": "0"}) == 0
+        assert registry.get_sample_value(metric, {"engine": "P0", "rank": "1"}) == rank1
+        assert registry.get_sample_value(metric, {"engine": "P1", "rank": "0"}) == (
+            2 if name == "registrations" else 1
+        )
+
+    pull_registry = CollectorRegistry()
+    exporter(NixlPullConnector, pull_registry)
+    assert not any("push_unmatched" in m.name for m in pull_registry.collect())
+
+    consumer = _StubWriterWorker.fresh()
+    consumer._backlog_rank = None
+    consumer.xfer_stats.record_failed_notification()
+    assert "push_backlog" not in consumer.get_kv_connector_stats().to_dict()
+    assert consumer.get_kv_connector_stats() is None
 
 
 class TestPushWriterMatching:

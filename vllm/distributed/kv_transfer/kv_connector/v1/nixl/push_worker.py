@@ -58,6 +58,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqMeta,
     TransferHandle,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import NixlKVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     _is_attention_spec,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -121,6 +123,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        self._backlog_rank = (
+            str(vllm_config.parallel_config.rank)
+            if self.kv_transfer_config.is_kv_producer
+            else None
+        )
+        self._push_backlog = (0, 0)
+        self._reported_push_backlog: tuple[int, int] | None = None
         # Requests being submitted or with WRITEs in flight -> destination
         # engine. Guarded by ``_sending_transfers_lock``.
         self._inflight_pushes: dict[ReqId, EngineId] = {}
@@ -335,6 +344,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
 
+            # Publish a single snapshot after matching and eviction. Only the
+            # writer accesses the two dictionaries; the engine reads the tuple.
+            self._push_backlog = (
+                len(self._pending_d_registrations),
+                len(self._push_finished_blocks),
+            )
+
             # Self-poll only while there is no other wake source: P-side
             # finished blocks waiting for a D PUSH_REG match. All other
             # progress is event-driven (see module docstring).
@@ -343,6 +359,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             else:
                 self._push_writer_wake.wait()
                 self._push_writer_wake.clear()
+
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        stats = super().get_kv_connector_stats()
+        backlog = self._push_backlog
+        if self._backlog_rank is not None and backlog != self._reported_push_backlog:
+            if stats is None:
+                stats = NixlKVConnectorStats()
+            stats.data["push_backlog"] = {self._backlog_rank: backlog}
+            self._reported_push_backlog = backlog
+        return stats
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:
