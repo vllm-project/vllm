@@ -552,16 +552,30 @@ def _rocm_aiter_topk_gating_impl(
     # preserving vLLM's `renormalize=True` semantics without a second
     # pointwise kernel, scales it by `routed_scaling_factor`, and sigmoids the
     # trailing shared-expert columns.
-    topk_gating(
-        topk_weights,
-        topk_indices,
-        gating_output,
-        correction_bias=correction_bias,
-        need_renorm=renormalize,
-        routed_scaling_factor=routed_scaling_factor,
-        score_func=score_func,
-        num_shared_experts=num_shared_experts,
-    )
+    # Older aiter builds have no num_shared_experts argument. Omitting it is
+    # the same as 0. A non-zero count still needs the argument.
+    kwargs = {
+        "correction_bias": correction_bias,
+        "need_renorm": renormalize,
+        "routed_scaling_factor": routed_scaling_factor,
+        "score_func": score_func,
+    }
+    accepts_shared = getattr(_rocm_aiter_topk_gating_impl, "_accepts_shared", None)
+    if accepts_shared is None:
+        import inspect
+
+        accepts_shared = (
+            "num_shared_experts" in inspect.signature(topk_gating).parameters
+        )
+        _rocm_aiter_topk_gating_impl._accepts_shared = accepts_shared  # type: ignore[attr-defined]
+    if accepts_shared:
+        kwargs["num_shared_experts"] = num_shared_experts
+    elif num_shared_experts:
+        raise RuntimeError(
+            "installed aiter topk_gating does not accept num_shared_experts, "
+            f"got {num_shared_experts}"
+        )
+    topk_gating(topk_weights, topk_indices, gating_output, **kwargs)
 
 
 def _rocm_aiter_topk_gating_fake(
