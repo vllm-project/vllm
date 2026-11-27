@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from vllm import SamplingParams, TokensPrompt
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ExampleConnectorMetadata,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -634,3 +642,63 @@ def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints(dcp, expe
     )
 
     assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == expected
+
+
+class LostKVConnector(ExampleConnector):
+    """Reports the blocks of a load whose stored KV is gone."""
+
+    def start_load_kv(self, forward_context, **kwargs):
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, ExampleConnectorMetadata)
+        self._lost_block_ids: set[int] = set()
+        for request in [r for r in metadata.requests if not r.is_store]:
+            if os.listdir(
+                self._generate_foldername_debug(request.token_ids, request.mm_hashes)
+            ):
+                continue
+            metadata.requests.remove(request)
+            block_ids = request.slot_mapping[:: self._block_size] // self._block_size
+            self._lost_block_ids.update(block_ids.tolist())
+            Path(self._storage_path, "load_failed").touch()
+        super().start_load_kv(forward_context, **kwargs)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        return self._lost_block_ids
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_recompute_after_failed_sync_load_matches_cold_run(
+    vllm_runner, tmp_path, async_scheduling
+):
+    """A synchronous load fills blocks of a request that is already running.
+    When it fails, `recompute` must generate what the cold run generated."""
+    prompt = TokensPrompt(prompt_token_ids=[100 + i * 37 % 5000 for i in range(135)])
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        async_scheduling=async_scheduling,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="LostKVConnector",
+            kv_connector_module_path=__name__,
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            kv_load_failure_policy="recompute",
+        ),
+        gpu_memory_utilization=0.5,
+        max_model_len=256,
+        block_size=16,
+    ) as runner:
+        llm = runner.llm
+        computed = llm.generate(prompt, params, use_tqdm=False)
+        stored = list(tmp_path.glob("*/*.safetensors"))
+        assert stored, "the prompt was not stored"
+        for path in stored:
+            path.unlink()
+        assert llm.reset_prefix_cache()
+
+        recovered = llm.generate(prompt, params, use_tqdm=False)
+
+        assert (tmp_path / "load_failed").exists(), "no load was attempted"
+        assert recovered[0].outputs[0].token_ids == computed[0].outputs[0].token_ids
