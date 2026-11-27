@@ -400,8 +400,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && python3 tools/use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        && grep -i "^torch=" torch_lib_versions.txt > /tmp/torch-only.txt \
+        && test -s /tmp/torch-only.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r /tmp/torch-only.txt --pre \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && rm -f /tmp/torch-only.txt; \
     else \
         echo "Installing build requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
@@ -585,8 +588,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && python3 tools/use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        && grep -i "^torch=" torch_lib_versions.txt > /tmp/torch-only.txt \
+        && test -s /tmp/torch-only.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r /tmp/torch-only.txt --pre \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && rm -f /tmp/torch-only.txt; \
     else \
         echo "Installing build requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
@@ -693,10 +699,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 tools/use_existing_torch.py --prefix \
+        && test -s torch_lib_versions.txt \
         && cat torch_lib_versions.txt >> requirements/test/cuda.in \
         && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
+        && uv pip install --python /opt/venv/bin/python3 -r torch_lib_versions.txt --pre \
         -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
@@ -812,8 +819,8 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ] \
 
 ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
-# Install uv for faster pip installs
-RUN python3 -m pip install uv
+# Install uv for faster pip installs (--no-cache-dir avoids baking pip's wheel cache)
+RUN python3 -m pip install --no-cache-dir uv
 
 # Environment for uv
 # Redirect uv's managed Python and download cache out of /root/ so downstream
@@ -982,21 +989,9 @@ COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 # warm BuildKit agent can skip the install and ship a stale wheel.
 COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        echo "Installing torch nightly..." \
-        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        && echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    else \
-        echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        --extra-index-url https://pypi.org/simple \
-        --index-strategy unsafe-first-match; \
-    fi
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" dist/*.whl
 
 # Expose the Rust frontend bundled in the wheel on the container's PATH.
 RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
@@ -1014,9 +1009,9 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # and bind-mount the wheel for the actual install to keep it out of the image.
 COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" ep_kernels/dist/*.whl
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -1049,7 +1044,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN apt-get update -y \
-    && apt-get install -y git
+    && apt-get install -y git \
+    && rm -rf /var/lib/apt/lists/*
 
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
@@ -1070,10 +1066,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 tools/use_existing_torch.py --prefix \
+            && test -s torch_lib_versions.txt \
             && cat torch_lib_versions.txt >> requirements/test/cuda.in \
             && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+            && uv pip install --system -r torch_lib_versions.txt --pre \
             -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         else \
@@ -1114,6 +1111,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Prebuilt hybrid-model test extensions. --no-deps --offline: their dependencies
 # come only from the hash-pinned test requirements installed above.
 RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-test-wheels \
+    --mount=type=cache,target=/opt/uv/cache \
     if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
         uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
         && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
@@ -1156,32 +1154,18 @@ ARG PYTORCH_NIGHTLY
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        echo "Installing torch nightly..." \
-        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        && echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    else \
-        echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        --extra-index-url https://pypi.org/simple \
-        --index-strategy unsafe-first-match; \
-    fi
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" dist/*.whl
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        --extra-index-url https://pypi.org/simple \
-        --index-strategy unsafe-first-match
+    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" ep_kernels/dist/*.whl
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
@@ -1226,10 +1210,6 @@ ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
 ARG CUDA_VERSION
-ARG VLLM_BUILD_COMMIT
-ARG VLLM_BUILD_PIPELINE
-ARG VLLM_BUILD_URL
-ARG VLLM_IMAGE_TAG
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1245,74 +1225,15 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
     --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
-    set -eu; \
-    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
-    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
-    CUDA_HOME=/usr/local/cuda; \
-    # lmcache requires explicit specifying CUDA_HOME
-    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
-                libcublas-dev-${CUDA_VERSION_DASH} \
-                libcusolver-dev-${CUDA_VERSION_DASH}"; \
+    --mount=type=bind,source=tools/install_kv_connectors.sh,target=/tmp/install_kv_connectors.sh,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        KV_REQUIREMENTS=/tmp/vllm-requirements/kv_connectors.txt; \
-        if [ "${CUDA_MAJOR}" = "12" ]; then \
-            KV_REQUIREMENTS=/tmp/vllm-requirements/kv_connectors_cu12.txt; \
-        fi; \
-        # Preserve the stack used to compile vLLM when resolving optional dependencies. \
-        uv pip freeze --system > /tmp/kv-installed.txt; \
-        grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
-            /tmp/kv-installed.txt > /tmp/kv-constraints.txt; \
-        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build || ( \
-            # if the above fails, install from source
-            apt-get update -y && \
-            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build-isolation && \
-            apt-get purge -y ${BUILD_PKGS} && \
-            # clean up -dev packages, keep runtime libraries
-            rm -rf /var/lib/apt/lists/* \
-        ); \
-        # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
-        # cuda13 variant. Uninstall first; both ship the `mooncake` package.
-        # The CI image does the same via requirements/test/kv_connectors_cuda.in.
-        MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
-        if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
-            uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
-            uv pip install --system -c /tmp/kv-constraints.txt "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
-        fi; \
-        rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
+        /tmp/install_kv_connectors.sh /tmp/vllm-requirements; \
     fi
 
 # Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
 # and Mooncake's EFA transport load libfabric at runtime.
-RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        set -eux; \
-        EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
-        curl -fsSL --retry 3 --retry-all-errors \
-            "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
-            -o "${EFA_INSTALLER_ARCHIVE}"; \
-        echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
-        tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
-        # The installer apt-installs dependencies; earlier layers purged the lists.
-        apt-get update -y; \
-        # Minimal install: libfabric, aws-ofi-nccl and hwloc only. --build-ngc
-        # implies --skip-kmod --skip-limit-conf --no-verify.
-        (cd /tmp/aws-efa-installer && \
-            ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
-        test -x /opt/amazon/efa/bin/fi_info; \
-        /opt/amazon/efa/bin/fi_info --version; \
-        # `-l` lists providers without EFA hardware, so this works in a build.
-        /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
-        EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
-            -print -quit); \
-        test -n "${EFA_NIXL_PLUGIN}"; \
-        ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
-        # Plugins that NCCL_NET_PLUGIN=ofi and NCCL_TUNER_PLUGIN=ofi resolve to.
-        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
-        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
-        apt-get clean; \
-        rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
-            /var/lib/apt/lists/*; \
-    fi
+RUN --mount=type=bind,source=tools/install_efa.sh,target=/tmp/install_efa.sh,ro \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then /tmp/install_efa.sh "${EFA_INSTALLER_VERSION}" "${EFA_INSTALLER_SHA256}"; fi
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
@@ -1330,6 +1251,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     fi
 
+# Declared below the KV/EFA/Rubin RUNs so rebuilding the same commit with a
+# new build URL or tag does not invalidate them.
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
     VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local} \
