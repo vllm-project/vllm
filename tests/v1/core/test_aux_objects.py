@@ -594,6 +594,7 @@ def _versions(engine, objects):
 
 def _abort(engine, request_id):
     core = object.__new__(EngineCoreProc)
+    core.aux_output_enabled = True
     core.scheduler = engine.scheduler
     core.output_queue = queue.Queue()
     (request,) = engine.scheduler.finish_requests(
@@ -610,6 +611,7 @@ def _engine_core(engine):
     worker = object.__new__(WorkerBase)
     worker.model_runner = SimpleNamespace(aux_output_connector=engine.worker)
     core = object.__new__(EngineCore)
+    core.aux_output_enabled = True
     core.scheduler = engine.scheduler
     core.model_executor = Mock()
     core.mm_receiver_cache = None

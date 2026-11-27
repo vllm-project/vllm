@@ -135,6 +135,8 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    aux_output_enabled = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -155,6 +157,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        self.aux_output_enabled = vllm_config.aux_output_config.enabled
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
@@ -1038,7 +1041,8 @@ class EngineCore:
             if clear_cache:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
-            flush_aux_output(self.scheduler, self.collective_rpc)
+            if self.aux_output_enabled:
+                flush_aux_output(self.scheduler, self.collective_rpc)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -2618,7 +2622,9 @@ class EngineCoreProc(EngineCore):
             by_client = defaultdict[int, set[str]](set)
             for request in aborted_reqs:
                 by_client[request.client_index].add(request.request_id)
-            aux_objects = finished_aux_objects(aborted_reqs)
+            aux_objects = None
+            if self.aux_output_enabled:
+                aux_objects = finished_aux_objects(aborted_reqs)
             for client_index, req_ids in by_client.items():
                 self._send_finish_outputs_to_client(
                     list(req_ids),
