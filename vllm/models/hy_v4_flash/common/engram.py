@@ -19,6 +19,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader_cls
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.reload.types import WeightReloadValidator
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4_flash.common.engram_ops import (
@@ -28,6 +29,8 @@ from vllm.models.hy_v4_flash.common.engram_ops import (
 )
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+from .engram_disk import FlashDiskTable
 
 logger = init_logger(__name__)
 
@@ -197,8 +200,8 @@ class FlashNgramHashState(nn.Module):
         )
 
 
-class FlashEmbedding(nn.Module):
-    def __init__(self, sizes, dim, dtype, cpu_offload):
+class FlashEmbedding(nn.Module, WeightReloadValidator):
+    def __init__(self, sizes, dim, dtype, cpu_offload, *, disk_offload=False):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.head_start, self.head_end = head_range(
@@ -209,11 +212,12 @@ class FlashEmbedding(nn.Module):
         self.num_embeddings = sum(sizes)
         self.n_hash_cols = len(sizes)
         self.dim = dim
-        self.cpu_offload = cpu_offload
-        if cpu_offload and not is_uva_available():
+        self.disk_table = FlashDiskTable() if disk_offload else None
+        self.cpu_offload = cpu_offload and not disk_offload
+        if self.cpu_offload and not is_uva_available():
             raise RuntimeError("Flash Engram CPU offload requires UVA")
         rows = self.vocab_end - self.vocab_start
-        storage = {"device": "cpu", "pin_memory": True} if cpu_offload else {}
+        storage = {"device": "cpu", "pin_memory": True} if self.cpu_offload else {}
         self.embedding = nn.Module()
         self.embedding.weight = nn.Parameter(
             torch.empty(
@@ -279,16 +283,24 @@ class FlashEmbedding(nn.Module):
                 and self.embedding.weight_scale_inv is not None
             ):
                 raise ValueError("BF16 Engram table must not have FP8 row scales")
-        elif self.embedding.weight.numel() and not self.fp8:
+        elif not self.fp8 and (
+            self.embedding.weight.numel()
+            or (self.disk_table is not None and "weight" in self.disk_table.planes)
+        ):
             raise ValueError("BF16 Engram table must not have FP8 row scales")
-        if parameter.numel() == 0:
+        shard = value[self.vocab_start : self.vocab_end]
+        if self.disk_table is not None:
+            name = "weight" if is_weight else "weight_scale_inv"
+            self.disk_table.bind(name, shard)
+        elif parameter.numel() == 0:
             parameter.data = torch.empty(
                 (self.vocab_end - self.vocab_start, *expected[1:]),
                 dtype=value.dtype,
                 device=parameter.device,
                 pin_memory=self.cpu_offload,
             )
-        default_weight_loader(parameter, value[self.vocab_start : self.vocab_end])
+        if self.disk_table is None:
+            default_weight_loader(parameter, shard)
         if is_weight:
             self.fp8 = value.dtype == torch.float8_e4m3fn
         if is_weight and self.fp8 and self.embedding.weight_scale_inv is None:
@@ -300,6 +312,22 @@ class FlashEmbedding(nn.Module):
             )
         self._uva_weight = None
         self._uva_scale = None
+
+    def validate_weight_reload(self) -> None:
+        if self.disk_table is not None:
+            raise RuntimeError("HY4 Flash Engram disk offload does not support reload")
+
+    def lookup(self, hashes, gamma, dtype):
+        hashes = hashes[:, self.head_start : self.head_end]
+        if self.disk_table is not None:
+            table, scales, hashes = self.disk_table.gather(
+                hashes, self.vocab_start, self.vocab_end
+            )
+            return lookup_norm(table, scales, hashes, 0, table.shape[0], gamma, dtype)
+        table, scales = self.tables()
+        return lookup_norm(
+            table, scales, hashes, self.vocab_start, self.vocab_end, gamma, dtype
+        )
 
     def tables(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         """CUDA views of the local table rows and their FP8 row scales."""
@@ -336,22 +364,27 @@ class FlashEngram(nn.Module):
         index = layout.layer_ids.index(layer_id)
         sizes = [p for order in layout.primes[index] for p in order]
         storage = vllm_config.engram_config
-        if (
-            storage.disk_offload
-            or storage.embedding_across_dp
-            or storage.dp_shared_memory
-        ):
+        if storage.embedding_across_dp or storage.dp_shared_memory:
             raise ValueError(
                 "Flash Engram requires private DP replicas with TP-local tables; "
-                "DP sharing, cross-DP sharding and disk offload are unsupported"
+                "DP sharing and cross-DP sharding are unsupported"
             )
+        if storage.disk_offload and (
+            vllm_config.load_config.load_format not in ("auto", "safetensors", "hf")
+            or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError("HY4 Flash Engram disk offload requires lazy safetensors")
         dtype = None
         if loads_dummy_weights(vllm_config):
             dtype = (
                 torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
             )
         self.multi_head_embedding = FlashEmbedding(
-            sizes, layout.head_dim, dtype, storage.cpu_offload
+            sizes,
+            layout.head_dim,
+            dtype,
+            storage.cpu_offload,
+            disk_offload=storage.disk_offload,
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
         local = self.multi_head_embedding
@@ -430,16 +463,7 @@ class FlashEngram(nn.Module):
 
     def forward(self, hidden, hashes):
         local = self.multi_head_embedding
-        table, scales = local.tables()
-        x = lookup_norm(
-            table,
-            scales,
-            hashes[:, local.head_start : local.head_end],
-            local.vocab_start,
-            local.vocab_end,
-            self.lookup_norm_weight,
-            hidden.dtype,
-        )
+        x = local.lookup(hashes, self.lookup_norm_weight, hidden.dtype)
         proj = F.linear(x, self.proj_weight.flatten(0, 1), self.proj_bias.flatten())
         if local.tp_size > 1:
             proj = tensor_model_parallel_all_reduce(proj)

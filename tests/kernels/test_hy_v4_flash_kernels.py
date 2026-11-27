@@ -738,6 +738,65 @@ def test_engram_layer_matches_reference(
     torch.testing.assert_close(out[dead], hidden[dead], rtol=0, atol=0)
 
 
+@requires_cuda
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+def test_engram_disk_checkpoint_matches_pinned(fp8, dist_init, tmp_path):
+    """Keep packed data on disk and preserve duplicate and masked lookups."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    from vllm.config import EngramConfig, ModelConfig, VllmConfig
+    from vllm.models.hy_v4_flash.common.engram import FlashEngram, FlashEngramLayout
+
+    checkpoint = _engram_config(engram_fp8_embedding=fp8)
+    checkpoint.architectures = ["HYV4FlashForCausalLM"]
+    checkpoint.save_pretrained(tmp_path)
+    model = ModelConfig(
+        model=str(tmp_path),
+        dtype="bfloat16",
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+    )
+    config = model.hf_text_config
+    layout = FlashEngramLayout(config)
+    layer_id = _ENGRAM_LAYERS[1]
+    sizes = [p for order in layout.primes[1] for p in order]
+    weights = _engram_checkpoint(config, sizes, layout.head_dim, fp8)
+    shard = tmp_path / "model.safetensors"
+    save_file(
+        {name: value.cpu().contiguous() for name, value in weights.items()}, shard
+    )
+
+    layers = []
+    for disk in (False, True):
+        runtime = VllmConfig(
+            model_config=model, engram_config=EngramConfig(disk_offload=disk)
+        )
+        with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+            layer = FlashEngram(runtime, layout, layer_id, "engram")
+        with safe_open(shard, framework="pt") as source:
+            # Real checkpoints may supply the scale first.
+            for name in reversed(weights):
+                layer.load_weight(name, source.get_tensor(name))
+        layers.append(layer)
+
+    offsets = layout.offsets[1].tolist()
+    edge = [lo + size - 1 for lo, size in zip(offsets, sizes)]
+    hashes = torch.tensor([offsets, edge, offsets, [-1] * len(sizes)], device="cuda")
+    hashes[1, 1] = -1
+    hidden = torch.randn(
+        (4, config.hc_mult, config.hidden_size), device="cuda"
+    ).bfloat16()
+    pinned, disk = layers
+    torch.testing.assert_close(
+        disk(hidden, hashes), pinned(hidden, hashes), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        disk(hidden[-1:], hashes[-1:]), hidden[-1:], rtol=0, atol=0
+    )
+    assert disk.multi_head_embedding.embedding.weight.numel() == 0
+
+
 def _hadamard(n, device):
     """Dense Sylvester Hadamard matrix, `H[i][j] = (-1)^popcount(i & j)`."""
     index = torch.arange(n, device=device)
