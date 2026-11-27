@@ -20,6 +20,7 @@
 
 from collections.abc import Iterable, Mapping
 from itertools import islice
+from typing import cast
 
 import torch
 from torch import nn
@@ -52,6 +53,9 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.selector import (
+    select_mamba_ssu_kernel,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
@@ -775,12 +779,12 @@ class NemotronHForCausalLM(
             cache_config.mamba_cache_dtype,
             cache_config.mamba_ssm_cache_dtype,
         )
-        if cache_config.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype,
-                vllm_config.model_config.dtype,
-            )
-        return base_dtype
+        # The decode kernel's own cache states follow.
+        kernel = select_mamba_ssu_kernel(vllm_config, None)
+        return (
+            *base_dtype,
+            *kernel.extra_state_dtypes(vllm_config.model_config.dtype),
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -796,11 +800,10 @@ class NemotronHForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-            - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+            - the decode kernel's own cache states, if any
 
         """
         parallel_config = vllm_config.parallel_config
-        cache_config = vllm_config.cache_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
@@ -814,16 +817,18 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
-        if cache_config.use_replayssm:
-            return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shapes=base_shape,
-                n_groups=hf_config.n_groups,
-                tp_world_size=parallel_config.tensor_parallel_size,
-                logical_window=cache_config.replayssm_buffer_len,
-                backend=vllm_config.mamba_config.backend,
-                num_speculative_tokens=vllm_config.num_speculative_tokens,
-            )
-        return base_shape
+        kernel = select_mamba_ssu_kernel(vllm_config, None)
+        return cast(
+            MambaStateShapes,
+            (
+                *base_shape,
+                *kernel.extra_state_shapes(vllm_config, base_shape, hf_config.n_groups),
+            ),
+        )
+
+    @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        return select_mamba_ssu_kernel(vllm_config, None).state_alignment
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:

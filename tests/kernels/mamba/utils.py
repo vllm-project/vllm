@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -256,3 +259,24 @@ def allocate_update_caches(
     )
     write_pos = torch.zeros(batch, dtype=torch.int32, device=device)
     return x_cache, dt_cache, B_cache, write_pos
+
+
+@contextmanager
+def record_triton_compiles() -> Iterator[list[str]]:
+    """Collect the names of the Triton kernels compiled inside the block."""
+    from triton import knobs
+
+    previous = knobs.runtime.jit_post_compile_hook
+    compiled: list[str] = []
+
+    def hook(**kwargs):
+        compiled.append(getattr(kwargs.get("fn"), "name", "<unknown>"))
+        if previous is not None:
+            return previous(**kwargs)
+        return None
+
+    knobs.runtime.jit_post_compile_hook = hook
+    try:
+        yield compiled
+    finally:
+        knobs.runtime.jit_post_compile_hook = previous

@@ -5,8 +5,8 @@
 import functools
 import itertools
 import os
-from collections.abc import Callable
-from typing import Literal
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from einops import rearrange
@@ -35,6 +35,12 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
+    ReplaySSMRingPlanner,
+)
+from vllm.model_executor.layers.linear_attention.replayssm.state import (
+    ReplaySSMLayerState,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -70,7 +76,6 @@ from vllm.model_executor.layers.mamba.ops.replayssm_config import GDN_MAX_BUFFER
 from vllm.model_executor.layers.mamba.ops.scatter_states import (
     scatter_states,
 )
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import plan_replayssm_decode
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -109,6 +114,9 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear_attention.lifecycle import GroupLayers
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -952,15 +960,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.cache_config.replayssm_buffer_len if self.use_replayssm else None
         )
         # Per-slot ring counters, bound by initialize_replayssm_ring_trackers().
-        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
-        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        # Triton plans each decode step in one layer per cache group.
-        self._plans_replayssm_decode = True
+        if self.use_replayssm:
+            self.ssu_state = ReplaySSMLayerState(
+                buffer_len=self.cache_config.replayssm_buffer_len
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @property
+    def step_lifecycle_owner(self) -> type["QwenGatedDeltaNetAttention"] | None:
+        # The ReplaySSM decode runs in the layer, not in a decode kernel class.
+        return type(self) if self.use_replayssm else None
+
+    @classmethod
+    def make_step_lifecycle(
+        cls, layers_by_group: "Sequence[GroupLayers]"
+    ) -> ReplaySSMRingPlanner:
+        return ReplaySSMRingPlanner.from_groups(layers_by_group)
 
     @staticmethod
     def _replayssm_unsupported_reason(
@@ -970,7 +989,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return "does not support scaled beta (linear_allow_neg_eigval)"
         if vllm_config.num_speculative_tokens > 0:
             return "does not support speculative decoding yet"
-        if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
+        # None selects automatically, which is Triton for Gated DeltaNet.
+        if vllm_config.mamba_config.backend not in (None, MambaBackendEnum.TRITON):
             return "requires --mamba-backend triton"
         if vllm_config.mamba_config.enable_stochastic_rounding:
             return "does not support --enable-mamba-cache-stochastic-rounding"
@@ -2344,11 +2364,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             # Init cache
             scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
-            if self.use_replayssm and self._plans_replayssm_decode:
-                # Cached decode appends to the ring that prefill leaves empty.
-                self._replayssm_ring_start.index_fill_(
-                    0, prefill_state_indices.long(), 0
-                )
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
@@ -2715,22 +2730,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """One ReplaySSM decode step on post-conv `mixed_qkv` rows.
 
         The per-step delta-rule inputs go to the `d`/`k`/`g` rings, and the
-        checkpoint state is rewritten only on flush. The group's planner layer
-        first fills this step's `write_pos`/`is_flush` rows.
+        checkpoint state is rewritten only on flush. The layer's step lifecycle
+        planned this step's `write_pos`/`is_flush` rows (`ReplaySSMRingPlanner`).
         """
         assert attn_metadata.write_pos_d is not None
         assert attn_metadata.is_flush_d is not None
-        if self._plans_replayssm_decode:
-            assert self.replayssm_buffer_len is not None
-            plan_replayssm_decode(
-                self._replayssm_ring_start,
-                state_indices,
-                attn_metadata.write_pos_d,
-                attn_metadata.is_flush_d,
-                buffer_len=self.replayssm_buffer_len,
-                seq_lens=attn_metadata.replayssm_seq_lens_d,
-                align_block_size=attn_metadata.replayssm_align_block_size,
-            )
         _, ssm_state, d_cache, k_cache, g_cache = self.kv_cache
         fused_recurrent_gated_delta_rule_replayssm(
             mixed_qkv=mixed_qkv,
