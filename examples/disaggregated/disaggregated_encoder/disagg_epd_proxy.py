@@ -477,6 +477,16 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _loads_audio_from_video(mm_kwargs: Any) -> bool:
+    """Resolve the request setting with the same precedence as the renderer."""
+    if not isinstance(mm_kwargs, dict):
+        return False
+    load_audio = mm_kwargs.get("load_audio_from_video")
+    if load_audio is None:
+        load_audio = mm_kwargs.get("use_audio_in_video")
+    return bool(load_audio)
+
+
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict:
     """Replace each media item with a metadata-only reference for the decoder.
 
@@ -487,14 +497,12 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict
     Their modalities, cache keys and placeholder metadata come from the encoder.
     """
     mm_items = extract_mm_items(req_data)
+    load_audio = _loads_audio_from_video(req_data.get("mm_processor_kwargs"))
     # Audio processors may consume placeholders from other modalities too.
     # Keep the whole request raw if any item cannot be rewritten safely.
     raw_audio_request = any(
         item["type"] in {"audio_url", "input_audio"}
-        or (
-            item["type"] == "video_url"
-            and (req_data.get("mm_processor_kwargs") or {}).get("use_audio_in_video")
-        )
+        or (item["type"] == "video_url" and load_audio)
         for item in mm_items
     ) and any(
         not item_meta.get(i) or any(not feature["metadata"] for feature in item_meta[i])
@@ -599,9 +607,7 @@ def _per_video_list_options(
 def _validate_per_video_kwargs(mm_kwargs: Any, num_videos: int) -> None:
     if not isinstance(mm_kwargs, dict) or not num_videos:
         return
-    load_audio = mm_kwargs.get("load_audio_from_video")
-    if load_audio is None:
-        load_audio = mm_kwargs.get("use_audio_in_video")
+    load_audio = _loads_audio_from_video(mm_kwargs)
     for scope, key, value in _per_video_list_options(mm_kwargs):
         if load_audio and scope is mm_kwargs:
             raise HTTPException(
@@ -679,6 +685,8 @@ async def fanout_encoder_primer(
         return {}, {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
+    mm_kwargs = orig_request.get("mm_processor_kwargs")
+    load_audio = _loads_audio_from_video(mm_kwargs)
 
     # Per-video kwargs index by position among the videos, not among all
     # media items, so images interleaved with videos do not shift them.
@@ -687,9 +695,7 @@ async def fanout_encoder_primer(
         for idx, item in enumerate(mm_items):
             if item["type"] == "video_url":
                 video_positions[idx] = len(video_positions)
-        _validate_per_video_kwargs(
-            orig_request.get("mm_processor_kwargs"), len(video_positions)
-        )
+        _validate_per_video_kwargs(mm_kwargs, len(video_positions))
 
     tasks = []
     item_uuids: dict[int, str] = {}
@@ -737,14 +743,7 @@ async def fanout_encoder_primer(
             item_uuid = None if NO_REWRITE else (item.get("uuid") or content_uuid(item))
             if item_uuid is not None:
                 item_uuids[idx] = item_uuid
-            num_features = 1 + int(
-                item["type"] == "video_url"
-                and bool(
-                    (orig_request.get("mm_processor_kwargs") or {}).get(
-                        "use_audio_in_video"
-                    )
-                )
-            )
+            num_features = 1 + int(item["type"] == "video_url" and load_audio)
             item_transfer_ids[idx] = [uuid.uuid4().hex for _ in range(num_features)]
             content.append(item if item_uuid is None else {**item, "uuid": item_uuid})
 
@@ -761,7 +760,7 @@ async def fanout_encoder_primer(
             "stream": False,
         }
         if "mm_processor_kwargs" in orig_request:
-            kwargs = orig_request["mm_processor_kwargs"]
+            kwargs = mm_kwargs
             if enable_per_video_kwargs_slicing:
                 kwargs = _slice_mm_processor_kwargs(
                     kwargs,
