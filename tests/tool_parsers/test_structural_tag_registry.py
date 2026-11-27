@@ -1199,6 +1199,55 @@ def test_kimi_k3_property_ref_to_root_defs_compiles_and_accepts():
     assert _is_grammar_accept_string(grammar, body)
 
 
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        ('{"limit": 1, "same": 2, "tag": "x", "alias": 3}', True),
+        ('{"limit": 1, "same": "2", "tag": "x", "alias": 3}', False),
+        ('{"limit": 1, "same": 2, "tag": 3, "alias": 3}', False),
+        ('{"root": {"config": {"limit": 1}}}', True),
+        ('{"root": {"config": {"limit": "1"}}}', False),
+    ],
+)
+def test_kimi_k3_property_tree_ref_compiles_and_constrains(value: str, accepted: bool):
+    """A `$ref` into the parameters' own property tree is enforced instead of
+    rejecting the request; `#` is the parameters root, root `$defs` refs keep
+    resolving and `#anchor` refs are not rewritten."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "make_config",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "config": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"$anchor": "limit", "type": "integer"},
+                                "same": {
+                                    "$ref": "#/properties/config/properties/limit"
+                                },
+                                "tag": {"$ref": "#/$defs/tag"},
+                                "alias": {"$ref": "#limit"},
+                                "root": {"$ref": "#"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "$defs": {"tag": {"type": "string"}},
+                },
+            },
+        )
+    ]
+    grammar = _k3_grammar("required", tools=tools)
+
+    body = _k3_response() + _k3_tools(
+        _k3_call("make_config", _k3_arg("config", "object", value))
+    )
+    assert _is_grammar_accept_string(grammar, body) is accepted
+
+
 def _k3_tools_with_string_enum() -> list[ChatCompletionToolsParam]:
     return [
         ChatCompletionToolsParam(

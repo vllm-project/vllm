@@ -746,10 +746,61 @@ def _k3_bounded_string_regex(prop: dict[str, Any]) -> str | None:
     return _K3_STRING_ATOM + f"{{{min_len},{max_len}}}"
 
 
+_K3_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+_K3_DATA_KEYWORDS = frozenset({"const", "enum", "default", "examples"})
+_K3_ROOT_DEF = "__k3_parameters"
+
+
+def _k3_map_refs(schema: Any, rewrite: Callable[[str], str]) -> Any:
+    """Copy `schema` with every schema-level `$ref` passed through `rewrite`."""
+    if isinstance(schema, list):
+        return [_k3_map_refs(item, rewrite) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    mapped: dict[str, Any] = {}
+    for keyword, value in schema.items():
+        if keyword == "$ref" and isinstance(value, str):
+            mapped[keyword] = rewrite(value)
+        elif keyword in _K3_DATA_KEYWORDS:
+            mapped[keyword] = value
+        elif keyword in _K3_SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            mapped[keyword] = {
+                name: _k3_map_refs(subschema, rewrite)
+                for name, subschema in value.items()
+            }
+        else:
+            mapped[keyword] = _k3_map_refs(value, rewrite)
+    return mapped
+
+
+def _k3_rebased_parameters(parameters: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebase `parameters` for embedding under `$defs/__k3_parameters`.
+
+    Returns a copy whose JSON-pointer refs (`#`, `#/...`) are prefixed with
+    `#/$defs/__k3_parameters`, or `None` when every such ref already targets
+    the root `$defs` / `definitions` tables. Anchor (`#name`) and external refs
+    are kept as they are.
+    """
+    leaves_defs = False
+
+    def rebase(ref: str) -> str:
+        nonlocal leaves_defs
+        if ref != "#" and not ref.startswith("#/"):
+            return ref
+        leaves_defs |= not ref.startswith(("#/$defs/", "#/definitions/"))
+        return f"#/$defs/{_K3_ROOT_DEF}{ref[1:]}"
+
+    rebased = _k3_map_refs(parameters, rebase)
+    return rebased if leaves_defs else None
+
+
 def _k3_argument_tag(
     key: str,
     schema: dict[str, Any],
     root_defs: dict[str, Any] | None = None,
+    rebased_root: dict[str, Any] | None = None,
 ) -> TagFormat | None:
     """Build one `argument` XTML tag for property `key`.
 
@@ -762,6 +813,11 @@ def _k3_argument_tag(
     `definitions`: slicing a property out of the parameters document orphans
     its `#/$defs/...` references, so those tables must be re-attached to keep
     the embedded schema self-contained.
+
+    `rebased_root` is the output of `_k3_rebased_parameters`: when set, the
+    whole parameters document is attached instead to arguments that use
+    JSON-pointer refs, so refs into its property tree (`#/properties/...`,
+    `#`) keep resolving.
     """
     prop = schema if isinstance(schema, dict) else {}
     json_type = prop.get("type")
@@ -800,7 +856,13 @@ def _k3_argument_tag(
             content = AnyTextFormat(excludes=[_K3_CLOSE])
     else:
         embedded = prop
-        if root_defs:
+        if rebased_root and rebased_root["properties"][key] != prop:
+            embedded = dict(rebased_root["properties"][key])
+            embedded["$defs"] = {
+                **embedded.get("$defs", {}),
+                _K3_ROOT_DEF: rebased_root,
+            }
+        elif root_defs:
             embedded = dict(prop)
             for defs_key, defs_value in root_defs.items():
                 embedded.setdefault(defs_key, defs_value)
@@ -844,9 +906,10 @@ def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
         for defs_key in ("$defs", "definitions")
         if isinstance(parameters.get(defs_key), dict)
     }
+    rebased_root = _k3_rebased_parameters(parameters)
     tags: list[TagFormat] = []
     for key, prop in props.items():
-        tag = _k3_argument_tag(key, prop, root_defs)
+        tag = _k3_argument_tag(key, prop, root_defs, rebased_root)
         tags.append(tag if tag is not None else _k3_permissive_argument_tag())
     inner = tags[0] if len(tags) == 1 else OrFormat(elements=list(tags))
     required = parameters.get("required")
