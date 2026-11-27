@@ -27,8 +27,8 @@ pytestmark = pytest.mark.hybrid_model
 APC_MULTIPLY_BY = 300
 
 SSM_MODELS = [
-    "vllm-project/mamba2-130m-hf",
-    "vllm-project/mamba2-codestral-v0.1-tiny-random",
+    "vllm/mamba2-130m-hf",
+    "vllm/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
@@ -45,7 +45,7 @@ FULL_CUDA_GRAPH_MODELS = [
 ]
 
 FP32_STATE_MODELS = [
-    "vllm-project/mamba2-130m-hf",
+    "vllm/mamba2-130m-hf",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -992,7 +992,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
-@pytest.mark.parametrize("model", ["vllm-project/mamba2-1.3b-hf"])
+@pytest.mark.parametrize("model", ["vllm/mamba2-1.3b-hf"])
 def test_apc_common_prefix_same_batch(
     model: str,
     monkeypatch,

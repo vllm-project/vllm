@@ -23,6 +23,7 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
 
@@ -243,6 +244,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
         main_kv_cache=attn.kv_cache,
+        block_indices=torch.empty(2, 1, dtype=torch.int32),
     )
 
     assert actual is rows
@@ -709,6 +711,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
         attn=SimpleNamespace(use_fused_qsa_prepare=False),
+        block_indices=torch.empty(8, 1, dtype=torch.int32, device=device),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -1351,13 +1354,156 @@ def test_qsa_sparse_paged_attention_correctness(
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
+)
+# Per-rank heads at TP1 and TP4.
+@pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
+def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
+    """FlashInfer prefill matches the dense reference. Slots past each sequence
+    hold NaN, like stale bytes of another cache group."""
+    from flashinfer.attention.prims_ts import make_q_token_kv_block_sparse_qo_indptr
+
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
+        GROUP_SIZE,
+        get_workspace_size,
+        qsa_sparse_paged_prefill,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    head_dim, page_size, budget, ratio, pages = 256, 1600, 2048, 4, 4
+    max_seq_len_kv = pages * page_size
+    scale = head_dim**-0.5
+    # Prefill requests as (cached prefix, new rows): shorter than a group, a
+    # fresh prefill and a chunked prefill past the selection budget, none
+    # ending on a block boundary. A leading decode request owns block table row
+    # 0 but no rows here, so prefill requests index the table from row 1.
+    num_decodes = 1
+    requests = [(0, 5), (0, 301), (2500, 503)]
+    kv_rows = torch.full(
+        ((num_decodes + len(requests)) * pages, page_size, kv_heads, 2 * head_dim),
+        torch.nan,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    block_table = (
+        torch.randperm(kv_rows.shape[0], device="cuda", generator=generator)
+        .view(-1, pages)
+        .int()
+    )
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        slots = torch.arange(prefix + n, device="cuda")
+        kv_rows[block_table[req, slots // page_size].long(), slots % page_size] = (
+            torch.randn(
+                slots.numel(),
+                kv_heads,
+                2 * head_dim,
+                device="cuda",
+                dtype=torch.bfloat16,
+                generator=generator,
+            )
+        )
+
+    query_lens = [n for _, n in requests]
+    num_rows = sum(query_lens)
+    seq_lens = torch.tensor(
+        [p + n for p, n in requests], dtype=torch.int32, device="cuda"
+    )
+    token_to_req = torch.repeat_interleave(
+        torch.arange(
+            num_decodes, num_decodes + len(requests), dtype=torch.int32, device="cuda"
+        ),
+        torch.tensor(query_lens, device="cuda"),
+        output_size=num_rows,
+    )
+    positions = torch.cat([torch.arange(p, p + n, device="cuda") for p, n in requests])
+    q, output_gate = torch.randn(
+        2,
+        num_rows,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    # Top-k of random block scores, -1 padded like the indexer's top-k.
+    visible_blocks = ((positions + 1) // ratio).int()
+    scores = torch.rand(
+        num_rows, max_seq_len_kv // ratio, device="cuda", generator=generator
+    )
+    blocks = torch.arange(scores.shape[1], device="cuda")
+    scores[blocks >= visible_blocks.unsqueeze(1)] = -1
+    top_scores, block_indices = scores.topk(budget // ratio, dim=1)
+    block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
+    selected = torch.empty(num_rows, budget + ratio, device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
+        block_indices, positions, visible_blocks, ratio, budget, selected
+    )
+    k_cache, v_cache = kv_rows.split(head_dim, dim=-1)
+    expected = _qsa_sparse_paged_attention_reference(
+        q,
+        k_cache,
+        v_cache,
+        selected[:, : budget + ratio - 1],
+        block_table,
+        token_to_req,
+        scale,
+    ) * torch.sigmoid(output_gate)
+
+    qo_indptr = make_q_token_kv_block_sparse_qo_indptr(
+        torch.tensor([0, *itertools.accumulate(query_lens)]),
+        num_rows,
+        group_size=GROUP_SIZE,
+        device="cuda",
+    )
+    actual = torch.full_like(q, torch.nan)
+    qsa_sparse_paged_prefill(
+        q,
+        kv_rows.transpose(1, 2),
+        block_table,
+        num_decodes,
+        seq_lens,
+        block_indices,
+        token_to_req,
+        positions,
+        qo_indptr,
+        ratio,
+        max_seq_len_kv,
+        get_workspace_size(
+            num_rows,
+            len(requests),
+            heads,
+            kv_heads,
+            head_dim,
+            page_size,
+            max_seq_len_kv,
+            ratio,
+            budget // ratio,
+            torch.device("cuda"),
+        ),
+        scale,
+        output_gate,
+        actual,
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+    # Each open-block tail is zeroed, and nothing past it is written.
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        end = prefix + n
+        tail = torch.arange(end, cdiv(end, ratio) * ratio + 1, device="cuda")
+        rows = kv_rows[block_table[req, tail // page_size].long(), tail % page_size]
+        assert (rows[:-1] == 0).all() and rows[-1].isnan().all()
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
     reason="the fp8 kernel runs on sm_100/sm_103",
 )
 # Per-rank heads at TP1/2/4/8.
 @pytest.mark.parametrize(
     "num_query_heads,num_kv_heads", [(24, 2), (12, 1), (6, 1), (3, 1)]
 )
-@pytest.mark.parametrize("num_requests", [20, 100])
+@pytest.mark.parametrize("num_requests", [1, 4, 20, 100])
 def test_qsa_fp8_kernel_correctness(
     num_query_heads: int, num_kv_heads: int, num_requests: int
 ) -> None:
@@ -1457,7 +1603,7 @@ def test_qsa_fp8_kernel_correctness(
 
 
 @requires_qsa_hisparse
-# 33 FP8 rows x 2 KV heads cross the Blackwell FP8 decode-kernel threshold.
+# Physical indices bypass the logical-index Blackwell FP8 decode kernel.
 @pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "large-fp8"])
 def test_qsa_attention_consumes_hisparse_physical_indices(fp8: bool) -> None:
     """Resolved HiSparse rows bypass the logical block table on padded pages."""
