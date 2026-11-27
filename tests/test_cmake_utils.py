@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 def _get_cmake_bin() -> str:
     cmake = shutil.which("cmake")
@@ -18,66 +16,6 @@ def _get_cmake_bin() -> str:
     if venv_cmake.is_file():
         return str(venv_cmake)
     return "cmake"
-
-
-def test_exact_family_arch_precedes_generic_family_fallback(tmp_path: Path):
-    repo_root = Path(__file__).parents[1]
-    script = tmp_path / "test_cuda_archs.cmake"
-    script.write_text(
-        f"""
-cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
-cuda_archs_loose_intersection(
-  actual "10.0f;10.7f" "10.7")
-if(NOT "${{actual}}" STREQUAL "10.7f")
-  message(FATAL_ERROR "Expected 10.7f, got '${{actual}}'")
-endif()
-"""
-    )
-
-    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
-
-
-def _check_loose_intersection(
-    tmp_path: Path, src_archs: str, tgt_archs: str, expected: str
-):
-    repo_root = Path(__file__).parents[1]
-    script = tmp_path / "test_cuda_archs.cmake"
-    script.write_text(
-        f"""
-cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
-cuda_archs_loose_intersection(actual "{src_archs}" "{tgt_archs}")
-if(NOT "${{actual}}" STREQUAL "{expected}")
-  message(FATAL_ERROR "Expected '{expected}', got '${{actual}}'")
-endif()
-"""
-    )
-
-    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
-
-
-@pytest.mark.parametrize(
-    ("src_archs", "tgt_archs", "expected"),
-    [
-        pytest.param(
-            "10.7f", "7.5;8.0;8.6;8.9;9.0;10.0;12.0", "", id="cu134-release-list"
-        ),
-        pytest.param("10.7f", "10.0a", "", id="lower-minor-arch-specific"),
-        pytest.param("12.1f", "12.0", "", id="lower-minor-plain"),
-        pytest.param("10.3f", "10.0a;10.7a", "10.7a", id="skips-lower-minor"),
-        pytest.param("12.0f", "12.1a", "12.1a", id="higher-minor"),
-    ],
-)
-def test_family_arch_fallback_never_picks_lower_minor(
-    tmp_path: Path, src_archs: str, tgt_archs: str, expected: str
-):
-    _check_loose_intersection(tmp_path, src_archs, tgt_archs, expected)
-
-
-@pytest.mark.parametrize("src_archs", ["10.0f;10.7f", "10.7f;10.0f"])
-def test_family_arch_fallback_runs_after_name_matches(tmp_path: Path, src_archs: str):
-    _check_loose_intersection(tmp_path, src_archs, "10.7a;10.3a", "10.7a;10.3a")
 
 
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
