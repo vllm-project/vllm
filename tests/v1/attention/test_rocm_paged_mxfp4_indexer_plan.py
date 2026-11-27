@@ -44,7 +44,7 @@ from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
-def _chunk(block_table, token_start, token_end, row_ends):
+def _chunk(block_table, req_start, token_start, token_end, row_ends):
     ends = torch.tensor(row_ends, dtype=torch.int32)
     return DeepseekV32IndexerPrefillChunkMetadata(
         block_table=block_table,
@@ -57,6 +57,7 @@ def _chunk(block_table, token_start, token_end, row_ends):
         token_start=token_start,
         token_end=token_end,
         num_reqs=block_table.shape[0],
+        req_start=req_start,
     )
 
 
@@ -66,9 +67,9 @@ QUERY_START_LOC = [0, 1, 4, 7, 12, 18]
 SEQ_LENS = torch.tensor([40, 10, 12, 21, 64])
 BLOCK_TABLE = torch.arange(20, dtype=torch.int32).view(5, 4)
 CHUNKS = [
-    _chunk(BLOCK_TABLE[1:4], 1, 12, list(range(11))),
-    _chunk(BLOCK_TABLE[4:5], 12, 15, [29, 30, 30]),
-    _chunk(BLOCK_TABLE[4:5], 15, 18, [31, 31, 32]),
+    _chunk(BLOCK_TABLE[1:4], 1, 1, 12, list(range(11))),
+    _chunk(BLOCK_TABLE[4:5], 4, 12, 15, [29, 30, 30]),
+    _chunk(BLOCK_TABLE[4:5], 4, 15, 18, [31, 31, 32]),
 ]
 
 
@@ -299,6 +300,8 @@ def test_decode_row_shard_skips_steps_with_prefill(
     assert (metadata.decode_shard is not None) == sharded
     assert metadata.decode_row_lens is not None
     assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
+    assert metadata.decode_step_row_lens is not None
+    assert torch.equal(metadata.decode_step_row_lens, decode.seq_lens.view(-1))
     ends = metadata.decode_block_ends
     expected = range(rows // 4, rows // 2) if sharded else range(rows)
     assert ends is not None and ends.tolist() == list(expected)
@@ -451,3 +454,45 @@ def test_decode_metadata_matches_torch_path(monkeypatch, cls, ratio, adaptive):
             assert torch.equal(a, b) and a.data_ptr() == buf.data_ptr()
         assert out.decode.block_table.shape == ref.decode.block_table.shape
         assert out.decode.requires_padding == ref.decode.requires_padding
+
+
+def test_prefill_plans_on_shardq_query_ranges(monkeypatch):
+    """Under ShardQ the chunks cover this rank's tokens, so they are planned on
+    the renumbered query ranges; the rank holds none of the first request."""
+    chunks = [
+        _chunk(BLOCK_TABLE[0:2], 0, 0, 3, [1, 2, 3]),
+        _chunk(BLOCK_TABLE[2:3], 2, 3, 7, [1, 2, 3, 4]),
+    ]
+    base = DeepseekV32IndexerMetadata(
+        seq_lens=SEQ_LENS[:3],
+        max_seq_len=64,
+        slot_mapping=torch.zeros(16),
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=3,
+        num_prefill_tokens=16,
+        prefill=types.SimpleNamespace(
+            chunks=chunks,
+            shardq_query_start_loc_cpu=torch.tensor([0, 0, 3, 7], dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(DeepseekV32IndexerMetadataBuilder, "build", lambda *a: base)
+    builder = object.__new__(RocmMxfp4IndexerMetadataBuilder)
+    builder.__dict__.update(
+        compress_ratio=2,
+        context_lens_buffer=torch.zeros(3, dtype=torch.int32),
+        candidate_block_size=0,
+        min_gather_width=None,
+        device=torch.device("cpu"),
+    )
+    query_start_loc = torch.tensor([0, 2, 8, 16], dtype=torch.int32)
+    cm = types.SimpleNamespace(
+        num_reqs=3,
+        seq_lens=SEQ_LENS[:3],
+        seq_lens_cpu_upper_bound=SEQ_LENS[:3],
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+    )
+    plans = builder.build(0, cm).prefill_plans
+    assert [p.requests for p in plans] == [[(0, 3, 1)], [(0, 4, 0)]]
+    assert [p.query_start_loc.tolist() for p in plans] == [[0, 0, 3], [0, 4]]

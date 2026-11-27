@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, assert_never
 
 from typing_extensions import TypedDict
@@ -38,6 +38,9 @@ class TokensInput(_InputOptions):
 
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
+
+    prompt_echo_mask: NotRequired[list[bool]]
+    """Whether each prompt token is represented in the rebuilt echo text."""
 
     prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
     """Char-level (start, end) offsets per token, propagated from the
@@ -148,6 +151,11 @@ class MultiModalInput(_InputOptions):
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
+    """
+
+    skip_mm_cache: NotRequired[bool]
+    """
+    If true, skip the multimodal processor cache for this request.
     """
 
 
@@ -317,8 +325,14 @@ def build_enc_dec_input(
     encoder_input: SingletonInput,
     decoder_input: SingletonInput | None,
     decoder_start_token_id: int,
-    skip_decoder_start_token: bool = False,
+    skip_decoder_start_token: bool | Callable[[list[int]], bool] = False,
 ) -> EncoderDecoderInput:
+    """Combine the encoder and decoder inputs into an encoder-decoder input.
+
+    `decoder_start_token_id` is prepended to the decoder prompt when it is
+    missing, unless `skip_decoder_start_token` is set. Pass a predicate on
+    the decoder prompt token IDs instead of a constant to decide per input.
+    """
     enc_input = _validate_enc_input(encoder_input)
 
     if decoder_input is None:
@@ -346,6 +360,11 @@ def build_enc_dec_input(
         dec_input_new = dec_input
     else:
         assert_never(enc_input)
+
+    if callable(skip_decoder_start_token):
+        skip_decoder_start_token = skip_decoder_start_token(
+            dec_input_new["prompt_token_ids"]
+        )
 
     if not skip_decoder_start_token:
         dec_input_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(

@@ -850,11 +850,15 @@ class RoutedExperts(PluggableLayer):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
-            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
-            # The generic assignment below would broadcast w1/w3 into the
-            # whole expert row, so the second shard would overwrite the first.
+            # ModelOpt and Quark NVFP4 store w13 input scales as two logical
+            # shards. The generic assignment below would broadcast w1/w3 into
+            # the whole expert row, so the second shard would overwrite the
+            # first, and the layerwise loader would count each scalar twice.
             if (
-                "ModelOpt" in quant_method_name
+                (
+                    "ModelOpt" in quant_method_name
+                    or quant_method_name == "QuarkNvfp4MoEMethod"
+                )
                 and param.data.ndim == 2
                 and shard_id in ("w1", "w3")
             ):

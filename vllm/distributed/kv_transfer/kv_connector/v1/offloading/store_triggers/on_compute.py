@@ -24,7 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.cand
     select_store_candidates,
 )
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -58,10 +57,12 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         # Skip prefix-hit chunks for block-level policy; for
         # request-level, the next stored chunk stays at 0 so all
         # chunks (including hits) are offloaded.
+        # Round down: after a partial-tail hit the last chunk is only
+        # checkpointed up to the hit, so it must still be offered.
         if req_status.offloading_context.policy != OffloadPolicy.CHUNK_LEVEL:
             return
         self._next_stored_chunk_idxs[req_status.req.request_id] = [
-            cdiv(num_cached_tokens, group_config.tokens_per_chunk)
+            num_cached_tokens // group_config.tokens_per_chunk
             for group_config in self._config.kv_group_configs
         ]
 
@@ -106,21 +107,16 @@ class OnComputeStoreHandler(StoreTriggerHandler):
     def _advance_stored_idx(
         self, req_status: RequestOffloadState, num_offloadable_tokens: int
     ) -> None:
-        # max(): at the prefill->decode transition of a chunk-aligned prompt,
-        # storable_chunks drops by one (the eagle exclusion kicks in), and the
-        # index must not move backwards past already-stored chunks.
-        apply_eagle_drop = not self._config.num_hash_lookahead_tokens
         next_idxs = self._next_idxs(req_status)
         for config_group_idx, (group_config, group_state) in enumerate(
             zip(self._config.kv_group_configs, req_status.group_states)
         ):
+            # max(): the finish-time clamp can lower num_offloadable_tokens, and
+            # the index must not move back past chunks already stored.
             next_idxs[config_group_idx] = max(
                 next_idxs[config_group_idx],
                 req_status.storable_chunks(
-                    group_config,
-                    group_state,
-                    num_offloadable_tokens,
-                    apply_eagle_drop,
+                    group_config, group_state, num_offloadable_tokens
                 ),
             )
 
@@ -154,13 +150,44 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 self._advance_stored_idx(req_status, num_offloadable_tokens)
                 continue
 
+            next_idxs = self._next_idxs(req_status)
             store_output = sink.prepare_store(new_offload_keys, req_status.req_context)
             if store_output is None:
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
+            if store_output.keys_to_retry:
+                # Each group's range ends at its first chunk to retry, which is
+                # offered again on the next step.
+                key_chunks = dict(zip(new_offload_keys, candidates.key_chunks))
+                for key in store_output.keys_to_retry:
+                    assert key in key_chunks, "A key to retry was not offered"
+                    config_group_idx, chunk_idx = key_chunks[key]
+                    start_chunk_idx, end_chunk_idx = group_store_ranges[
+                        config_group_idx
+                    ]
+                    group_store_ranges[config_group_idx] = (
+                        start_chunk_idx,
+                        min(end_chunk_idx, chunk_idx),
+                    )
+                retried_keys = set(store_output.keys_to_retry)
+                assert all(
+                    (key in retried_keys)
+                    == (chunk_idx >= group_store_ranges[config_group_idx][1])
+                    for key, (config_group_idx, chunk_idx) in key_chunks.items()
+                ), "The keys to retry are not each group's offered keys from its cut"
+                assert retried_keys.isdisjoint(store_output.keys_to_store), (
+                    "A key is both stored and retried"
+                )
+                if req.is_finished():
+                    logger.warning("Request %s: cannot store chunks", req_id)
+                    sink.record_allocation_failure()
+
             if not store_output.keys_to_store:
-                self._advance_stored_idx(req_status, num_offloadable_tokens)
+                for config_group_idx, (_, num_chunks) in enumerate(group_store_ranges):
+                    next_idxs[config_group_idx] = max(
+                        next_idxs[config_group_idx], num_chunks
+                    )
                 continue
 
             ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))
@@ -216,7 +243,6 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
 
-            next_idxs = self._next_idxs(req_status)
             for config_group_idx, (_, num_chunks) in enumerate(group_store_ranges):
                 next_idxs[config_group_idx] = max(
                     next_idxs[config_group_idx], num_chunks

@@ -24,5 +24,4 @@ server_args: >-
   --block-size 16
   --enable-prefix-caching
   --prefix-match-unit 327
-  --mamba-cache-mode align
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

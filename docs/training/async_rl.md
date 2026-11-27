@@ -72,7 +72,7 @@ A typical async RL loop with weight syncing looks like this:
 
 1. Start generating rollouts from the current policy
 2. Once trainer has new weights to update to, pause generation with `mode="keep"`
-3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_transfer/README.md)) and set their weight version
+3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_updates/README.md)) and set their weight version
 4. Resume generation -- in-flight requests continue with the new weights
 5. Repeat
 

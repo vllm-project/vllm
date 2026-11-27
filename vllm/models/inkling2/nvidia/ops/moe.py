@@ -7,6 +7,7 @@ top-k combine.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 
 from .block_scales import _scale_offsets
@@ -14,7 +15,7 @@ from .linear import _k_group_tile, _prefetch_k_group_tile, k_group_partials
 from .mxfp8 import _mxfp8_block, _store_mxfp8_block
 from .nvfp4 import FP32_MAX, _quantize_block, _quantize_columns, _store_block
 from .seq_parallel import HALO_ROWS, SeqParallel
-from .trtllm_bmm import ExpertPlan
+from .trtllm_bmm import ExpertPlan, operand
 
 
 @triton.jit
@@ -914,14 +915,14 @@ def route(
     weights = torch.empty(n, dtype=torch.float32, device=device)
     if nvfp4:
         quantized = (
-            torch.empty((rows, hidden // 2), dtype=torch.uint8, device=device),
-            torch.empty((rows, hidden // 16), dtype=torch.float8_e4m3fn, device=device),
-            torch.empty(rows, dtype=torch.float32, device=device),
+            operand(rows, hidden // 2, dtype=torch.uint8, device=device),
+            operand(rows, hidden // 16, dtype=torch.float8_e4m3fn, device=device),
+            operand(rows, dtype=torch.float32, device=device),
         )
     else:
         quantized = (
-            torch.empty((rows, hidden), dtype=torch.float8_e4m3fn, device=device),
-            torch.empty((rows, hidden // 32), dtype=torch.uint8, device=device),
+            operand(rows, hidden, dtype=torch.float8_e4m3fn, device=device),
+            operand(rows, hidden // 32, dtype=torch.uint8, device=device),
             None,
         )
     outputs = (src2dst, gammas, routed, tiles)
@@ -1068,9 +1069,11 @@ def _combine_kernel(
     LAUNCH_DEPENDENTS: tl.constexpr,
     PUSH: tl.constexpr,
     HALO_ROWS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
-    if LAUNCH_DEPENDENTS:
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+    if launch_pdl and LAUNCH_DEPENDENTS:
         tl.extra.cuda.gdc_launch_dependents()
     token = tl.program_id(0).to(tl.int64)
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -1126,7 +1129,7 @@ def _combine(
 ) -> None:
     hidden = down.shape[1]
     tokens = src2dst.numel() // topk
-    block = 512
+    block = 512 if hidden % 512 == 0 else 256
     assert hidden % block == 0
     _combine_kernel[(tokens, hidden // block)](
         down,
@@ -1142,5 +1145,5 @@ def _combine(
         sp is not None,
         HALO_ROWS,
         num_warps=2,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )

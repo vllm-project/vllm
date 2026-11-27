@@ -521,7 +521,8 @@ async def test_refit_equals_fresh(
     fresh_b, fresh_b_tokens = references[case.reference_key]
 
     result: dict[str, object] = {"unchanged_in_b": unchanged}
-    async with _engine(folder_a, case, "direct", monkeypatch) as engine:
+    # the default mode: direct with weight updates
+    async with _engine(folder_a, case, "auto", monkeypatch) as engine:
         cold_a_tokens = await _generate(engine, case)
         cold_a, ptrs, walked = zip(*await _rpc(engine, _inspect, True))
         result["walk_found_off_registry"] = list(walked)

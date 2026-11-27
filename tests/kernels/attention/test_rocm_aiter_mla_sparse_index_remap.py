@@ -368,6 +368,7 @@ def _make_metadata():
         ),
         block_size=1,
         topk_tokens=TOPK_TOKENS,
+        topk_start=0,
         remapped_buf=None,
         remapped_epoch=-1,
     )

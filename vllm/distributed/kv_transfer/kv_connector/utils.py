@@ -74,6 +74,18 @@ def get_transferred_mrope_position_delta(
     return delta
 
 
+def get_max_offload_tokens(kv_transfer_params: dict[str, Any] | None) -> int | None:
+    """Parse the request's offload cap, preserving zero and rejecting booleans."""
+    raw = kv_transfer_params.get("max_offload_tokens") if kv_transfer_params else None
+    if type(raw) is int and raw >= 0:
+        return raw
+    if raw is not None:
+        logger.warning(
+            "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+        )
+    return None
+
+
 def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     """Drop speculative scratch slots and keep only the running-state slot."""
     if not blocks:

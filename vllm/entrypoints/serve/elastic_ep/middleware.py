@@ -4,6 +4,7 @@
 from collections.abc import Awaitable
 
 from fastapi.responses import JSONResponse
+from starlette._utils import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Process-local states used to pause serving during scaling and after this rank
@@ -50,7 +51,9 @@ class ScalingMiddleware:
         # waiting for the external orchestrator to remove its process.
         rank_retired = get_elastic_ep_rank_retired()
         serving_paused = get_scaling_elastic_ep() or rank_retired
-        if serving_paused and scope["path"] not in _SCALING_OBSERVABILITY_PATHS:
+        # Strip root_path the same way the router does.
+        url_path = get_route_path(scope)
+        if serving_paused and url_path not in _SCALING_OBSERVABILITY_PATHS:
             error = (
                 "This data-parallel rank has been retired and is awaiting shutdown."
                 if rank_retired

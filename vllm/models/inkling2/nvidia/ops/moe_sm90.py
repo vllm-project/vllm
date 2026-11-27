@@ -1,195 +1,316 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling2 expert GEMMs for Hopper (Triton), in place of `trtllm_bmm.bmm`.
+"""Inkling2 routed experts on Hopper: Humming expert GEMMs (bf16
+activations, NVFP4 / MXFP8 weights) in place of the TRT-LLM-gen ones.
 
-They read the same tile-padded expert rows and block scales (R8c4 / R128c4)
-as the TRT-LLM-gen GEMMs, and row-major (unshuffled) expert weights. Both
-operands are dequantized exactly (NVFP4 to fp16, MXFP8 to bf16: an e2m1 or
-e4m3 value times its block scale needs at most 8 significant bits), so the
-products match the block-scaled MMA; the fp32 row and expert scales apply to
-the accumulator.
+Rows stay in the flat (token * topk + slot) order: the gate/up GEMM
+gathers each row's token, the down GEMM reads and writes row by row, and
+`ops.moe.combine` sums them with the identity `src2dst` (-1: not local).
 """
+
+import json
+from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
+)
 from vllm.triton_utils import tl, triton
 
-from .block_scales import _scale_offsets
-from .trtllm_bmm import ExpertPlan
+from .activation import _situ
+from .linear import k_group_partials
+from .moe import _load_bias, _local_experts, _select_experts
+
+if TYPE_CHECKING:
+    from vllm.utils.humming import HummingInputSchema
+
+# Row block size when no Humming tuning range covers the row count.
+_DEFAULT_BLOCK_M = 64
 
 
 @triton.jit
-def _dequant_e2m1(codes, scales):
-    """fp16 values of the e2m1 codes in the low nibbles of `codes` times
-    their e4m3 `scales` (same shape), exact: |products| lie in
-    `[2^-10, 2688]` with at most 6 significant bits. With its 3 magnitude
-    bits at fp16 bits 9-11, a code reads as an fp16 of its value times
-    2^-14."""
-    codes = codes.to(tl.uint16)
-    bits = ((codes & 8) << 12) | ((codes & 7) << 9)
-    values = bits.to(tl.float16, bitcast=True) * 16384.0
-    return values * scales.to(tl.float16)
-
-
-@triton.jit
-def _dequant_e4m3(values, exponents):
-    """bf16 e4m3 `values` times 2 ** (ue8m0 `exponents` - 127)."""
-    exponents = exponents.to(tl.uint32)
-    scales = tl.where(exponents == 0, 0x00400000, exponents << 23)
-    scales = scales.to(tl.float32, bitcast=True)
-    return (values.to(tl.float32) * scales).to(tl.bfloat16)
-
-
-@triton.jit
-def _expand_scales(scales, REPEAT: tl.constexpr):
-    """`[R, G]` block scales -> `[R, G * REPEAT]`, each repeated in place."""
-    rows: tl.constexpr = scales.shape[0]
-    groups: tl.constexpr = scales.shape[1]
-    scales = tl.broadcast_to(scales[:, :, None], (rows, groups, REPEAT))
-    return tl.reshape(scales, (rows, groups * REPEAT))
-
-
-@triton.jit
-def _expert_gemm_kernel(
-    Act,
-    ActScale,
-    RowScale,
-    Weight,
-    WeightScale,
-    ExpertScale,
-    Out,
-    Tiles,
-    MAX_CTAS: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    TILE: tl.constexpr,
-    NVFP4: tl.constexpr,
-    BN: tl.constexpr,
-    BT: tl.constexpr,
-    BK: tl.constexpr,
+def _select_kernel(
+    Partials,
+    Bias,
+    ExpertBounds,
+    IsPadding,
+    Ids,
+    Weights,
+    Src2Dst,
+    T,
+    route_scale,
+    E: tl.constexpr,
+    E_POW2: tl.constexpr,
+    GROUPS: tl.constexpr,
+    TOPK: tl.constexpr,
+    SORT: tl.constexpr,
 ):
-    """One `[BN, BT]` block of the transposed output: `BN` weight rows (the
-    MMA's M, dequantized in registers) by `BT` rows of one token tile."""
-    PACK: tl.constexpr = 2 if NVFP4 else 1
-    GROUP: tl.constexpr = 16 if NVFP4 else 32
-    T_BLOCKS: tl.constexpr = (TILE + BT - 1) // BT
-    tl.extra.cuda.gdc_wait()
-    pid_t = tl.program_id(1)
-    tile = pid_t // T_BLOCKS
-    if tile >= tl.load(Tiles + 2 * MAX_CTAS):
+    """Local expert ids (-1: not local), routing weights and identity
+    `src2dst` of the flat rows of one token."""
+    token = tl.program_id(0) + tl.arange(0, 1)
+    bias = _load_bias(Bias, E, E_POW2)
+    ids, weights = _select_experts(
+        Partials, bias, token, T, route_scale, E, E_POW2, GROUPS, TOPK, SORT
+    )
+    padding = None
+    if IsPadding is not None:
+        padding = tl.load(IsPadding + token)
+    local = _local_experts(
+        ids, tl.load(ExpertBounds), tl.load(ExpertBounds + 1), padding
+    )
+    rows = token[:, None] * TOPK + tl.arange(0, TOPK)[None, :]
+    tl.store(Ids + rows, local)
+    tl.store(Weights + rows, weights)
+    tl.store(Src2Dst + rows, tl.where(local >= 0, rows, -1))
+
+
+def select_experts(
+    x: torch.Tensor,
+    gate_weight: torch.Tensor,
+    bias: torch.Tensor,
+    topk: int,
+    route_scale: float,
+    expert_bounds: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The router and top-k of `ops.moe.route`, without its layout.
+
+    Returns the local expert id of each token's slots `[T, topk]` (-1: not
+    one of the local experts `expert_bounds`, or a padding token), their
+    routing weights `[T * topk]` and the identity `src2dst` `[T * topk]`
+    of the local rows (-1 elsewhere).
+    """
+    tokens = x.shape[0]
+    experts = gate_weight.shape[0]
+    partials = k_group_partials(x, gate_weight)
+    ids = torch.empty((tokens, topk), dtype=torch.int32, device=x.device)
+    weights = torch.empty(tokens * topk, dtype=torch.float32, device=x.device)
+    src2dst = torch.empty(tokens * topk, dtype=torch.int32, device=x.device)
+    _select_kernel[(tokens,)](
+        partials,
+        bias,
+        expert_bounds,
+        is_padding,
+        ids,
+        weights,
+        src2dst,
+        tokens,
+        route_scale,
+        E=experts,
+        E_POW2=triton.next_power_of_2(experts),
+        GROUPS=partials.shape[0],
+        TOPK=topk,
+        SORT=tokens <= 128,
+        num_warps=4 if tokens <= 256 else 1,
+    )
+    return ids, weights, src2dst
+
+
+@triton.jit
+def _swiglu_kernel(
+    GateUp,
+    Weights,
+    Src2Dst,
+    Out,
+    N: tl.constexpr,
+    BLOCK: tl.constexpr,
+    GATE_CAP: tl.constexpr,
+    UP_CAP: tl.constexpr,
+):
+    """bf16 softcapped SwiGLU of a local row times its routing weight."""
+    row = tl.program_id(0)
+    if tl.load(Src2Dst + row) < 0:
         return
-    expert = tl.load(Tiles + tile).to(tl.int64)
-    row_end = tl.load(Tiles + MAX_CTAS + tile)
-    rows = tile * TILE + (pid_t % T_BLOCKS) * BT + tl.arange(0, BT)
-    row_mask = rows < tl.minimum(row_end, (tile + 1) * TILE)
-    cols = tl.program_id(0) * BN + tl.arange(0, BN)
-    col_mask = cols < N
-
-    weight = Weight + expert * N * (K // PACK)
-    weight_scale = WeightScale + expert * N * (K // GROUP)
-    acc = tl.zeros((BN, BT), tl.float32)
-    for k in range(0, K, BK):
-        # NVFP4 bytes hold columns 2j (low nibble) and 2j + 1: the low and
-        # high nibbles of both operands are multiplied separately.
-        kp = k // PACK + tl.arange(0, BK // PACK)
-        kg = k // GROUP + tl.arange(0, BK // GROUP)
-        # Masked rows and columns are never stored.
-        w = tl.load(
-            weight + cols[:, None].to(tl.int64) * (K // PACK) + kp[None, :],
-            col_mask[:, None],
-        )
-        w_scale = _expand_scales(
-            tl.load(
-                weight_scale + cols[:, None] * (K // GROUP) + kg[None, :],
-                col_mask[:, None],
-            ),
-            GROUP // PACK,
-        )
-        a = tl.load(
-            Act + rows[:, None].to(tl.int64) * (K // PACK) + kp[None, :],
-            row_mask[:, None],
-        )
-        a_scale = _expand_scales(
-            tl.load(
-                ActScale + _scale_offsets(rows[:, None], kg[None, :], K // GROUP, TILE),
-                row_mask[:, None],
-            ),
-            GROUP // PACK,
-        )
-        if NVFP4:
-            acc = tl.dot(
-                _dequant_e2m1(w, w_scale),
-                tl.trans(_dequant_e2m1(a, a_scale)),
-                acc,
-            )
-            acc = tl.dot(
-                _dequant_e2m1(w >> 4, w_scale),
-                tl.trans(_dequant_e2m1(a >> 4, a_scale)),
-                acc,
-            )
-        else:
-            acc = tl.dot(
-                _dequant_e4m3(w, w_scale), tl.trans(_dequant_e4m3(a, a_scale)), acc
-            )
-    acc = acc * tl.load(ExpertScale + expert)
-    if NVFP4:
-        acc = acc * tl.load(RowScale + rows, row_mask, other=0)[None, :]
-    tl.store(
-        Out + rows[None, :].to(tl.int64) * N + cols[:, None],
-        acc.to(tl.bfloat16),
-        row_mask[None, :] & col_mask[:, None],
-    )
+    start = tl.program_id(1) * BLOCK
+    gamma = tl.load(Weights + row)
+    values = _situ(GateUp, row, start, gamma, N, BLOCK, GATE_CAP, UP_CAP)
+    tl.store(Out + row * N + start + tl.arange(0, BLOCK), values.to(tl.bfloat16))
 
 
-def bmm(
-    act: torch.Tensor,
-    act_scale: torch.Tensor,
-    row_scale: torch.Tensor | None,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    ones: torch.Tensor,
-    tiles: torch.Tensor,
-    plan: ExpertPlan,
-    projection: int,
+def swiglu(
+    gate_up: torch.Tensor,
+    weights: torch.Tensor,
+    src2dst: torch.Tensor,
+    gate_cap: float,
+    up_cap: float,
 ) -> torch.Tensor:
-    """`trtllm_bmm.bmm` (bf16 `[plan.rows, N]`) on row-major weights."""
-    del projection
-    nvfp4 = weight.dtype == torch.uint8
-    num_experts, n = weight.shape[:2]
-    k = weight.shape[2] * (2 if nvfp4 else 1)
-    out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
-    # (weight rows, token rows, warps, stages) by token tile, from H200 sweeps.
-    if plan.tile <= 16:
-        block_n, block_t, num_warps, num_stages = 128, 16, 4, 3
-    elif plan.tile <= 64:
-        block_n, block_t, num_warps, num_stages = 128, 64, 4, 3
-    else:
-        block_n, block_t, num_warps, num_stages = 256, 128, 8, 2 if nvfp4 else 3
-    block_k = 128
-    assert k % block_k == 0
-    grid = (
-        triton.cdiv(n, block_n),
-        plan.max_ctas * triton.cdiv(plan.tile, block_t),
-    )
-    _expert_gemm_kernel[grid](
-        act,
-        act_scale,
-        row_scale,
-        weight,
-        weight_scale,
-        ones,
+    """`activation.swiglu_quantize`'s SiTU of the interleaved (gate, up)
+    columns times the routing weights, in bf16, for the local rows (the
+    others are left unset)."""
+    rows, n = gate_up.shape[0], gate_up.shape[1] // 2
+    block = 256 if n % 256 == 0 else 128
+    assert n % block == 0
+    out = torch.empty((rows, n), dtype=torch.bfloat16, device=gate_up.device)
+    _swiglu_kernel[(rows, n // block)](
+        gate_up,
+        weights,
+        src2dst,
         out,
-        tiles,
-        MAX_CTAS=plan.max_ctas,
         N=n,
-        K=k,
-        TILE=plan.tile,
-        NVFP4=nvfp4,
-        BN=block_n,
-        BT=block_t,
-        BK=block_k,
-        num_warps=num_warps,
-        num_stages=num_stages,
-        launch_pdl=True,
+        BLOCK=block,
+        GATE_CAP=gate_cap,
+        UP_CAP=up_cap,
+        num_warps=2,
     )
     return out
+
+
+class HummingExperts:
+    """Humming tensors and kernel configs of the two expert projections.
+
+    Args:
+        weights: Per projection (`w13`, `w2`), the row-major checkpoint
+            weights `[E, N, K / pack]`, block scales `[E, N, K / group]`
+            and, for NVFP4, the per-expert global scales `[E]` (else None).
+        shapes: `(N, K)` of each projection.
+        nvfp4: NVFP4 (else MXFP8) weights.
+        input_schema: Quantized input contract, or None for BF16 activations.
+
+    """
+
+    def __init__(
+        self,
+        weights: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
+        shapes: tuple[tuple[int, int], tuple[int, int]],
+        nvfp4: bool,
+        input_schema: "HummingInputSchema | None" = None,
+    ) -> None:
+        from vllm.utils.humming import (
+            GemmType,
+            HummingInputSchema,
+            ModeloptMxfp8WeightSchema,
+            ModeloptNvfp4WeightSchema,
+            get_heuristics_config,
+            prepare_and_transform_humming_tensors,
+        )
+
+        self.configs = {}
+        self.tensors: dict[str, dict[str, torch.Tensor]] = {}
+        self.tunings: dict[str, list] = {}
+        self.tuning_strs: dict[str, str] = {}
+        for name, (n, k) in zip(("w13", "w2"), shapes):
+            weight, scale, global_scale = weights[name]
+            num_experts = weight.shape[0]
+            tensors = {"weight": weight, "weight_scale": scale}
+            if nvfp4:
+                source = ModeloptNvfp4WeightSchema()
+                tensors["weight_scale_2"] = global_scale
+            else:
+                source = ModeloptMxfp8WeightSchema()
+            schema, tensors = source.convert_humming(
+                tensors=tensors,
+                shape_n_stacks=[n],
+                shape_k_stacks=[k],
+                param_dtype=torch.bfloat16,
+                num_experts=num_experts,
+            )
+            config, tensors = prepare_and_transform_humming_tensors(
+                tensors=tensors,
+                shape_n=n,
+                shape_k=k,
+                pad_n_to_multiple=256,
+                pad_k_to_multiple=128,
+                input_schema=input_schema or HummingInputSchema(),
+                weight_schema=schema,
+                num_experts=num_experts,
+                torch_dtype=torch.bfloat16,
+                device=weight.device,
+            )
+            assert config.shape_n == n and config.shape_k == k, (n, k)
+            tuning = get_heuristics_config(
+                layer_config=config,
+                use_f16_accum=False,
+                use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+                gemm_type=GemmType.INDEXED,
+            )
+            # Stream-K adds the K slices into the output with bf16 atomics,
+            # whose order (and so the result) changes from run to run.
+            for _, _, kernel_config in tuning:
+                kernel_config["use_stream_k"] = False
+            self.configs[name] = config
+            self.tensors[name] = tensors
+            self.tunings[name] = tuning
+            self.tuning_strs[name] = json.dumps(tuning)
+        self.num_experts = num_experts
+        self.compute_config = json.dumps(
+            {
+                "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
+                "use_f16_accum": False,
+                "gemm_type": GemmType.INDEXED.value,
+            }
+        )
+        self.locks = torch.zeros(2048, dtype=torch.int32, device=weight.device)
+
+    def _block_m(self, name: str, rows: int) -> int:
+        for lower, upper, config in self.tunings[name]:
+            if lower < rows <= upper:
+                return config["block_shape"][0]
+        return _DEFAULT_BLOCK_M
+
+    def _gemm(
+        self,
+        name: str,
+        inputs: torch.Tensor,
+        rows: int,
+        alignment: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        top_k: int,
+        valid_rows: int,
+    ) -> torch.Tensor:
+        from vllm.utils.humming import humming_forward
+
+        config = self.configs[name]
+        tensors = self.tensors[name]
+        out = torch.empty(
+            (rows, config.shape_n), dtype=torch.bfloat16, device=inputs.device
+        )
+        sorted_ids, expert_ids, num_tokens_padded = alignment
+        return humming_forward(
+            config,
+            inputs=inputs,
+            weight=tensors["weight"],
+            weight_scale=tensors.get("weight_scale"),
+            weight_scale_2=tensors.get("weight_scale_2"),
+            outputs=out,
+            locks=self.locks,
+            sorted_ids=sorted_ids,
+            expert_ids=expert_ids,
+            num_tokens_padded=num_tokens_padded,
+            top_k=top_k,
+            valid_shape_m=valid_rows,
+            compute_config=self.compute_config,
+            tuning_config=self.tuning_strs[name],
+        )
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        ids: torch.Tensor,
+        weights: torch.Tensor,
+        src2dst: torch.Tensor,
+        num_global_experts: int,
+        gate_cap: float,
+        up_cap: float,
+    ) -> torch.Tensor:
+        """bf16 `[T * topk, H]` down-projection rows of the local slots of
+        `ids` (`select_experts`); the other rows are left unset."""
+        tokens, topk = ids.shape
+        rows = tokens * topk
+        # Expected local rows, which pick the kernel configs.
+        valid_rows = -(-rows * self.num_experts // num_global_experts)
+        block_m = {name: self._block_m(name, valid_rows) for name in ("w13", "w2")}
+        alignments = {
+            size: moe_align_block_size(
+                ids, size, self.num_experts, ignore_invalid_experts=True
+            )[:3]
+            for size in set(block_m.values())
+        }
+        gate_up = self._gemm(
+            "w13", x, rows, alignments[block_m["w13"]], topk, valid_rows
+        )
+        activated = swiglu(gate_up, weights, src2dst, gate_cap, up_cap)
+        del gate_up
+        return self._gemm(
+            "w2", activated, rows, alignments[block_m["w2"]], 1, valid_rows
+        )
