@@ -24,6 +24,7 @@ from vllm.models.inkling.nvidia.sconv_swa_attn import (
 from .ops.allreduce import Inkling2AllReduceWorkspace, all_reduce_conv_mix
 from .ops.conv_mix import conv_mix as fused_conv_mix
 from .ops.linear import linear_k_groups
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.sconv import short_conv
 from .ops.seq_parallel import SeqParallel
 
@@ -104,6 +105,8 @@ class Inkling2ShortConv(nn.Module):
             4,
         ):
             return linear_k_groups(x.contiguous(), self.weight_proj, x.dtype)
+        if use_sm12x_bf16_ll_gemm(x, self.weight_proj):
+            return sm12x_bf16_ll_gemm(x, self.weight_proj)
         return nn.functional.linear(x, self.weight_proj)
 
     def forward(

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import vllm.models.inkling2.nvidia.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
@@ -314,9 +315,10 @@ _ConvMeta = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.
 
 
 def _chunked_steps(
-    lengths_steps, block_table, block
+    lengths_steps, block_table, block, pad=0
 ) -> Iterator[tuple[Any, Any, Any, _ConvMeta]]:
-    """Yield per-step conv metadata for chunked prefill + decode."""
+    """Yield per-step conv metadata for chunked prefill + decode, with `pad`
+    trailing padding rows (position 0, request 0, no slot, start 0)."""
     done = [0] * len(lengths_steps[0])
     for step in lengths_steps:
         reqs = [i for i in range(len(step)) if step[i]]
@@ -331,12 +333,13 @@ def _chunked_steps(
                 for i, r in zip(reqs, rows)
             ]
         )
+        zeros = torch.zeros(pad, dtype=torch.long, device=DEVICE)
         meta = (
-            torch.cat(rows),
+            torch.cat([*rows, zeros]),
             block_table[reqs],
-            seq_idx.int().to(DEVICE),
-            slots,
-            starts[seq_idx].int().to(DEVICE),
+            torch.cat([seq_idx.to(DEVICE), zeros]).int(),
+            torch.cat([slots, zeros - 1]),
+            torch.cat([starts[seq_idx].to(DEVICE), zeros]).int(),
         )
         yield reqs, rows, starts, meta
         for i in reqs:
@@ -346,6 +349,9 @@ def _chunked_steps(
 STEPS = [[3, 7, 2, 9], [2, 6, 0, 0], [1, 1, 1, 1]]
 # Steps of over 256 tokens take the prefill tiling.
 LONG_STEPS = [[3, 150, 2, 140], [200, 6, 90, 0], [1, 1, 1, 1]]
+# A long step ending in a request that continues earlier context, so with
+# padding its last prefill tile ends in padding rows.
+PADDED_STEPS = [[120, 100, 3, 2], [120, 0, 138, 1]]
 
 
 def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
@@ -356,10 +362,12 @@ def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
 
 
 @pytest.mark.parametrize("fused_residual", [False, True])
-@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS])
+@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS, PADDED_STEPS])
 def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
-    """Chunked prefill + decode through the paged conv state equals one pass;
-    the residual update `(res + addend) + y` is fused in fp32."""
+    """Chunked prefill + decode through the paged conv state, with trailing
+    padding rows, equals one pass; the residual update `(res + addend) + y` is
+    fused in fp32."""
+    pad = 3
     width, block, heads, stream_width, offset, row = 4, 4, 2, 128, 128, 1024
     channels = heads * stream_width
     totals = [sum(s[i] for s in steps) for i in range(4)]
@@ -370,13 +378,12 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
     cache, block_table = _conv_cache_and_table(heads, block, row, 64)
 
     outs: list[list[torch.Tensor]] = [[] for _ in totals]
-    for reqs, rows, starts, meta in _chunked_steps(steps, block_table, block):
-        x = torch.cat([xs[i][r] for i, r in zip(reqs, rows)])
-        kwargs: dict[str, torch.Tensor] = {}
-        if fused_residual:
-            res = torch.cat([ress[i][r] for i, r in zip(reqs, rows)])
-            add = torch.cat([adds[i][r] for i, r in zip(reqs, rows)])
-            kwargs = dict(addend=add, residual=res, out=res)
+    for reqs, rows, starts, meta in _chunked_steps(steps, block_table, block, pad):
+        x, res, add = (
+            F.pad(torch.cat([t[i][r] for i, r in zip(reqs, rows)]), (0, 0, 0, pad))
+            for t in (xs, ress, adds)
+        )
+        kwargs = dict(addend=add, residual=res, out=res) if fused_residual else {}
         out = short_conv(x, weight, cache, *meta, offset, stream_width, **kwargs)
         for j, i in enumerate(reqs):
             outs[i].append(out[starts[j] : starts[j + 1]])
@@ -606,9 +613,9 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
 )
 @pytest.mark.parametrize("shape", [(131, 130), (6552, 2304)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_sm12x_gemv_projection_and_graph(tokens, shape, dtype):
+def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
     """Handle tail tiles, row strides, output storage, bias and graph replay."""
-    from vllm.models.inkling2.nvidia.ops.gemv import sm12x_bf16_gemv
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm
 
     torch.manual_seed(0)
     n, k = shape
@@ -619,7 +626,7 @@ def test_sm12x_gemv_projection_and_graph(tokens, shape, dtype):
     out = storage[:, :n]
 
     def run():
-        return sm12x_bf16_gemv(x, weight, bias, out=out)
+        return sm12x_bf16_ll_gemm(x, weight, bias, out=out)
 
     def check():
         if k == 2304:

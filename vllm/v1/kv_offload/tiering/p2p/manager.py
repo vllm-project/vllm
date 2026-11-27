@@ -24,13 +24,14 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -262,6 +263,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -304,6 +306,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            access_mode: Direction(s) in which this tier may transfer data.
+                `read` fetches blocks from peers but never stages local
+                blocks for them; `write` stages blocks for peers but never
+                fetches. The tiering manager skips the directions the mode
+                disables.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
@@ -329,6 +336,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             offloading_spec,
             primary_kv_view,
             tier_type,
+            access_mode=access_mode,
         )
         try:
             timeout_s = float(unbound_store_timeout_s)
@@ -465,7 +473,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Parse kv_transfer_params once and open the outbound session.
 
         Parses the P2P routing state onto `req_context` (cached for the
@@ -480,6 +488,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
         the ones this request computed.
+
+        Requests without a `remote_decoder` opt out of cascades of newly
+        stored primary chunks, since there is no destination to receive them.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
@@ -489,8 +500,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
-            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return RequestOffloadingContext()
+            return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        return SecondaryTierRequestContext(receives_stores=dest is not None)
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
