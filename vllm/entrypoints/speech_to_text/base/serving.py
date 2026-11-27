@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.engine.types import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInput, EngineInput
+from vllm.inputs import EncoderDecoderInput, EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
@@ -38,6 +38,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
+from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
 
 from ..transcription.protocol import (
@@ -88,6 +89,15 @@ def asr_inter_chunk_separator(
     separator; others use a single ASCII space.
     """
     return "" if language and language.lower() in no_space_languages else " "
+
+
+def _set_audio_uuid(prompt: PromptType, audio_uuid: str) -> None:
+    """Name the prompt's audio so requests with the same audio share its
+    encoder output."""
+    if isinstance(prompt, dict):
+        mm_prompt = prompt.get("encoder_prompt", prompt)
+        if isinstance(mm_prompt, dict) and "multi_modal_data" in mm_prompt:
+            mm_prompt["multi_modal_uuids"] = {"audio": [audio_uuid]}
 
 
 class SpeechToTextBaseServing(GenerateBaseServing):
@@ -218,6 +228,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         audio_chunk: np.ndarray,
         request_id: str,
         data_parallel_rank: int | None = None,
+        audio_uuid: str | None = None,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
@@ -229,6 +240,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             audio_chunk,
             self.asr_config,
         )
+        if audio_uuid is not None:
+            _set_audio_uuid(prompt, audio_uuid)
         allowed_token_ids = self.model_cls.get_language_token_ids(
             self.tokenizer,
         )
@@ -292,18 +305,23 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
             )
 
+        detected_chunk_uuid: str | None = None
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
-            # Auto-detect language from the first chunk.
+            # Auto-detect language from the first chunk. Both requests name the
+            # chunk with the same UUID so its encoder output is computed once.
+            # The request ID can come from the client, so it must not be the key.
+            detected_chunk_uuid = f"lang_detect-{random_uuid()}"
             request.language = await self._detect_language(
                 chunks[0],
                 f"{request_id}-lang_detect",
                 data_parallel_rank=data_parallel_rank,
+                audio_uuid=detected_chunk_uuid,
             )
 
         parsed_prompts: list[DictPrompt] = []
-        for chunk in chunks:
+        for chunk_index, chunk in enumerate(chunks):
             stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
@@ -311,6 +329,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 task_type=self.task_type,
             )
             prompt = self.model_cls.get_generation_prompt(stt_params)
+            if chunk_index == 0 and detected_chunk_uuid is not None:
+                _set_audio_uuid(prompt, detected_chunk_uuid)
 
             parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":
