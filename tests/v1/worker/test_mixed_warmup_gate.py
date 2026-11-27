@@ -151,7 +151,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         runner.adaptive_verification
     )
 
-    def run_steps(model_runner, execute, sample, greedy=False, seeded=False):
+    def run_steps(model_runner, execute, sample, greedy=False):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
         if fail_warmup:
@@ -177,16 +177,13 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
     monkeypatch.setattr(
         warmup,
         "_warmup_kernels",
-        lambda runner, execute, sample, greedy=False, seeded=False: rounds.append(
-            (greedy, seeded)
-        ),
+        lambda runner, execute, sample, greedy=False: rounds.append(greedy),
     )
     for is_last_pp_rank in (False, True):
         rounds.clear()
         runner = SimpleNamespace(
             adaptive_verification=None,
             speculator=None,
-            is_pooling_model=False,
             speculative_config=SimpleNamespace() if speculative else None,
             rejection_sampler=(
                 SimpleNamespace(enable_adaptive_verification=False)
@@ -195,9 +192,4 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
             ),
         )
         warmup.warmup_kernels(runner, _fail, _fail)
-        expected = (
-            [(False, False), (False, True), (True, False)]
-            if speculative
-            else [(False, False), (False, True)]
-        )
-        assert rounds == expected
+        assert rounds == ([False, True] if speculative else [False])

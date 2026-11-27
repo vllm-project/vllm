@@ -1472,14 +1472,13 @@ class SamplingParams(
         )
 
     @staticmethod
-    def for_sampler_warmup(seed: int | None = None) -> "SamplingParams":
+    def for_sampler_warmup() -> "SamplingParams":
         """Set parameters to exercise all sampler logic."""
         return SamplingParams(
             temperature=0.9,
             top_p=0.9,
             top_k=50,
             min_p=0.1,
-            seed=seed,
             frequency_penalty=0.5,
             presence_penalty=0.5,
             repetition_penalty=1.2,

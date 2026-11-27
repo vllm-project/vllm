@@ -553,10 +553,6 @@ def warmup_kernels(
     """
     with _fixed_draft_counts(model_runner):
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
-        if not getattr(model_runner, "is_pooling_model", False):
-            _warmup_kernels(
-                model_runner, worker_execute_model, worker_sample_tokens, seeded=True
-            )
         # All PP ranks must run the same forwards to match sends and receives.
         if model_runner.speculative_config is not None:
             # Greedy batches skip logits processing, so rejection kernels
@@ -564,7 +560,6 @@ def warmup_kernels(
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
-
     adaptive_verification = model_runner.adaptive_verification
     if adaptive_verification is not None:
         adaptive_verification.warmup_budget_kernel()
@@ -580,7 +575,6 @@ def _warmup_kernels(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
     greedy: bool = False,
-    seeded: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -653,11 +647,10 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        seed = 42 if seeded else None
         sampling_params = (
             SamplingParams(temperature=0)
             if greedy
-            else SamplingParams.for_sampler_warmup(seed=seed)
+            else SamplingParams.for_sampler_warmup()
         )
         pooling_params = None
 
