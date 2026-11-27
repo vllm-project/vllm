@@ -1106,9 +1106,8 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
 def test_convert_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
     into each projection's size, after the renamings. Like in Transformers, a longer
-    name that only starts with the pattern is not split, and a quantization scale for
-    the fused tensor is rejected, not split. The fused tensor of a skipped module is
-    left for the loader to drop."""
+    name that only starts with the pattern is not split. The fused tensor of a skipped
+    module is left for the loader to drop."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1144,12 +1143,71 @@ def test_convert_weights_splits_fused_gqa_qkv():
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
 
-    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
-    with pytest.raises(ValueError, match="quantized tensors is not supported"):
-        list(weights([scale]))
-
     skipped = ("vision_model.query_key_value.weight", fused)
     assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        {"weight": (None, 8), "weight_scale": (1,), "input_scale": (1,)},
+        {
+            "weight_packed": (None, 4),
+            "weight_scale": (None, 1),
+            "weight_global_scale": (1,),
+            "input_global_scale": (1,),
+        },
+        {"weight_packed": (None, 1), "weight_scale": (None, 1), "weight_shape": (2,)},
+    ],
+    ids=["fp8", "nvfp4", "int4"],
+)
+def test_convert_weights_splits_quantized_tensors(shapes):
+    """The tensors a quantized checkpoint stores with a weight that a converter splits
+    (Molmo2's FP8, NVFP4 and int4 checkpoints) are split like the weight: those with
+    its rows (`None`) by rows, the others copied to every piece. Both for a module's
+    converter (`Split` of `att_proj`) and a weight's (`Chunk` of `ff_proj.weight`)."""
+    with torch.device("meta"):
+        model = nn.Module()
+        model.config = PreTrainedConfig()
+        for name, out in [("q", 8), ("k", 2), ("v", 2), ("up", 3), ("gate", 3)]:
+            setattr(model, f"{name}_proj", nn.Linear(8, out, bias=False))
+    split = WeightConverter(
+        source_patterns="att_proj",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
+    )
+    convert = ConvertWeights([], [split, chunk], WeightsMapper(), model)
+    targets = {"att_proj": ["q", "k", "v"], "ff_proj": ["up", "gate"]}
+    rows = {
+        module: [getattr(model, f"{t}_proj").out_features for t in names]
+        for module, names in targets.items()
+    }
+    checkpoint = {}
+    for module in targets:
+        for param, shape in shapes.items():
+            size = (sum(rows[module]), *shape[1:]) if shape[0] is None else shape
+            checkpoint[f"{module}.{param}"] = torch.rand(size)
+
+    pieces = dict(convert(checkpoint.items()))
+
+    assert len(pieces) == 5 * len(shapes)
+    for module, names in targets.items():
+        for param, shape in shapes.items():
+            tensor = checkpoint[f"{module}.{param}"]
+            split_pieces = [pieces[f"{t}_proj.{param}"] for t in names]
+            if shape[0] is None:
+                assert [p.shape[0] for p in split_pieces] == rows[module]
+                torch.testing.assert_close(torch.cat(split_pieces), tensor)
+            else:
+                assert all(p is tensor for p in split_pieces)
 
 
 def test_converters_apply_to_renamed_weights():

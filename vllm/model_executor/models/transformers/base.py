@@ -144,6 +144,11 @@ class ConvertWeights:
         pending: dict[str, dict[str, torch.Tensor]] = {}
         for name, tensor in weights:
             first, source = rename_source_key(name, self.renamings, self.converters)
+            if source is None or self.mapper.map_name(first) not in self.shapes:
+                pieces = self.split_like_weight(name, tensor)
+                if pieces is not None:
+                    yield from pieces.items()
+                    continue
             if source is None:
                 yield first, tensor
                 continue
@@ -179,6 +184,38 @@ class ConvertWeights:
                 )
             for target, piece in pieces.items():
                 yield first.replace(targets[0], target), piece
+
+    def split_like_weight(
+        self, name: str, tensor: torch.Tensor
+    ) -> dict[str, torch.Tensor] | None:
+        """Split a tensor stored with a weight that a converter splits (e.g. a quantized
+        checkpoint's `weight_scale`) like the weight: by rows if it has the weight's
+        rows, else copied to every piece. `None` if `name` is no such tensor."""
+        module, _, param = name.rpartition(".")
+        if param == "weight":
+            return None
+        first, source = rename_source_key(
+            f"{module}.weight", self.renamings, self.converters
+        )
+        if source is None:
+            return None
+        converter = self.pattern_to_converter[source]
+        if len(converter.source_patterns) > 1:
+            return None
+        targets = converter.target_patterns
+        weights = [first.replace(targets[0], target) for target in targets]
+        full_layer_names = [self.mapper.map_name(weight) for weight in weights]
+        if not all(n in self.shapes for n in full_layer_names):
+            return None
+        rows = [self.shapes[n][0] for n in full_layer_names]
+        if tensor.shape[:1] == (sum(rows),):
+            pieces = tensor.split(rows)
+        else:
+            pieces = (tensor,) * len(rows)
+        return {
+            weight.removesuffix("weight") + param: piece
+            for weight, piece in zip(weights, pieces)
+        }
 
 
 VLLM_ATTN_ATTR = "attn"
