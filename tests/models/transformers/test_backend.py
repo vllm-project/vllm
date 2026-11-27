@@ -1259,7 +1259,7 @@ def test_joining_into_a_quantized_module_is_rejected():
     wte += [("model.wte.new_embedding", torch.rand(1, 2))]
 
     model.embed_tokens.quant_method = SimpleNamespace(uses_meta_device=False)
-    with pytest.raises(ValueError, match="split of a tensor stored like its weight"):
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(convert(wte))
     model.embed_tokens.quant_method.uses_meta_device = True
     assert [name for name, _ in convert(wte)] == ["model.embed_tokens.weight"]

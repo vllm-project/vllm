@@ -1154,19 +1154,23 @@ class Base(
             quant_method = getattr(loader[0], "quant_method", None)
             # Online quantization loads unquantized weights and quantizes them after
             online = getattr(quant_method, "uses_meta_device", False)
-            # A join's other tensors aren't converted, and a tensor in another dtype
-            # isn't quantized like the module (e.g. ignored by its checkpoint name)
-            dtype = getattr(getattr(loader[0], "weight", None), "dtype", None)
-            if (
-                not isinstance(quant_method, UNQUANTIZED_METHODS)
-                and not online
-                and (len(converter.target_patterns) < 2 or tensor.dtype != dtype)
-            ):
-                raise ValueError(
-                    f"Cannot convert {name!r} ({tensor.dtype}) into "
-                    f"{converter.target_patterns}: a quantized module only takes a "
-                    f"split of a tensor stored like its weight ({dtype or 'packed'})."
-                )
+            if not isinstance(quant_method, UNQUANTIZED_METHODS) and not online:
+                # Unlike a split's (above), a join's other tensors aren't converted
+                if len(converter.target_patterns) < 2:
+                    raise ValueError(
+                        f"Cannot convert {name!r} into {converter.target_patterns}: "
+                        "converting quantized tensors is not supported."
+                    )
+                # A tensor in another dtype isn't quantized like the module (e.g. one
+                # the quantization config ignores by its checkpoint name)
+                dtype = getattr(getattr(loader[0], "weight", None), "dtype", None)
+                if tensor.dtype != dtype:
+                    raise ValueError(
+                        f"Cannot convert {name!r} ({tensor.dtype}) into "
+                        f"{converter.target_patterns}: a quantized module only takes "
+                        "a split of a tensor stored like its weight "
+                        f"({dtype or 'packed'})."
+                    )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
             if len(target.collected_tensors) == len(converter.source_patterns):
