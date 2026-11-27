@@ -35,6 +35,12 @@ def _mean_pool_chunks(data: torch.Tensor, chunk_size: int) -> torch.Tensor:
     )
 
 
+def _mean_pool_segments(data: torch.Tensor, segment_lengths: list[int]) -> torch.Tensor:
+    """Mean of each candidate segment (the prefix is skipped), in FP32."""
+    candidates = data[segment_lengths[0] :].split(segment_lengths[1:])
+    return torch.stack([c.mean(dim=0, dtype=torch.float32) for c in candidates])
+
+
 class TokenPoolerHead(nn.Module, ABC):
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
@@ -100,7 +106,8 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         Keep eligibility checks in sync with PoolingParams fields read by forward_chunk.
         """
         if envs.VLLM_BATCH_INVARIANT or any(
-            p.late_chunking_params is not None for p in pooling_params
+            p.late_chunking_params is not None or p.segment_layout_params is not None
+            for p in pooling_params
         ):
             return None
         # [total_tokens, hidden_size] -> [total_tokens, embedding_size]
@@ -156,8 +163,15 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
                 means.to(pooled_data.dtype) if self.head_dtype is None else means
             )
             # pooled_data: [num_chunks, hidden_size]
+        elif (layout := pooling_param.segment_layout_params) is not None:
+            means = _mean_pool_segments(pooled_data, layout.segment_lengths)
+            pooled_data = (
+                means.to(pooled_data.dtype) if self.head_dtype is None else means
+            )
+            # pooled_data: [num_candidates, hidden_size]
 
-        # Output: [num_rows, output_size], one row per token or late chunk.
+        # Output: [num_rows, output_size], one row per token, late chunk or
+        # candidate segment.
         return self._finish(self._project(pooled_data), pooling_param)
 
 

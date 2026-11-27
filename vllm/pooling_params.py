@@ -80,6 +80,53 @@ class LateChunkingParams(
             )
 
 
+class SegmentLayoutParams(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    """Segment attention layout for one-pass multi-candidate scoring.
+
+    The prompt is a shared prefix followed by candidate segments. In the
+    forward pass the prefix attends only to itself, and each candidate attends
+    to the prefix and to itself, never to another candidate. Each candidate's
+    positions restart right after the prefix, so it sees the same positions as
+    in a ``prefix + candidate`` prompt. The output has one row per candidate:
+    the mean of that candidate's contextual token states.
+
+    The outputs equal separate ``prefix + candidate`` forwards only for a model
+    whose prefix does not attend to later tokens, i.e. a model trained with
+    this layout (or a causal one); for an ordinary bidirectional encoder the
+    prefix would otherwise see the candidate.
+
+    Attributes:
+        segment_lengths: Token count of the prefix, then of each candidate, in
+            prompt order. They must sum to the prompt length.
+
+    """
+
+    segment_lengths: list[int]
+
+    def __post_init__(self) -> None:
+        self.verify()
+
+    def verify(self) -> None:
+        lengths = self.segment_lengths
+        if (
+            not isinstance(lengths, list)
+            or len(lengths) < 2
+            or any(type(n) is not int or n <= 0 for n in lengths)
+        ):
+            raise VLLMValidationError(
+                "segment_lengths must list the prefix length and at least one "
+                "candidate length, all positive integers"
+            )
+
+    @property
+    def num_candidates(self) -> int:
+        return len(self.segment_lengths) - 1
+
+
 class PoolingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -94,6 +141,9 @@ class PoolingParams(
             if model support matryoshka representation.
         late_chunking_params: Mean-pool contextual token states into fixed-size
             chunks for the token embedding task.
+        segment_layout_params: Read a shared prefix and several candidates in
+            one forward, one output row per candidate (token embedding task,
+            encoder-only models).
 
     """
 
@@ -122,18 +172,30 @@ class PoolingParams(
     # --8<-- [start:token-embed-pooling-params]
     late_chunking_params: LateChunkingParams | None = None
     """Mean-pool contextual tokens into fixed-size chunks for `token_embed`."""
+    segment_layout_params: SegmentLayoutParams | None = None
+    """Shared-prefix / candidate segment layout for `token_embed`."""
     # --8<-- [end:token-embed-pooling-params]
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "use_activation", "late_chunking_params"]
+        return [
+            "dimensions",
+            "use_activation",
+            "late_chunking_params",
+            "segment_layout_params",
+        ]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "token_embed": ["dimensions", "use_activation", "late_chunking_params"],
+            "token_embed": [
+                "dimensions",
+                "use_activation",
+                "late_chunking_params",
+                "segment_layout_params",
+            ],
             "token_classify": ["use_activation"],
         }
 
@@ -154,6 +216,24 @@ class PoolingParams(
             if self.late_interaction_params is not None:
                 raise VLLMValidationError(
                     "Late chunking cannot be combined with late-interaction scoring"
+                )
+
+        if self.segment_layout_params is not None:
+            self.segment_layout_params.verify()
+            if self.task != "token_embed":
+                raise VLLMValidationError("Segment layouts require token_embed")
+            if (
+                self.late_chunking_params is not None
+                or self.late_interaction_params is not None
+            ):
+                raise VLLMValidationError(
+                    "Segment layouts cannot be combined with late chunking or "
+                    "late-interaction scoring"
+                )
+            if model_config.attn_type != "encoder_only":
+                raise VLLMValidationError(
+                    "Segment layouts need a model with encoder-only "
+                    "(non-causal) attention"
                 )
 
         # plugin task uses io_processor.parse_data to verify inputs,
@@ -177,6 +257,10 @@ class PoolingParams(
             if self.step_tag_id is not None:
                 raise VLLMValidationError("Late chunking requires all token rows")
             # KV cache hits omit hidden states needed for complete chunk means.
+            self.skip_reading_prefix_cache = True
+        if self.segment_layout_params is not None:
+            if self.step_tag_id is not None:
+                raise VLLMValidationError("Segment layouts require all token rows")
             self.skip_reading_prefix_cache = True
 
     def _merge_default_parameters(self, model_config: ModelConfig) -> None:
@@ -300,6 +384,7 @@ class PoolingParams(
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
             f"late_chunking_params={self.late_chunking_params}, "
+            f"segment_layout_params={self.segment_layout_params}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 
