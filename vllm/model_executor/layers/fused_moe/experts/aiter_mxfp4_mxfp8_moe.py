@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from functools import cache
 
 import torch
 
@@ -99,6 +100,26 @@ def _swiglu_args(
     return alpha, float(limit), add_residual
 
 
+@cache
+def _zero_bias(num_experts: int, n: int, device: torch.device) -> torch.Tensor:
+    return torch.zeros(num_experts, n, dtype=torch.float32, device=device)
+
+
+def _gemm1_bias(w1: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    """Pass a zero bias in place of ``None`` to the SwiGLU GEMM.
+
+    With ``bias=None``, ``moe_gemm_a8w4`` + ``out_mx_quant`` returns wrong and
+    run-to-run varying results on the small-batch tile (``block_m == 16``,
+    AITER 0.1.25, gfx950): about 25% error against a torch reference, versus
+    under 3% with a zero bias. Checkpoints without expert biases (MiniMax) hit
+    this at decode batch sizes. ``w1`` is the column-major ``[E, K / 2, N]``
+    view, so ``N`` is its last dim.
+    """
+    if bias is not None:
+        return bias
+    return _zero_bias(w1.shape[0], w1.shape[2], w1.device)
+
+
 def aiter_mxfp4_mxfp8_moe_forward(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -155,7 +176,7 @@ def aiter_mxfp4_mxfp8_moe_forward(
         w1_scale,
         None,
         None,
-        quant_config.w1_bias,
+        _gemm1_bias(w1, quant_config.w1_bias),
         routing_data,
         gather_indx=gather_idx,
         gammas=gammas if apply_router_weight_on_input else None,
