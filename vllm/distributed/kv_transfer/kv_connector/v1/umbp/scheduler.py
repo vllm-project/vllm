@@ -15,7 +15,6 @@ from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -717,7 +716,7 @@ class UMBPStoreConnectorScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    ) -> UMBPConnectorMetadata:
         meta = UMBPConnectorMetadata(async_load=self.load_async)
         reserved_store_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
@@ -842,6 +841,28 @@ class UMBPStoreConnectorScheduler:
             self._load_specs.pop(request_id, None)
             if load_plans:
                 meta.load_requests[request_id] = load_plans
+
+        if not self.load_async and scheduler_output.new_block_ids_to_zero:
+            # Zeroing is queued on the forward stream, which a transfer is not
+            # ordered behind, so it could wipe a synchronous load. The load
+            # overwrites its blocks whole, as core relies on for async loads.
+            # Blocks a load fails to fill need no zeroing either: core zeroes
+            # them when it reallocates them, and with one cache group (the only
+            # layout loaded synchronously) their bytes never change precision.
+            loaded = {
+                block_id
+                for plans in meta.load_requests.values()
+                for block_id in (
+                    plans.block_ids
+                    if isinstance(plans, BlockLoadBatch)
+                    else (plan.block_id for plan in plans)
+                )
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                block_id
+                for block_id in scheduler_output.new_block_ids_to_zero
+                if block_id not in loaded
+            ]
 
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)

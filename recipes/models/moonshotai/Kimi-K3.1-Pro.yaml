@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-21
+  date_updated: 2026-11-27
   tasks:
     - multimodal
     - text
@@ -15,6 +15,7 @@ meta:
   default_hardware: gb300
   hardware:
     gb300: verified
+    gb200: verified
     vr200: supported
     810e: verified
     m890: verified
@@ -43,6 +44,11 @@ model:
   context_length: 1048576
   base_args:
     - "--trust-remote-code"
+    # The checkpoint's generation_config.json sets no sampling defaults, so a
+    # request that omits them would sample at top_p 1.0. These are the model
+    # card's values; see the guide's Client usage.
+    - "--override-generation-config"
+    - '{"temperature":1.0,"top_p":0.95}'
 
 features:
   tool_calling:
@@ -117,19 +123,36 @@ features:
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
+  strict_tool_calls:
+    label: "Strict tool calls"
+    description: "Constrain tool calls to each tool's declared arguments; use with Tool calling."
+    # Not offered under pd_cluster: its Dynamo router passes feature args to a
+    # worker that rejects this flag.
+    strategies:
+      - single_node_tp
+      - single_node_tep
+      - multi_node_tp
+      - multi_node_tep
+    # The tool-call parser has not been exercised on TPU.
+    hardware:
+      ironwood: unsupported
+    args:
+      - "--tool-strict-level"
+      - "parameter"
 
 opt_in_features:
   - spec_decoding
   - text_only
   - low_latency_decode
   - nvfp4_kv_cache
+  - strict_tool_calls
 
 variants:
   default:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
+    supported_hardware: [b300, gb300, gb200, vr200, mi355x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -224,6 +247,9 @@ strategy_min_gpus:
   multi_node_dep: 16
   810e: 32
   m890: 32
+  # Two GB200 trays (1536 GB) are short of the checkpoint; the qualified
+  # layouts start at four trays.
+  gb200: 16
   # The validated TPU layout spans a 2x2x4 v7x slice: TP32 over 4 hosts
   # (16 chips, 32 devices).
   ironwood: 32
@@ -2197,12 +2223,379 @@ presets:
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
 
+  # GB200: the three vLLM AgentX lanes of SemiAnalysisAI/InferenceX#5199. Every
+  # point serves the K3.1 DSpark draft (revision e4e6e626, 4 tokens) with block
+  # rejection, FP8 KV and FP32 KDA recurrent state.
+  gb200_agentx_tp16:
+    label: "AgentX TP16 + DCP16"
+    hardware: gb200
+    strategy: multi_node_tp
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 1, 4 and 8 on four GB200 trays: one aggregated TP16 + DCP16 engine on the low-latency decode backend, with the K3.1 DSpark draft (4 tokens) and KV offload to host DRAM."
+    source: { label: "InferenceX #5199", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5199", key: "kimik3.1-fp4-gb200-vllm-agentic-dspark-tp16-agg", revision: "9d613eedd28ffc931a093058d0e75442da3841ea" }
+    image: "vllm/vllm-openai:kimi-k31-arm64-cu135-7074371@sha256:4fc725bbec7b91b4164de0f8d61e086a9a038ccd1110d6a6cfba75d71898e28a"
+    select:
+      nodes: 4
+      frontend: python
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: true, nvfp4_kv_cache: false, strict_tool_calls: false }
+      dcp: 16
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "16"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","tokenspeed_mla_min_split_kv":32}'
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--use-replayssm"
+      - "--enable-prefix-caching"
+      - "--no-enable-flashinfer-autotune"
+      - "--stream-interval"
+      - "10"
+      - "--gpu-memory-utilization"
+      - "0.98"
+      - "--max-num-batched-tokens"
+      - "8192"
+    env: &k31_gb200_env
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      VLLM_USE_NCCL_SYMM_MEM: "0"
+      VLLM_ENABLE_GEMM_RS: "0"
+      TOKENSPEED_MLA_FP16_PARTIALS: "0"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+      VLLM_RPC_TIMEOUT: "600000"
+    json_args:
+      "--speculative-config": &k31_gb200_spec { revision: "e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f", num_speculative_tokens: 4, rejection_sample_method: block }
+      # 105 GiB of host DRAM per rank, half of a tray's share.
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 112742379520 } }
+    points:
+      c1:
+        label: "1"
+        concurrency: 1
+        description: "max-num-seqs 2."
+        args: ["--max-num-seqs", "2", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10]}']
+      c4:
+        label: "4"
+        concurrency: 4
+        description: "max-num-seqs 8."
+        args: ["--max-num-seqs", "8", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15,20,25,30,35,40]}']
+      c8:
+        label: "8"
+        concurrency: 8
+        description: "max-num-seqs 16."
+        args: ["--max-num-seqs", "16", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80]}']
+    runbook: |
+      The concurrency 1, 4 and 8 points of the GB200 AgentX aggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb200-vllm-agentic-dspark-tp16-agg`, [SemiAnalysisAI/InferenceX#5199](https://github.com/SemiAnalysisAI/InferenceX/pull/5199)): one engine serves prefill and decode with TP16 + DCP16 across four 4-GPU GB200 trays, without expert parallelism, on the low-latency decode backend. The lane ran the image digest the preset pins; the preset has been measured only on that image.
+
+      **Serving config.**
+      - **TP16 + DCP16.** DCP16 shards the MLA latent and indexer-key caches across the whole TP group, with the A2A DCP backend, `--cp-kv-cache-interleave-size 1` and the direct DCP paths (`VLLM_USE_DIRECT_DCP_*`). FP8 MLA KV cache with an MXFP4 indexer key cache (`--attention-config`, which also sets `tokenspeed_mla_min_split_kv` to 32); FP32 KDA recurrent state.
+      - **Low-latency decode** (the Low-latency decode feature, on in this preset) runs pure decode steps on the fused path, with `--use-replayssm`. Each point sets `--max-num-seqs` to twice its concurrency and captures `FULL_DECODE_ONLY` CUDA graphs at every multiple of 5 rows (1 + 4 draft tokens per request) up to that batch.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` with 4 tokens, probabilistic drafting and block rejection.
+      - **KV offload** to host DRAM through `SimpleCPUOffloadConnector` (the Simple option on the **KV Offload** row), 105 GiB per rank.
+      - `--gpu-memory-utilization 0.98` and `--max-num-batched-tokens 8192`.
+
+      **Benchmark-only settings left out.** `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=600` (the benchmark client holds each session's connection across turns), `PYTHONHASHSEED=0`, and the job and benchmark-client settings.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.46. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  gb200_agentx_pd_tp16:
+    label: "AgentX 1P1D TP16 + DCP16"
+    hardware: gb200
+    strategy: pd_cluster
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 32 and 64 on 32 GPUs: one TP16 + DCP16 prefill worker with EP16 on MegaMoE and one TP16 + DCP16 decode worker on the low-latency decode backend, four GB200 trays each, behind vLLM Router with the K3.1 DSpark draft (4 tokens), NIXL KV transfer and prefill KV offload to host DRAM."
+    source: { label: "InferenceX #5199", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5199", key: "kimik3.1-fp4-gb200-vllm-agentic-dspark-tp16dcp16-disagg", revision: "9d613eedd28ffc931a093058d0e75442da3841ea" }
+    image: "vllm/vllm-openai:kimi-k31-arm64-cu135-7074371@sha256:4fc725bbec7b91b4164de0f8d61e086a9a038ccd1110d6a6cfba75d71898e28a"
+    select:
+      pd_router: vllm
+      pd_connector: nixl
+      frontend: python
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: false, nvfp4_kv_cache: false, strict_tool_calls: false }
+      dcp: 16
+      # Host DRAM behind the prefill worker; decode keeps plain NIXL.
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "16"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","tokenspeed_mla_min_split_kv":16}'
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--enable-prefix-caching"
+      - "--no-enable-flashinfer-autotune"
+      - "--stream-interval"
+      - "10"
+      - "--gpu-memory-utilization"
+      - "0.95"
+    env: &k31_gb200_pd_env
+      <<: *k31_gb200_env
+      VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
+      # NIXL moves the KDA short-conv state in three reads, which needs the DS layout.
+      VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_MEMTYPE_REG_WHOLE: "n"
+    json_args:
+      "--speculative-config": *k31_gb200_spec
+      # The roles differ in expert parallelism, so skip the handshake's
+      # compatibility check.
+      "--kv-transfer-config":
+        NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false } }
+    roles:
+      prefill:
+        parallelism: tep
+        nodes: 4
+        args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+          - "--max-num-batched-tokens"
+          - "16384"
+        # Recompute on a failed load; 105 GiB of host DRAM per rank.
+        json_args:
+          "--kv-transfer-config":
+            kv_load_failure_policy: recompute
+            NixlConnector: { kv_role: kv_both }
+            SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 112742379520 } }
+        env:
+          VLLM_ENABLE_GEMM_RS: "1"
+      decode:
+        parallelism: tp
+        nodes: 4
+        args:
+          - "--additional-config"
+          - '{"decode_backend":"latency_specialized"}'
+          - "--use-replayssm"
+          # Bounds the MoE autotune workspace to decode-sized batches.
+          - "--max-num-batched-tokens"
+          - "2048"
+    points:
+      c32:
+        label: "32"
+        concurrency: 32
+        description: "Prefill max-num-seqs 32, decode 64."
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "32", "--max-cudagraph-capture-size", "160"]
+          decode:
+            args: ["--max-num-seqs", "64", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300,305,310,315,320]}']
+      c64:
+        label: "64"
+        concurrency: 64
+        description: "Prefill max-num-seqs 64, decode 128."
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "64", "--max-cudagraph-capture-size", "320"]
+          decode:
+            args: ["--max-num-seqs", "128", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300,305,310,315,320,325,330,335,340,345,350,355,360,365,370,375,380,385,390,395,400,405,410,415,420,425,430,435,440,445,450,455,460,465,470,475,480,485,490,495,500,505,510,515,520,525,530,535,540,545,550,555,560,565,570,575,580,585,590,595,600,605,610,615,620,625,630,635,640]}']
+    runbook: |
+      The concurrency 32 and 64 points of the GB200 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb200-vllm-agentic-dspark-tp16dcp16-disagg`, [SemiAnalysisAI/InferenceX#5199](https://github.com/SemiAnalysisAI/InferenceX/pull/5199)), on the image digest the preset pins: one prefill worker and one decode worker, each TP16 + DCP16 across four 4-GPU GB200 trays (32 GPUs), behind vLLM Router.
+
+      **Serving config.**
+      - **Prefill.** TP16 + DCP16 with the routed experts EP16 on MegaMoE (`--moe-backend deep_gemm_mega_moe`), `--max-num-batched-tokens 16384`, and `VLLM_ENABLE_GEMM_RS=1`. `--max-num-seqs` equals the concurrency, with CUDA graphs up to 5 rows per request.
+      - **Decode.** TP16 + DCP16 without expert parallelism, on the low-latency decode backend with `--use-replayssm`. `--max-num-seqs` is twice the concurrency, with `FULL_DECODE_ONLY` CUDA graphs at every multiple of 5 rows (1 + 4 draft tokens per request) up to that batch. `--max-num-batched-tokens 2048` bounds the MoE autotune workspace to decode-sized batches.
+      - **Both roles.** FP8 MLA KV cache with an MXFP4 indexer key cache, FP32 KDA recurrent state, `--gpu-memory-utilization 0.95`, and the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` with 4 tokens, probabilistic drafting and block rejection.
+      - **KV transfer.** `NixlConnector` with `kv_buffer_device: cuda` and `enforce_handshake_compat: false`, since the two roles differ in expert parallelism. `VLLM_SSM_CONV_STATE_LAYOUT=DS` is the KDA short-conv state layout NIXL transfers. The prefill worker composes it in a `MultiConnector` with `SimpleCPUOffloadConnector` (105 GiB of host DRAM per rank) and recomputes on a failed load.
+      - **vLLM Router.** The lane ran `vllm-router` 0.1.14 with `--policy consistent_hash --request-timeout-secs 14400 --disable-retries`, so each session stays on one worker pair.
+
+      **Benchmark-only settings left out.** `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=600`, `PYTHONHASHSEED=0`, and the job and benchmark-client settings.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.46. Only `--speculative-config` changes, on both roles:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  gb200_agentx_pd_pp2:
+    label: "AgentX 1P1D, TP8 x PP2 prefill"
+    hardware: gb200
+    strategy: pd_cluster
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 140 to 210 on 32 or 48 GPUs: one TP8 + DCP8 prefill worker with two pipeline stages and EP8 on MegaMoE across four GB200 trays, and one decode worker that runs two or four TP8 + DCP8 data-parallel ranks with expert parallelism on MegaMoE and the low-latency decode backend, behind vLLM Router with the K3.1 DSpark draft (4 tokens), pushed NIXL KV transfer and prefill KV offload to host DRAM."
+    source: { label: "InferenceX #5199", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5199", key: "kimik3.1-fp4-gb200-vllm-agentic-dspark-tp8pp2-disagg", revision: "9d613eedd28ffc931a093058d0e75442da3841ea" }
+    image: "vllm/vllm-openai:kimi-k31-arm64-cu135-7074371@sha256:4fc725bbec7b91b4164de0f8d61e086a9a038ccd1110d6a6cfba75d71898e28a"
+    select:
+      # No pd_connector pick: the lane renames the default NIXL connector to
+      # its push variant below.
+      pd_router: vllm
+      frontend: python
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: false, nvfp4_kv_cache: false, strict_tool_calls: false }
+      dcp: 8
+      # Host DRAM behind the prefill worker; decode keeps plain NIXL.
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--kv-cache-dtype"
+      - "fp8"
+      # Shard the sparse MLA queries across the DCP ranks.
+      - "--attention-config"
+      - '{"sparse_mla_shard_q":true}'
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--enable-prefix-caching"
+      - "--no-enable-flashinfer-autotune"
+      - "--stream-interval"
+      - "10"
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--max-num-seqs"
+      - "256"
+    env: *k31_gb200_pd_env
+    json_args:
+      "--speculative-config": *k31_gb200_spec
+      # Pushed NIXL: prefill writes each request's KV into the decode rank.
+      "--kv-transfer-config":
+        NixlConnector: { kv_connector: NixlPushConnector, kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false } }
+    roles:
+      prefill:
+        parallelism: tep
+        nodes: 4
+        tp: 8
+        pp: 2
+        args:
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--max-cudagraph-capture-size"
+          - "320"
+        # Recompute on a failed load; 178.5 GiB of host DRAM per rank.
+        json_args:
+          "--kv-transfer-config":
+            kv_load_failure_policy: recompute
+            SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 191662915584 } }
+        env:
+          VLLM_ENABLE_GEMM_RS: "1"
+      decode:
+        # One engine across the decode trays, whose --tensor-parallel-size 8
+        # and --data-parallel-size replace the pool's TP width: TP8 + DCP8
+        # data-parallel ranks of two trays each, routed experts on MegaMoE
+        # across all of them.
+        parallelism: tep
+        nodes: 4
+        args:
+          - "--tensor-parallel-size"
+          - "8"
+          - "--data-parallel-size"
+          - "2"
+          - "--data-parallel-rpc-port"
+          - "13345"
+          - "--gpu-memory-utilization"
+          - "0.97"
+          - "--additional-config"
+          - '{"decode_backend":"latency_specialized"}'
+          - "--use-replayssm"
+          # 256 requests x (1 + 4 draft tokens).
+          - "--max-num-batched-tokens"
+          - "1280"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300,305,310,315,320,340,360,380,400,420,440,460,480,500,520,540,560,580,600,620,640,660,680,700,720,740,760,780,800,820,840,860,880,900,920,940,960,980,1000,1020,1040,1060,1080,1100,1120,1140,1160,1180,1200,1220,1240,1260,1280]}'
+        env:
+          VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "1"
+          VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+          # Route each session to one data-parallel rank by a hash of the request body.
+          VLLM_DP_SESSION_AFFINITY_KEY: "body"
+          VLLM_DP_SESSION_AFFINITY_SIZE: "2"
+    points:
+      c140:
+        label: "140 (DP4)"
+        concurrency: 140
+        description: "Four TP8 decode ranks on eight trays (48 GPUs)."
+        roles:
+          decode: &k31_gb200_dp4
+            nodes: 8
+            args: ["--data-parallel-size", "4"]
+            env: { VLLM_DP_SESSION_AFFINITY_SIZE: "4" }
+      c160:
+        label: "160 (DP2)"
+        concurrency: 160
+        default: true
+        description: "Two TP8 decode ranks on four trays (32 GPUs)."
+      c170:
+        label: "170 (DP4)"
+        concurrency: 170
+        description: "Four TP8 decode ranks on eight trays (48 GPUs)."
+        roles:
+          decode: *k31_gb200_dp4
+      c200:
+        label: "200 (DP2)"
+        concurrency: 200
+        description: "Two TP8 decode ranks on four trays (32 GPUs)."
+      c210:
+        label: "210 (DP4)"
+        concurrency: 210
+        description: "Four TP8 decode ranks on eight trays (48 GPUs)."
+        roles:
+          decode: *k31_gb200_dp4
+    runbook: |
+      The GB200 AgentX lane with a pipeline-parallel prefill worker in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb200-vllm-agentic-dspark-tp8pp2-disagg`, [SemiAnalysisAI/InferenceX#5199](https://github.com/SemiAnalysisAI/InferenceX/pull/5199)), behind vLLM Router. Its layout exists only in the image the preset pins.
+
+      | Clients | Decode ranks | Decode trays | GPUs |
+      |---:|---:|---:|---:|
+      | 140, 170, 210 | 4 | 8 | 48 |
+      | 160, 200 | 2 | 4 | 32 |
+
+      **Serving config.**
+      - **Prefill.** One engine across four trays with `--tensor-parallel-size 8 --pipeline-parallel-size 2`: each pipeline stage holds half of the layers on a TP8 + DCP8 group of two trays, with the routed experts EP8 on MegaMoE inside the stage. `--max-num-batched-tokens 16384`, `--gpu-memory-utilization 0.95`.
+      - **Decode.** One engine across four or eight trays with `--tensor-parallel-size 8` and `--data-parallel-size 2` or `4`: each data-parallel rank is TP8 + DCP8 on two trays, the routed experts run on MegaMoE with expert parallelism across all ranks, and `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=1` shards the shared expert across each TP group. Low-latency decode backend with `--use-replayssm`, `--max-num-seqs 256` per rank, and `FULL_DECODE_ONLY` CUDA graphs up to 256 x (1 + 4 draft tokens) rows. `--data-parallel-rpc-port 13345` is the lane's choice; any free port works.
+      - **Session affinity on decode.** `VLLM_DP_SESSION_AFFINITY_KEY=body` with `VLLM_DP_SESSION_AFFINITY_SIZE` set to the number of data-parallel ranks keeps every turn of a session on the rank that holds its KV.
+      - **Both roles.** `--attention-config '{"sparse_mla_shard_q":true}'` shards the sparse MLA queries across the DCP ranks. FP8 MLA KV cache, FP32 KDA recurrent state, and the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` with 4 tokens, probabilistic drafting and block rejection.
+      - **KV transfer.** `NixlPushConnector`: the prefill worker (`kv_producer`) pushes each request's KV to the decode rank (`kv_consumer`), with `kv_buffer_device: cuda` and `enforce_handshake_compat: false`. The prefill worker composes it in a `MultiConnector` with `SimpleCPUOffloadConnector` (178.5 GiB of host DRAM per rank) and recomputes on a failed load.
+      - **vLLM Router.** The lane ran `vllm-router` 0.1.14 with `--policy consistent_hash --request-timeout-secs 14400 --disable-retries`.
+
+      Run the prefill command on each of its four trays with `--nnodes 4`, and the decode command on each of its four or eight trays with the matching `--nnodes`, `--node-rank` and the first tray's address as `--master-addr`; ranks above 0 add `--headless`, as rendered.
+
+      **Benchmark-only settings left out.** `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=600`, `PYTHONHASHSEED=0`, and the job and benchmark-client settings.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.46. Only `--speculative-config` changes, on both roles:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
 # DCP8 over the TP8 group (one B300 node or two GB300 trays); on GB300 also
 # DCP16 over a TP16 group of four trays (the AgentX concurrency-1 preset).
 decode_context_parallel:
   sizes:
     b300: [8]
     gb300: [8, 16]
+    gb200: [8, 16]
   match_tp: true
 
 strategy_overrides:
@@ -2428,6 +2821,22 @@ guide: |
   is free after the engines are up. The tested GB300 prefill workers used 128 GiB per GPU
   (512 GiB per tray).
 
+  ## Strict tool calls
+
+  Without a grammar, K3.1 sometimes calls a tool with empty or placeholder arguments. The opt-in
+  **Strict tool calls** feature adds `--tool-strict-level parameter`, which constrains every
+  tool call to a declared tool and to that tool's declared argument names and types, as if each
+  tool had set `strict: true`. On the
+  [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) Tool Call benchmark
+  (70 samples x 5 epochs, 8x MI355X, single-node TP8, Python frontend) K3.1 Pro scored 0.786
+  without the flag and 0.980 with it. The Rust frontend builds its own grammar and was not
+  measured. The limits are those in the
+  [Kimi-K3 recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3)'s Tool calling note: a tool
+  schema the grammar cannot compile fails the whole request, and arguments still need
+  validating on the client. The feature is not offered for prefill/decode disaggregation:
+  Dynamo workers do not accept the flag and constrain tool calls through their own
+  `--dyn-enable-structural-tag`, which the AgentX PD presets set.
+
   ## Client usage
 
   ```bash
@@ -2435,11 +2844,17 @@ guide: |
     -H "Content-Type: application/json" \
     -d '{
       "model": "moonshotai/Kimi-K3.1-Pro",
-      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}],
-      "temperature": 0.7,
-      "top_p": 0.95
+      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}]
     }'
   ```
+
+  The model card reports its results at `temperature = 1.0` and `top-p = 0.95`, but the
+  checkpoint's `generation_config.json` sets no sampling defaults, so the command passes them
+  as server defaults with `--override-generation-config`. They apply only to the parameters a
+  request omits; a value sent by the client still wins. Without the flag vLLM serves such a
+  request at `top_p = 1.0`: on DeepSWE (113 tasks, 8x MI355X, one run each) a coding agent that
+  sends neither parameter resolved 75 tasks at that fallback and 88 with `temperature = 1.0`
+  and `top_p = 0.95` set in the agent.
 
   ## References
 

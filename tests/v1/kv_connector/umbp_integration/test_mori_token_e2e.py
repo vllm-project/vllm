@@ -240,6 +240,53 @@ def test_restore_under_pool_eviction(umbp_llm):
     assert _external_tokens(umbp_llm) == before
 
 
+# A prompt this long fills an engine step, so the step after it is prepared
+# while it still runs.
+_STEP_TOKENS = 8192
+
+
+_MIXED_PRECISION_RUNNER = {
+    "kv_cache_dtype": "fp8",
+    "kv_cache_dtype_skip_layers": ["0"],
+    "max_model_len": _STEP_TOKENS,
+    "max_num_batched_tokens": _STEP_TOKENS,
+}
+
+
+@pytest.mark.parametrize(
+    "umbp_llm",
+    [
+        pytest.param(
+            {"load_async": False, "runner": _MIXED_PRECISION_RUNNER},
+            id="mixed-precision",
+        ),
+        pytest.param(
+            {
+                "load_async": False,
+                "runner": {**_MIXED_PRECISION_RUNNER, "tensor_parallel_size": 2},
+            },
+            id="mixed-precision-tp2",
+            marks=multi_gpu_marks(num_gpus=2),
+        ),
+    ],
+    indirect=True,
+)
+def test_synchronous_restore_survives_block_zeroing(umbp_llm):
+    """A mixed-precision KV cache zeroes new blocks on the forward stream; that
+    must not wipe a synchronous restore issued while an earlier step runs."""
+    block_size = umbp_llm.llm_engine.vllm_config.cache_config.block_size
+    prompt = _prompt(0, 8 * block_size + 7)
+    computed = umbp_llm.generate(prompt, PARAMS, use_tqdm=False)
+    _reset_gpu_prefix_cache(umbp_llm)
+    running = [_prompt(_FILLER_SEED + seed, _STEP_TOKENS - 64) for seed in range(2)]
+
+    before = _external_tokens(umbp_llm)
+    restored = umbp_llm.generate([*running, prompt], PARAMS, use_tqdm=False)[-1:]
+
+    assert _external_tokens(umbp_llm) - before == 8 * block_size
+    _assert_same_outputs(computed, restored)
+
+
 HYBRID_MODEL = "ibm-granite/granite-4.0-h-350m"
 HYBRID_REVISION = "3b17b717b8f2f5d305b0a92c1491e239aeda19c8"
 

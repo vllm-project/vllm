@@ -233,17 +233,25 @@ def test_openapi_stateless(case: schemathesis.Case):
         ("POST", "/inference/v1/generate"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
+    expected_server_error_status = {
+        # SmolVLM does not support either decision endpoint.
+        "/v1/systemone": 501,
+        "/v1/decisions": 501,
+        # Tiny fuzzed timeout_s values (e.g. 5e-324) legitimately return
+        # 503 probe_timeout.
+        "/health_generate": 503,
+    }.get(case.operation.path)
     # No need to verify SSL certificate for localhost
-    unsupported_decisions = case.operation.path in {
-        "/v1/systemone",
-        "/v1/decisions",
-    }
     response = case.call_and_validate(
         verify=False,
         timeout=timeout,
         headers={"Content-Type": "application/json"},
-        excluded_checks=[not_a_server_error] if unsupported_decisions else None,
+        excluded_checks=(
+            [not_a_server_error] if expected_server_error_status is not None else None
+        ),
     )
-    if unsupported_decisions:
-        # SmolVLM does not support either decision endpoint.
-        assert response.status_code < 500 or response.status_code == 501
+    if expected_server_error_status is not None:
+        assert (
+            response.status_code < 500
+            or response.status_code == expected_server_error_status
+        )

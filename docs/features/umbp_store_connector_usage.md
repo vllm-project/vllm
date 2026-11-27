@@ -39,7 +39,7 @@ Set these options in `kv_connector_extra_config`:
 | `total_capacity_bytes` | | Pool size per engine, split evenly across its workers. Exclusive with `capacity_bytes`. |
 | `lookup_instance` | | Distinguishes independent engines serving the same model on one host. Data-parallel ranks are already distinguished. |
 | `lookup_dir` | `/tmp` | Directory of the per-worker lookup sockets. |
-| `dram_high_watermark`, `dram_low_watermark` | MORI defaults | Pool occupancy at which eviction starts and stops. |
+| `dram_high_watermark`, `dram_low_watermark` | `0.99`, `0.97` | Pool occupancy at which eviction starts and stops. MORI v1.2.3's defaults (`0.9`, `0.7`) keep the pool about 80% full; setting either option keeps MORI's default for the other. |
 | `dram_use_hugepages`, `dram_hugepage_size`, `dram_numa_node`, `dram_prefault` | MORI defaults | Allocation of each worker's pool. |
 
 ## Standalone mode
@@ -68,7 +68,8 @@ every GPU that its clients use, so do not narrow it with
 cannot see crashes the server with a GPU memory fault, which takes the pool
 down for every attached engine. `UMBP_DRAM_*`
 variables control huge pages, NUMA placement, prefaulting, and eviction
-watermarks; see the MORI UMBP documentation.
+watermarks; see the MORI UMBP documentation. Set `UMBP_DRAM_HIGH_WM=0.99` and
+`UMBP_DRAM_LOW_WM=0.97` to match the embedded pool's defaults.
 
 ### Configure the connector
 
