@@ -9,7 +9,7 @@ meta:
   provider: "Mistral AI"
   description: "Mistral Large 4: a 1T-total / 49B-active multimodal MoE with sparse MLA attention, a built-in DSpark drafter, tool calling and reasoning, in FP8, NVFP4 and AMD MXFP4 checkpoints."
   date_added: 2026-10-28
-  date_updated: 2026-11-18
+  date_updated: 2026-11-27
   tasks:
     - multimodal
   performance_headline: "8x GB300, NVFP4 + DSpark: TP8 c1 TPOT 3.1 ms; 1P1D (4+4) P DP4/EP → D TP4 reaches 241 output tok/s/GPU at 32k input"
@@ -702,7 +702,9 @@ notes:
       The P/D presets run one 4-GPU tray per side, which holds the NVFP4 weights
       but not the FP8 ones (~128 GiB per GPU at 8 GPUs). Pick the NVFP4 variant.
   - title: "Probabilistic drafting"
+    # Not offered on gfx942 (see the dspark_probabilistic mode).
     when:
+      hardware: [nvidia, "arch:gfx950"]
       features: [spec_decoding]
     body: |
       For sampled serving at T ≥ 1 without top-p, pick **DSpark (probabilistic)**:
@@ -758,10 +760,12 @@ notes:
     body: |
       - Block-FP8 experts on AITER at TP8, one 8-GPU node (~128 GiB of
         weights per GPU). MXFP4 requant was not tested on gfx942.
+      - Use greedy DSpark (the default mode). Only greedy drafting was run
+        on gfx942, so the probabilistic mode is not offered here.
       - Validated on 8× MI325X: GSM8K 96.7% with and without greedy DSpark,
         80–86% draft acceptance, 136–187 vs 60–71 tok/s for one request.
-      - Not tested: probabilistic drafting, MI300X, and prompts near 262144
-        (the KV pool holds 7 such sequences).
+      - Not tested: MI300X, and prompts near 262144 (the KV pool holds 7
+        such sequences).
       - The startup warning that `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` is
         ignored on gfx942 is expected.
   - title: "MI350 Series: TP8 with DSpark not yet validated"
@@ -894,8 +898,11 @@ guide: |
 
   Mistral Large 4 runs on AMD Instinct with the ROCm build of vLLM (image
   `vllm/vllm-openai-rocm:v0.34.0`). The latent KV cache is plain FP8 (E4M3) by
-  default, 1.86x the capacity of bf16. The builder adds the AITER environment
-  on AMD.
+  default, 1.86x the capacity of bf16. On AMD hardware the generated command
+  sets `VLLM_ROCM_USE_AITER=1`, which runs the MoE, GEMMs, MLA decode, RMSNorm
+  and TP all-reduce on AITER kernels, plus two AITER tuning variables
+  (`VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1` and `AITER_CUSTOM_AR_MAX_SIZE`).
+  You don't need to set them yourself.
 
   On MI350 Series (gfx950) the routed experts run as OCP MXFP4 on AITER's fused
   MoE, either from the AMD Quark MXFP4 checkpoint or from the FP8 checkpoint
