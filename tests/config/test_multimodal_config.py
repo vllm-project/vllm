@@ -673,6 +673,17 @@ def test_consumer_resolves_mm_embedding_inputs(
     assert mm_config.enable_mm_embeds is expected
 
 
+def test_mm_embeds_disabled_per_modality():
+    mm_config = MultiModalConfig(
+        enable_mm_embeds=True,
+        limit_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
+    )
+
+    assert mm_config.is_mm_embeds_enabled("image")
+    assert mm_config.is_mm_embeds_enabled("audio")
+    assert not mm_config.is_mm_embeds_enabled("video")
+
+
 def test_vllm_config_runs_the_mm_processor_device_check():
     """Startup must reach the check; the rule itself is covered above.
 

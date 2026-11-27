@@ -9,12 +9,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import torch
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    mm_hashes_from_engine_input,
     placeholder_ranges_from_engine_input,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -229,6 +231,21 @@ def test_placeholder_ranges_from_engine_input():
     assert placeholder_ranges_from_engine_input(text_only) is None
 
 
+def test_mm_hashes_from_engine_input():
+    engine_input: Any = {
+        "type": "multimodal",
+        "mm_hashes": {"image": ["img-0", "img-1"], "audio": ["aud-0"]},
+    }
+
+    assert mm_hashes_from_engine_input(engine_input) == {
+        "image": ["img-0", "img-1"],
+        "audio": ["aud-0"],
+    }
+
+    text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    assert mm_hashes_from_engine_input(text_only) is None
+
+
 @pytest.mark.asyncio
 async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     engine = _mock_engine()
@@ -345,6 +362,43 @@ async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
     assert validated_hash == "image_A"
     assert validated_item["address"].data == 224
     engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_null_kwargs_refs_fall_back_to_inline_data():
+    """`null` references don't need the feature enabled or a read slot."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    item = MultiModalKwargsItem(
+        {
+            "pixel_values": MultiModalFieldElem(
+                data=torch.zeros(1, 4), field=MultiModalBatchedField()
+            )
+        }
+    )
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["image_A"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+            kwargs_data={"image": [encode_mm_kwargs_item(item)]},
+            kwargs_refs={"image": [None]},
+        ),
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    engine.generate.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -661,8 +715,10 @@ MM_ENGINE_INPUT: Any = {
     "type": "multimodal",
     "prompt_token_ids": [1, 2, 2, 2, 3],
     "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
+    "mm_hashes": {"image": ["content:image_A"]},
 }
 MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3, "is_embed": None}]}
+MM_HASHES = {"image": ["content:image_A"]}
 
 
 def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
@@ -704,10 +760,13 @@ async def test_non_stream_prompt_metadata_requires_return_token_ids(
     if return_token_ids:
         assert response.prompt_token_ids == [1, 2, 3]
         assert response.model_dump()["mm_placeholders"] == MM_PLACEHOLDERS
+        assert response.mm_hashes == MM_HASHES
     else:
         assert response.prompt_token_ids is None
         assert response.mm_placeholders is None
+        assert response.mm_hashes is None
         assert request._response_mm_placeholders is None
+        assert request._response_mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -733,6 +792,7 @@ async def test_non_stream_text_only_prompt_has_no_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -759,6 +819,7 @@ async def test_non_stream_encoder_decoder_omits_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -808,9 +869,11 @@ async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
     ]
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
     for chunk in data_chunks[1:]:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -839,6 +902,7 @@ async def test_stream_omits_prompt_metadata_by_default():
     for chunk in data_chunks:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -866,6 +930,7 @@ async def test_stream_text_only_prompt_omits_mm_placeholders_key():
 
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert "mm_placeholders" not in data_chunks[0]
+    assert "mm_hashes" not in data_chunks[0]
 
 
 @pytest.mark.asyncio
@@ -896,6 +961,7 @@ async def test_stream_zero_token_completion_still_delivers_prompt_metadata():
     assert data_chunks[0]["choices"][0]["finish_reason"] == "stop"
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
 
 
 @pytest.mark.asyncio

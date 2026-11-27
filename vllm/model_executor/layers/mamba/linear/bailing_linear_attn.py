@@ -479,25 +479,6 @@ class BailingMoELinearAttention(LinearAttention):
 
         return BailingLinearAttentionBackend
 
-    @staticmethod
-    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        """Load weight for linear attention layers.
-
-        For FP8 quantized parameters, we need to use the weight_loader if available,
-        as it handles special cases like tensor parallelism sharding.
-        """
-        # Check if param has a weight_loader (for vLLM ModelWeightParameter)
-        weight_loader = getattr(param, "weight_loader", None)
-        if weight_loader is not None:
-            # Use the weight_loader which handles TP sharding and quantization
-            weight_loader(param, loaded_weight)
-        else:
-            # Fall back to direct copy for standard tensors
-            assert param.size() == loaded_weight.size(), (
-                f"Shape mismatch: {param.shape} vs {loaded_weight.shape}"
-            )
-            param.data.copy_(loaded_weight)
-
     def forward(
         self,
         hidden_states: torch.Tensor,

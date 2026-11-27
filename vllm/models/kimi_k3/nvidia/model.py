@@ -456,7 +456,9 @@ class KimiMoE(nn.Module):
                 intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                # MegaMoE adds the shared output locally, so without sequence
+                # parallelism (PP > 1) the TP-sharded partials must be reduced.
+                reduce_results=self.use_mega_moe and not use_sequence_parallel,
                 use_sequence_parallel=use_sequence_parallel,
                 # MegaMoE calls the shared expert directly. DeepEP v2 hands it
                 # to MoERunner, but preserves the local SP output layout needed
@@ -1807,16 +1809,6 @@ class KimiK3ForConditionalGeneration(
             ],
             out_hidden_size=self.hidden_size,
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int]:
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return min_budget, max_budget
 
     @staticmethod
     def _get_grid_thws(mm_kwargs: dict[str, Any]) -> list[list[int]]:

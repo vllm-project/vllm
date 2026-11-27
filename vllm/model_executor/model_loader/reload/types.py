@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo"]
+__all__ = ["LayerTensors", "LayerReloadingInfo", "WeightReloadValidator"]
 
 # encodes both parameters and buffers separately
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+
+class WeightReloadValidator(ABC):
+    """Opt-in validation for modules with weight reload restrictions."""
+
+    @abstractmethod
+    def validate_weight_reload(self) -> None:
+        """Raise if reloading is unsupported, before any weights are written."""
 
 
 @dataclass(slots=True)

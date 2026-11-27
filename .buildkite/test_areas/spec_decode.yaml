@@ -13,6 +13,10 @@ steps:
     - "!vllm/distributed/kv_transfer/"
     - vllm/inputs/
     - vllm/model_executor/
+    - vllm/models/hy_v4/dfly_config.py
+    - vllm/models/hy_v4/nvidia/dfly.py
+    - vllm/models/hy_v4/nvidia/dfly_speculator.py
+    - vllm/models/hy_v4/common/
     - vllm/models/qwen4_exp/
     - vllm/platforms/
     - vllm/sampling_params.py
@@ -33,6 +37,11 @@ steps:
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/models/hy_v4/amd/aiter_mla_sparse.py
+      - vllm/models/hy_v4/amd/attention.py
+      - vllm/models/hy_v4/amd/dfly.py
+      - vllm/models/hy_v4/amd/dfly_speculator.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen

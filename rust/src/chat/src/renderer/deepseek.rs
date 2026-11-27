@@ -18,7 +18,7 @@ use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
 use super::MediaPartSource;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_messages};
 use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
@@ -31,6 +31,9 @@ const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const SYSTEM_SP_TOKEN: &str = "<｜System｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
+const FIM_BEGIN_TOKEN: &str = "<｜fim▁begin｜>";
+const FIM_HOLE_TOKEN: &str = "<｜fim▁hole｜>";
+const FIM_END_TOKEN: &str = "<｜fim▁end｜>";
 const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
@@ -84,6 +87,12 @@ struct RenderedToolSchema<'a> {
     description: Option<&'a str>,
     parameters: &'a Value,
     strict: Option<bool>,
+}
+
+/// Fill-in-the-middle prompt, as vLLM's Python `DeepseekV4Renderer` renders a
+/// completions `suffix`.
+pub(super) fn render_completion_suffix(prompt: &str, suffix: &str) -> String {
+    format!("{FIM_BEGIN_TOKEN}{prompt}{FIM_HOLE_TOKEN}{suffix}{FIM_END_TOKEN}")
 }
 
 /// Render one chat request into the final prompt string.
@@ -633,9 +642,7 @@ fn render_developer_message(
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     if content.is_empty() {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek developer message: empty content".to_string(),
-        ));
+        bail_invalid_messages!("invalid DeepSeek developer message: empty content");
     }
 
     out.push_str(USER_SP_TOKEN);
