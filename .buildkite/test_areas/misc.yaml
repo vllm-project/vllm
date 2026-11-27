@@ -634,17 +634,9 @@ steps:
   - tests/standalone_tests/python_only_compile.sh
   commands:
   - PYTHON_ONLY_COMPILE_PYTHON=3.12 bash standalone_tests/python_only_compile.sh
-  mirror:
-    amd:
-      label: ":amd: (MI355) [Nightly] Python 3.12 Smoke"
-      dind: false
-      device: mi355_1
-      timeout_in_minutes: 55
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - tests/standalone_tests/python_only_compile.sh
-      - vllm/platforms/rocm.py
+  # No AMD mirror on torch 2.14: its amdsmi import hook loads a second libamd_smi
+  # when ROCm is also on the loader path, so the venv sees no GPUs. Re-add the
+  # MI355 mirror with torch 2.15 (fixed by pytorch/pytorch#197482).
 
 - label: ":nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker"
   device: h200_35gb

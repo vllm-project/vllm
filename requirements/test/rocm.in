@@ -45,7 +45,7 @@ buildkite-test-collector==0.1.9
 # Pinned to the version the cuda and cpu locks already hold, so the audit
 # reports the same verdict on every platform.
 torch-abi-audit==0.0.1 # CI check for PyTorch stable ABI compliance
-tilelang==0.1.10
+tilelang==0.1.15
 
 genai_perf>=0.0.8
 tritonclient>=2.51.0

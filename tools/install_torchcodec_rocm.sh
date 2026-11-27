@@ -10,7 +10,7 @@ set -e
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
 # Pin to a specific release for reproducibility; update as needed.
-TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
+TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.17.0}"
 # Cache directory for pre-built wheels to avoid redundant recompilation.
 TORCHCODEC_WHEEL_CACHE="${TORCHCODEC_WHEEL_CACHE:-/root/.cache/torchcodec-wheels}"
 
@@ -93,6 +93,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# torchcodec's build backend, kept out of the image (it pulls in pathspec)
+pip install --target "$BUILD_DIR/build-deps" "scikit-build-core>=0.10"
+export PYTHONPATH="$BUILD_DIR/build-deps${PYTHONPATH:+:$PYTHONPATH}"
+
 # Clone and build
 cd "$BUILD_DIR"
 echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
@@ -103,6 +107,7 @@ cd torchcodec
 # Set build environment for ROCm compatibility
 export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build"
 export TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1
+export TORCHCODEC_BUILD_IMAGE="${TORCHCODEC_BUILD_IMAGE:-0}"  # vLLM decodes only audio and video
 export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1
 # Use ninja for faster builds and parallelize compilation
 export CMAKE_GENERATOR=Ninja
