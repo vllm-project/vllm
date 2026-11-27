@@ -1670,6 +1670,28 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
+        if (
+            envs.VLLM_ROCM_MOE_SPLIT_AG_RS
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            from vllm.model_executor.layers.fused_moe.split_ag_rs import try_split
+
+            split_output = try_split(
+                self,
+                hidden_states,
+                w1,
+                w2,
+                topk_ids,
+                topk_weights,
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+            )
+            if split_output is not None:
+                return split_output
+
         output = hidden_states.new_empty(
             (
                 *hidden_states.shape[:-1],

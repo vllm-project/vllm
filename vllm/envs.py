@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
+    VLLM_ROCM_MOE_SPLIT_AG_RS: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
     VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
@@ -1381,6 +1382,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "a8w4",
         ["a8w4", "a4w4", "a16w4"],
         case_sensitive=False,
+    ),
+    # Pipeline two routed MoE slices in eligible eager DP/EP steps.
+    "VLLM_ROCM_MOE_SPLIT_AG_RS": lambda: (
+        os.getenv("VLLM_ROCM_MOE_SPLIT_AG_RS", "0").lower() in ("true", "1")
     ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
