@@ -340,7 +340,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
         )
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment("triton")
 
     def rearrange_mixed_qkv(

@@ -525,8 +525,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             num_spec=self.num_spec_tokens,
         )
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
-        return 1 if vllm_config.cache_config.enable_prefix_caching else None
+    def get_cache_checkpoint_alignment(self) -> int | None:
+        return 1 if self.cache_config.enable_prefix_caching else None
 
     def _short_conv_dilated_dispatch(
         self,

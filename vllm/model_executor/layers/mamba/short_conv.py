@@ -5,7 +5,7 @@
 import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -352,7 +352,7 @@ class ShortConv(MambaBase, PluggableLayer):
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         # The window ending at a checkpoint is a copy of its last inputs, so
         # any position works; the CPU path has no export.
         return None if current_platform.is_cpu() else 1

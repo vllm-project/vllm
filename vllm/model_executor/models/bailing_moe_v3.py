@@ -814,7 +814,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         ):
             compilation_config.splitting_ops.append(splitting_op)
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment("triton")
 
     def forward(

@@ -1013,7 +1013,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         return None
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
     @functools.cached_property

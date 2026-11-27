@@ -71,7 +71,7 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         """Token alignment of the prefill checkpoint offsets this layer can
         export from inside a single forward pass, or `None` if it cannot.
 
@@ -94,9 +94,7 @@ class MambaBase(AttentionLayerBase):
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
         )
-        checkpoint_alignment = self.get_prefill_checkpoint_alignment(vllm_config)
-        if checkpoint_alignment is not None:
-            checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
+        checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
         return MambaManager.layer_config(
             spec,
             enable_prefix_caching=vllm_config.cache_config.enable_prefix_caching,
@@ -119,36 +117,51 @@ def get_mamba_num_speculative_blocks(vllm_config: VllmConfig) -> int:
     return vllm_config.num_speculative_tokens
 
 
-def get_mamba_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
-    """LCM of all Mamba layers' prefill checkpoint alignments.
-
-    Returns `None` when no Mamba layers are registered or when any Mamba
-    layer cannot export internal prefill checkpoints: the scheduler takes
-    internal checkpoints only when every Mamba group can export them.
-    """
+def _get_mamba_checkpoint_alignment_info(
+    vllm_config: VllmConfig,
+) -> tuple[int | None, bool]:
+    if not vllm_config.cache_config.enable_prefix_caching:
+        return None, False
     layers = get_layers_from_vllm_config(
         vllm_config,
         MambaBase,  # type: ignore[type-abstract]
     ).values()
     if not layers:
-        return None
+        return None, False
     alignment = 1
+    requires_grid = False
     for layer in layers:
-        layer_alignment = layer.get_prefill_checkpoint_alignment(vllm_config)
+        layer_alignment = layer.get_cache_checkpoint_alignment()
         if layer_alignment is None:
-            return None
+            return None, False
         alignment = lcm(alignment, layer_alignment)
+        requires_grid |= layer.requires_grid_checkpoint_alignment
+    return alignment, requires_grid
+
+
+def get_mamba_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
+    """LCM of all Mamba layers' prefill checkpoint alignments.
+
+    Returns `None` when prefix caching is disabled, when no Mamba layers are
+    registered, or when any Mamba layer cannot export internal prefill
+    checkpoints: the scheduler takes internal checkpoints only when every
+    Mamba group can export them.
+    """
+    alignment, _ = _get_mamba_checkpoint_alignment_info(vllm_config)
     return alignment
 
 
-def get_mamba_prefill_checkpoint_grid(vllm_config: VllmConfig) -> int:
+def get_mamba_prefill_checkpoint_grid(
+    vllm_config: VllmConfig, alignment: int | None = None
+) -> int:
     """Token grid every Mamba layer keeps its prefill checkpoint offsets on.
 
     Prefix-cache boundaries, made multiples of the layers' checkpoint alignment
     (the platform already keeps blocks on it). The scheduler checks offsets
     against one alignment, so every Mamba spec must use this one.
     """
-    alignment = get_mamba_prefill_checkpoint_alignment(vllm_config)
+    if alignment is None:
+        alignment = get_mamba_prefill_checkpoint_alignment(vllm_config)
     assert alignment is not None
     cache_config = vllm_config.cache_config
     if cache_config.prefix_match_unit is not None:
@@ -159,16 +172,12 @@ def get_mamba_prefill_checkpoint_grid(vllm_config: VllmConfig) -> int:
 
 def get_kv_cache_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
     """Model-wide prefill checkpoint alignment shared by every Mamba KV cache
-    group and metadata builder, or `None` if any Mamba layer cannot export
-    internal checkpoints.
+    group and metadata builder, or `None` if prefix caching is disabled or any
+    Mamba layer cannot export internal checkpoints.
     """
-    alignment = get_mamba_prefill_checkpoint_alignment(vllm_config)
+    alignment, requires_grid = _get_mamba_checkpoint_alignment_info(vllm_config)
     if alignment is None:
         return None
-    layers = get_layers_from_vllm_config(
-        vllm_config,
-        MambaBase,  # type: ignore[type-abstract]
-    ).values()
-    if any(layer.requires_grid_checkpoint_alignment for layer in layers):
-        return get_mamba_prefill_checkpoint_grid(vllm_config)
+    if requires_grid:
+        return get_mamba_prefill_checkpoint_grid(vllm_config, alignment)
     return alignment

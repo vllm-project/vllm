@@ -210,7 +210,7 @@ class CheckpointingMambaLayer(MambaBase):
         self.checkpoint_alignment = checkpoint_alignment
         self.requires_grid_checkpoint_alignment = requires_grid
 
-    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return self.checkpoint_alignment
 
     def get_state_shape(self):
