@@ -6,14 +6,17 @@ import asyncio
 import itertools
 import math
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 from typing import Any, cast
 
 import msgspec
 from fastapi import Request
 
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -48,14 +51,25 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import (
     GenerationError,
     PromptUpdateMismatchError,
+    RetryableRequestError,
+    VLLMClientError,
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+)
+from vllm.multimodal.s3_transport import S3MMReader
+from vllm.multimodal.tensor_transport import (
+    MMTensorMemoryBudget,
+    MMTensorReservation,
+    MMTensorTransportError,
+    ReleasingStream,
+    run_in_read_slot,
+    validate_mm_tensor_request_size,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
@@ -66,6 +80,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
+from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,
@@ -92,7 +107,9 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    MMTensorReference,
     OutputMode,
+    RenderedGenerateResponse,
 )
 
 logger = init_logger(__name__)
@@ -104,6 +121,21 @@ _STREAM_RESPONSE_CLS: dict[OutputMode, Callable[..., GenerateStreamResponseBase]
 }
 
 _background_tasks: set[asyncio.Task[None]] = set()
+
+
+class _MMTensorRefs:
+    """Server-wide state for `features.kwargs_refs`, created at startup."""
+
+    def __init__(self, config: MMTensorRefsConfig) -> None:
+        self.config = config
+        self.reader = S3MMReader(config)
+        self.read_slots = asyncio.Semaphore(config.max_concurrent_reads)
+        # Own threads, so slow reads don't hold the loop's default executor.
+        self.read_executor = ThreadPoolExecutor(
+            max_workers=config.max_concurrent_reads,
+            thread_name_prefix="vllm-mm-tensor-read",
+        )
+        self.memory = MMTensorMemoryBudget(config.max_reserved_bytes)
 
 
 async def _close_result_generator(
@@ -166,6 +198,8 @@ class ServingTokens(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
+        enable_force_include_usage: bool = False,
+        mm_tensor_refs_config: MMTensorRefsConfig | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -175,8 +209,10 @@ class ServingTokens(GenerateBaseServing):
         )
         self.online_renderer = online_renderer
         self.online_derenderer = online_derenderer
+        self.render_lock = asyncio.Lock()
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
+        self.enable_force_include_usage = enable_force_include_usage
         self.force_no_detokenize = force_no_detokenize
         self.has_tokenizer = (
             not force_no_detokenize and self.renderer.tokenizer is not None
@@ -186,6 +222,12 @@ class ServingTokens(GenerateBaseServing):
                 "Tokens-only mode is enabled, skipping detokenization "
                 "step for incoming requests."
             )
+
+        self._mm_tensor_refs = (
+            None
+            if mm_tensor_refs_config is None
+            else _MMTensorRefs(mm_tensor_refs_config)
+        )
 
         # Mirrors ``OpenAIServingChat`` so we can apply server-side
         # ``max_tokens`` defaulting when the client omits it. Without this,
@@ -199,28 +241,78 @@ class ServingTokens(GenerateBaseServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
+    def _load_external_mm_item(
+        self,
+        modality: str,
+        reference: MMTensorReference,
+    ) -> MultiModalKwargsItem:
+        assert self._mm_tensor_refs is not None
+        tensors = self._mm_tensor_refs.reader.read(reference)
+        processor = self.online_renderer.renderer.get_mm_processor()
+        try:
+            kwargs = processor.build_mm_kwargs_from_processed_tensors(tensors)
+        except Exception as e:
+            raise MMTensorTransportError(
+                f"Multimodal tensor object {reference.uri!r} is not compatible "
+                "with the served model"
+            ) from e
+
+        items = kwargs.get(modality, [])
+        if set(kwargs) != {modality} or len(items) != 1:
+            counts = {m: len(v) for m, v in kwargs.items()}
+            raise MMTensorTransportError(
+                f"Multimodal tensor object {reference.uri!r} must hold exactly "
+                f"one {modality} item; got {counts}"
+            )
+        return items[0]
+
     def _validate_mm_cache_handles(
         self,
         mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
         mm_hashes: dict[str, list[str]],
-    ) -> ErrorResponse | None:
+    ) -> None:
         cache = self.online_renderer.renderer.mm_processor_cache
         if cache is None:
-            return None
-        try:
-            for modality, items in mm_kwargs.items():
-                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
-                    if item is not None:
-                        cache.validate_input_item(item, mm_hash)
-        except ValueError as error:
-            return self.create_error_response(error)
-        return None
+            return
+
+        for modality, items in mm_kwargs.items():
+            for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                if item is not None:
+                    cache.validate_input_item(item, mm_hash)
 
     async def serve_tokens(
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
-    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
+    ) -> (
+        GenerateResponse | RenderedGenerateResponse | ErrorResponse | AsyncIterator[str]
+    ):
+        # The request keeps its referenced tensors until it finishes, so its
+        # memory reservation lasts as long, through the end of a stream.
+        reservations: list[MMTensorReservation] = []
+        try:
+            response = await self._serve_tokens(request, raw_request, reservations)
+        except BaseException:
+            for reservation in reservations:
+                reservation.release()
+            raise
+        if reservations and isinstance(response, AsyncGenerator):
+            return ReleasingStream(response, reservations)
+        for reservation in reservations:
+            reservation.release()
+        return response
+
+    async def _serve_tokens(
+        self,
+        request: GenerateRequest,
+        raw_request: Request | None,
+        mm_reservations: list[MMTensorReservation],
+    ) -> (
+        GenerateResponse
+        | RenderedGenerateResponse
+        | ErrorResponse
+        | AsyncGenerator[str, None]
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -253,15 +345,14 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(
                 "prompt_logprob_token_ids are not available when stream=true."
             )
-        if self.force_no_detokenize and sampling_params.stop:
-            # SamplingParams rejects stop with detokenize=False at request
-            # validation, but this server forces detokenize=False afterwards,
-            # so the combination must be rejected here or stop strings are
-            # silently never applied.
+        if sampling_params.stop and not self.has_tokenizer:
+            # Without a tokenizer (or with detokenization forced off) stop
+            # strings would silently never be applied.
             return self.create_error_response(
-                "stop strings are not supported on a --tokens-only server "
-                "because detokenization is disabled. Check stop strings on "
-                "the coordinator, or use stop_token_ids."
+                "stop strings require a tokenizer and detokenization, but "
+                "this server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Check stop strings on the "
+                "coordinator, or use stop_token_ids."
             )
         if sampling_params.bad_words and not self.has_tokenizer:
             # bad_words are tokenized in the input processor, which skips
@@ -323,81 +414,7 @@ class ServingTokens(GenerateBaseServing):
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
-        engine_input: EngineInput
-        features = request.features
-        if request.content_parts:
-            # Items in features are already expanded; render every token
-            # after the last of them, so new placeholders must lie there.
-            feature_ranges = features.mm_placeholders.values() if features else ()
-            start = max(
-                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
-            )
-            tracker = AsyncMultiModalItemTracker(self.model_config)
-            mm_parser = tracker.create_parser()
-            for part in request.content_parts:
-                ptype = part.get("type", "")
-                url = part.get("url")
-                uuid = part.get("uuid")
-                if ptype == "image_url":
-                    mm_parser.parse_image(url, uuid)
-                elif ptype == "audio_url":
-                    mm_parser.parse_audio(url, uuid)
-                elif ptype == "video_url":
-                    mm_parser.parse_video(url, uuid)
-            mm_data, mm_uuids = await tracker.resolve_items()
-            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
-            if request.cache_salt is not None:
-                prompt["cache_salt"] = request.cache_salt
-            if mm_data:
-                prompt["multi_modal_data"] = mm_data
-            if mm_uuids:
-                prompt["multi_modal_uuids"] = mm_uuids
-            try:
-                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                    [prompt]
-                )
-            except PromptUpdateMismatchError as e:
-                if not features:
-                    raise
-                raise VLLMValidationError(
-                    f"{e}; content_parts placeholders must come after the last "
-                    f"features range, which ends at offset {start}"
-                ) from e
-        if features:
-            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
-
-            # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
-            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
-                return error
-
-            token_ids = request.token_ids
-            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
-            if request.content_parts:
-                rendered = cast(MultiModalInput, engine_input)
-                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
-                for m, ps in rendered.get("mm_placeholders", {}).items():
-                    mm_placeholders.setdefault(m, []).extend(
-                        replace(p, offset=p.offset + start) for p in ps
-                    )
-                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
-                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
-
-            engine_input = mm_input(
-                prompt_token_ids=token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=mm_hashes,
-                mm_placeholders=mm_placeholders,
-                cache_salt=request.cache_salt,
-            )
-        elif not request.content_parts:
-            (engine_input,) = await self.online_renderer.preprocess_completion(
-                request,
-                prompt_input=request.token_ids,
-                prompt_embeds=None,
-                skip_mm_cache=True,
-            )
+        engine_input = await self.build_engine_input(request, mm_reservations)
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
@@ -430,7 +447,10 @@ class ServingTokens(GenerateBaseServing):
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
         # every generation that omits the field.
-        if not request.is_sampling_param_provided("max_tokens"):
+        if (
+            not request.is_sampling_param_provided("max_tokens")
+            or sampling_params.max_tokens is None
+        ):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
@@ -438,12 +458,30 @@ class ServingTokens(GenerateBaseServing):
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
+            if sampling_params.min_tokens > sampling_params.max_tokens:
+                return self.create_error_response(
+                    f"min_tokens must be less than or equal to "
+                    f"max_tokens={sampling_params.max_tokens}, got "
+                    f"{sampling_params.min_tokens}.",
+                    param="min_tokens",
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
+        if (
+            not request.stream
+            and request.output_mode == "tokens"
+            and sampling_params.logprobs is not None
+            and sampling_params.logprobs >= 0
+            and sampling_params.prompt_logprobs is None
+        ):
+            # Keep sample logprobs as rows without decoded tokens, to render
+            # them without a Python object per entry (see logprobs_render).
+            sampling_params.flat_logprobs = True
+            sampling_params._detokenize_logprobs = False
 
         self._log_inputs(
             request_id,
@@ -500,6 +538,146 @@ class ServingTokens(GenerateBaseServing):
             derender_request=derender_request,
         )
 
+    async def build_engine_input(
+        self,
+        request: GenerateRequest,
+        mm_reservations: list[MMTensorReservation] | None = None,
+    ) -> EngineInput:
+        engine_input: EngineInput
+        features = request.features
+        reservations = mm_reservations if mm_reservations is not None else []
+
+        if request.content_parts:
+            # Items in features are already expanded; render every token
+            # after the last of them, so new placeholders must lie there.
+            feature_ranges = features.mm_placeholders.values() if features else ()
+            start = max(
+                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
+            )
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                uuid = part.get("uuid")
+                if ptype == "image_url":
+                    mm_parser.parse_image(url, uuid)
+                elif ptype == "audio_url":
+                    mm_parser.parse_audio(url, uuid)
+                elif ptype == "video_url":
+                    mm_parser.parse_video(url, uuid)
+            mm_data, mm_uuids = await tracker.resolve_items()
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
+            if request.cache_salt is not None:
+                prompt["cache_salt"] = request.cache_salt
+            if mm_data:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids:
+                prompt["multi_modal_uuids"] = mm_uuids
+            try:
+                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                    [prompt]
+                )
+            except PromptUpdateMismatchError as e:
+                if not features:
+                    raise
+                raise VLLMValidationError(
+                    f"{e}; content_parts placeholders must come after the last "
+                    f"features range, which ends at offset {start}"
+                ) from e
+        if features:
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
+
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            # `null` entries fall back to `kwargs_data` or the cache.
+            references = [
+                ref
+                for refs in (features.kwargs_refs or {}).values()
+                for ref in refs
+                if ref is not None
+            ]
+            if references:
+                tensor_refs = self._mm_tensor_refs
+                if tensor_refs is None:
+                    raise VLLMClientError(
+                        "kwargs_refs are disabled on this server. Start it "
+                        "with --mm-tensor-refs-config to enable them."
+                    )
+                # Reject bad references before queueing or downloading.
+                for ref in references:
+                    tensor_refs.reader.validate(ref)
+                nbytes = validate_mm_tensor_request_size(
+                    references, tensor_refs.config.max_request_bytes
+                )
+                # The downloaded bytes and the decoded tensors.
+                reservation = await tensor_refs.memory.reserve(2 * nbytes)
+
+                reservations.append(reservation)
+                try:
+                    mm_kwargs = await run_in_read_slot(
+                        tensor_refs.read_slots,
+                        partial(
+                            mm_kwargs_from_features,
+                            features,
+                            reference_loader=self._load_external_mm_item,
+                        ),
+                        reservation,
+                        tensor_refs.read_executor,
+                    )
+                except (
+                    MMTensorTransportError,
+                    RetryableRequestError,
+                    ValueError,
+                ) as e:
+                    raise e
+            else:
+                mm_kwargs = mm_kwargs_from_features(features)
+
+            kwargs_data = features.kwargs_data or {}
+            kwargs_refs = features.kwargs_refs or {}
+            for modality, items in mm_kwargs.items():
+                full_tensor_items = kwargs_data.get(modality, [None] * len(items))
+                tensor_references = kwargs_refs.get(modality, [None] * len(items))
+                for item, full_tensor_data, tensor_reference in zip(
+                    items, full_tensor_items, tensor_references, strict=True
+                ):
+                    if full_tensor_data is None and tensor_reference is None:
+                        continue
+                    if item is not None:
+                        for elem in item.values():
+                            elem.skip_mm_cache = True
+            self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes)
+
+            token_ids = request.token_ids
+            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
+            if request.content_parts:
+                rendered = cast(MultiModalInput, engine_input)
+                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
+                for m, ps in rendered.get("mm_placeholders", {}).items():
+                    mm_placeholders.setdefault(m, []).extend(
+                        replace(p, offset=p.offset + start) for p in ps
+                    )
+                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
+                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
+
+            engine_input = mm_input(
+                prompt_token_ids=token_ids,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_hashes=mm_hashes,
+                mm_placeholders=mm_placeholders,
+                cache_salt=request.cache_salt,
+            )
+        elif not request.content_parts:
+            (engine_input,) = await self.online_renderer.preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
+
+        return engine_input
+
     async def serve_tokens_full_generator(
         self,
         request: GenerateRequest,
@@ -508,7 +686,7 @@ class ServingTokens(GenerateBaseServing):
         model_name: str,
         request_metadata: RequestResponseMetadata,
         derender_request: ChatCompletionRequest | None = None,
-    ) -> ErrorResponse | GenerateResponse:
+    ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
@@ -525,6 +703,7 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
+        fragments: dict[int, list[bytes]] = {}  # choice -> rendered logprobs
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
         derender_choice_fields: list[dict[str, Any]] = []
@@ -546,10 +725,18 @@ class ServingTokens(GenerateBaseServing):
                         tokenizer=tokenizer,
                         top_limit=top_limit,
                     )
+                elif isinstance(out_logprobs, FlatLogprobs) and (
+                    rendered := await render_tokens_logprobs(
+                        token_ids, out_logprobs, self.render_lock
+                    )
+                ):
+                    fragments[len(tokens_choices)] = rendered
+                    logprobs = None
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=out_logprobs,
+                        # One pass, rather than indexing a FlatLogprobs.
+                        top_logprobs=list(out_logprobs),
                     )
             else:
                 logprobs = None
@@ -662,6 +849,10 @@ class ServingTokens(GenerateBaseServing):
                         delta=False,
                     )
 
+        if fragments:
+            return RenderedGenerateResponse(
+                render_json_with_fragments(response.model_dump(), "logprobs", fragments)
+            )
         return response
 
     def _build_response_fields(
@@ -757,7 +948,7 @@ class ServingTokens(GenerateBaseServing):
         finish_reason_sent = [False] * sampling_params.n
 
         include_usage, include_continuous_usage = should_include_usage(
-            request.stream_options, False
+            request.stream_options, self.enable_force_include_usage
         )
 
         try:

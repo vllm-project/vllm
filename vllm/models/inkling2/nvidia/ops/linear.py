@@ -5,8 +5,13 @@ reference `linear` with fp32 accumulation in ordered 1024-wide K groups."""
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+
+from . import use_sm100_kernels
+from .ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.
@@ -21,8 +26,14 @@ def linear(
     if out is not None:
         assert x.shape[0] > LOW_M_MAX_TOKENS
         return torch.mm(x, weight.t(), out=out)
+    if use_sm12x_bf16_ll_gemm(x, weight):
+        return sm12x_bf16_ll_gemm(x, weight)
     # Autotuning would profile the CuTe DSL kernels past their 32-row limit.
-    if x.shape[0] > LOW_M_MAX_TOKENS or is_flashinfer_autotuning():
+    if (
+        x.shape[0] > LOW_M_MAX_TOKENS
+        or is_flashinfer_autotuning()
+        or not use_sm100_kernels()
+    ):
         return torch.nn.functional.linear(x, weight)
     from flashinfer import mm_bf16
 
@@ -56,7 +67,7 @@ def _k_group_tile(
     for g in tl.static_range(NUM_GROUPS):
         group = first + g
         partial = tl.zeros((BM, BN), tl.float32)
-        for tile in range(8):
+        for tile in range(tl.minimum(8, tl.cdiv(K - group * 1024, 128))):
             k = group * 1024 + tile * 128 + ks
             x = tl.load(
                 X + rows[:, None] * K + k[None, :],
@@ -69,6 +80,17 @@ def _k_group_tile(
                 other=0,
             )
             partial = tl.dot(x, w, partial)
+        if g > 0:
+            # Keep a short tail's dot separate from the preceding 1024-wide
+            # groups; folding total into its MMA changes the rounding order.
+            partial = tl.inline_asm_elementwise(
+                "mov.b32 $0, $1;",
+                "=f,f",
+                [partial],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
         total = partial if g == 0 else total + partial
     tl.store(
         Y + (first * M + rows[:, None]) * N + cols[None, :],
@@ -107,10 +129,12 @@ def _k_group_kernel(
     BM: tl.constexpr,
     BN: tl.constexpr,
     SPLIT: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     if SPLIT and tl.program_id(1) == 0:
         _prefetch_k_group_tile(W, N, K, BN, tl.program_id(0), tl.program_id(2))
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     _k_group_tile(
         X,
         W,
@@ -128,8 +152,11 @@ def _k_group_kernel(
 
 
 @triton.jit
-def _k_group_sum_kernel(Partials, Y, MN, GROUPS: tl.constexpr, BLOCK: tl.constexpr):
-    tl.extra.cuda.gdc_wait()
+def _k_group_sum_kernel(
+    Partials, Y, MN, GROUPS: tl.constexpr, BLOCK: tl.constexpr, launch_pdl: tl.constexpr
+):
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < MN
     total = tl.load(Partials + offs, mask)
@@ -192,11 +219,15 @@ def k_group_partials(
     assert x.is_contiguous() and weight.is_contiguous()
     tokens, hidden = x.shape
     n = weight.shape[0]
-    if tokens >= TMA_MIN_TOKENS:
+    # SM86/89 and SM12x allow ~99 KiB of shared memory per block; SM80 and
+    # SM90+ allow 163-227 KiB.
+    small_smem = get_max_shared_memory_bytes() < 128 * 1024
+    if tokens >= TMA_MIN_TOKENS and current_platform.has_device_capability(90):
         from triton.tools.tensor_descriptor import TensorDescriptor
 
         out = torch.empty((1, tokens, n), dtype=out_dtype, device=x.device)
-        block_n = 64 if tokens < 4096 else 128
+        # With ~99 KiB, two 48 KiB stages fit.
+        block_n = 64 if tokens < 4096 or small_smem else 128
         _k_group_tma_kernel[(triton.cdiv(n, block_n), triton.cdiv(tokens, 128))](
             TensorDescriptor.from_tensor(x, [128, 128]),
             TensorDescriptor.from_tensor(weight, [block_n, 128]),
@@ -209,7 +240,7 @@ def k_group_partials(
             128,
             launch_dependents,
             num_warps=4 if block_n == 64 else 8,
-            num_stages=4 if block_n == 64 else 3,
+            num_stages=2 if small_smem else 4 if block_n == 64 else 3,
             enable_fp_fusion=False,
             launch_pdl=True,
         )
@@ -220,6 +251,8 @@ def k_group_partials(
     split = groups > 1 and tokens < 4096
     num_warps = 4 if block_n <= 64 else 8
     num_stages = 4 if not split else 3 if block_n <= 64 else 2
+    if small_smem:
+        num_stages = min(num_stages, 2)
     out = torch.empty(
         (groups if split else 1, tokens, n),
         dtype=torch.float32 if split else out_dtype,
@@ -243,7 +276,7 @@ def k_group_partials(
         num_warps=num_warps,
         num_stages=num_stages,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
 
@@ -261,6 +294,11 @@ def linear_k_groups(
         return partials[0]
     out = torch.empty(partials.shape[1:], dtype=out_dtype, device=x.device)
     _k_group_sum_kernel[(triton.cdiv(out.numel(), 1024),)](
-        partials, out, out.numel(), partials.shape[0], 1024, launch_pdl=True
+        partials,
+        out,
+        out.numel(),
+        partials.shape[0],
+        1024,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out

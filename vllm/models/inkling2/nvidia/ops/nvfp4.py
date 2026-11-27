@@ -11,16 +11,65 @@ import math
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+from . import use_sm100_kernels
 from .block_scales import _scale_offsets
 
 FP32_MAX = tl.constexpr(3.4028234663852886e38)
+# Both Blackwell families have native e2m1 conversions; Hopper uses software.
+_HW_E2M1 = tl.constexpr(
+    use_sm100_kernels() or current_platform.is_device_capability_family(120)
+)
+
+
+@triton.jit
+def _e2m1(x):
+    """The e2m1 code (sign in bit 3) of fp32 `x` rounded to nearest even
+    with saturation (`cvt.rn.satfinite`), and its value."""
+    a = tl.abs(x)
+    code = tl.where(
+        a <= 0.25,
+        0,
+        tl.where(
+            a < 0.75,
+            1,
+            tl.where(
+                a <= 1.25,
+                2,
+                tl.where(
+                    a < 1.75,
+                    3,
+                    tl.where(
+                        a <= 2.5, 4, tl.where(a < 3.5, 5, tl.where(a <= 5.0, 6, 7))
+                    ),
+                ),
+            ),
+        ),
+    ).to(tl.uint32)
+    exponent = code >> 1
+    mantissa = (code & 1).to(tl.float32)
+    value = tl.where(
+        exponent == 0,
+        mantissa * 0.5,
+        tl.where(
+            exponent == 1,
+            1.0 + mantissa * 0.5,
+            tl.where(exponent == 2, 2.0 + mantissa, 4.0 + 2.0 * mantissa),
+        ),
+    )
+    sign = x.to(tl.uint32, bitcast=True) >> 31
+    return code | (sign << 3), tl.where(sign != 0, -value, value)
 
 
 @triton.jit
 def _pack_roundtrip(x):
     low, high = tl.split(x)
+    if not _HW_E2M1:
+        low_code, low = _e2m1(low)
+        high_code, high = _e2m1(high)
+        return (low_code | (high_code << 4)).to(tl.uint8), tl.join(low, high)
     packed, halves = tl.inline_asm_elementwise(
         "{ .reg .b8 b; cvt.rn.satfinite.e2m1x2.f32 b, $3, $2; "
         "cvt.u32.u8 $0, b; cvt.rn.f16x2.e2m1x2 $1, b; }",
@@ -84,6 +133,10 @@ def _quantize_block(x, encoder_scale, decoder_scale, outer_scale, BLOCK: tl.cons
 def _e2m1_pair(a, b):
     """The e2m1x2 byte of `(a, b)` (`a` in the low nibble) and both
     values rounded to e2m1."""
+    if not _HW_E2M1:
+        low_code, low = _e2m1(a)
+        high_code, high = _e2m1(b)
+        return low_code | (high_code << 4), low, high
     return tl.inline_asm_elementwise(
         "{ .reg .b8 q; .reg .b32 h; .reg .b16 l, u; "
         "cvt.rn.satfinite.e2m1x2.f32 q, $4, $3; cvt.u32.u8 $0, q; "

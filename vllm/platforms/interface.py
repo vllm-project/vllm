@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import ParallelConfig, VllmConfig
+    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -1157,7 +1158,7 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
         checkpoint_alignment = 1
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             # Internal prefill checkpoints land on block boundaries.
             checkpoint_alignment = (
                 get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
@@ -1197,7 +1198,7 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
 
         if packed_block_size is not None:
@@ -1373,7 +1374,7 @@ class Platform:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
@@ -1492,6 +1493,43 @@ class Platform:
         keep the old pool allocated, and capturing into it would fail.
         """
         cls._global_graph_pool = None
+
+    def get_cudagraph_capture_defaults(
+        self, vllm_config: "VllmConfig"
+    ) -> "CUDAGraphCaptureDefaults":
+        """Return capture defaults without mutating user configuration.
+
+        The common resolver applies these only to unset settings; explicit
+        legacy settings retain their shared-grid semantics.
+        """
+        from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+        return CUDAGraphCaptureDefaults()
+
+    @classmethod
+    def get_prefill_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return prefill token sizes within `max_tokens`; zero returns `[]`."""
+        from vllm.config.compilation import prefill_cudagraph_capture_grid
+
+        return prefill_cudagraph_capture_grid(max_tokens, dense_head)
+
+    @classmethod
+    def get_decode_cudagraph_capture_grid(cls, max_requests: int) -> list[int]:
+        """Return uniform decode request counts, independent of query length."""
+        from vllm.config.compilation import decode_cudagraph_capture_grid
+
+        return decode_cudagraph_capture_grid(max_requests)
+
+    @classmethod
+    def get_varlen_decode_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return adaptive verification token sizes within `max_tokens`."""
+        from vllm.config.compilation import varlen_decode_cudagraph_capture_grid
+
+        return varlen_decode_cudagraph_capture_grid(max_tokens, dense_head)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

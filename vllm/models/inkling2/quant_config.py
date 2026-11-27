@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.models.inkling2.configs import INKLING2_ARCHITECTURES
 
 _COMPUTE_DTYPES = ("float32", "bfloat16", "mxfp8", "nvfp4")
 
@@ -42,7 +43,7 @@ class Inkling2QuantConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        return 80
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -63,7 +64,7 @@ class Inkling2QuantConfig(QuantizationConfig):
         # in config.json; their per-tensor precisions are in
         # hf_quant_config.json.
         architectures = getattr(hf_config, "architectures", None) or []
-        if "Inkling2ForConditionalGeneration" in architectures:
+        if INKLING2_ARCHITECTURES & set(architectures):
             return "inkling2"
         return None
 

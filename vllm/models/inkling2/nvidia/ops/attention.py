@@ -16,9 +16,13 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _num_warps_bucket,
     bucket_max_seqlen_q,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import gl, gluon, tl, tldevice, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+
+from . import use_sm100_kernels
+from .attention_sm90 import MODE_GATED, MODE_PARTIAL, rel_attention
 
 # Full-layer FA4 split estimate, fitted on GB200 over uniform and mixed
 # prefill batches (re-fit for other devices): one CTA per 256-row query tile
@@ -281,8 +285,10 @@ def _gate_sink_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = col < H * D
@@ -330,7 +336,7 @@ def gate_sink(
         width // num_heads,
         512,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 
@@ -452,6 +458,7 @@ def _rel_decode_combine_kernel(
     BLOCK_S: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GATED: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """Merge the split partials, then apply the output gate and attention sink
     if `GATED`."""
@@ -463,7 +470,8 @@ def _rel_decode_combine_kernel(
         # gate and sink are ready.
         gate = tl.load(Gate + row * stride_gate + head * D + offs_d).to(tl.float32)
         sink = tl.load(Sink + row * stride_sink + head).to(tl.float32)
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     y_ptrs = Y + row * H * D + head * D + offs_d
     if row >= num_actual_tokens:
         tl.store(y_ptrs, tl.zeros([BLOCK_D], tl.float32))
@@ -1219,7 +1227,6 @@ def _decode_attention(
     assert key_cache.stride() == value_cache.stride() and key_cache.stride(3) == 1
     assert q.stride(1) == head_dim and q.stride(2) == 1
     assert out.is_contiguous()
-    grid = (num_splits, num_kv_heads, cache_seqlens.shape[0])
     # A single split writes the (gated) output itself.
     fuse_gate = num_splits == 1
     o_part = q.new_empty(
@@ -1228,6 +1235,98 @@ def _decode_attention(
     lse_part = q.new_empty(
         (0 if fuse_gate else num_splits, num_tokens, num_heads), dtype=torch.float32
     )
+    if use_sm100_kernels():
+        _launch_rel_verify(
+            q,
+            key_cache,
+            value_cache,
+            out,
+            o_part,
+            lse_part,
+            rel_logits,
+            gate,
+            sinks,
+            block_table,
+            cache_seqlens,
+            cu_seqlens_q,
+            softmax_scale,
+            extent,
+            window,
+            num_splits,
+            draft,
+        )
+    else:
+        rel_attention(
+            q,
+            key_cache,
+            value_cache,
+            out if fuse_gate else o_part,
+            None if fuse_gate else lse_part,
+            None if draft else rel_logits,
+            gate,
+            sinks,
+            block_table=block_table,
+            cache_seqlens=cache_seqlens,
+            cu_seqlens_q=cu_seqlens_q,
+            max_query_len=max_query_len,
+            softmax_scale=softmax_scale,
+            window=window,
+            num_splits=num_splits,
+            mode=MODE_GATED if fuse_gate else MODE_PARTIAL,
+        )
+    if fuse_gate:
+        out[num_actual_tokens:].zero_()
+        return
+    # Small batches spread the merge over more programs; larger ones merge a
+    # whole head per (narrow) program.
+    if num_tokens * num_heads >= 512:
+        block_d, num_warps = head_dim, 2 if num_splits > 32 else 1
+    else:
+        block_d, num_warps = 32, 4
+    _rel_decode_combine_kernel[(num_tokens, num_heads, head_dim // block_d)](
+        o_part,
+        lse_part,
+        gate,
+        sinks,
+        out,
+        num_tokens,
+        num_actual_tokens,
+        gate.stride(0),
+        sinks.stride(0),
+        H=num_heads,
+        D=head_dim,
+        NUM_SPLITS=num_splits,
+        BLOCK_S=triton.next_power_of_2(num_splits),
+        BLOCK_D=block_d,
+        GATED=not draft,
+        num_warps=num_warps,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+    )
+
+
+def _launch_rel_verify(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    out: torch.Tensor,
+    o_part: torch.Tensor,
+    lse_part: torch.Tensor,
+    rel_logits: torch.Tensor,
+    gate: torch.Tensor,
+    sinks: torch.Tensor,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    softmax_scale: float,
+    extent: int,
+    window: int,
+    num_splits: int,
+    draft: bool,
+) -> None:
+    num_tokens, num_heads, head_dim = q.shape
+    num_blocks, page, num_kv_heads = key_cache.shape[:3]
+    grid = (num_splits, num_kv_heads, cache_seqlens.shape[0])
+    fuse_gate = num_splits == 1
     # The paged cache as 2D rows of (K | V) per KV head: a page's slots
     # are rows, KV heads sit either side by side in a row or in row blocks.
     page_stride, slot_stride, head_stride = key_cache.stride()[:3]
@@ -1283,33 +1382,5 @@ def _decode_attention(
         DRAFT=draft,
         WINDOW=window,
         num_warps=4,
-        launch_pdl=True,
-    )
-    if fuse_gate:
-        out[num_actual_tokens:].zero_()
-        return
-    # Small batches spread the merge over more programs; larger ones merge a
-    # whole head per (narrow) program.
-    if num_tokens * num_heads >= 512:
-        block_d, num_warps = head_dim, 2 if num_splits > 32 else 1
-    else:
-        block_d, num_warps = 32, 4
-    _rel_decode_combine_kernel[(num_tokens, num_heads, head_dim // block_d)](
-        o_part,
-        lse_part,
-        gate,
-        sinks,
-        out,
-        num_tokens,
-        num_actual_tokens,
-        gate.stride(0),
-        sinks.stride(0),
-        H=num_heads,
-        D=head_dim,
-        NUM_SPLITS=num_splits,
-        BLOCK_S=triton.next_power_of_2(num_splits),
-        BLOCK_D=block_d,
-        GATED=not draft,
-        num_warps=num_warps,
         launch_pdl=True,
     )

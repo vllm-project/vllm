@@ -3,11 +3,14 @@
 """Inkling2 core kernels against plain torch references of the same math."""
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+import vllm.models.inkling2.nvidia.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
 from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
 from vllm.models.inkling2.nvidia.ops.conv_mix import conv_mix
@@ -17,6 +20,7 @@ from vllm.models.inkling2.nvidia.ops.sconv import (
     shift_rel_proj,
     short_conv,
 )
+from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -32,6 +36,36 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
     ref = ref * weight.float()
     out = rms_norm(x, weight, 1e-6, torch.bfloat16)
     torch.testing.assert_close(out, ref.bfloat16(), atol=0, rtol=1e-2)
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 8, 37, 8192])
+@pytest.mark.parametrize("broadcast", [False, True])
+def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
+    """The fused upstream pair norm preserves direct-write normalization."""
+    from vllm.models.inkling2.nvidia.ops.loop import pair_rms_norm
+
+    torch.manual_seed(42)
+    streams, width = 3, 2304
+    source = torch.randn(1 if broadcast else streams, tokens, width, device=DEVICE)
+    dest = source.expand(streams, -1, -1)
+    message = torch.randn(streams, tokens, width, device=DEVICE)
+    weight = torch.ones(width, device=DEVICE)
+
+    def reference():
+        pair = torch.stack((dest, message), dim=2)
+        return rms_norm(pair, weight, 1e-6, torch.bfloat16).flatten(2)
+
+    out = pair_rms_norm(dest, message)
+    torch.testing.assert_close(out, reference(), atol=0, rtol=0)
+    if tokens:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = pair_rms_norm(dest, message)
+        for _ in range(3):
+            source.copy_(torch.randn_like(source))
+            message.copy_(torch.randn_like(message))
+            graph.replay()
+            torch.testing.assert_close(out, reference(), atol=0, rtol=0)
 
 
 def _clip(x, threshold, eps=1e-6):
@@ -145,10 +179,14 @@ def test_qr_clip_rel_rounds_before_tau(heads, kv_heads, with_tau):
     torch.testing.assert_close(rel, ref_rel, atol=0.25, rtol=1e-2)
 
 
+@pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("is_local", [False, True])
-def test_prologue_shears_rel_logits(is_local):
+def test_prologue_shears_rel_logits(is_local, split, monkeypatch):
     """The relative logits land in tml_fa4's sheared layout, padding
-    included, for decode, verify, chunked and fresh prefill requests."""
+    included, for decode, verify, chunked and fresh prefill requests, also
+    from the separate q/r launch of large batches (`split`)."""
+    if split:
+        monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
     torch.manual_seed(0)
     heads, kv_heads, dim, d_rel, extent = 12, 2, 128, 16, 1024
     seqs = [(1, 3000), (8, 1500), (300, 300), (200, 1700), (130, 1029)]
@@ -195,6 +233,65 @@ def test_attn_res_matches_softmax_mix_then_norm(
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-2)
 
 
+@pytest.mark.parametrize("num_stack,with_addend", [(1, False), (3, True)])
+# Small batches keep rows in registers; large ones loop over D chunks.
+@pytest.mark.parametrize("tokens", [29, 300])
+def test_attn_res_without_norm_returns_fp32_mix(num_stack, with_addend, tokens):
+    """Without a norm weight, `attn_res` returns the fp32 softmax mix (the
+    loop's sublayer inputs before their controllers, and its message reads:
+    a mix of two blocks)."""
+    dim = 2304
+    stack = torch.randn(num_stack, tokens, dim, device=DEVICE).bfloat16()
+    last = torch.randn(tokens, dim, device=DEVICE).bfloat16()
+    addend = torch.randn(tokens, dim, device=DEVICE).bfloat16() if with_addend else None
+    queries = torch.randn(4, dim, device=DEVICE) * dim**-0.5
+
+    values = torch.cat([stack, last[None]]).float()
+    if addend is not None:
+        values[-1] += addend.float()
+    inv_rms = torch.rsqrt(values.square().mean(-1) + 1e-6)
+    probs = torch.einsum("ntd,qd,nt->qtn", values, queries, inv_rms).softmax(-1)
+    ref = torch.einsum("qtn,ntd->qtd", probs, values * inv_rms[..., None])
+
+    out = attn_res(stack, last, addend, queries, None, 0.0, True)
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.parametrize("tokens", [1, 300])
+def test_loop_blend_matches_per_stream_controllers(tokens):
+    """The stream-batched controllers (shared `dest` and norm weight, as a
+    local layer's q/k/v) equal each stream's reference controller followed by
+    its RMSNorm."""
+    from vllm.models.inkling2.nvidia.loop import (
+        Inkling2LoopDecoderLayer,
+        Inkling2MessageController,
+    )
+
+    dim, rank, streams = 2304, 64, 3
+    down = torch.randn(streams, rank, 2 * dim, device=DEVICE) * 0.02
+    gain_forget = torch.randn(streams, 2 * dim, rank, device=DEVICE) * 0.1
+    layer: Any = SimpleNamespace(
+        controller_down=down.bfloat16(), controller_gain_forget=gain_forget.bfloat16()
+    )
+    dest = torch.randn(1, tokens, dim, device=DEVICE).expand(streams, -1, -1)
+    message = torch.randn(streams, tokens, dim, device=DEVICE)
+    norm_weight = torch.randn(1, dim, device=DEVICE).bfloat16().expand(streams, -1)
+
+    out = Inkling2LoopDecoderLayer.blend(
+        layer, slice(0, streams), dest, message, norm_weight, 1e-6
+    )
+    assert out.dtype == torch.bfloat16 and out.shape == (streams, tokens, dim)
+    for s in range(streams):
+        controller = Inkling2MessageController(
+            layer.controller_down[s],
+            layer.controller_gain_forget[s, :dim],
+            layer.controller_gain_forget[s, dim:],
+        )
+        ref = rms_norm(controller(dest[s], message[s]), norm_weight[s], 1e-6)
+        torch.testing.assert_close(out[s].float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
 def _dense_conv(x, weight, dyn):
     """Torch reference over whole sequences; x: (L, C)."""
     width = weight.shape[0] if dyn is not None else weight.shape[1]
@@ -218,9 +315,10 @@ _ConvMeta = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.
 
 
 def _chunked_steps(
-    lengths_steps, block_table, block
+    lengths_steps, block_table, block, pad=0
 ) -> Iterator[tuple[Any, Any, Any, _ConvMeta]]:
-    """Yield per-step conv metadata for chunked prefill + decode."""
+    """Yield per-step conv metadata for chunked prefill + decode, with `pad`
+    trailing padding rows (position 0, request 0, no slot, start 0)."""
     done = [0] * len(lengths_steps[0])
     for step in lengths_steps:
         reqs = [i for i in range(len(step)) if step[i]]
@@ -235,12 +333,13 @@ def _chunked_steps(
                 for i, r in zip(reqs, rows)
             ]
         )
+        zeros = torch.zeros(pad, dtype=torch.long, device=DEVICE)
         meta = (
-            torch.cat(rows),
+            torch.cat([*rows, zeros]),
             block_table[reqs],
-            seq_idx.int().to(DEVICE),
-            slots,
-            starts[seq_idx].int().to(DEVICE),
+            torch.cat([seq_idx.to(DEVICE), zeros]).int(),
+            torch.cat([slots, zeros - 1]),
+            torch.cat([starts[seq_idx].to(DEVICE), zeros]).int(),
         )
         yield reqs, rows, starts, meta
         for i in reqs:
@@ -250,6 +349,9 @@ def _chunked_steps(
 STEPS = [[3, 7, 2, 9], [2, 6, 0, 0], [1, 1, 1, 1]]
 # Steps of over 256 tokens take the prefill tiling.
 LONG_STEPS = [[3, 150, 2, 140], [200, 6, 90, 0], [1, 1, 1, 1]]
+# A long step ending in a request that continues earlier context, so with
+# padding its last prefill tile ends in padding rows.
+PADDED_STEPS = [[120, 100, 3, 2], [120, 0, 138, 1]]
 
 
 def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
@@ -260,10 +362,12 @@ def _conv_cache_and_table(heads, block, row, blocks_per_req=8):
 
 
 @pytest.mark.parametrize("fused_residual", [False, True])
-@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS])
+@pytest.mark.parametrize("steps", [STEPS, LONG_STEPS, PADDED_STEPS])
 def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
-    """Chunked prefill + decode through the paged conv state equals one pass;
-    the residual update `(res + addend) + y` is fused in fp32."""
+    """Chunked prefill + decode through the paged conv state, with trailing
+    padding rows, equals one pass; the residual update `(res + addend) + y` is
+    fused in fp32."""
+    pad = 3
     width, block, heads, stream_width, offset, row = 4, 4, 2, 128, 128, 1024
     channels = heads * stream_width
     totals = [sum(s[i] for s in steps) for i in range(4)]
@@ -274,13 +378,12 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
     cache, block_table = _conv_cache_and_table(heads, block, row, 64)
 
     outs: list[list[torch.Tensor]] = [[] for _ in totals]
-    for reqs, rows, starts, meta in _chunked_steps(steps, block_table, block):
-        x = torch.cat([xs[i][r] for i, r in zip(reqs, rows)])
-        kwargs: dict[str, torch.Tensor] = {}
-        if fused_residual:
-            res = torch.cat([ress[i][r] for i, r in zip(reqs, rows)])
-            add = torch.cat([adds[i][r] for i, r in zip(reqs, rows)])
-            kwargs = dict(addend=add, residual=res, out=res)
+    for reqs, rows, starts, meta in _chunked_steps(steps, block_table, block, pad):
+        x, res, add = (
+            F.pad(torch.cat([t[i][r] for i, r in zip(reqs, rows)]), (0, 0, 0, pad))
+            for t in (xs, ress, adds)
+        )
+        kwargs = dict(addend=add, residual=res, out=res) if fused_residual else {}
         out = short_conv(x, weight, cache, *meta, offset, stream_width, **kwargs)
         for j, i in enumerate(reqs):
             outs[i].append(out[starts[j] : starts[j + 1]])
@@ -300,17 +403,21 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
         (8, 3, False, True),
     ],
 )
+@pytest.mark.parametrize("dim", [4608, 2304])
+@pytest.mark.parametrize("with_norm", [True, False])
 def test_conv_mix_matches_conv_then_attn_res(
-    num_stack, num_q, with_last, with_residual
+    num_stack, num_q, with_last, with_residual, dim, with_norm
 ):
     """The fused prefill conv + mix kernel equals short_conv then attn_res over
     chunked steps (bitwise conv and cache; the mix up to its fp32 summation
-    order)."""
-    block, heads, stream_width, offset, row = 4, 2, 2304, 256, 2560
-    dim = heads * stream_width
+    order), with the RMSNorm or returning the fp32 mixes."""
+    block, heads, offset = 4, 2, 256
+    stream_width = dim // heads
+    row = offset + stream_width
     weight = torch.randn(dim, 4, device=DEVICE).bfloat16()
     queries = torch.randn(num_q, dim, device=DEVICE) * dim**-0.5
-    norm_w = torch.randn(num_q, dim, device=DEVICE).bfloat16()
+    norm_w = torch.randn(num_q, dim, device=DEVICE).bfloat16() if with_norm else None
+    eps = 1e-6 if with_norm else 0.0
     cache, block_table = _conv_cache_and_table(heads, block, row, 64)
     ref_cache = cache.clone()
     for _, _, _, meta in _chunked_steps(LONG_STEPS, block_table, block):
@@ -333,9 +440,9 @@ def test_conv_mix_matches_conv_then_attn_res(
             ref_conv,
         )
         if with_last:
-            ref = attn_res(stack, last, ref_conv, queries, norm_w, 1e-6, True)
+            ref = attn_res(stack, last, ref_conv, queries, norm_w, eps, True)
         else:
-            ref = attn_res(stack, ref_conv, None, queries, norm_w, 1e-6, True)
+            ref = attn_res(stack, ref_conv, None, queries, norm_w, eps, True)
         conv = residual.clone() if with_residual else torch.empty_like(x)
         out = conv_mix(
             x,
@@ -351,18 +458,22 @@ def test_conv_mix_matches_conv_then_attn_res(
             last if with_last else None,
             queries,
             norm_w,
-            1e-6,
+            eps,
         )
         torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
         torch.testing.assert_close(cache, ref_cache, atol=0, rtol=0)
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_attention_prologue_writes_clipped_k_and_normed_v(dynamic):
+def test_attention_prologue_writes_clipped_k_and_normed_v(dynamic, split, monkeypatch):
     """K/V convs over chunked steps, then K L2 clipping and V RMSNorm, land in
     the paged KV cache at each token's slot; padded tokens (slot -1, as in
-    CUDA graph padding) write nothing."""
+    CUDA graph padding) write nothing. `split`: the K/V conv launch of large
+    batches (q/r in their own launch)."""
+    if split:
+        monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
     width, block, heads, dim, kv_block = 4, 4, 2, 128, 16
     channels = heads * dim
     totals = [sum(s[i] for s in STEPS) for i in range(4)]
@@ -441,3 +552,115 @@ def test_attention_prologue_writes_clipped_k_and_normed_v(dynamic):
     num_tokens = sum(totals)
     assert (kv != 0).any(-1).sum() == num_tokens * heads
     assert (cache[..., : 2 * dim] != 0).any(-1).sum() == num_tokens * heads
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.float16, torch.float8_e4m3fn])
+def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
+    cache_dtype,
+):
+    """Known convolutions store normalized K/V and preserve empty slots."""
+    heads, dim, tokens = 2, 128, 3
+    q = torch.zeros(tokens, 6, dim, device=DEVICE).bfloat16()
+    kv_input = torch.full((tokens, heads * dim), 2.0, device=DEVICE).bfloat16()
+    weights = torch.zeros(heads * dim, 4, device=DEVICE).bfloat16()
+    weights[:, -1] = 1
+    conv, table = _conv_cache_and_table(heads, 4, 1024)
+    kv = torch.full((1, 16, heads, 2 * dim), -3.0, device=DEVICE).to(cache_dtype)
+    keys, values = kv.split(dim, dim=-1)
+    indices = torch.arange(tokens, device=DEVICE)
+    slots = torch.tensor([2, 7, -1], device=DEVICE)
+    attention_prologue(
+        q,
+        q.new_zeros(tokens, 6, 16),
+        kv_input,
+        kv_input,
+        q.new_ones(6, dim),
+        q.new_ones(6, 16),
+        None,
+        shift_rel_proj(q.new_zeros(16, 1024), True),
+        weights,
+        weights,
+        None,
+        None,
+        conv,
+        indices,
+        table[:1],
+        torch.zeros_like(indices).int(),
+        indices,
+        torch.zeros_like(indices).int(),
+        keys,
+        values,
+        slots,
+        torch.empty_like(q),
+        q.new_empty(tokens + 128, 6, 1280),
+        torch.tensor([0, tokens], device=DEVICE, dtype=torch.int32),
+        torch.tensor([tokens], device=DEVICE, dtype=torch.int32),
+        clip_threshold=32.0,
+        rel_threshold=8.0,
+        norm_eps=1e-6,
+    )
+    expected = torch.full_like(kv.float(), -3.0)
+    # The static four-tap convolution includes the residual and scales by sqrt(5).
+    expected[:, [2, 7], :, :dim] = (
+        torch.tensor(4 / 5**0.5).bfloat16().to(cache_dtype).float()
+    )
+    expected[:, [2, 7], :, dim:] = 1.0
+    torch.testing.assert_close(kv.float(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "tokens", [1, 4, 8, 16] if current_platform.is_device_capability_family(120) else []
+)
+@pytest.mark.parametrize("shape", [(131, 130), (6552, 2304)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
+    """Handle tail tiles, row strides, output storage, bias and graph replay."""
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm
+
+    torch.manual_seed(0)
+    n, k = shape
+    x = torch.randn(tokens, k + 8, device=DEVICE).bfloat16()[:, :k]
+    weight = torch.randn(n, k + 8, device=DEVICE).bfloat16()[:, :k]
+    bias = torch.randn(n, device=DEVICE).bfloat16()
+    storage = torch.full((tokens, n + 8), float("nan"), device=DEVICE, dtype=dtype)
+    out = storage[:, :n]
+
+    def run():
+        return sm12x_bf16_ll_gemm(x, weight, bias, out=out)
+
+    def check():
+        if k == 2304:
+            # Match the existing tensor-core accumulation, including its
+            # rounding. Four rows select that path for the one-row reference.
+            inputs = x.repeat(4, 1) if tokens == 1 else x
+            reference = torch.mm(inputs, weight.t(), out_dtype=torch.float32)
+            reference = (reference[:tokens] + bias.float()).to(dtype)
+            torch.testing.assert_close(out, reference, atol=0, rtol=0)
+        else:
+            reference = x.double() @ weight.double().T + bias.double()
+            rounding = (reference.to(dtype).double() - reference).abs()
+            assert ((out.double() - reference).abs() <= 2e-4 + rounding).all()
+        assert torch.isnan(storage[:, n:]).all()
+
+    assert run().data_ptr() == out.data_ptr()
+    check()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for _ in range(3):
+        x.copy_(torch.randn_like(x))
+        expected = run().clone()
+        graph.replay()
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
+        check()
+
+
+def test_sm12x_linear_large_batch_fallback():
+    """Rows beyond the GEMV tile must retain the complete cuBLAS output."""
+    from vllm.models.inkling2.nvidia.ops.linear import linear
+
+    torch.manual_seed(0)
+    x = torch.randn(33, 256, device=DEVICE).bfloat16()
+    weight = torch.randn(129, 256, device=DEVICE).bfloat16()
+    expected = torch.nn.functional.linear(x, weight)
+    torch.testing.assert_close(linear(x, weight), expected, atol=0, rtol=0)

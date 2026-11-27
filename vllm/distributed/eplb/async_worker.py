@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
+from .policy_process import EplbPolicyProcess, EplbPolicyProcessError
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -29,11 +30,14 @@ def start_async_worker(
     device_index = state.device_index
     assert state.is_async
 
+    policy_process = EplbPolicyProcess(state.policy) if not is_profile else None
+    state.policy_process = policy_process
+
     def thread_target() -> None:
-        assert device_index is not None
-        torch.accelerator.set_device_index(device_index)
-        stream = torch.Stream(device=torch.accelerator.current_accelerator())
         try:
+            assert device_index is not None
+            torch.accelerator.set_device_index(device_index)
+            stream = torch.Stream(device=torch.accelerator.current_accelerator())
             transfer_run_periodically(
                 state=state,
                 stream=stream,
@@ -42,9 +46,18 @@ def start_async_worker(
         except Exception as exc:
             state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
+        finally:
+            if policy_process is not None:
+                policy_process.close()
 
     thread = threading.Thread(target=thread_target, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        if policy_process is not None:
+            policy_process.close()
+        state.policy_process = None
+        raise
     return thread
 
 
@@ -63,7 +76,8 @@ def run_rebalance_experts(
             eplb_stats.global_expert_load_window.cpu()
         )
     # Compute new expert mappings for the model
-    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
+    policy = eplb_state.policy_process or eplb_state.policy
+    new_physical_to_logical_map = policy.rebalance_experts(
         eplb_stats,
         physical_to_logical_map_cpu,
     )
@@ -78,12 +92,19 @@ def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     rank = get_eplb_group().device_group.rank()
-    while True:
+    while not state.async_worker_stop.is_set():
         try:
-            state.rearrange_event.wait(stream=stream)
+            if not state.rearrange_event.wait(stream=stream, timeout=0.1):
+                continue
+            if state.async_worker_stop.is_set():
+                return
             _transfer_cycle(state, stream, is_profile)
-        except Exception:
-            if not state.parallel_config.enable_fault_tolerance:
+        except Exception as exc:
+            if state.async_worker_stop.is_set():
+                return
+            if isinstance(exc, EplbPolicyProcessError) or not (
+                state.parallel_config.enable_fault_tolerance
+            ):
                 raise
             # FT keeps the thread alive so EPLB can resume after a retry.
             logger.exception(
@@ -113,18 +134,31 @@ def _transfer_cycle(
         model_state.communicator.set_stream(stream)
         num_layers = model_state.model.num_moe_layers
 
-        # Snapshot the physical_to_logical_map (synchronized with
-        # rearrange_event) and copy it to CPU
-        with device_stream(stream):
-            physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
-
         t_start = time.perf_counter()
-        new_physical_to_logical_map = run_rebalance_experts(
-            model_state, state, physical_to_logical_map_cpu, stream
-        )
+        physical_to_logical_map_cpu = None
+        policy_error = None
+        new_physical_to_logical_map = None
+        if state.ft_reset_epoch == reset_epoch and not state.async_worker_stop.is_set():
+            # Snapshot the physical_to_logical_map (synchronized with
+            # rearrange_event) and copy it to CPU
+            with device_stream(stream):
+                physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
+            try:
+                new_physical_to_logical_map = run_rebalance_experts(
+                    model_state, state, physical_to_logical_map_cpu, stream
+                )
+            except EplbPolicyProcessError as exc:
+                policy_error = exc
 
         migration_batches_by_layer = None
-        if state.parallel_config.eplb_config.migration_batching_enabled:
+        if (
+            policy_error is None
+            and new_physical_to_logical_map is not None
+            and state.ft_reset_epoch == reset_epoch
+            and not state.async_worker_stop.is_set()
+            and state.parallel_config.eplb_config.migration_batching_enabled
+        ):
+            assert physical_to_logical_map_cpu is not None
             profile_name = "eplb: schedule migration batches"
             num_local_experts = model_state.model.expert_weights[0][0].shape[0]
             # The placement snapshots stay fixed for this rebalance cycle.
@@ -145,25 +179,51 @@ def _transfer_cycle(
         # We sync the rebalanced flag across ranks before each iteration so
         # all ranks make a coordinated decision to continue or stop.
         while layer_idx < num_layers:
-            model_state.worker_progress = 2 * layer_idx
+            if (
+                state.ft_reset_epoch != reset_epoch
+                and eplb_cpu_group is not get_eplb_group().cpu_group
+            ):
+                return
+            if state.ft_reset_epoch == reset_epoch:
+                model_state.worker_progress = 2 * layer_idx
+            stopping = state.async_worker_stop.is_set()
             flag = torch.tensor(
-                [int(model_state.rebalanced)],
+                [
+                    int(
+                        model_state.rebalanced
+                        and state.ft_reset_epoch == reset_epoch
+                        and not stopping
+                        and policy_error is None
+                    ),
+                    int(policy_error is not None and not stopping),
+                ],
                 dtype=torch.int32,
                 device="cpu",
             )
             torch.distributed.all_reduce(flag, group=eplb_cpu_group)
-            if int(flag.item()) != eplb_cpu_group.size():
-                logger.warning(
+            if int(flag[1].item()):
+                raise EplbPolicyProcessError(
+                    "EPLB policy process failed on at least one rank"
+                ) from policy_error
+            if int(flag[0].item()) != eplb_cpu_group.size():
+                log = (
+                    logger.debug if state.async_worker_stop.is_set() else logger.warning
+                )
+                log(
                     "async worker (rank=%d): layer %d coordinated stop "
                     "(flag_sum=%d, group_size=%d)",
                     ep_rank,
                     layer_idx,
-                    int(flag.item()),
+                    int(flag[0].item()),
                     eplb_cpu_group.size(),
                 )
-                model_state.rebalanced = False
-                break
+                if state.ft_reset_epoch == reset_epoch:
+                    for cancelled_model in state.model_states.values():
+                        cancelled_model.rebalanced = False
+                return
 
+            assert physical_to_logical_map_cpu is not None
+            assert new_physical_to_logical_map is not None
             transfer_metadata = transfer_layer(
                 old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                 new_layer_indices=new_physical_to_logical_map[layer_idx],
@@ -188,40 +248,42 @@ def _transfer_cycle(
 
             # Wait until all writes to expert_buffer have finished before making the
             # AsyncEplbLayerResult visible to the main thread.
-            stream.synchronize()
+            if stream is not None:
+                stream.synchronize()
 
-            # This event guarantees that expert_buffer will not be overwritten by
-            # subsequent iterations of this loop until the main thread has consumed
-            # it. Record is called by the main thread after move_from_buffer().
-            consumed_event = CpuGpuEvent()
-
-            model_state.pending_result = AsyncEplbLayerResult(
-                layer_idx=layer_idx,
-                new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
-                transfer_metadata=transfer_metadata,
-                consumed_event=consumed_event,
-            )
-            model_state.worker_progress = 2 * layer_idx + 1
-            # A fault recovery happened during the transfer, so the main
-            # thread will never consume this result. Drop it and abandon
-            # the rebalance.
-            if state.ft_reset_epoch != reset_epoch:
-                model_state.pending_result = None
+            # Do not publish a stale transfer. The next layer's collective
+            # coordinates cancellation with peers still finishing this layer.
+            if state.async_worker_stop.is_set():
                 return
-
-            # Block this thread until the main thread and main stream
-            # finish copying model_state.expert_buffer into
-            # model_state.model.expert_weights[layer_idx]
-            consumed_event.wait(stream=stream)
-            # Host-issued writes into expert_buffer (e.g. NIXL RDMA reads) are not
-            # stream-ordered, so wait until move_from_buffer has run on the GPU.
-            stream.synchronize()
-            assert model_state.pending_result is None
-            # Woken by an FT reset's record, not a normal consume.
-            if state.ft_reset_epoch != reset_epoch:
-                return
+            if state.ft_reset_epoch == reset_epoch:
+                # This event guarantees that expert_buffer will not be overwritten by
+                # subsequent iterations of this loop until the main thread has consumed
+                # it. Record is called by the main thread after move_from_buffer().
+                consumed_event = CpuGpuEvent()
+                model_state.pending_result = AsyncEplbLayerResult(
+                    layer_idx=layer_idx,
+                    new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
+                    transfer_metadata=transfer_metadata,
+                    consumed_event=consumed_event,
+                )
+                model_state.worker_progress = 2 * layer_idx + 1
+                if state.ft_reset_epoch != reset_epoch:
+                    model_state.pending_result = None
+                else:
+                    # Wait for the main thread to consume or discard the buffer.
+                    while not consumed_event.wait(stream=stream, timeout=0.1):
+                        if state.async_worker_stop.is_set():
+                            return
+                    # Host-issued writes (e.g. RDMA reads) are not stream-ordered.
+                    if stream is not None:
+                        stream.synchronize()
+                    assert model_state.pending_result is None
             layer_idx += 1
-        if ep_rank == 0:
+        if (
+            ep_rank == 0
+            and state.ft_reset_epoch == reset_epoch
+            and not state.async_worker_stop.is_set()
+        ):
             logger.info(
                 "Async EPLB rearranged %d/%d layers of %s in %.2f s.",
                 layer_idx,

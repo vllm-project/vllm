@@ -238,6 +238,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer: KVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
+        masked = self.model_config.masked_token_ids
+        self.masked_token_ids = (
+            torch.tensor(masked, dtype=torch.int64, device=self.device)
+            if masked
+            else None
+        )
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -504,8 +510,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Speculative verification uses native top-k/top-p masking even
             # when target-only sampling can use FlashInfer's fused sampler.
-            if current_platform.is_rocm() or (
-                current_platform.is_cuda() and self.speculative_config is not None
+            # CPU has no fused sampler, so it always masks with the kernel.
+            if (
+                current_platform.is_rocm()
+                or current_platform.is_cpu()
+                or (current_platform.is_cuda() and self.speculative_config is not None)
             ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
@@ -1340,6 +1349,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
+            mrope_position_delta = self.model_state.get_mrope_position_delta(req_index)
+            if mrope_position_delta is not None:
+                self.kv_connector.record_mrope_position_delta(
+                    req_id, mrope_position_delta
+                )
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
@@ -1750,6 +1764,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model_state.compute_sample_logits(sample_hidden_states)
+
+        if self.masked_token_ids is not None:
+            logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
@@ -2535,6 +2552,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.eplb_state is not None:
+            self.eplb_state.stop_async_loop()
         torch.accelerator.synchronize()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:

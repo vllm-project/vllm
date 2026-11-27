@@ -238,7 +238,11 @@ def flash_attn_supports_kv_cache_dtype(
 
 
 def flash_attn_supports_quant_query_input() -> bool:
-    return not current_platform.is_xpu()
+    if current_platform.is_xpu():
+        from vllm.platforms.xpu import XPUPlatform
+
+        return XPUPlatform.support_fp8_query()
+    return True
 
 
 def flash_attn_supports_sinks() -> bool:

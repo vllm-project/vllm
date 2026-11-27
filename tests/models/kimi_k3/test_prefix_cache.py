@@ -279,15 +279,11 @@ class Turn:
         return self.output[0] == self.recompute[0]
 
 
-def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
-    """A turn must reuse the previous prompt up to its last checkpoint.
-
-    EAGLE-style drafts drop the trailing unit, so the checkpoint is one earlier.
-    """
+def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
+    """A turn reuses the previous prompt up to its last checkpoint."""
     if not prev_prompt_len:
         return 0
-    checkpoint = (prev_prompt_len - 1) // hit_unit * hit_unit
-    return max(checkpoint - hit_unit, 0) if spec else checkpoint
+    return (prev_prompt_len - 1) // hit_unit * hit_unit
 
 
 @contextlib.contextmanager
@@ -345,11 +341,15 @@ def _run_conversation(
         else:
             computed = output = _complete(decode_url, prompt, "conv")
         recompute = _complete(decode_url, prompt, f"recompute-{turn}")
+        expected_cached = _expected_cached(prev_len, hit_unit)
+        if deployment.prefill is not None:
+            # The prefiller stops at the checkpoint, so its hits end a unit lower.
+            expected_cached = max(expected_cached - hit_unit, 0)
         turns.append(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit, mode.spec),
+                expected_cached=expected_cached,
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),

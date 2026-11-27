@@ -20,23 +20,28 @@
 //!
 //! `self` bodies are reasoning, `commentary`/`user` bodies are visible text,
 //! and any other recipient names a tool whose body is one ATEM block with one
-//! or more `<atem:invoke>` calls. Parameters admitting strings retain their
-//! raw text; other values are JSON-decoded when possible and kept as raw
-//! strings otherwise. Each invoke's arguments are reassembled as a compact
-//! JSON object preserving parameter order.
+//! or more `<atem:invoke>` calls. Each invoke streams as one tool call: its
+//! name once the open tag is complete, then its arguments JSON object in
+//! parameter order. A parameter whose schema admits only a string retains its
+//! raw text, which streams as it arrives, escaped into a JSON string. Any other
+//! value is decoded once complete: JSON when it decodes to a type the schema
+//! admits, and its raw text otherwise. A parameter repeated within one invoke
+//! keeps its first value, which may already be on the wire.
 //!
 //! The model sometimes opens the next segment without closing the current one
 //! with `<|eom|>`, e.g. writing `to=FUNCTION<|message|>` straight after its
 //! reasoning when calling a tool with empty arguments. Since `<|start|>` and
 //! `<|message|>` never occur inside a body, either one also ends the current
-//! segment and starts the next.
+//! segment and starts the next. It sometimes omits the last
+//! `</atem:parameter>` too, so a parameter value can also end where its invoke
+//! closes.
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, peek, preceded, repeat, seq};
+use winnow::combinator::{alt, delimited, eof, opt, peek, preceded, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::Partial;
@@ -44,8 +49,12 @@ use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::schema::{JsonType, OptionSource, SchemaRoot};
-use crate::tool::{JsonStyle, Tool, ToolCallDelta};
-use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
+use crate::tool::{JsonStyle, OpenToolCall, Tool};
+use crate::unified::parsing_failed;
+use crate::utils::{
+    MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker,
+    take_until_marker_mul,
+};
 
 const START: &str = "<|start|>";
 const MESSAGE: &str = "<|message|>";
@@ -65,17 +74,15 @@ const PARAMETER_CLOSE: &str = "</atem:parameter>";
 /// start of the next segment's header when `<|eom|>` is missing.
 const BODY_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE, RECIPIENT_PREFIX];
 
+/// Markers that end a parameter value: its close tag, or the invoke close that
+/// ends a last value missing it, after one separating newline the value drops.
+const VALUE_END_MARKERS: &[&str] = &[PARAMETER_CLOSE, "\n</atem:invoke>", INVOKE_CLOSE];
+
 /// Recipient whose segments are dropped: `developer` is a prompt role, not a
 /// valid assistant recipient.
 const DEVELOPER_RECIPIENT: &str = "developer";
 
 type MuseInput<'i> = Partial<&'i str>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MuseToolCall {
-    name: String,
-    parameters: Vec<(String, String)>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MuseEvent {
@@ -92,13 +99,34 @@ enum MuseEvent {
     SegmentEnd,
     /// `<|eot|>`: the assistant turn ends.
     TurnEnd,
-    /// One complete ATEM block parsed into raw calls.
-    ToolCalls {
-        calls: Vec<MuseToolCall>,
+    /// `<atem:function_calls>`: the ATEM block of a tool segment opens.
+    BlockOpen,
+    /// A complete `<atem:invoke>` open tag.
+    InvokeOpen {
+        name: String,
     },
+    /// A complete `<atem:parameter>` open tag.
+    ParameterOpen {
+        key: String,
+    },
+    /// The drained text continues the open string parameter value.
+    ParameterText,
+    /// `</atem:parameter>` after a string parameter value.
+    ParameterClose,
+    /// The complete raw value of a buffered parameter, through its close tag;
+    /// `closes_invoke` when `</atem:invoke>` ended it instead.
+    BufferedValue {
+        value: String,
+        closes_invoke: bool,
+    },
+    /// `</atem:invoke>`, which also ends a string parameter value missing its
+    /// close tag.
+    InvokeClose,
+    /// `</atem:function_calls>`: the ATEM block closes.
+    BlockClose,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum MuseMode {
     /// Awaiting the ` to=RECIPIENT<|message|>` routing header of the next
     /// segment; the full `<|start|>assistant to=…` form is also accepted.
@@ -108,13 +136,63 @@ enum MuseMode {
     Reasoning,
     /// Inside a `to=commentary`/`to=user` segment (visible text).
     Text,
-    /// Inside a tool segment, buffering one ATEM block through its close tag.
-    Tool { scan: MarkerScanState },
+    /// Inside a tool segment, streaming its ATEM block.
+    Tool { block: AtemBlock },
     /// Dropping text until the next segment boundary: noise after a complete
     /// ATEM block, or the body of a `to=developer` segment.
     Skip,
     /// After `<|eot|>`: ignore the rest (EOS leakage guard).
     Done,
+}
+
+/// Where the parser is inside the ATEM block of a tool segment.
+#[derive(Debug)]
+enum AtemBlock {
+    /// Before `<atem:function_calls>`.
+    Start,
+    /// Between invokes; `any` tells whether one was already closed, since a
+    /// block holds at least one.
+    Invokes { any: bool },
+    /// Inside one invoke, streaming it as a tool call.
+    Invoke {
+        call: OpenToolCall,
+        body: InvokeBody,
+    },
+}
+
+/// Where the parser is inside one `<atem:invoke>`.
+#[derive(Debug)]
+enum InvokeBody {
+    /// Between parameters.
+    Parameters,
+    /// Inside a string parameter value, which streams as it arrives.
+    Parameter,
+    /// Inside another parameter value, which is decoded once complete.
+    BufferedParameter {
+        key: String,
+        value_end_scan: MarkerScanState,
+    },
+}
+
+impl MuseMode {
+    /// The position inside the ATEM block, for an event inside a tool segment.
+    fn block_mut(&mut self) -> Result<&mut AtemBlock> {
+        match self {
+            MuseMode::Tool { block } => Ok(block),
+            _ => Err(parsing_failed!("Muse ATEM event outside a tool segment")),
+        }
+    }
+
+    /// The open invoke's call and the position inside it, for an event inside
+    /// an `<atem:invoke>`.
+    fn invoke_mut(&mut self) -> Result<(&mut OpenToolCall, &mut InvokeBody)> {
+        match self {
+            MuseMode::Tool {
+                block: AtemBlock::Invoke { call, body },
+            } => Ok((call, body)),
+            _ => Err(parsing_failed!("Muse invoke event outside an invoke")),
+        }
+    }
 }
 
 impl Default for MuseMode {
@@ -161,7 +239,7 @@ impl MuseUnifiedParser {
         event: MuseEvent,
         piece: DecodedText,
         output: &mut UnifiedParserOutput,
-    ) {
+    ) -> Result<()> {
         match event {
             MuseEvent::Text => output.push_text(piece.text),
             MuseEvent::Reasoning => output.push_reasoning(piece),
@@ -172,7 +250,7 @@ impl MuseUnifiedParser {
                     Some("commentary" | "user") => MuseMode::Text,
                     Some(DEVELOPER_RECIPIENT) => MuseMode::Skip,
                     Some(_) => MuseMode::Tool {
-                        scan: MarkerScanState::default(),
+                        block: AtemBlock::Start,
                     },
                 };
             }
@@ -182,32 +260,78 @@ impl MuseUnifiedParser {
                 };
             }
             MuseEvent::TurnEnd => self.mode = MuseMode::Done,
-            MuseEvent::ToolCalls { calls } => {
-                for call in calls {
-                    let name = normalize_tool_name(call.name, &self.tool_names);
-                    let parameters = self.parameters.get(&name).unwrap_or(&Value::Null);
-                    let arguments: Map<String, Value> = call
-                        .parameters
-                        .into_iter()
-                        .map(|(key, raw)| {
-                            let value = convert_parameter_value(parameters, &key, raw);
-                            (key, value)
-                        })
-                        .collect();
+            MuseEvent::BlockOpen => *self.mode.block_mut()? = AtemBlock::Invokes { any: false },
+            MuseEvent::InvokeOpen { name } => {
+                let name = normalize_tool_name(name, &self.tool_names);
+                let tool_index = self.emitted_call_count;
+                self.emitted_call_count += 1;
+                *self.mode.block_mut()? = AtemBlock::Invoke {
                     // The template renders JSON values with Python separators.
-                    let arguments =
-                        JsonStyle::Spaced.to_string(&arguments).expect("a JSON map serializes");
-                    let tool_index = self.emitted_call_count;
-                    self.emitted_call_count += 1;
-                    output.push_call(ToolCallDelta {
-                        tool_index,
-                        name: Some(name),
-                        arguments,
-                    });
-                }
-                self.mode = MuseMode::Skip;
+                    call: OpenToolCall::new(name, tool_index, JsonStyle::Spaced),
+                    body: InvokeBody::Parameters,
+                };
             }
+            MuseEvent::ParameterOpen { key } => {
+                let (call, body) = self.mode.invoke_mut()?;
+                let parameters = self.parameters.get(&call.name).unwrap_or(&Value::Null);
+                if admits_only_string(parameters, &key) {
+                    call.arguments.open_string(&key);
+                    *body = InvokeBody::Parameter;
+                } else {
+                    *body = InvokeBody::BufferedParameter {
+                        key,
+                        value_end_scan: MarkerScanState::default(),
+                    };
+                }
+            }
+            MuseEvent::ParameterText => self.mode.invoke_mut()?.0.arguments.push(&piece.text),
+            MuseEvent::ParameterClose => {
+                let (call, body) = self.mode.invoke_mut()?;
+                call.arguments.close();
+                *body = InvokeBody::Parameters;
+            }
+            MuseEvent::BufferedValue {
+                value,
+                closes_invoke,
+            } => {
+                let (call, body) = self.mode.invoke_mut()?;
+                let InvokeBody::BufferedParameter { key, .. } =
+                    std::mem::replace(body, InvokeBody::Parameters)
+                else {
+                    return Err(parsing_failed!("Muse parameter value outside a parameter"));
+                };
+                let parameters = self.parameters.get(&call.name).unwrap_or(&Value::Null);
+                let value = convert_parameter_value(parameters, &key, value);
+                call.arguments.write_value(&key, &value);
+                if closes_invoke {
+                    self.close_invoke(output)?;
+                }
+            }
+            MuseEvent::InvokeClose => self.close_invoke(output)?,
+            MuseEvent::BlockClose => self.mode = MuseMode::Skip,
         }
+        if let MuseMode::Tool {
+            block: AtemBlock::Invoke { call, .. },
+        } = &mut self.mode
+            && let Some(delta) = call.take_delta()
+        {
+            output.push_call(delta);
+        }
+        Ok(())
+    }
+
+    /// Close the open invoke and emit the rest of its call.
+    fn close_invoke(&mut self, output: &mut UnifiedParserOutput) -> Result<()> {
+        let block = std::mem::replace(self.mode.block_mut()?, AtemBlock::Invokes { any: true });
+        let AtemBlock::Invoke { mut call, body } = block else {
+            return Err(parsing_failed!("Muse invoke close outside an invoke"));
+        };
+        // A string value missing its `</atem:parameter>` ends here.
+        if let InvokeBody::Parameter = body {
+            call.arguments.close();
+        }
+        output.push_call(call.finish());
+        Ok(())
     }
 }
 
@@ -242,7 +366,7 @@ impl UnifiedParser for MuseUnifiedParser {
             parse_next_muse_event(input, &mut self.mode)
         })? {
             let piece = self.buffer.drain_prefix(consumed_len);
-            self.apply_event(event, piece, output);
+            self.apply_event(event, piece, output)?;
         }
 
         Ok(())
@@ -279,18 +403,31 @@ impl UnifiedParser for MuseUnifiedParser {
 /// Map an emitted ATEM invoke name back to a registered tool name.
 ///
 /// The Muse Glimmer template lists a registered bare name `NAME` as the
-/// namespace recipient `"NAME.*"`, so the model may call it as `NAME.NAME`.
-/// Collapse only that doubled form, and only when `NAME` is registered and the
-/// emitted name is not: matching on the trailing segment alone could dispatch
-/// `weather.get` to a registered `calendar.get`.
+/// namespace recipient `"NAME.*"`, so the model may call it as `NAME.NAME`, or
+/// fill the `*` with a parameter, a verb or nothing (`NAME.city`, `NAME.`).
+/// Collapse to `NAME` only when `NAME` is registered and the emitted name is
+/// not; for a suffix other than `NAME`, also only when no registered name lives
+/// under `NAME.`, since the suffix may then mean a missing sibling. Matching on
+/// the trailing segment alone could dispatch `weather.get` to a registered
+/// `calendar.get`. Same rule as the Python `MuseToolParser._normalize_name`.
 fn normalize_tool_name(name: String, tool_names: &HashSet<String>) -> String {
     if tool_names.contains(&name) {
         return name;
     }
-    match name.split_once('.') {
-        Some((head, tail)) if head == tail && tool_names.contains(head) => head.to_string(),
-        _ => name,
+    let Some((head, tail)) = name.split_once('.') else {
+        return name;
+    };
+    // Python never registers an empty name, so an emitted `.x` stays as-is.
+    let has_sibling = || {
+        tool_names
+            .iter()
+            .any(|n| n.strip_prefix(head).is_some_and(|r| r.starts_with('.')))
+    };
+    if !head.is_empty() && tool_names.contains(head) && (head == tail || !has_sibling()) {
+        tracing::debug!(emitted = %name, mapped = head, "muse: mapped emitted tool name");
+        return head.to_string();
     }
+    name
 }
 
 /// Parse one Muse event from buffered streaming input.
@@ -303,7 +440,7 @@ fn parse_next_muse_event(input: &mut MuseInput<'_>, mode: &mut MuseMode) -> Moda
         .parse_next(input),
         MuseMode::Reasoning => body_event(input, MuseEvent::Reasoning),
         MuseMode::Text => body_event(input, MuseEvent::Text),
-        MuseMode::Tool { scan } => tool_block_event(input, scan),
+        MuseMode::Tool { block } => parse_atem_event(input, block),
         MuseMode::Skip => body_event(input, MuseEvent::Skip),
         MuseMode::Done => parse_done_event(input),
     }
@@ -363,23 +500,100 @@ fn inline_header_event(input: &mut MuseInput<'_>) -> ModalResult<MuseEvent> {
     .parse_next(input)
 }
 
-/// Parse a buffered ATEM block through `</atem:function_calls>` into completed calls.
-// TODO: calls commit at block granularity; the canonical wire shape is one
-// invoke per block (the template renders each tool call as its own segment),
-// so this matches call-at-a-time emission. Revisit per-invoke emission only if
-// multi-invoke blocks ever matter.
-fn tool_block_event(
-    input: &mut MuseInput<'_>,
-    scan: &mut MarkerScanState,
-) -> ModalResult<MuseEvent> {
-    let (body,) = seq!(
-        take_until_marker(ATEM_CLOSE, scan),
-        _: literal(ATEM_CLOSE),
+/// Parse one event of the ATEM block at position `block`.
+///
+/// Any structure other than the expected tags fails the block: it is
+/// determinably malformed, and calls emitted before cannot be retracted.
+fn parse_atem_event(input: &mut MuseInput<'_>, block: &mut AtemBlock) -> ModalResult<MuseEvent> {
+    let block_close = literal(ATEM_CLOSE).value(MuseEvent::BlockClose);
+    match block {
+        AtemBlock::Start => atem_structure(preceded(
+            ws0,
+            literal(ATEM_OPEN).value(MuseEvent::BlockOpen),
+        ))
+        .parse_next(input),
+        AtemBlock::Invokes { any: false } => {
+            atem_structure(preceded(ws0, invoke_open_event)).parse_next(input)
+        }
+        AtemBlock::Invokes { any: true } => {
+            atem_structure(preceded(ws0, alt((invoke_open_event, block_close)))).parse_next(input)
+        }
+        AtemBlock::Invoke { body, .. } => match body {
+            InvokeBody::Parameters => atem_structure(preceded(
+                ws0,
+                alt((
+                    parameter_open_event,
+                    literal(INVOKE_CLOSE).value(MuseEvent::InvokeClose),
+                )),
+            ))
+            .parse_next(input),
+            InvokeBody::Parameter => alt((
+                literal(PARAMETER_CLOSE).value(MuseEvent::ParameterClose),
+                unclosed_value_invoke_close.value(MuseEvent::InvokeClose),
+                |input: &mut MuseInput<'_>| {
+                    safe_text_len_mul(input, VALUE_END_MARKERS).map(|_| MuseEvent::ParameterText)
+                },
+            ))
+            .parse_next(input),
+            InvokeBody::BufferedParameter { value_end_scan, .. } => {
+                let (value, closes_invoke) = seq!(
+                    take_until_marker_mul(VALUE_END_MARKERS, value_end_scan),
+                    alt((
+                        literal(PARAMETER_CLOSE).value(false),
+                        unclosed_value_invoke_close.value(true),
+                    )),
+                )
+                .parse_next(input)?;
+                Ok(MuseEvent::BufferedValue {
+                    value: value.to_string(),
+                    closes_invoke,
+                })
+            }
+        },
+    }
+}
+
+/// Fail a mismatched ATEM tag as a malformed block, while still waiting on
+/// input that may yet complete it.
+fn atem_structure<'i>(
+    mut parser: impl Parser<MuseInput<'i>, MuseEvent, ErrMode<ContextError>>,
+) -> impl Parser<MuseInput<'i>, MuseEvent, ErrMode<ContextError>> {
+    move |input: &mut MuseInput<'i>| {
+        parser.parse_next(input).map_err(|error| match error {
+            ErrMode::Backtrack(_) => muse_error("Muse ATEM block"),
+            error => error,
+        })
+    }
+}
+
+/// Parse the `</atem:invoke>` that ends a last parameter value missing its
+/// `</atem:parameter>`, with the one newline before it that the value drops.
+fn unclosed_value_invoke_close(input: &mut MuseInput<'_>) -> ModalResult<()> {
+    (opt(literal("\n")), literal(INVOKE_CLOSE)).void().parse_next(input)
+}
+
+/// Parse an `<atem:invoke>` open tag into its tool name.
+fn invoke_open_event(input: &mut MuseInput<'_>) -> ModalResult<MuseEvent> {
+    let (name,) = seq!(
+        _: (literal(INVOKE_OPEN), ws1, literal("name"), literal("=")),
+        atem_attr_value,
+        _: (take_until(0.., ">"), literal(">")),
     )
     .parse_next(input)?;
-    let calls = parse_atem_block(body)?;
 
-    Ok(MuseEvent::ToolCalls { calls })
+    Ok(MuseEvent::InvokeOpen { name })
+}
+
+/// Parse an `<atem:parameter>` open tag into its key.
+fn parameter_open_event(input: &mut MuseInput<'_>) -> ModalResult<MuseEvent> {
+    let (key,) = seq!(
+        _: (literal(PARAMETER_OPEN), ws1, literal("name"), literal("=")),
+        atem_attr_value,
+        _: (take_until(0.., ">"), literal(">")),
+    )
+    .parse_next(input)?;
+
+    Ok(MuseEvent::ParameterOpen { key })
 }
 
 /// Ignore everything after the assistant turn ended.
@@ -416,49 +630,8 @@ fn is_recipient_char(char: char) -> bool {
     char.is_ascii_alphanumeric() || matches!(char, '_' | '.' | '-')
 }
 
-/// Parse one complete ATEM block body (up to `</atem:function_calls>`) into
-/// raw calls, one per `<atem:invoke>`.
-fn parse_atem_block(body: &str) -> ModalResult<Vec<MuseToolCall>> {
-    let mut input = body;
-    delimited(
-        (ws0, literal(ATEM_OPEN)),
-        repeat(1.., atem_invoke),
-        (ws0, eof),
-    )
-    .parse_next(&mut input)
-    .map_err(|_| muse_error("Muse ATEM block"))
-}
-
-/// Parse one `<atem:invoke>` element into its name and raw parameters.
-fn atem_invoke(input: &mut &str) -> ModalResult<MuseToolCall> {
-    let (name, parameters): (String, Vec<(String, String)>) = seq!(
-        _: (ws0, literal(INVOKE_OPEN), ws1, literal("name"), literal("=")),
-        atem_attr_value,
-        _: (take_until(0.., ">"), literal(">")),
-        repeat(0.., atem_parameter),
-        _: (ws0, literal(INVOKE_CLOSE)),
-    )
-    .parse_next(input)?;
-
-    Ok(MuseToolCall { name, parameters })
-}
-
-/// Parse one `<atem:parameter>` element into its key/value pair.
-fn atem_parameter(input: &mut &str) -> ModalResult<(String, String)> {
-    let (name, raw) = seq!(
-        _: (ws0, literal(PARAMETER_OPEN), ws1, literal("name"), literal("=")),
-        atem_attr_value,
-        _: (take_until(0.., ">"), literal(">")),
-        take_until(0.., PARAMETER_CLOSE),
-        _: literal(PARAMETER_CLOSE),
-    )
-    .parse_next(input)?;
-
-    Ok((name, raw.to_string()))
-}
-
 /// Parse one ATEM attribute value, double/single-quoted or bare.
-fn atem_attr_value(input: &mut &str) -> ModalResult<String> {
+fn atem_attr_value(input: &mut MuseInput<'_>) -> ModalResult<String> {
     alt((
         delimited(literal("\""), take_till(0.., '"'), literal("\"")),
         delimited(literal("'"), take_till(0.., '\''), literal("'")),
@@ -481,20 +654,32 @@ fn decode_parameter_value(raw: &str) -> Value {
 /// `Optional[str]`, `3` for `anyOf: [integer, string]`).
 fn convert_parameter_value(parameters: &Value, key: &str, raw: String) -> Value {
     let decoded = decode_parameter_value(&raw);
-    let root = SchemaRoot::new(parameters);
-    let types = root
-        .resolved()
-        .get("properties")
-        .and_then(|properties| properties.get(key))
-        .or_else(|| root.resolved().get("additionalProperties"))
-        .and_then(|schema| schema_types(root, schema))
-        .unwrap_or_default();
+    let types = parameter_types(parameters, key);
     match JsonType::of_value(&decoded) {
         _ if !types.contains(&JsonType::String) => decoded,
         JsonType::Integer if types.contains(&JsonType::Number) => decoded,
         ty if ty != JsonType::String && types.contains(&ty) => decoded,
         _ => Value::String(raw),
     }
+}
+
+/// Whether the schema of parameter `key` admits only a string, so that
+/// [`convert_parameter_value`] keeps its raw text whatever it spells and the
+/// value can stream before it is complete.
+fn admits_only_string(parameters: &Value, key: &str) -> bool {
+    let types = parameter_types(parameters, key);
+    !types.is_empty() && types.iter().all(|ty| *ty == JsonType::String)
+}
+
+/// Types the schema of parameter `key` admits; empty when unconstrained.
+fn parameter_types(parameters: &Value, key: &str) -> Vec<JsonType> {
+    let root = SchemaRoot::new(parameters);
+    root.resolved()
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+        .or_else(|| root.resolved().get("additionalProperties"))
+        .and_then(|schema| schema_types(root, schema))
+        .unwrap_or_default()
 }
 
 /// Types `schema` admits (none for a non-`string` type name), or `None` if unconstrained.
@@ -542,6 +727,7 @@ fn muse_error(label: &'static str) -> ErrMode<ContextError> {
 mod tests {
     use std::sync::Arc;
 
+    use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::{DecodedText, test_utils::TestTokenizer};
@@ -583,6 +769,7 @@ mod tests {
         fn normal_text(&self) -> String;
         fn reasoning_text(&self) -> String;
         fn calls(&self) -> Vec<ToolCallDelta>;
+        fn merged_events(&self) -> Vec<UnifiedParserEvent>;
     }
 
     impl UnifiedOutputTestExt for UnifiedParserOutput {
@@ -606,14 +793,38 @@ mod tests {
                 .collect()
         }
 
+        /// Tool calls with their argument deltas merged.
         fn calls(&self) -> Vec<ToolCallDelta> {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .collect()
+            let mut calls = Vec::<ToolCallDelta>::new();
+            for event in &self.events {
+                let UnifiedParserEvent::ToolCall(delta) = event else {
+                    continue;
+                };
+                match calls.iter_mut().find(|call| call.tool_index == delta.tool_index) {
+                    Some(call) => call.arguments.push_str(&delta.arguments),
+                    None => calls.push(delta.clone()),
+                }
+            }
+            calls
+        }
+
+        /// Events with each tool call's consecutive deltas merged, which
+        /// depend on how the input was chunked.
+        fn merged_events(&self) -> Vec<UnifiedParserEvent> {
+            let mut events = Vec::<UnifiedParserEvent>::new();
+            for event in &self.events {
+                if let (
+                    Some(UnifiedParserEvent::ToolCall(call)),
+                    UnifiedParserEvent::ToolCall(delta),
+                ) = (events.last_mut(), event)
+                    && call.tool_index == delta.tool_index
+                {
+                    call.arguments.push_str(&delta.arguments);
+                    continue;
+                }
+                events.push(event.clone());
+            }
+            events
         }
     }
 
@@ -828,7 +1039,10 @@ mod tests {
                 parser.reset();
                 let chunks = char_chunks(&text, size);
                 let chunks: Vec<_> = chunks.iter().map(String::as_str).collect();
-                assert_eq!(collect_stream(&mut parser, &chunks), batch);
+                assert_eq!(
+                    collect_stream(&mut parser, &chunks).merged_events(),
+                    batch.merged_events()
+                );
             }
         }
     }
@@ -878,6 +1092,252 @@ mod tests {
         assert_eq!(calls[2].name.as_deref(), Some("third"));
     }
 
+    fn shell_tool() -> Tool {
+        Tool {
+            name: "shell".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                    "note": {"type": ["string", "null"]}
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }
+    }
+
+    #[test]
+    fn muse_tool_call_streams_before_close_tag() {
+        let mut parser = MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+        let mut output = UnifiedParserOutput::default();
+
+        // The call and its arguments so far, after each chunk.
+        let mut progress = Vec::new();
+        for chunk in [
+            &format!(" to=shell{MESSAGE}<atem:function_calls>\n"),
+            "<atem:invoke name=\"shell\">\n",
+            "<atem:parameter name=\"command\">ls \"a",
+            " b\"</atem:para",
+            "meter>\n<atem:parameter name=\"timeout\">3",
+            "0</atem:parameter>\n",
+            "<atem:parameter name=\"note\">null</atem:parameter>\n",
+            "</atem:invoke>\n",
+            "</atem:function_calls>",
+        ] {
+            output.append(parser.parse_chunk(chunk).unwrap());
+            progress.push(match output.calls().first() {
+                Some(call) => format!("{}({})", call.name.as_deref().unwrap(), call.arguments),
+                None => "no call".to_string(),
+            });
+        }
+
+        // A string-only parameter streams; `timeout` and the nullable `note`
+        // are decoded once complete.
+        expect![[r#"
+            no call
+            shell()
+            shell({"command": "ls \"a)
+            shell({"command": "ls \"a b\")
+            shell({"command": "ls \"a b\"")
+            shell({"command": "ls \"a b\"", "timeout": 30)
+            shell({"command": "ls \"a b\"", "timeout": 30, "note": null)
+            shell({"command": "ls \"a b\"", "timeout": 30, "note": null})
+            shell({"command": "ls \"a b\"", "timeout": 30, "note": null})"#]]
+        .assert_eq(&progress.join("\n"));
+    }
+
+    #[test]
+    fn muse_string_parameter_keeps_atem_tags_in_its_value() {
+        // Only `</atem:parameter>` and `</atem:invoke>` end a value, so a string
+        // value may spell the other ATEM tags, including the block close.
+        let value = "<atem:invoke name=\"x\"><atem:parameter></atem:function_calls>";
+        let text = format!(
+            " to=shell{MESSAGE}{}{EOT}",
+            atem(&[("shell", &[("command", value)][..])])
+        );
+        let mut parser = MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+
+        let output = parser.parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "command": value })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_ends_at_invoke_close() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             </atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_after_closed_one() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             <atem:parameter name=\"limit\">10\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket", "limit": 10 })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_stays_inside_its_invoke() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             <atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[1].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_string_parameter_drops_separator_newline() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_streams_and_keeps_later_segments() {
+        // The streamed string value holds back its trailing newline until the
+        // invoke close shows it is the separator, and the turn goes on after
+        // the block.
+        let text = format!(
+            " to=shell{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"shell\">\n\
+             <atem:parameter name=\"command\">ls\n\
+             </atem:invoke>\n<atem:invoke name=\"shell\">\n\
+             <atem:parameter name=\"timeout\">5</atem:invoke>\n\
+             </atem:function_calls>{EOM}{START}assistant to=user{MESSAGE}Final answer.{EOT}"
+        );
+        let parser = || MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+        let batch = parser().parse_complete(&text).unwrap();
+
+        let calls = batch.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, r#"{"command": "ls"}"#);
+        assert_eq!(calls[1].arguments, r#"{"timeout": 5}"#);
+        assert_eq!(batch.normal_text(), "Final answer.");
+        for (first, second) in two_way_splits(&text) {
+            let output = collect_stream(&mut parser(), &[&first, &second]);
+            assert_eq!(
+                output.merged_events(),
+                batch.merged_events(),
+                "split: {first:?} + {second:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_repeated_parameter_keeps_first_value() {
+        // The first value may already be on the wire, so a later one is dropped.
+        let text = format!(
+            " to=shell{MESSAGE}{}{EOT}",
+            atem(&[(
+                "shell",
+                &[
+                    ("command", "ls"),
+                    ("timeout", "1"),
+                    ("command", "rm"),
+                    ("timeout", "2")
+                ][..]
+            )])
+        );
+        let mut parser = MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+
+        let output = parser.parse_complete(&text).unwrap();
+
+        assert_eq!(
+            output.calls()[0].arguments,
+            r#"{"command": "ls", "timeout": 1}"#
+        );
+    }
+
+    #[test]
+    fn muse_streaming_tool_calls_match_batch_for_every_marker_split() {
+        let text = format!(
+            " to=shell{MESSAGE}{}{EOM}{START}assistant to=user{MESSAGE}done{EOT}",
+            atem(&[
+                (
+                    "shell",
+                    &[("command", "echo \"</atem:par\" \\ é"), ("timeout", "5")][..]
+                ),
+                ("shell", &[][..]),
+            ])
+        );
+        let parser = || MuseUnifiedParser::new(&[shell_tool()], Arc::new(tokenizer())).unwrap();
+        let batch = parser().parse_complete(&text).unwrap();
+        assert_eq!(batch.calls().len(), 2);
+
+        for (first, second) in two_way_splits(&text) {
+            let output = collect_stream(&mut parser(), &[&first, &second]);
+            assert_eq!(
+                output.merged_events(),
+                batch.merged_events(),
+                "split: {first:?} + {second:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_atem_block_without_invoke_fails() {
+        let mut parser = test_parser();
+        let error = parser
+            .parse_chunk(&format!(
+                " to=calc{MESSAGE}<atem:function_calls>\n</atem:function_calls>"
+            ))
+            .unwrap_err();
+
+        assert!(error.to_report_string().contains("Muse ATEM block"));
+    }
+
     #[test]
     fn muse_parses_consecutive_tool_segments_across_eom() {
         let text = format!(
@@ -912,7 +1372,11 @@ mod tests {
         // Exhaustive two-way splits cover every marker cut at every boundary.
         for (first, second) in two_way_splits(text) {
             let output = collect_stream(&mut test_parser(), &[&first, &second]);
-            assert_eq!(output.events, batch.events, "split: {first:?} + {second:?}");
+            assert_eq!(
+                output.merged_events(),
+                batch.merged_events(),
+                "split: {first:?} + {second:?}"
+            );
         }
 
         // Small fixed-size chunks split longer markers across 3+ chunks.
@@ -920,7 +1384,11 @@ mod tests {
             let chunks = char_chunks(text, size);
             let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
             let output = collect_stream(&mut test_parser(), &chunk_refs);
-            assert_eq!(output.events, batch.events, "chunk size {size}");
+            assert_eq!(
+                output.merged_events(),
+                batch.merged_events(),
+                "chunk size {size}"
+            );
         }
     }
 
@@ -1128,39 +1596,37 @@ mod tests {
         );
         let output = test_parser().parse_complete(text).unwrap();
         expect_test::expect![[r#"
-            UnifiedParserOutput {
-                events: [
-                    Reasoning(
-                        DecodedText {
-                            text: "Think.",
-                            attributions: [],
-                        },
-                    ),
-                    Text(
-                        "Checking. ",
-                    ),
-                    ToolCall(
-                        ToolCallDelta {
-                            tool_index: 0,
-                            name: Some(
-                                "weather.get",
-                            ),
-                            arguments: "{\"city\": \"Paris\"}",
-                        },
-                    ),
-                    Reasoning(
-                        DecodedText {
-                            text: "Recheck.",
-                            attributions: [],
-                        },
-                    ),
-                    Text(
-                        "Done.",
-                    ),
-                ],
-            }
+            [
+                Reasoning(
+                    DecodedText {
+                        text: "Think.",
+                        attributions: [],
+                    },
+                ),
+                Text(
+                    "Checking. ",
+                ),
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: Some(
+                            "weather.get",
+                        ),
+                        arguments: "{\"city\": \"Paris\"}",
+                    },
+                ),
+                Reasoning(
+                    DecodedText {
+                        text: "Recheck.",
+                        attributions: [],
+                    },
+                ),
+                Text(
+                    "Done.",
+                ),
+            ]
         "#]]
-        .assert_debug_eq(&output);
+        .assert_debug_eq(&output.merged_events());
         assert_streaming_matches_batch(text);
     }
 
@@ -1179,7 +1645,19 @@ mod tests {
 
     #[test]
     fn muse_collapses_doubled_namespace_tool_name() {
-        let tools = ["get_weather", "calendar.get"].map(|name| Tool {
+        let tools = [
+            "get_weather",
+            "calendar.get",
+            "Bash",
+            "Read",
+            "Glob",
+            "forecast",
+            "forecast.daily",
+            "Edit",
+            "Edit.Edit",
+            "",
+        ]
+        .map(|name| Tool {
             name: name.to_string(),
             description: None,
             parameters: json!({"type": "object"}),
@@ -1187,15 +1665,26 @@ mod tests {
             defer_loading: None,
         });
         let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
-        let text = format!(
-            " to=get_weather.get_weather{MESSAGE}{}",
-            atem(&[
-                ("get_weather.get_weather", &[][..]),
-                ("calendar.get", &[][..]),
-                ("weather.get", &[][..]),
-                ("calendar.calendar", &[][..]),
-            ])
-        );
+        let emitted = [
+            "get_weather.get_weather",
+            "calendar.get",
+            "weather.get",
+            "calendar.calendar",
+            // A bare tool with any other suffix collapses too...
+            "Bash.command",
+            "Read.read",
+            "Bash.execute",
+            "Glob.",
+            // ...unless a registered sibling may be what the suffix names.
+            "forecast.weekly",
+            "forecast.forecast",
+            "forecast.daily",
+            // An exact match wins over collapsing the doubled form.
+            "Edit.Edit",
+            ".x",
+        ];
+        let invokes: Vec<_> = emitted.iter().map(|name| (*name, &[][..])).collect();
+        let text = format!(" to=get_weather.get_weather{MESSAGE}{}", atem(&invokes));
 
         let output = parser.parse_complete(&text).unwrap();
 
@@ -1206,9 +1695,40 @@ mod tests {
                 "get_weather",
                 "calendar.get",
                 "weather.get",
-                "calendar.calendar"
+                "calendar.calendar",
+                "Bash",
+                "Read",
+                "Bash",
+                "Glob",
+                "forecast.weekly",
+                "forecast",
+                "forecast.daily",
+                "Edit.Edit",
+                ".x",
             ]
         );
+    }
+
+    #[test]
+    fn muse_collapsed_tool_name_uses_its_parameter_types() {
+        let tools = [Tool {
+            name: "Bash".to_string(),
+            description: None,
+            parameters: json!({"type": "object", "properties": {
+                "command": {"type": "string"}, "n": {"type": "integer"}}}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let text = format!(
+            " to=Bash.command{MESSAGE}{}",
+            atem(&[("Bash.command", &[("command", "007"), ("n", "7")][..])])
+        );
+
+        let calls = parser.parse_complete(&text).unwrap().calls();
+
+        assert_eq!(calls[0].name.as_deref(), Some("Bash"));
+        assert_eq!(calls[0].arguments, r#"{"command": "007", "n": 7}"#);
     }
 
     #[test]
