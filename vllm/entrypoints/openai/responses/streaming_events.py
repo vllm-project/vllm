@@ -1061,7 +1061,7 @@ def emit_simple_reasoning_done(
 
 def emit_simple_tool_call_open(
     state: SimpleStreamingState,
-    name: str,
+    name: str | None,
     index: int | None,
     namespace: str | None = None,
     is_custom: bool = False,
@@ -1072,7 +1072,7 @@ def emit_simple_tool_call_open(
         f"ctc_{random_uuid()}" if is_custom else f"fc_{random_uuid()}"
     )
     state.tool_call_id = call_id or make_tool_call_id()
-    state.tool_call_name = name
+    state.tool_call_name = name or ""
     state.tool_call_namespace = namespace
     state.tool_call_index = index
     state.tool_call_is_custom = is_custom
@@ -1085,7 +1085,7 @@ def emit_simple_tool_call_open(
             type="custom_tool_call",
             id=state.current_item_id,
             call_id=state.tool_call_id,
-            name=name,
+            name=state.tool_call_name,
             input="",
         )
     else:
@@ -1093,7 +1093,7 @@ def emit_simple_tool_call_open(
             type="function_call",
             id=state.current_item_id,
             call_id=state.tool_call_id,
-            name=name,
+            name=state.tool_call_name,
             namespace=namespace,
             arguments="",
             status="in_progress",
@@ -1184,7 +1184,7 @@ def emit_simple_tool_call_done(
             type="custom_tool_call",
             id=state.current_item_id,
             call_id=state.tool_call_id,
-            name=state.tool_call_name,
+            name=state.tool_call_name or "",
             input=payload,
         )
     else:
@@ -1195,12 +1195,12 @@ def emit_simple_tool_call_done(
                 output_index=state.output_index,
                 item_id=state.current_item_id,
                 arguments=state.accumulated_text,
-                name=state.tool_call_name,
+                name=state.tool_call_name or "",
             )
         ]
         item = ResponseFunctionToolCall(
             type="function_call",
-            name=state.tool_call_name,
+            name=state.tool_call_name or "",
             namespace=state.tool_call_namespace,
             arguments=state.accumulated_text,
             status=status,
@@ -1303,6 +1303,9 @@ class SimpleStreamingEventProcessor:
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
         self.custom_tool_names = custom_tool_names(tools)
         self.output_items: list[ResponseOutputItem] = []
+        self.tool_call_names: dict[int | None, str] = {}
+        self.tool_call_ids: dict[int | None, str] = {}
+        self.tool_call_namespaces: dict[int | None, str | None] = {}
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
@@ -1317,6 +1320,11 @@ class SimpleStreamingEventProcessor:
             delta_message.tool_calls
             and delta_message.tool_calls[0].function is not None
         ):
+            for tc in delta_message.tool_calls:
+                if tc.function is not None and tc.function.name:
+                    self.tool_call_names[tc.index] = tc.function.name
+                if tc.id:
+                    self.tool_call_ids[tc.index] = tc.id
             return _StateType.TOOL_CALL, delta_message.tool_calls[0]
         if delta_message.reasoning is not None:
             return _StateType.REASONING, None
@@ -1365,17 +1373,37 @@ class SimpleStreamingEventProcessor:
         handlers = self._STATE_HANDLERS[target_state]
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
+            raw_name = (
+                (tool_call.function.name if tool_call.function else None)
+                or self.tool_call_names.get(tool_call.index)
+                or (self.state.tool_call_name if self.state.tool_call_name else None)
+                or ""
+            )
             call_name = resolve_responses_tool_call_name(
-                tool_call.function.name,
+                raw_name,
                 tool_call_name_map=self.tool_call_name_map,
             )
+            call_id = (
+                tool_call.id
+                or self.tool_call_ids.get(tool_call.index)
+                or (self.state.tool_call_id if self.state.tool_call_id else None)
+            )
+            resolved_namespace = call_name.namespace or self.tool_call_namespaces.get(
+                tool_call.index
+            )
+            if call_name.name:
+                self.tool_call_names[tool_call.index] = call_name.name
+            if resolved_namespace:
+                self.tool_call_namespaces[tool_call.index] = resolved_namespace
+            if call_id:
+                self.tool_call_ids[tool_call.index] = call_id
             return handlers.open_fn(
                 self.state,
-                call_name.name,
+                call_name.name or "",
                 tool_call.index,
-                call_name.namespace,
-                call_name.name in self.custom_tool_names,
-                tool_call.id,
+                resolved_namespace,
+                (call_name.name in self.custom_tool_names) if call_name.name else False,
+                call_id,
             )
         return handlers.open_fn(self.state)
 
@@ -1393,8 +1421,13 @@ class SimpleStreamingEventProcessor:
             assert delta_message.tool_calls is not None
             combined_args = ""
             for tc in delta_message.tool_calls:
-                if tc.function is not None and tc.function.arguments:
-                    combined_args += tc.function.arguments
+                if tc.function is not None:
+                    if tc.function.name:
+                        self.tool_call_names[tc.index] = tc.function.name
+                        if not self.state.tool_call_name:
+                            self.state.tool_call_name = tc.function.name
+                    if tc.function.arguments:
+                        combined_args += tc.function.arguments
             if combined_args:
                 return handlers.delta_fn(self.state, combined_args)
             return []

@@ -204,6 +204,43 @@ class TestProcessorCompoundDeltas:
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
 
+    def test_interleaved_tool_call_without_name_in_subsequent_delta(self):
+        """Regression test for #70053: Interleaved tool-call delta where subsequent
+        chunk has name=None must reuse stored tool_call_name instead of raising
+        ValidationError."""
+        tc_start = _make_tool_call(0, name="get_weather")
+        reasoning = DeltaMessage(reasoning="Thinking...")
+        tc_args = _make_tool_call(0, arguments='{"city":"Tokyo"}')
+
+        processor = SimpleStreamingEventProcessor()
+        _run_through_processor(processor, DeltaMessage(tool_calls=[tc_start]))
+        _run_through_processor(processor, reasoning)
+        events = _run_through_processor(processor, DeltaMessage(tool_calls=[tc_args]))
+        events += processor.close_current()
+
+        added = [e for e in events if e.type == "response.output_item.added"]
+        assert len(added) == 1
+        assert added[0].item.name == "get_weather"
+
+        deltas = [
+            e for e in events if e.type == "response.function_call_arguments.delta"
+        ]
+        assert len(deltas) == 1
+        assert deltas[0].delta == '{"city":"Tokyo"}'
+
+    def test_tool_call_without_initial_name_does_not_crash(self):
+        """Regression test for #70053: Tool-call delta without function.name
+        must default to empty string and not crash pydantic validation."""
+        tc_args = _make_tool_call(0, arguments='{"key":"val"}')
+
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(processor, DeltaMessage(tool_calls=[tc_args]))
+        events += processor.close_current()
+
+        added = [e for e in events if e.type == "response.output_item.added"]
+        assert len(added) == 1
+        assert added[0].item.name == ""
+
 
 class TestSimpleToolCallShapes:
     def test_arguments_done_emitted_without_deltas(self):
