@@ -75,6 +75,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod decisions;
 mod responses;
 
 fn request_output(
@@ -463,6 +464,8 @@ struct FakeChatBackend {
     /// A model's own renderer replacing the fake chat format.
     chat_renderer: Option<DynChatRenderer>,
     parsers: ResolvedParsers,
+    /// A tokenizer replacing [`fake_chat_tokenizer`].
+    tokenizer: Option<Arc<TestTokenizer>>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -520,6 +523,7 @@ impl FakeChatBackend {
             skip_tokenizer_init: false,
             chat_renderer: None,
             parsers,
+            tokenizer: None,
         }
     }
 
@@ -564,6 +568,9 @@ impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
         if self.skip_tokenizer_init {
             return Arc::new(UnavailableTokenizer::new(1024));
+        }
+        if let Some(tokenizer) = &self.tokenizer {
+            return tokenizer.clone();
         }
         Arc::new(fake_chat_tokenizer())
     }
@@ -13344,6 +13351,55 @@ async fn post_json(
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
     (status, json)
+}
+
+/// A body whose `messages` is a list is a chat tokenize request even when it
+/// also carries `prompt`: a malformed chat part is reported, not replaced by the
+/// tokens of `prompt`. Without a `messages` list, `prompt` is tokenized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_selects_chat_by_a_messages_list() {
+    let (mut app, _engine_task) = test_app().await;
+    let request = |messages: serde_json::Value| json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "messages": messages});
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        request(json!([{
+            "role": "user",
+            "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA==", "format": "WAV"}}],
+        }])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    for messages in [serde_json::Value::Null, json!(17)] {
+        let (status, json) = post_json(&mut app, "/tokenize", request(messages)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["count"], 6, "{json}");
+    }
+}
+
+/// A Responses `input_audio` part without `format` is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_input_audio_requires_format() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/responses",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA=="}}],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1297,21 +1297,25 @@ class SimpleCPUOffloadScheduler:
         if state is None or gpu_pool is None:
             return
         gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
-        partial_tail = self._find_fa_partial_tail_source(request, block_ids)
-        if (
-            partial_tail is not None
-            # Decode tokens can fill the boundary block, in which case the
-            # positional scan above already selected it. Appending again would
-            # allocate two CPU blocks for one GPU block.
-            and partial_tail not in gpu_ids
-            and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
-        ):
-            gpu_ids.append(partial_tail)
-            if block_meta is not None:
-                # The block's own hashes are registered at completion, so no
-                # capture is needed here; emit the event without a payload, as
-                # the size-mismatch fallback above already does.
-                block_meta.append({})
+        # A fine-grained hit needs the prompt tail of every group that keys
+        # one. There can be several: e.g. under DCP a replicated draft group
+        # sits next to the sharded target group, each with its own block size.
+        for group_idx in self.prefix_cacheable_group_ids:
+            partial_tail = self._find_partial_tail_source(request, block_ids, group_idx)
+            if (
+                partial_tail is not None
+                # Decode tokens can fill the boundary block, in which case the
+                # positional scan above already selected it. Appending again
+                # would allocate two CPU blocks for one GPU block.
+                and partial_tail not in gpu_ids
+                and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
+            ):
+                gpu_ids.append(partial_tail)
+                if block_meta is not None:
+                    # The block's own hashes are registered at completion, so
+                    # no capture is needed here; emit the event without a
+                    # payload, as the size-mismatch fallback above already does.
+                    block_meta.append({})
         if not gpu_ids:
             return
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
@@ -1321,10 +1325,13 @@ class SimpleCPUOffloadScheduler:
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
 
-    def _find_fa_partial_tail_source(
-        self, request: "Request", block_ids: tuple[list[int], ...]
+    def _find_partial_tail_source(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        group_idx: int,
     ) -> int | None:
-        """Locate the full-attention prompt-tail block for a fine-grained hit.
+        """Locate one group's prompt-tail block for a fine-grained hit.
 
         Mirrors `FullAttentionManager._cache_partial_tail_block`: only the
         final prompt hash boundary is eligible, and boundaries that land on a
@@ -1335,10 +1342,18 @@ class SimpleCPUOffloadScheduler:
         no new core hand-off is required. The boundary key is registered at
         completion along with the block's other hashes, so nothing has to be
         captured here.
+
+        Groups that never key a prompt tail are filtered by the registered-key
+        check below. Prefix-cached Mamba tables are not positional; their tail
+        arrives through the boundary-state hand-off instead.
         """
         if not self.cpu_coordinator.enable_partial_hash_hits:
             return None
         assert self._gpu_block_pool is not None
+        manager = self.cpu_coordinator.single_type_managers[group_idx]
+        if not manager.has_positionally_stable_blocks:
+            return None
+        group_block_size = self.group_block_sizes[group_idx]
         boundary_tokens = min(
             get_reusable_prefix_length(
                 request.num_prompt_tokens,
@@ -1349,13 +1364,13 @@ class SimpleCPUOffloadScheduler:
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None
-        if boundary_tokens % self.fa_block_size == 0:
+        if boundary_tokens % group_block_size == 0:
             return None
-        block_idx = boundary_tokens // self.fa_block_size
-        fa_block_ids = block_ids[self.fa_gidx]
-        if block_idx >= len(fa_block_ids):
+        block_idx = boundary_tokens // group_block_size
+        group_block_ids = block_ids[group_idx]
+        if block_idx >= len(group_block_ids):
             return None
-        gpu_block_id = fa_block_ids[block_idx]
+        gpu_block_id = group_block_ids[block_idx]
         gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
         if gpu_block.is_null or gpu_block_id in self._in_flight_store_gpu_blocks:
             return None
@@ -1363,7 +1378,7 @@ class SimpleCPUOffloadScheduler:
         if hash_idx >= len(request.block_hashes):
             return None
         block_hash = make_block_hash_with_group_id(
-            request.block_hashes[hash_idx], self.fa_gidx
+            request.block_hashes[hash_idx], group_idx
         )
         # Only worth copying when the boundary key is actually registered on
         # the source block; completion replays the block's own hashes.

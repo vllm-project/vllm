@@ -528,9 +528,10 @@ def enable_qwen4_exp_low_latency_gemm(
             isinstance(child, LinearBase)
             and type(child.quant_method) is UnquantizedLinearMethod
         )
-        is_head = (
-            isinstance(child, ParallelLMHead)
-            and type(child.quant_method) is UnquantizedEmbeddingMethod
+        # ModelOpt gives an excluded head UnquantizedLinearMethod.
+        is_head = isinstance(child, ParallelLMHead) and type(child.quant_method) in (
+            UnquantizedEmbeddingMethod,
+            UnquantizedLinearMethod,
         )
         if not (is_linear or is_head):
             continue

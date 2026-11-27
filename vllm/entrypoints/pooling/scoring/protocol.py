@@ -181,6 +181,7 @@ class RerankRequest(ScoringRequestMixin):
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default=0, ge=0)
+    return_documents: bool | None = True
     # --8<-- [end:rerank-request-params]
 
 
@@ -194,7 +195,9 @@ class RerankDocument(BaseModel):
 
 class RerankResult(BaseModel):
     index: int
-    document: RerankDocument
+    document: RerankDocument | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     relevance_score: float
 
 
