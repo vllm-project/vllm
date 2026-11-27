@@ -463,6 +463,8 @@ def test_dflash_window_admission_cap_covers_lookahead_slots(
     cap_without_lookahead = DFlashSlidingWindowManager.max_admission_blocks(
         config.replace_params(num_lookahead_tokens=0), 4, max(chunks), 1000
     )
+    assert cap is not None
+    assert cap_without_lookahead is not None
     assert cap_without_lookahead < max_held <= cap
 
 

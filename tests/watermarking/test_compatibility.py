@@ -41,6 +41,7 @@ def _input_processor(
     renderer = MagicMock(spec=BaseRenderer)
     renderer.tokenizer = None
     renderer._executor = None
+    renderer._mm_executor = None
     return InputProcessor(config, renderer)
 
 

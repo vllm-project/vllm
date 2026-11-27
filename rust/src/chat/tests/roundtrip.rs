@@ -590,6 +590,28 @@ impl RoundtripCase {
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
+
+    /// Mistral v11+ `[TOOL_CALLS]name[ARGS]{...}` tool calls with
+    /// `[THINK]`/`[/THINK]` reasoning (tekken v15).
+    fn mistral_large4() -> Self {
+        Self {
+            model_id: "mistralai/Mistral-Large-4-1T-A52B",
+            assistant_stop_suffix: "</s>",
+            tool_call_parser: ParserSelection::Explicit("mistral".to_owned()),
+            reasoning_parser: ParserSelection::Explicit("mistral".to_owned()),
+            // `reasoning_effort` only takes low/medium/high; the model always
+            // thinks.
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_style: JsonStyle::Spaced,
+            sort_json_keys: false,
+            // The v11+ Mistral tool parser builds no tool grammar, so the
+            // schema excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -640,6 +662,7 @@ roundtrip_tests! {
     muse_glimmer => [reasoning_and_content], // Glimmer drops content on tool-call turns in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+    mistral_large4 => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -864,6 +887,11 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            tool_call_parser: case.tool_call_parser.clone(),
+            reasoning_parser: case.reasoning_parser.clone(),
+            // Roundtrips render and parse text only; some cases are multimodal
+            // checkpoints the Rust frontend serves only as text.
+            language_model_only: true,
             ..Default::default()
         },
     )
@@ -1041,8 +1069,6 @@ async fn parse_completion(
             // Pin every tool schema so that builder-backed parsers build an
             // output grammar for replay. The strict level does not affect parsing.
             tool_strict_level: Some(ToolStrictLevel::Parameter),
-            tool_call_parser: &case.tool_call_parser,
-            reasoning_parser: &case.reasoning_parser,
         },
     )?;
     processor.initialize(&prompt_token_ids)?;
@@ -1156,6 +1182,7 @@ fn decoded_completion_stream(
             events.push(DecodedTextEvent::TextDelta {
                 decoded: chunk.delta,
                 sampled: vllm_text::SampledDelta {
+                    timestamp: 0.0,
                     token_ids: chunk.token_ids,
                     logprobs: None,
                     sampling_mask: None,
