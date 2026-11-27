@@ -34,6 +34,8 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base, ConvertWeights
@@ -1258,3 +1260,100 @@ def test_converters_apply_to_renamed_weights():
     up_gate = torch.cat([text.up_proj.weight, text.gate_proj.weight])
     torch.testing.assert_close(up_gate, ff_proj)
     torch.testing.assert_close(text.embed_tokens.weight, torch.cat(wte))
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+@pytest.mark.parametrize("source", ["safetensors", "bin", "memory"])
+def test_lora_is_split_like_converted_weights(source, tmp_path):
+    """A LoRA for a fused checkpoint module (Molmo2's `att_proj` and `ff_proj`) loads
+    into the modules its weight is split into: `lora_B` by rows, with its `lora_A`,
+    rank and scaling (here from `alpha_pattern` and `rank_pattern`). A renamed module's
+    LoRA loads as before."""
+    with torch.device("meta"):
+        stub = nn.Module()
+        stub.config = PreTrainedConfig()
+        stub.model = nn.Module()
+        stub.model.base_model_prefix = "model"
+        stub.model._keys_to_ignore_on_load_unexpected = None
+        stub.model.language_model = text = nn.Module()
+        sizes = {"q": 4, "k": 2, "v": 2, "o": 4, "up": 3, "gate": 3}
+        for name, out in sizes.items():
+            setattr(text, f"{name}_proj", nn.Linear(4, out, bias=False))
+    split = WeightConverter(
+        source_patterns="att_proj",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
+    )
+    for converter in (split, chunk):
+        converter.scope_prefix, converter.base_model_prefix = "language_model", "model"
+    renamings = [
+        WeightRenaming(r"transformer\.", "language_model."),
+        WeightRenaming(r"attn_out", "o_proj"),
+    ]
+    stub._weight_conversions = lambda: [*renamings, split, chunk]
+    stub._maybe_apply_model_mapping = lambda: None
+    Base._create_hf_to_vllm_mapper(stub)
+    lora = {
+        "att_proj": (torch.rand(2, 4), torch.rand(8, 2)),
+        "attn_out": (torch.rand(2, 4), torch.rand(4, 2)),
+        "ff_proj": (torch.rand(3, 4), torch.rand(6, 3)),
+    }
+    tensors = {}
+    for module, (lora_a, lora_b) in lora.items():
+        prefix = f"base_model.model.model.transformer.{module}"
+        tensors[f"{prefix}.lora_A.weight"] = lora_a
+        tensors[f"{prefix}.lora_B.weight"] = lora_b
+    peft_helper = PEFTHelper.from_dict(
+        {
+            "r": 2,
+            "lora_alpha": 2,
+            "target_modules": list(lora),
+            "alpha_pattern": {"att_proj": 4},
+            "rank_pattern": {"ff_proj": 3},
+        }
+    )
+    kwargs = dict(
+        peft_helper=peft_helper,
+        device="cpu",
+        weights_mapper=stub.hf_to_vllm_mapper.get_rename_mapper(),
+        split_rows=partial(Base.lora_split_rows, stub),
+    )
+    expected = {"q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "gate_proj"}
+
+    if source == "safetensors":
+        save_file(tensors, tmp_path / "adapter_model.safetensors")
+    elif source == "bin":
+        torch.save(tensors, tmp_path / "adapter_model.bin")
+    if source != "memory":
+        lora_model = LoRAModel.from_local_checkpoint(
+            str(tmp_path), expected, lora_model_id=1, **kwargs
+        )
+    else:
+        lora_model = LoRAModel.from_lora_tensors(
+            1, tensors, expected_lora_modules=expected, **kwargs
+        )
+
+    loras = {
+        name.removeprefix("model.language_model."): weights
+        for name, weights in lora_model.loras.items()
+    }
+    assert loras.keys() == expected
+    for module, targets, rank, scaling in [
+        ("att_proj", ["q_proj", "k_proj", "v_proj"], 2, 2.0),
+        ("attn_out", ["o_proj"], 2, 1.0),
+        ("ff_proj", ["up_proj", "gate_proj"], 3, 2 / 3),
+    ]:
+        lora_a, lora_b = lora[module]
+        for target in targets:
+            assert loras[target].rank == rank
+            assert loras[target].scaling == pytest.approx(scaling)
+            torch.testing.assert_close(loras[target].lora_a, lora_a, rtol=0, atol=0)
+        pieces = torch.cat([loras[target].lora_b for target in targets])
+        torch.testing.assert_close(pieces, lora_b, rtol=0, atol=0)

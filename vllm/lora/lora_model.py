@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import safetensors
@@ -20,6 +20,8 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+SplitRows = Callable[[str], dict[str, int] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +128,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None,
         skip_prefixes: list[str] | None,
         unsupported_lora_modules: set[str] | None,
+        split_rows: SplitRows | None = None,
     ) -> None:
         unexpected_modules: list[str] = []
         for lora_module in module_names:
@@ -139,21 +142,24 @@ class LoRAModel:
             if skip_prefixes and cls._should_skip_module(lora_module, skip_prefixes):
                 continue
             module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-            base_name = module_name.rsplit(".", 1)[-1]
-            # Case for expert lora weights
-            if ".experts" in module_name:
-                expert_idx = module_name.find(".experts")
-                expert_suffix = module_name[expert_idx + 1 :]
-                if expert_suffix not in expected_lora_modules:
-                    unexpected_modules.append(module_name)
+            # A LoRA of a module the model splits is checked as its pieces
+            rows = split_rows(module_name) if split_rows else None
+            for name in rows or [module_name]:
+                base_name = name.rsplit(".", 1)[-1]
+                # Case for expert lora weights
+                if ".experts" in name:
+                    expert_idx = name.find(".experts")
+                    expert_suffix = name[expert_idx + 1 :]
+                    if expert_suffix not in expected_lora_modules:
+                        unexpected_modules.append(name)
 
-            elif base_name not in expected_lora_modules and base_name not in (
-                peft_helper.modules_to_save or ()
-            ):
-                unexpected_modules.append(module_name)
+                elif base_name not in expected_lora_modules and base_name not in (
+                    peft_helper.modules_to_save or ()
+                ):
+                    unexpected_modules.append(name)
 
-            elif module_name in (unsupported_lora_modules or ()):
-                unexpected_modules.append(f"{module_name} (not a LoRA layer)")
+                elif name in (unsupported_lora_modules or ()):
+                    unexpected_modules.append(f"{name} (not a LoRA layer)")
 
         if unexpected_modules:
             raise ValueError(
@@ -178,6 +184,7 @@ class LoRAModel:
         expected_lora_modules: set[str] | None = None,
         unsupported_lora_modules: set[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        split_rows: SplitRows | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         if expected_lora_modules is not None:
@@ -188,6 +195,7 @@ class LoRAModel:
                 weights_mapper,
                 skip_prefixes,
                 unsupported_lora_modules,
+                split_rows,
             )
         pin_memory = str(device) == "cpu" and PIN_MEMORY
 
@@ -239,6 +247,23 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
+        # Split the LoRA of a module the model splits like its weight: `lora_B` by
+        # rows, with the same `lora_A`, rank and scaling
+        if split_rows is not None:
+            for module_name in list(loras):
+                if rows := split_rows(module_name):
+                    lora = loras.pop(module_name)
+                    lora_bs = lora.lora_b.split(list(rows.values()))
+                    for target, lora_b in zip(rows, lora_bs):
+                        loras[target] = LoRALayerWeights(
+                            target,
+                            lora.rank,
+                            lora.lora_alpha,
+                            lora.lora_a,
+                            lora_b,
+                            lora.scaling,
+                        )
+
         modules_to_save = {}
         for module_name, parameters in full_parameters.items():
             weight = parameters.get("weight")
@@ -272,6 +297,7 @@ class LoRAModel:
         skip_prefixes: list[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
         unsupported_lora_modules: set[str] | None = None,
+        split_rows: SplitRows | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -299,6 +325,8 @@ class LoRAModel:
             unsupported_lora_modules: Full names of model layers that match
                 expected_lora_modules but are not wrapped by LoRA, such as
                 BERT's pooler.dense. LoRA weights on them are unexpected.
+            split_rows: Model hook returning the modules a LoRA of a module splits
+                into, with their rows, if the model splits that module's weight.
 
         Returns:
             Loaded LoRA Model.
@@ -326,6 +354,7 @@ class LoRAModel:
                     weights_mapper,
                     skip_prefixes,
                     unsupported_lora_modules,
+                    split_rows,
                 )
                 for module in f.keys():  # noqa
                     if moe_ep_spec is not None and _is_remote_expert_key(
@@ -347,6 +376,7 @@ class LoRAModel:
                 weights_mapper,
                 skip_prefixes,
                 unsupported_lora_modules,
+                split_rows,
             )
             if moe_ep_spec is not None:
                 # `.bin`/`.pt` adapters can't be lazy-loaded, but pruning
@@ -369,4 +399,5 @@ class LoRAModel:
             model_vocab_size=model_vocab_size,
             weights_mapper=weights_mapper,
             skip_prefixes=skip_prefixes,
+            split_rows=split_rows,
         )

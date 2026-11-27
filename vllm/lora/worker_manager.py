@@ -166,6 +166,7 @@ class WorkerLoRAManager:
                     expected_lora_modules=expected_lora_modules,
                     moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
                     unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
+                    split_rows=model.lora_split_rows,
                 )
             else:
                 lora = self._lora_model_cls.from_local_checkpoint(
@@ -180,6 +181,7 @@ class WorkerLoRAManager:
                     skip_prefixes=lora_skip_prefixes,
                     moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
                     unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
+                    split_rows=model.lora_split_rows,
                 )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the

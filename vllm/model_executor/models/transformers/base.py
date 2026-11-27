@@ -1163,6 +1163,18 @@ class Base(
         mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
         return loader.load_weights(weights, mapper=mapper)
 
+    def lora_split_rows(self, module_name: str) -> dict[str, int] | None:
+        """The modules a converter splits `module_name`'s weight into (e.g. Molmo2's
+        fused `att_proj`), with their rows. The LoRA rename mapper has already applied
+        the renamings to `module_name`, so only the converters are matched."""
+        convert = self._transformers_conversions
+        first, source = rename_source_key(
+            f"{module_name}.weight", [], convert.converters
+        )
+        if source is None or (rows := convert.target_rows(first, source)) is None:
+            return None
+        return {name.removesuffix(".weight"): n for name, n in rows.items()}
+
     def _drop_ignored_unexpected(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
