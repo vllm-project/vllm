@@ -334,6 +334,10 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Prefill work still to compute for this request, while it prefills.
+    # Appended last for `array_like` compatibility.
+    remaining_prefill_tokens: int | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

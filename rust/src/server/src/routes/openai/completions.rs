@@ -477,6 +477,7 @@ async fn completion_chunk_stream(
                     pending_prompt_chunk = Some(Ok(chunk));
                 }
             }
+            Ok(DecodedTextEvent::PrefillProgress(_)) => {}
             Ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled:

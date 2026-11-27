@@ -82,6 +82,16 @@ impl OutputSender {
     /// delivered immediately, the latter together with any held-back outputs.
     pub fn send(&mut self, output: EngineCoreStreamOutput) {
         let finished = output.finished();
+        // Holding a progress-only output back would keep the worker's view of
+        // its remaining work from the consumer.
+        let progress_only = output.output.remaining_prefill_tokens.is_some()
+            && output.output.new_token_ids.is_empty();
+        // Progress does not take the first-output credit.
+        if progress_only {
+            self.flush();
+            self.deliver(Delivery::One(output));
+            return;
+        }
         if self.buffered.is_empty()
             && (finished || !self.delivered_first || self.stream_interval == 1)
         {
@@ -172,6 +182,13 @@ mod tests {
         output_channel(NonZeroU32::new(stream_interval).unwrap())
     }
 
+    /// An output that carries prefill progress and nothing else.
+    fn progress(remaining: u64) -> EngineCoreStreamOutput {
+        let mut output = output(&[]);
+        output.output.remaining_prefill_tokens = Some(remaining);
+        output
+    }
+
     /// Render a delivery as the token ids of its outputs.
     fn token_ids(delivery: Delivery) -> Vec<Vec<u32>> {
         delivery.into_iter().map(|output| output.output.new_token_ids).collect()
@@ -188,6 +205,24 @@ mod tests {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return deliveries,
             }
         }
+    }
+
+    #[test]
+    fn progress_only_output_is_not_held_back() {
+        let (mut sender, mut receiver) = channel(8);
+        sender.send(output(&[1]));
+        sender.send(progress(500));
+        // The progress frame arrives now instead of with the eighth token.
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![1]], vec![vec![]]]);
+    }
+
+    #[test]
+    fn progress_before_the_first_token_does_not_delay_it() {
+        let (mut sender, mut receiver) = channel(8);
+        sender.send(progress(500));
+        sender.send(output(&[1]));
+        // Progress first, then the first token on its own, not eight tokens later.
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![]], vec![vec![1]]]);
     }
 
     #[test]

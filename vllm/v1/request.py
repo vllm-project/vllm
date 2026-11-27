@@ -87,6 +87,10 @@ class Request:
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
+        # Prefill progress: remaining tokens at the last report, and the
+        # interval between reports. ``None`` means it has not reported yet.
+        self.prefill_remaining_token_num: int | None = None
+        self.prefill_progress_report_interval = 0
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params

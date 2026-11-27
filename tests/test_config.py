@@ -4953,6 +4953,10 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_prefill_progress_is_off_by_default():
+    assert SchedulerConfig.default_factory().enable_prefill_progress is False
+
+
 def test_eplb_num_redundant_experts_default():
     """Test that num_redundant_experts defaults to None and can be set."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig

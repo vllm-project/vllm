@@ -807,6 +807,16 @@ class OutputProcessor:
                     reqs_to_abort.append(req_id)
                 continue
 
+            # A progress-only frame has no token, pooling or terminal event, so
+            # it must not count as one.
+            if (
+                engine_core_output.remaining_prefill_tokens is not None
+                and not engine_core_output.new_token_ids
+                and engine_core_output.pooling_output is None
+                and engine_core_output.finish_reason is None
+            ):
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats

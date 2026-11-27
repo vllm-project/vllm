@@ -2213,6 +2213,136 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_prefill_progress_reports_nothing_when_disabled():
+    """A scheduler created with reporting off emits no progress."""
+    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+    )
+    assert [
+        entry
+        for batch in outputs.values()
+        for entry in batch.outputs
+        if entry.remaining_prefill_tokens is not None
+    ] == []
+
+
+def test_prefill_progress_reports_chunks_and_ends_with_zero():
+    """Report each scheduled chunk of prefill work, ending with a final zero."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    def step() -> list[int]:
+        outputs = scheduler.update_from_output(
+            scheduler.schedule(),
+            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+        )
+        return [
+            entry.remaining_prefill_tokens
+            for batch in outputs.values()
+            for entry in batch.outputs
+            if entry.remaining_prefill_tokens is not None
+        ]
+
+    assert [step() for _ in range(5)] == [[48], [32], [16], [0], []]
+
+    # The step that finishes a prefill samples the first token, so the report
+    # rides on that output.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=4)[0]
+    scheduler.add_request(request)
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[7]]),
+    )
+    merged = [
+        entry
+        for batch in outputs.values()
+        for entry in batch.outputs
+        if entry.remaining_prefill_tokens is not None
+    ]
+    assert len(merged) == 1
+    assert merged[0].new_token_ids == [7]
+    assert merged[0].remaining_prefill_tokens == 0
+
+    # A drop smaller than the throttle still reports when it reaches zero.
+    request.prefill_remaining_token_num = 2
+    request.prefill_progress_report_interval = 3
+    request.num_computed_tokens = request.num_tokens
+    zero = scheduler._report_prefill_progress(request)
+    assert zero == 0
+
+
+def test_preemption_reports_the_work_it_requeues_and_yields_to_a_newer_one():
+    """A preemption queues the discarded work; a resuming report replaces it."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output, ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]])
+    )
+
+    def reported(outputs) -> list[int]:
+        return [
+            entry.remaining_prefill_tokens
+            for batch in outputs.values()
+            for entry in batch.outputs
+            if entry.remaining_prefill_tokens is not None
+        ]
+
+    def preempt() -> None:
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+
+    # A flush with nothing scheduled still reports the work that came back.
+    preempt()
+    output.num_scheduled_tokens.clear()
+    outputs = scheduler.update_from_output(
+        output, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
+    )
+    assert reported(outputs) == [request.num_tokens]
+
+    # Let it run so the next preemption has a running request, then resume it
+    # before the queued snapshot flushes; its own report wins.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+    )
+    preempt()
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+    )
+    assert reported(outputs) == [48]
+
+    # A request that already produced a token has no prefill work to report.
+    request.num_computed_tokens = request.num_tokens
+    request.append_output_token_ids([7])
+    preempt()
+    output = scheduler.schedule()
+    output.num_scheduled_tokens.clear()
+    assert (
+        reported(
+            scheduler.update_from_output(
+                output, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
+            )
+        )
+        == []
+    )
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
@@ -5583,6 +5713,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.num_computed_tokens = request.num_tokens
 
     scheduler.perf_metrics = None
+    scheduler._pending_prefill_progress = {}
+    scheduler.scheduler_config = Mock(enable_prefill_progress=False)
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()

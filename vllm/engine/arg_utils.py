@@ -597,6 +597,7 @@ class EngineArgs:
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
     pp_microbatch_min_tokens: int = SchedulerConfig.pp_microbatch_min_tokens
+    enable_prefill_progress: bool = SchedulerConfig.enable_prefill_progress
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
@@ -1790,6 +1791,10 @@ class EngineArgs:
             "--pp-microbatch-min-tokens",
             **scheduler_kwargs["pp_microbatch_min_tokens"],
         )
+        scheduler_group.add_argument(
+            "--enable-prefill-progress",
+            **scheduler_kwargs["enable_prefill_progress"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -2713,6 +2718,7 @@ class EngineArgs:
                 self.long_prefill_token_threshold_adaptive
             ),
             pp_microbatch_min_tokens=self.pp_microbatch_min_tokens,
+            enable_prefill_progress=self.enable_prefill_progress,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

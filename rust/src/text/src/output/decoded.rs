@@ -162,6 +162,7 @@ pub enum DecodedTextEvent {
         /// requested.
         prompt_token_id_logprobs: Option<WireNdArray>,
     },
+    PrefillProgress(u64),
     /// Decoded text and sampled metadata observed during one output update.
     ///
     /// `decoded` follows the decoder clock. It may be empty while tokens remain
@@ -236,6 +237,16 @@ pub async fn decoded_text_event_stream(
     while let Some(next) = raw_stream.next().await {
         let mut output = next?;
         prompt_cache_usage.merge(output.prompt_cache_usage);
+
+        if let Some(remaining) = output.remaining_prefill_tokens.take() {
+            y.yield_ok(DecodedTextEvent::PrefillProgress(remaining)).await;
+            if output.prompt_info.is_none()
+                && output.token_ids.is_empty()
+                && output.finish_reason.is_none()
+            {
+                continue;
+            }
+        }
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -517,6 +528,30 @@ mod tests {
             .collect_output()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_ordinary_output_remains_a_stream_event() {
+        let first = GenerateOutput::for_test(Some(Arc::from([1, 2])), vec![], None);
+        let terminal =
+            GenerateOutput::for_test(None, ascii_tokens("a"), Some(FinishReason::Length));
+        let events = decoded_text_event_stream(
+            "request".into(),
+            Arc::new(TestTokenizer::new()),
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let kinds: Vec<bool> = events
+            .iter()
+            .map(|event| matches!(event, DecodedTextEvent::TextDelta { .. }))
+            .collect();
+        assert_eq!(kinds, vec![false, true, true]);
     }
 
     /// Convert ASCII string to token IDs (one byte per token).

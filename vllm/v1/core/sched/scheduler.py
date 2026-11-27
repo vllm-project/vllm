@@ -99,6 +99,9 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Reports per prefill; the spacing is fixed by the work left at the first one.
+PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
+
 
 class Scheduler(SchedulerInterface):
     _encoder_cache_epoch: int = 0
@@ -516,6 +519,9 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
+        # Pending reports by request id, as (client index, remaining prefill
+        # tokens); a newer report replaces an older one.
+        self._pending_prefill_progress: dict[str, tuple[int, int]] = {}
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
 
@@ -1909,6 +1915,18 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
+        # Report the requeued work now, before the request runs again.
+        if (
+            self.scheduler_config.enable_prefill_progress
+            and request.prefill_progress_report_interval > 0
+            and request.num_output_tokens == 0
+        ):
+            request.prefill_remaining_token_num = None
+            request.prefill_progress_report_interval = 0
+            self._pending_prefill_progress[request.request_id] = (
+                request.client_index,
+                request.num_tokens,
+            )
         if self.collect_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -2389,6 +2407,31 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _report_prefill_progress(self, request: Request) -> int | None:
+        """This step's report, or None when it is not due yet."""
+        if request.prefill_progress_report_interval == 0:
+            # Fixed interval from the total prompt length; a coarse report is
+            # enough for routing.
+            request.prefill_progress_report_interval = max(
+                1,
+                -(-request.num_tokens // PREFILL_PROGRESS_UPDATES_PER_REQUEST),
+            )
+        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        remaining = max(0, request.num_tokens - computed)
+        if remaining <= 0:
+            # Zero is a state change, never throttled. Keep the interval so a
+            # later preemption still knows this request was reporting.
+            request.prefill_remaining_token_num = None
+            return 0
+        last = request.prefill_remaining_token_num
+        if (
+            last is not None
+            and 0 <= last - remaining < request.prefill_progress_report_interval
+        ):
+            return None
+        request.prefill_remaining_token_num = remaining
+        return remaining
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2429,6 +2472,9 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         # Updates dropped on arrival precede outputs of any later update.
         self._emit_dropped_streaming_updates(outputs)
+        pending_progress = self._pending_prefill_progress
+        self._pending_prefill_progress = {}
+
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2473,6 +2519,18 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
+                # In-flight is settled, so this step's tokens count as done.
+                if (
+                    self.scheduler_config.enable_prefill_progress
+                    and request.num_output_tokens == 0
+                    and not request.is_finished()
+                ):
+                    progress = self._report_prefill_progress(request)
+                    if progress is not None:
+                        pending_progress[request.request_id] = (
+                            request.client_index,
+                            progress,
+                        )
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2649,6 +2707,10 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if request.prefill_remaining_token_num is not None:
+                        request.prefill_remaining_token_num = None
+                        # Ride on the terminal output when there is one.
+                        pending_progress[req_id] = (request.client_index, 0)
                     if (
                         prefill_stats is not None
                         and kv_transfer_params is not None
@@ -2683,9 +2745,11 @@ class Scheduler(SchedulerInterface):
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
+                attached = pending_progress.pop(req_id, None)
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
+                        remaining_prefill_tokens=attached[1] if attached else None,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2844,6 +2908,19 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
+
+        for request_id, (client_index, update) in pending_progress.items():
+            if request_id not in self.requests:
+                continue
+            if (eco := engine_core_outputs.get(client_index)) is None:
+                engine_core_outputs[client_index] = eco = EngineCoreOutputs()
+            eco.outputs.append(
+                EngineCoreOutput(
+                    request_id=request_id,
+                    new_token_ids=[],
+                    remaining_prefill_tokens=update,
+                )
+            )
 
         if (
             stats := self.make_stats(

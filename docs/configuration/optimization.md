@@ -117,6 +117,10 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+## Prefill Progress
+
+`--enable-prefill-progress` makes the engine report, per request, how much prefill work it has left, so a router can price a running request by what remains instead of by what it estimated at admission. It is off by default and requires the Rust frontend: the value travels on the request's gRPC stream, which the Python OpenAI server does not serve.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
