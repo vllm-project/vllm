@@ -100,7 +100,9 @@ else
   docker buildx create --name vllm-cpu-builder --driver docker-container --driver-opt network=host --use
   docker buildx inspect --bootstrap
 
-  # build and push
+  # build and push. zstd-3 as for the CUDA and ROCm images; pulling it needs
+  # Docker >= 23. force-compression re-encodes layers from a gzip cache.
+  ZSTD="compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true"
   docker buildx build --file docker/Dockerfile.cpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
@@ -110,8 +112,8 @@ else
     --tag "$IMAGE" \
     --target vllm-test \
     "${CACHE_FROM_ARGS[@]}" \
-    --cache-to "type=registry,ref=${CACHE_TO},mode=max" \
-    --push \
+    --cache-to "type=registry,ref=${CACHE_TO},mode=max,${ZSTD}" \
+    --output "type=registry,${ZSTD}" \
     --progress plain .
 fi
 
