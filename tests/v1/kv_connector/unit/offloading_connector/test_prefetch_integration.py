@@ -255,6 +255,105 @@ def test_only_the_served_prefix_is_prefetched(request_runner):
     assert free_blocks(runner) == before
 
 
+def warm_and_keep(runner, calls):
+    """Fill blocks, store them to the mocked tier, keep the GPU copies.
+
+    This is a served prefix between requests: the tier holds it and the GPU
+    prefix cache still serves it, until the pool reuses those blocks.
+    """
+    stored = []
+
+    def prepare_store(keys, req_context, trigger):
+        stored.extend(keys)
+        return generate_store_output(keys)
+
+    runner.manager.prepare_store.side_effect = prepare_store
+    runner.new_request(token_ids=WARM_TOKENS, req_id="warm")
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=tuple(range(NUM_WARM_BLOCKS)),
+    )
+    assert len(stored) == NUM_WARM_BLOCKS
+    assert calls == []
+    return [get_offload_block_hash(key) for key in stored]
+
+
+def resident(runner, hashes):
+    """Which hinted hashes the GPU prefix cache serves right now."""
+    pool = runner.scheduler.kv_cache_manager.block_pool
+    return [
+        pool.get_cached_block(block_hash, [0]) is not None for block_hash in hashes
+    ]
+
+
+def evict_head(runner, hashes):
+    """Take the first block out of the cache, as an event subscriber can."""
+    pool = runner.scheduler.kv_cache_manager.block_pool
+    head = pool.get_cached_block(hashes[0], [0])[0]
+    pool.evict_blocks({head.block_id})
+
+
+def evict_tail(runner, hashes):
+    """Let the pool's own reuse order take the last hashed block.
+
+    The pool hands out plain free blocks first and, within a prefix, the end
+    before the start, so a prefix loses its tail before its head.
+    """
+    pool = runner.scheduler.kv_cache_manager.block_pool
+    taken: list = []
+    while pool.get_cached_block(hashes[-1], [0]) is not None:
+        taken.extend(pool.get_new_blocks(1))
+        assert len(taken) < NUM_BLOCKS, "the pool ran out before reusing the block"
+    pool.free_blocks(taken)
+
+
+def test_hint_for_a_fully_resident_prefix_loads_nothing(request_runner):
+    runner = make_runner(request_runner)
+    calls = record_loads(runner)
+    hashes = warm_and_keep(runner, calls)
+    assert resident(runner, hashes) == [True] * NUM_WARM_BLOCKS
+    before = free_blocks(runner)
+    tier_with(runner, hashes)
+
+    run_carrier(runner, hashes)
+
+    assert calls == [], "there is no block for a load to land in"
+    assert runner.connector_scheduler._prefetch_jobs == {}
+    assert runner.completed_loads == []
+    assert free_blocks(runner) == before
+
+
+@pytest.mark.parametrize("evicted", ["head", "tail"])
+def test_hint_for_a_partly_resident_prefix_loads_it_whole(request_runner, evicted):
+    """One destination block per source chunk, whatever is already cached.
+
+    A load is keyed per chunk and lands block for block. Reserving only the
+    blocks the GPU cache lacked left the job with three chunk keys and one
+    block: the worker's count check rejects that, and with several blocks per
+    chunk the counts can agree while the blocks are filled out of order.
+    """
+    runner = make_runner(request_runner)
+    calls = record_loads(runner)
+    hashes = warm_and_keep(runner, calls)
+    {"head": evict_head, "tail": evict_tail}[evicted](runner, hashes)
+    coverage = [True] * NUM_WARM_BLOCKS
+    coverage[0 if evicted == "head" else -1] = False
+    assert resident(runner, hashes) == coverage
+    before = free_blocks(runner)
+    tier_with(runner, hashes)
+
+    run_carrier(runner, hashes)
+
+    assert calls == [(PREFETCH_REQ_ID, NUM_WARM_BLOCKS)]
+    assert len(runner.completed_loads) == 1
+    loaded = {
+        block for transfer in runner.completed_loads for block in transfer.gpu_blocks
+    }
+    assert len(loaded) == NUM_WARM_BLOCKS
+    assert resident(runner, hashes) == [True] * NUM_WARM_BLOCKS
+    assert free_blocks(runner) == before
+
+
 def test_failed_prefetch_returns_blocks_without_publishing(request_runner):
     runner = make_runner(request_runner)
     calls = record_loads(runner)

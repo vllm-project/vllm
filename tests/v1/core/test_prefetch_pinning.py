@@ -69,12 +69,35 @@ def test_reuse_watcher_fires_when_a_released_block_is_handed_out():
     assert seen
 
 
-def test_covered_hashes_cost_nothing():
+def test_a_fully_resident_plan_reserves_nothing():
     pool = make_pool()
     sets = pool.pin_blocks_by_hash(HASHES[:2], [0], 16)
     assert sets
     pool.publish_pinned_hashes(sets[0])
     assert pool.pin_blocks_by_hash(HASHES[:2], [0], 16) == []
+
+
+def test_a_partly_resident_plan_is_reserved_in_full():
+    """One block per hash of the plan, cached or not.
+
+    The load that fills a reservation is keyed per chunk and lands block for
+    block, so its source and destination have to be the same length.
+    Reserving only the missing hashes gave it more chunks than blocks.
+    """
+    pool = make_pool()
+    sets = pool.pin_blocks_by_hash(HASHES[:3], [0], 16)
+    assert sets
+    pool.publish_pinned_hashes(sets[0])
+    pool.release_pinned(sets[0])
+    pool.evict_blocks({sets[0].blocks[0].block_id})
+    assert pool.get_cached_block(HASHES[0], [0]) is None
+    assert pool.get_cached_block(HASHES[2], [0]) is not None
+
+    again = pool.pin_blocks_by_hash(HASHES[:3], [0], 16)
+
+    assert again is not None
+    assert again[0].block_hashes == HASHES[:3]
+    assert len(again[0].blocks) == 3
 
 
 def test_reservation_is_declined_over_the_fraction_limit():

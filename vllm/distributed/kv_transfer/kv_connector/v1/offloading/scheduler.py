@@ -1686,6 +1686,11 @@ class OffloadingConnectorScheduler:
                     len(plan.block_hashes) * len(group_ids),
                 )
                 continue
+            if not pinned:
+                # The GPU cache already serves every hash. A load would still
+                # carry the chunk keys, with no block left for them to land in.
+                logger.debug("Prefetch skipped: the prefix is already resident")
+                continue
             keys = tuple(
                 key for group_id in group_ids for key in plan.keys_by_group[group_id]
             )

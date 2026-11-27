@@ -779,9 +779,17 @@ class BlockPool:
                 reservation may take, so a prefetch cannot starve admissions.
 
         Returns:
-            One set per group, or None when the pool declines the reservation.
-            Hashes that every group already serves cost nothing and are not
-            part of any returned set.
+            One set per group, covering every hash. An empty list when
+            every group already serves every hash, or None when the pool
+            declines the reservation.
+
+        A plan the cache only partly serves is reserved in full. The load that
+        fills a reservation is keyed per chunk and lands block for block, so
+        it needs one block per hash of the plan: reserving only what is
+        missing leaves it with more chunks than blocks, and where those
+        counts happen to agree, fills the wrong blocks. What the cache
+        already serves is loaded again, which costs bandwidth and nothing
+        else: a hit takes whichever copy is listed first.
         """
         if self.enable_kv_cache_events:
             # A reservation cannot be described on the event stream: BlockStored
@@ -796,16 +804,13 @@ class BlockPool:
         wanted = list(dict.fromkeys(block_hashes))
         if not wanted:
             return []
-        covered = {
-            block_hash
+        if all(
+            self.get_cached_block(block_hash, group_ids) is not None
             for block_hash in wanted
-            if self.get_cached_block(block_hash, group_ids) is not None
-        }
-        missing = [h for h in wanted if h not in covered]
-        if not missing:
+        ):
             return []
 
-        needed = len(missing) * len(group_ids)
+        needed = len(wanted) * len(group_ids)
         limit = int(self.get_num_free_blocks() * max_fraction)
         if needed > limit:
             logger.debug(
@@ -818,8 +823,8 @@ class BlockPool:
         return [
             PinnedBlockSet(
                 kv_cache_group_id=group_id,
-                block_hashes=list(missing),
-                blocks=self.get_new_blocks(len(missing)),
+                block_hashes=list(wanted),
+                blocks=self.get_new_blocks(len(wanted)),
                 block_size=block_size,
             )
             for group_id in group_ids
