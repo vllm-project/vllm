@@ -52,7 +52,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1170;gfx1171;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -475,7 +475,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/sampler.cu"
     "csrc/attention/dsa/topk/top_k_per_row.cu"
     "csrc/attention/dsa/topk/topk.cu"
-    "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
     "csrc/custom_all_gather_reduce_scatter.cu"
@@ -487,6 +486,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+    # CUDA-only: the tanh.approx inline PTX does not hipify.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/mamba/gdn_prefill_conv.cu")
+    # The f32x2 path needs an sm_103a image (see GDN_HAS_F32X2).
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/mamba/gdn_prefill_conv.cu"
+        CUDA_ARCHS "10.3a")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
@@ -794,6 +803,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
+  endif()
+
+  # HY V4 iHC boundary (mma.sync BF16). Requires SM90+.
+  cuda_archs_sm90plus(HY_V4_IHC_ARCHS "${CUDA_ARCHS}")
+  if(HY_V4_IHC_ARCHS)
+    set(HY_V4_IHC_SRCS "csrc/hy_v4_ihc_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${HY_V4_IHC_SRCS}"
+      CUDA_ARCHS "${HY_V4_IHC_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${HY_V4_IHC_SRCS}")
+    message(STATUS "Building hy_v4_ihc_boundary for archs: ${HY_V4_IHC_ARCHS}")
+  else()
+    message(STATUS "Not building hy_v4_ihc_boundary as no compatible archs "
+                   "found (requires SM90+).")
   endif()
 
   #
@@ -1148,7 +1171,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_GDN_DECODE_ARCHS)
     set(FUSED_GDN_DECODE_SRC
-      "csrc/gdn/fused_gdn_decode_kernel.cu")
+      "csrc/gdn/fused_gdn_decode_kernel.cu"
+      "csrc/gdn/fused_gdn_decode_16bit_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_GDN_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")
@@ -1659,14 +1683,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
   # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
-  # with extern template keeping the device code in the five units.
+  # with extern template keeping the device code in the per-N_in units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"
     "csrc/rocm/skinny_gemms_int4_n2.cu"
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
   # Both families are built into _rocm_C_skinny below.
   list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 

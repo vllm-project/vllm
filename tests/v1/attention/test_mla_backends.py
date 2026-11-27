@@ -13,9 +13,8 @@ from types import MethodType, SimpleNamespace
 from typing import Any, Literal
 
 import pytest
+import regex as re
 import torch
-from torch.autograd import DeviceType
-from torch.profiler import ProfilerActivity, profile
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -278,6 +277,48 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         assert spec.page_size_bytes == 64 * row_bytes
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "message"),
+    [
+        ("fp8", "kv_cache_dtype=fp8 (served as fp8_ds_mla)."),
+        ("fp8_e4m3", "kv_cache_dtype=fp8_e4m3 (served as fp8_ds_mla)."),
+        ("fp8_ds_mla", "kv_cache_dtype=fp8_ds_mla."),
+        ("nvfp4_ds_mla", "kv_cache_dtype=nvfp4_ds_mla."),
+    ],
+)
+def test_sliding_window_mla_rejects_ds_mla_kv_cache(
+    dist_init, default_vllm_config, kv_cache_dtype: str, message: str
+):
+    """Sliding-window layers that have not opted in must not run a DS-MLA cache,
+    including fp8 aliases a sparse backend would serve as fp8_ds_mla; the shared
+    cache config must stay as the user set it."""
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+
+    num_heads, nope, rope, v_dim, kv_lora_rank = 8, 128, 64, 128, 512
+    cache_config = CacheConfig(cache_dtype=kv_cache_dtype)
+    kv_b_proj = ColumnParallelLinear(
+        kv_lora_rank, num_heads * (nope + v_dim), bias=False
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        MLAAttention(
+            num_heads=num_heads,
+            scale=1.0,
+            qk_nope_head_dim=nope,
+            qk_rope_head_dim=rope,
+            v_head_dim=v_dim,
+            q_lora_rank=512,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=cache_config,
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            sliding_window=512,
+        )
+    assert cache_config.cache_dtype == kv_cache_dtype
+
+
 @pytest.mark.cpu_test
 def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
     context_lens_cpu = torch.tensor([65, 96], dtype=torch.int32)
@@ -423,6 +464,8 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
 ):
     """_v_up_proj runs AITER's Triton bf16 BMM exactly for shapes AITER has a
     tuned config for, and matches the torch.bmm path it replaces."""
+    import triton
+
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx950
 
@@ -455,6 +498,15 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
         num_tokens, num_heads * kv_lora_rank, dtype=torch.bfloat16, device="cuda"
     )
 
+    # torch.profiler on ROCm can drop kernel records that arrive after the
+    # session's flush (ROCm/rocm-systems#14378), so record Triton launches.
+    launched: list[str] = []
+    monkeypatch.setattr(
+        triton.knobs.runtime,
+        "launch_enter_hook",
+        lambda metadata: launched.append(metadata.get()["name"]),
+    )
+
     outs, kernels = {}, {}
     for use_triton in (False, True):
         layer.is_aiter_triton_bf16_bmm_enabled = use_triton
@@ -464,12 +516,10 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
             dtype=torch.bfloat16,
             device="cuda",
         )
-        with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            layer._v_up_proj(x, out)
-            torch.accelerator.synchronize()
-        kernels[use_triton] = [
-            e.name for e in prof.events() if e.device_type == DeviceType.CUDA
-        ]
+        launched.clear()
+        layer._v_up_proj(x, out)
+        torch.accelerator.synchronize()
+        kernels[use_triton] = list(launched)
         outs[use_triton] = out
 
     ran_triton = any("batched_gemm_bf16" in k for k in kernels[True])

@@ -27,9 +27,12 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers.embed_utils import (
+from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
+from vllm.multimodal.media.video import VideoEmbeddingMediaIO
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.utils.sparse_utils import (
     _MAX_EMBED_ERROR_REASON_CHARS,
-    safe_load_prompt_embeds,
+    load_torch_payload,
 )
 
 
@@ -121,6 +124,25 @@ def test_unreadable_prompt_embeds_payload_is_a_client_error(model_config, payloa
     assert int(create_error_response(excinfo.value).error.code) == 400
 
 
+@pytest.mark.parametrize(
+    ("media_io_cls", "parameter"),
+    [
+        (ImageEmbeddingMediaIO, "image_embeds"),
+        (AudioEmbeddingMediaIO, "audio_embeds"),
+        (VideoEmbeddingMediaIO, "video_embeds"),
+    ],
+)
+@pytest.mark.parametrize("payload", UNPARSABLE_PAYLOADS)
+def test_unreadable_mm_embeds_payload_is_a_client_error(
+    media_io_cls, parameter, payload
+):
+    with pytest.raises(VLLMValidationError) as excinfo:
+        media_io_cls().load_bytes(payload)
+
+    assert excinfo.value.parameter == parameter
+    assert int(create_error_response(excinfo.value).error.code) == 400
+
+
 @pytest.mark.parametrize("payload", UNPARSABLE_PAYLOADS)
 def test_the_error_body_stays_bounded(model_config, payload):
     """Torch's reason is built from the caller's bytes, so it must be truncated.
@@ -146,9 +168,7 @@ def test_a_long_reason_is_truncated_and_says_how_much_was_left_out(model_config)
     reason = "E" * (_MAX_EMBED_ERROR_REASON_CHARS + 37)
 
     with (
-        patch(
-            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
-        ),
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=RuntimeError(reason)),
         pytest.raises(VLLMValidationError) as excinfo,
     ):
         safe_load_prompt_embeds(model_config, _encode(b"ignored"))
@@ -166,9 +186,7 @@ def test_a_short_reason_is_passed_through_whole(model_config):
     assert len(reason) <= _MAX_EMBED_ERROR_REASON_CHARS
 
     with (
-        patch(
-            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
-        ),
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=RuntimeError(reason)),
         pytest.raises(VLLMValidationError) as excinfo,
     ):
         safe_load_prompt_embeds(model_config, _encode(b"ignored"))
@@ -176,6 +194,34 @@ def test_a_short_reason_is_passed_through_whole(model_config):
     message = str(excinfo.value)
     assert reason in message
     assert "truncated" not in message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(torch.OutOfMemoryError("device OOM"), id="device-oom"),
+        pytest.param(MemoryError("host OOM"), id="host-oom"),
+    ],
+)
+def test_memory_exhaustion_remains_a_server_error(error):
+    with (
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=error),
+        pytest.raises(type(error)) as excinfo,
+    ):
+        load_torch_payload(b"not a torch payload", parameter="image_embeds")
+
+    assert excinfo.value is error
+    assert int(create_error_response(excinfo.value).error.code) == 500
+
+
+def test_client_payloads_are_always_loaded_on_cpu():
+    payload = _saved_tensor(torch.ones(2, 3))
+
+    with patch("vllm.utils.sparse_utils.torch.load", wraps=torch.load) as load:
+        loaded = load_torch_payload(payload, parameter="image_embeds")
+
+    torch.testing.assert_close(loaded, torch.ones(2, 3))
+    assert load.call_args.kwargs["map_location"] == torch.device("cpu")
 
 
 def test_a_well_formed_payload_still_loads(model_config):

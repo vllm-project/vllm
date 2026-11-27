@@ -5,9 +5,10 @@ from typing import Any, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 
-from vllm import PoolingParams
+from vllm import PoolingParams, envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
@@ -62,6 +63,32 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         ),
     )
     # --8<-- [end:scoring-common-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+        for field_name in (
+            "documents",
+            "items",
+            "text_2",
+            "data_2",
+            "queries",
+            "data_1",
+            "text_1",
+        ):
+            value = data.get(field_name)
+            if isinstance(value, list) and len(value) > max_prompts:
+                raise VLLMValidationError(
+                    f"{field_name} list length {len(value)} exceeds the "
+                    f"maximum allowed count of {max_prompts}. To increase "
+                    "this limit, set the VLLM_MAX_COMPLETION_PROMPTS "
+                    "environment variable.",
+                    parameter=field_name,
+                )
+        return data
 
     @model_validator(mode="after")
     def _merge_instruction_into_kwargs(self) -> "ScoringRequestMixin":
@@ -154,6 +181,7 @@ class RerankRequest(ScoringRequestMixin):
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default=0, ge=0)
+    return_documents: bool | None = True
     # --8<-- [end:rerank-request-params]
 
 
@@ -167,7 +195,9 @@ class RerankDocument(BaseModel):
 
 class RerankResult(BaseModel):
     index: int
-    document: RerankDocument
+    document: RerankDocument | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     relevance_score: float
 
 

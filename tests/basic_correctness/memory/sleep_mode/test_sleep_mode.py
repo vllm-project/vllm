@@ -221,6 +221,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
         model,
         enable_sleep_mode=True,
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         max_lora_rank=8,
         tensor_parallel_size=2,
         enforce_eager=True,

@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import gc
 import json
 import multiprocessing
 import os
@@ -27,6 +28,7 @@ from typing import Any
 import psutil
 import pytest
 import regex as re
+import torch
 
 from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
@@ -47,6 +49,174 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Weight cache IPC sharing requires CUDA or ROCm",
 )
+
+
+def _state_for_model(model, backend_name):
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
+        IPC_BACKENDS,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        collect_tensors,
+        export_model_attrs,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        build_manifest,
+    )
+
+    backend = IPC_BACKENDS[backend_name]()
+    tensors, kinds, aliases = collect_tensors(model)
+    manifest, source_storages = build_manifest(tensors, kinds)
+    records = backend.materialize(source_storages)
+    state = WeightCacheState(manifest, records, aliases, export_model_attrs(model))
+    return state, backend
+
+
+def _export_vmm_test_model(connection):
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
+
+    with connection:
+        model = torch.nn.Module()
+        storage = torch.arange(48, dtype=torch.float32, device="cuda:0").reshape(6, 8)
+        other = torch.arange(1024, dtype=torch.float32, device="cuda:0").reshape(32, 32)
+        model.register_parameter("weight", torch.nn.Parameter(storage))
+        model.register_parameter("tied", model.weight)
+        model.register_buffer("transposed", storage.T)
+        model.register_buffer("offset", storage[1:5, ::2])
+        model.register_buffer("bytes_view", storage.view(torch.uint8))
+        model.register_buffer("host_table", torch.arange(3))
+        model.register_buffer("empty", torch.empty(0, device="cuda:0"))
+        model.register_buffer("other", other)
+        model.register_buffer("other_view", other[2:5, ::3])
+        state, backend = _state_for_model(model, "vmm_ipc")
+        entries = [backend.export_storage(record) for record in state.storages]
+        serial_utils.send_msg(
+            connection,
+            {
+                "storages": entries,
+                "manifest": state.manifest,
+                "aliases": state.aliases,
+            },
+        )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
+)
+def test_vmm_weights_survive_producer_exit_and_preserve_views():
+    """Packed FD imports share one owner while logical tensor views stay independent."""
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        rebuild_entries,
+        record_bytes,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        exported_weight_bytes,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        rebuild_tensors,
+    )
+
+    client, server = socket.socketpair()
+    ctx = multiprocessing.get_context("spawn")
+    process = ctx.Process(target=_export_vmm_test_model, args=(server,))
+    process.start()
+    server.close()
+    try:
+        with client:
+            client.settimeout(180)
+            payload = serial_utils.recv_msg(client)
+        process.join(timeout=60)
+        assert process.exitcode == 0
+        entries = payload["storages"]
+        records = rebuild_entries(entries, 0)
+        state = WeightCacheState(payload["manifest"], records, payload["aliases"], {})
+        weight_index = state.manifest["tensors"]["weight"]["storage"]
+        other_index = state.manifest["tensors"]["other"]["storage"]
+        weight_record = records[weight_index]
+        other_record = records[other_index]
+        assert weight_record.owner is other_record.owner
+        assert entries[weight_index].fd is entries[other_index].fd
+        assert other_record.byte_offset == 512
+        assert exported_weight_bytes(records) == weight_record.storage.nbytes()
+        buffers = [
+            record_bytes(record, storage["nbytes"])
+            for record, storage in zip(records, state.manifest["storages"], strict=True)
+        ]
+        views = rebuild_tensors(state.manifest, buffers)
+        assert state.aliases == {"tied": "weight"}
+        assert (
+            len(
+                {
+                    views[name].untyped_storage().data_ptr()
+                    for name in ("weight", "transposed", "offset", "bytes_view")
+                }
+            )
+            == 1
+        )
+        assert views["offset"].storage_offset() == 8
+        assert views["offset"].stride() == (8, 2)
+        assert views["empty"].shape == (0,)
+        del payload, state, records, entries, buffers
+        del weight_record, other_record
+        gc.collect()
+        expected = torch.arange(48, dtype=torch.float32).reshape(6, 8)
+        expected_other = torch.arange(1024, dtype=torch.float32).reshape(32, 32)
+        assert torch.equal(views["weight"].cpu(), expected)
+        assert torch.equal(views["transposed"].cpu(), expected.T)
+        assert torch.equal(views["offset"].cpu(), expected[1:5, ::2])
+        assert torch.equal(views["bytes_view"].cpu(), expected.view(torch.uint8))
+        assert torch.equal(views["host_table"], torch.arange(3))
+        assert torch.equal(views["other"].cpu(), expected_other)
+        assert torch.equal(views["other_view"].cpu(), expected_other[2:5, ::3])
+        views["offset"].fill_(17)
+        assert torch.equal(views["weight"][1:5, ::2], views["offset"])
+    finally:
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=10)
+        process.close()
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
+)
+def test_vmm_peer_copy_preserves_views_and_current_device():
+    """VMM sources can seed a different GPU without redirecting its stream sync."""
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import get_mover
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
+        PeerIpcMover,
+    )
+
+    model = torch.nn.Module()
+    model.register_buffer("weight", torch.arange(48, device="cuda:0").reshape(6, 8))
+    model.register_buffer("view", model.weight[1:5, ::2])
+    state, backend = _state_for_model(model, "vmm_ipc")
+    source = PeerIpcMover(0, backend)
+    client, server = socket.socketpair()
+    with client, server:
+        seed = source.prepare_seed(state.storages)
+        serial_utils.send_msg(server, seed)
+        seed = serial_utils.recv_msg(client)
+    with torch.accelerator.device_index(1):
+        copied = get_mover("peer_ipc").fill(
+            state.manifest, seed, torch.device("cuda", 1)
+        )
+        assert torch.accelerator.current_device_index() == 1
+        assert torch.equal(copied["weight"].cpu(), model.weight.cpu())
+        assert torch.equal(copied["view"].cpu(), model.view.cpu())
+        assert copied["weight"].untyped_storage().data_ptr() == (
+            copied["view"].untyped_storage().data_ptr()
+        )
+        del seed
+        gc.collect()
+        assert torch.accelerator.current_device_index() == 1
 
 
 class WeightCacheDaemon:
@@ -175,6 +345,196 @@ class WeightCacheDaemon:
             self._proc.kill()
             self._proc.wait()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "torch_ipc",
+        pytest.param(
+            "vmm_ipc",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(),
+                reason="VMM backend requires CUDA or ROCm",
+            ),
+        ),
+    ],
+)
+def test_weight_cache_backend_llm_restart(vllm_runner, tmp_path, monkeypatch, backend):
+    """Both backends load a real checkpoint without fallback and preserve logprobs."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = LlamaForCausalLM(
+            LlamaConfig(
+                vocab_size=64,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                max_position_embeddings=128,
+                tie_word_embeddings=True,
+            )
+        )
+        model.save_pretrained(tmp_path)
+    del model
+    sampling = SamplingParams(
+        temperature=0, max_tokens=4, ignore_eos=True, detokenize=False, logprobs=4
+    )
+    kwargs = dict(
+        skip_tokenizer_init=True,
+        dtype="float16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=8 << 20,
+        gpu_memory_utilization=0.1,
+        attention_config={"backend": "TRITON_ATTN"},
+        compilation_config={"mode": 0},
+    )
+    with vllm_runner(str(tmp_path), **kwargs) as runner:
+        baseline = runner.generate([[1, 2, 3]], sampling, return_logprobs=True)
+    with WeightCacheDaemon(
+        str(tmp_path),
+        tp_size=1,
+        extra_args=[
+            "--weight-cache-backend",
+            backend,
+            "--skip-tokenizer-init",
+            "--enable-flashinfer-autotune"
+            if backend == "vmm_ipc"
+            else "--disable-flashinfer-autotune",
+            "--dtype",
+            "float16",
+            "--max-model-len",
+            "128",
+            "--attention-backend",
+            "TRITON_ATTN",
+            "--kernel-config",
+            '{"enable_jit_warmup": false}',
+        ],
+    ) as daemon:
+        daemon.wait_until_ready()
+        extra_config = {"socket_dir": daemon.socket_dir, "fallback": False}
+        with vllm_runner(
+            str(tmp_path),
+            load_format="ipc_cache",
+            model_loader_extra_config=extra_config,
+            **kwargs,
+        ) as runner:
+            assert (
+                runner.generate([[1, 2, 3]], sampling, return_logprobs=True) == baseline
+            )
+
+
+@pytest.mark.distributed(num_gpus=1)
+def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(vllm_runner, enable_pickle):
+    """A memfd-backed PLE table serves the same outputs as the GPU-resident table."""
+    model = "tiny-random/qwen3.8-flash-next"
+    engram_config = {
+        "cpu_offload": True,
+        "dp_shared_memory": False,
+        "use_thp": False,
+        "disk_offload": False,
+    }
+    attention_config = {"indexer_kv_dtype": "bf16"}
+    kwargs = dict(
+        dtype="bfloat16",
+        kv_cache_dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        enable_chunked_prefill=True,
+        enable_flashinfer_autotune=False,
+        kv_cache_memory_bytes=64 << 20,
+        gpu_memory_utilization=0.2,
+        compilation_config={"mode": 0},
+        attention_config=attention_config,
+        kernel_config={
+            "moe_backend": "triton",
+            "sparse_indexer_topk_backend": "cooperative",
+        },
+    )
+    sampling = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        ignore_eos=True,
+        detokenize=False,
+        logprobs=1,
+    )
+    prompt = [3, 4, 5]
+    table_path = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding"
+    with vllm_runner(model, engram_config={"cpu_offload": False}, **kwargs) as runner:
+        assert runner.apply_model(
+            lambda model: model.get_submodule(table_path).weight.device.type
+        ) == ["cuda"]
+        baseline = runner.generate([prompt], sampling, return_logprobs=True)
+    assert len(baseline[0][0][0][0]) == 7
+
+    def check_offloaded_table(model):
+        from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+        table = model.get_submodule(table_path)
+        weight = table.weight
+        assert weight.device.type == "cpu" and weight.is_pinned()
+        assert table._uva_weight.is_cuda
+        assert (
+            table._uva_weight.data_ptr()
+            == get_accelerator_view_from_cpu_tensor(weight).data_ptr()
+        )
+        ranges = (
+            entry.split()[0].split("-")
+            for entry in Path("/proc/self/maps").read_text().splitlines()
+            if "/memfd:vllm_weight_cache " in entry
+        )
+        ptr = weight.data_ptr()
+        assert any(
+            int(start, 16) <= ptr and ptr + weight.nbytes <= int(end, 16)
+            for start, end in ranges
+        ), "The PLE weight does not belong to a weight-cache memfd"
+
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=[
+            "--disable-flashinfer-autotune",
+            "--dtype",
+            "bfloat16",
+            "--kv-cache-dtype",
+            "bfloat16",
+            "--max-model-len",
+            "128",
+            "--max-num-seqs",
+            "1",
+            "--max-num-batched-tokens",
+            "128",
+            "--enable-chunked-prefill",
+            "--engram-config",
+            json.dumps(engram_config),
+            "--attention-config",
+            json.dumps(attention_config),
+            "--kernel-config",
+            json.dumps(kwargs["kernel_config"]),
+        ],
+    ) as daemon:
+        daemon.wait_until_ready()
+        extra_config = {"socket_dir": daemon.socket_dir, "fallback": False}
+        with vllm_runner(
+            model,
+            load_format="ipc_cache",
+            model_loader_extra_config=extra_config,
+            engram_config=engram_config,
+            **kwargs,
+        ) as runner:
+            runner.apply_model(check_offloaded_table)
+            warm = runner.generate([prompt], sampling, return_logprobs=True)
+
+    assert warm == baseline
 
 
 @pytest.mark.distributed(num_gpus=2)
@@ -787,6 +1147,7 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
             "1",
         ],
     )
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     # The baseline engine tunes from scratch in its own empty cache root.
     monkeypatch.setenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "engine_baseline")
@@ -1032,6 +1393,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
     compiled artifact and run every rank's kernels on rank 0's device."""
     from types import SimpleNamespace
 
+    from vllm.config import AttentionConfig
     from vllm.model_executor.model_loader.weight_cache import daemon
 
     monkeypatch.setattr(
@@ -1049,6 +1411,8 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             ),
             model_config=SimpleNamespace(is_moe=False),
             cache_config=None,
+            engram_config=None,
+            attention_config=AttentionConfig(),
             kernel_config=None,
         )
         server = daemon.WeightCacheDaemon(
@@ -1161,7 +1525,6 @@ def test_ipc_rope_matching(
     import socket
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import nullcontext
-    from types import SimpleNamespace
 
     import torch
     from transformers import DeepseekV2Config, Qwen3VLConfig
@@ -1191,23 +1554,25 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
+    tp_size = 2 if rank else 1
+    monkeypatch.setattr(default_vllm_config, "model_config", model_config)
+    monkeypatch.setattr(default_vllm_config.parallel_config, "rank", rank)
+    monkeypatch.setattr(
+        default_vllm_config.parallel_config, "tensor_parallel_size", tp_size
+    )
     server.cache_key = WeightCacheKey.from_model_config(
-        model_config, 1, 0, cache_config=default_vllm_config.cache_config
+        model_config, tp_size, 0, cache_config=default_vllm_config.cache_config
     )
     model_config.hf_text_config.rope_parameters.update(
         rope_type=rope_type, rope_theta=theta, factor=factor
     )
     model_config.hf_text_config.max_position_embeddings = max_position
     server.model = torch.nn.Module()
+    server.state, server.backend = _state_for_model(server.model, "torch_ipc")
+    server.backend_name = "torch_ipc"
     server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: rank)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     loader.fallback = fallback
@@ -1301,6 +1666,39 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
         theirs.close()
 
 
+def test_daemon_capture_releases_registered_model_layers():
+    """Global layer registries must not retain the daemon's original model."""
+    import weakref
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        record_bytes,
+    )
+
+    config = VllmConfig(model_config=ModelConfig(model=QWEN_CASE.model))
+    server = WeightCacheDaemon(config, 0, 0, "tcp://127.0.0.1:0")
+    model = torch.nn.Module()
+    model.register_parameter("weight", torch.nn.Parameter(torch.arange(4.0)))
+    server.model = model
+    config.compilation_config.static_forward_context["model"] = model
+    model_ref = weakref.ref(model)
+
+    server.capture_state()
+    del model
+    gc.collect()
+
+    assert model_ref() is None
+    assert not config.compilation_config.static_forward_context
+    assert server.state is not None
+    assert torch.equal(
+        record_bytes(
+            server.state.storages[0], server.state.manifest["storages"][0]["nbytes"]
+        ).view(torch.float32),
+        torch.arange(4.0),
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @create_new_process_for_each_test("spawn")
 def test_daemon_releases_cublas_workspaces():
@@ -1359,51 +1757,6 @@ def test_external_weight_fallback_preserves_other_socket(socket_path, fallback_b
     assert accounting.fallback_bytes == fallback_bytes
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_daemon_reports_exported_weight_bytes():
-    """The engine's budget excludes exactly the storages it maps from the
-    daemon, not daemon-only allocations or tensors it does not export."""
-    import socket
-
-    import torch
-
-    from vllm.model_executor.model_loader.weight_cache import daemon
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        recv_msg,
-        send_msg,
-    )
-
-    def query_memory(server: daemon.WeightCacheDaemon) -> int:
-        client, connection = socket.socketpair()
-        with client, connection:
-            send_msg(client, {"cmd": "get_memory"})
-            server._handle_connection(connection)
-            response = recv_msg(client)
-        assert response["status"] == "ok"
-        return response["memory_bytes"]
-
-    model = torch.nn.Module()
-    model.weight = torch.nn.Parameter(
-        torch.empty(256, 1024, device="cuda"), requires_grad=False
-    )
-    # A tied parameter and a view share the weight's storage.
-    model.lm_head = model.weight
-    model.register_buffer("weight_row", model.weight[0], persistent=False)
-    model.register_buffer("bias", torch.empty(1024, device="cuda"))
-    # Shipped by value rather than mapped.
-    model.register_buffer("cpu_table", torch.empty(1024))
-    # Kept by the daemon but not exported (e.g. warmup workspace).
-    model.scratch = torch.empty(1 << 20, device="cuda")
-    leftover = torch.empty(1 << 20, device="cuda")
-
-    server = object.__new__(daemon.WeightCacheDaemon)
-    server.model = model
-    assert query_memory(server) == (256 * 1024 + 1024) * 4
-    server.model = None
-    assert query_memory(server) == 0
-    del leftover
-
-
 @pytest.mark.parametrize(
     "cache_dtype,skip_layers,mismatched_fields",
     [
@@ -1420,7 +1773,13 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     import torch
 
-    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        KernelConfig,
+        LoadConfig,
+        ParallelConfig,
+    )
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -1445,24 +1804,25 @@ def test_ipc_cache_key_tracks_kv_quantization(
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
+        engram_config=None,
+        attention_config=AttentionConfig(),
         kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.cache_config = CacheConfig(
         cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=skip_layers
     )
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     requested_keys: list[WeightCacheKey] = []
 
     def request_state(key):
         requested_keys.append(key)
-        return WeightCacheState(entries={}, aliases={}, attrs={})
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
 
     monkeypatch.setattr(loader, "_request_state", request_state)
     monkeypatch.setattr(
@@ -1502,7 +1862,13 @@ def test_ipc_cache_key_tracks_kernel_backends(
 
     import torch
 
-    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        KernelConfig,
+        LoadConfig,
+        ParallelConfig,
+    )
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -1525,16 +1891,12 @@ def test_ipc_cache_key_tracks_kernel_backends(
         parallel_config=ParallelConfig(),
         speculative_config=None,
         cache_config=CacheConfig(),
+        engram_config=None,
+        attention_config=AttentionConfig(),
         kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.kernel_config = KernelConfig(**engine_kernel_config)
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
     )
@@ -1543,7 +1905,12 @@ def test_ipc_cache_key_tracks_kernel_backends(
 
     def request_state(key):
         requested_keys.append(key)
-        return WeightCacheState(entries={}, aliases={}, attrs={})
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
 
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     monkeypatch.setattr(loader, "_request_state", request_state)
@@ -1626,12 +1993,10 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
 
     def handle(request):
-        return SeedTransport([FlashInferWarmupCache()]).handle_request(request)
+        transport = SeedTransport([FlashInferWarmupCache()])
+        return transport.handle_request(request)
 
     assert handle("not a dict")["status"] == "error"
     assert handle(_warmup_cache_request(kind="bogus"))["status"] == "error"
@@ -1650,10 +2015,6 @@ def test_warmup_cache_metadata_gate():
     """Tables flashinfer would refuse to load are rejected before install."""
     pytest.importorskip("flashinfer")
     from flashinfer.autotuner.autotuner import _collect_metadata
-
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
 
     kind = FlashInferWarmupCache()
     filename = "autotune_configs_dp0_rank0.json"
@@ -1687,9 +2048,6 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
     )
 
     config_hash = "b" * 64
@@ -1761,10 +2119,6 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
 def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     """Install writes the fetched table to the rank's disk tier."""
     import json
-
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
 
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     config_hash = "a" * 64

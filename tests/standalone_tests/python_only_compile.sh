@@ -223,7 +223,9 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     # Use the CUDA build the image's own torch was installed with, for both the
     # new venv's torch and the precompiled wheel variant.
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
-    uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
+    # A uv-managed interpreter ships the Python headers that Triton needs to
+    # build its driver at runtime; the image's system python3.12 has none.
+    uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" --managed-python /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
     # --torch-backend lists non-torch packages (e.g. outlines-core) at older versions,
     # so add the index for the image's CUDA build instead and let uv take the best

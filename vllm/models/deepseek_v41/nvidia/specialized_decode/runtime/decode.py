@@ -122,9 +122,7 @@ def step_gates(rows: int, executor: "SpecializedDecode | DraftDecode") -> Decode
 
 def captures_pure_decode(swa_prefixes: list[str]) -> bool:
     """Whether the forward being captured into a CUDA graph is a FULL graph of
-    a pure decode step: not a PIECEWISE capture (Model Runner V2 captures FULL
-    graphs with the forward context's mode NONE, and PIECEWISE ones, which
-    report capturing too, with PIECEWISE), and decode metadata without
+    a pure decode step: not a PIECEWISE capture, and decode metadata without
     prefills for every SWA KV-cache group (`swa_prefixes`) of the layers."""
     context = get_forward_context()
     attn_metadata = context.attn_metadata
