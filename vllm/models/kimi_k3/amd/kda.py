@@ -92,7 +92,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # Only the fused path exports the checkpoint snapshots. AITER's
         # chunk_kda cannot, so the gluon backend hands the steps that carry a
         # checkpoint to the fused kernel when the build has it.

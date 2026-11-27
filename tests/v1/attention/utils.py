@@ -197,15 +197,20 @@ def registered_attention_layers(
 
 
 class CheckpointingMambaLayer(MambaBase):
-    """Stand-in Mamba layer whose KV cache reserves prefill checkpoints at
-    a fixed alignment."""
+    """Stand-in Mamba layer that exports prefill checkpoints at a fixed alignment."""
 
     mamba_type = MambaAttentionBackendEnum.GDN_ATTN
 
-    def __init__(self, checkpoint_alignment: int | None):
+    def __init__(
+        self,
+        checkpoint_alignment: int | None,
+        *,
+        requires_grid: bool = False,
+    ):
         self.checkpoint_alignment = checkpoint_alignment
+        self.requires_grid_checkpoint_alignment = requires_grid
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         return self.checkpoint_alignment
 
     def get_state_shape(self):

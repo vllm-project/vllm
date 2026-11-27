@@ -352,7 +352,7 @@ class ShortConv(MambaBase, PluggableLayer):
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The window ending at a checkpoint is a copy of its last inputs, so
         # any position works; the CPU path has no export.
         return None if current_platform.is_cpu() else 1

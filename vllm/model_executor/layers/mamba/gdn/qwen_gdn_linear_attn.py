@@ -897,6 +897,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if vllm_config.cache_config.enable_prefix_caching:
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+                # FlashInfer emits states at one stride for the whole batch,
+                # the gcd of the offsets; keeping every offset on the
+                # prefix-cache grid bounds the states emitted.
+                self.requires_grid_checkpoint_alignment = True
             elif (
                 self.gdn_prefill_backend in ("triton", "aiter_flydsl")
                 and current_platform.is_cuda_alike()
@@ -1009,16 +1013,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         return None
 
-    def get_prefill_checkpoint_alignment(self) -> int | None:
+    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         return self._checkpoint_alignment
-
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
-        if not self._exports_checkpoints:
-            return None
-        # FlashInfer emits states at one stride for the whole batch, the gcd of
-        # the offsets; keeping every offset on the prefix-cache grid keeps that
-        # stride a multiple of the grid, which bounds the states emitted.
-        return get_mamba_prefill_checkpoint_grid(vllm_config)
 
     @functools.cached_property
     def _exports_checkpoints(self) -> bool:

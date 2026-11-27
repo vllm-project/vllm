@@ -13,11 +13,7 @@ from vllm.distributed import get_etp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.layers.mamba.abstract import (
-    MambaBase,
-    get_mamba_prefill_checkpoint_alignment,
-    get_mamba_prefill_checkpoint_grid,
-)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
@@ -529,21 +525,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             num_spec=self.num_spec_tokens,
         )
 
-    def get_prefill_checkpoint_alignment(self) -> int | None:
-        return 1 if self.cache_config.enable_prefix_caching else None
-
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
-        # The scheduler takes internal checkpoints only when every Mamba layer
-        # can export them.
-        if (
-            self.get_prefill_checkpoint_alignment() is None
-            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
-        ):
-            return None
-        grid = get_mamba_prefill_checkpoint_grid(vllm_config)
-        # Offsets are multiples of the grid, so the window holds only inputs.
-        assert grid >= self.conv_state_len
-        return grid
+    def get_prefill_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return 1 if vllm_config.cache_config.enable_prefix_caching else None
 
     def _short_conv_dilated_dispatch(
         self,

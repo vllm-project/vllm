@@ -476,7 +476,7 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 
 
 def _checkpoint_alignment_for(**attrs) -> int | None:
-    """Run the layer's `get_kv_cache_checkpoint_alignment`."""
+    """Run the layer's `get_prefill_checkpoint_alignment`."""
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
@@ -487,7 +487,7 @@ def _checkpoint_alignment_for(**attrs) -> int | None:
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     vllm_config.cache_config.enable_prefix_caching = True
-    return layer.get_kv_cache_checkpoint_alignment(vllm_config)
+    return layer.get_prefill_checkpoint_alignment(vllm_config)
 
 
 def test_opt_in_publishes_chunk_walk_alignment() -> None:
