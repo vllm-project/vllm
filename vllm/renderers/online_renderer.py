@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -58,7 +58,6 @@ from vllm.renderers import (
     ChatParams,
     TokenizeParams,
     map_reasoning_effort,
-    merge_kwargs,
 )
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -825,17 +824,6 @@ class OnlineRenderer:
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
             trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=(
-                    is_mistral_tokenizer(renderer.tokenizer)
-                    or self.model_config.enable_prompt_embeds
-                ),
-            ),
-        )
-
         if tok_params is None:
             tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
@@ -849,6 +837,18 @@ class OnlineRenderer:
             default_template_kwargs,
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
+        server_kwargs = dict(
+            chat_params.chat_template_kwargs,
+            tokenize=(
+                is_mistral_tokenizer(renderer.tokenizer)
+                or self.model_config.enable_prompt_embeds
+            ),
+        )
+        if tool_dicts is None:
+            server_kwargs.pop("tools", None)
+        else:
+            server_kwargs["tools"] = tool_dicts
+        chat_params = replace(chat_params, chat_template_kwargs=server_kwargs)
 
         reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
         if reuse_ids:

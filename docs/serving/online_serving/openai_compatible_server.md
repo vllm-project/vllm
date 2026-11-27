@@ -191,10 +191,12 @@ explicit refusal content part. Non-empty `content` takes precedence.
 
 `chat_template_kwargs` accepts template variables such as `enable_thinking`
 where supported by the renderer. The Python frontend reserves `tokenize`,
-`padding`, `max_length`, and `tokenizer_kwargs` for tokenizer configuration
-with its HF, Mistral, DeepSeek V3.2/V4/V4.1, and Kimi K3 renderers. Requests
-containing these keys in `chat_template_kwargs` receive HTTP 400 on these renderers.
-The HF and Kimi K3 renderers also reserve `return_dict` and `return_tensors`.
+`padding`, `max_length`, `tokenizer_kwargs`, `tools`, `conversation`, and
+`messages` for server configuration with its HF, Mistral, DeepSeek
+V3.2/V4/V4.1, Kimi K3, and Inkling renderers. Requests containing these keys
+in `chat_template_kwargs` receive HTTP 400 on these renderers. The HF and
+Kimi K3 renderers also reserve `return_dict` and `return_tensors`, and
+DeepSeek V4.1 also reserves `image_order`.
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;

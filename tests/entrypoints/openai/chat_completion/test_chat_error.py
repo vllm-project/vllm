@@ -712,3 +712,351 @@ def test_non_numeric_logprobs_rejected(field_name):
             messages=[{"role": "user", "content": "hello"}],
             **{field_name: "2"},
         )
+
+
+def _build_local_chat_and_tokenize_client(
+    tmp_path,
+    tokenizer_mode: str,
+    chat_template: str | None = None,
+):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import LlamaConfig, TokenizersBackend
+
+    from vllm.config import (
+        CacheConfig,
+        DeviceConfig,
+        LoadConfig,
+        ModelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+    from vllm.entrypoints.openai.chat_completion.api_router import (
+        router as chat_router,
+    )
+    from vllm.entrypoints.serve.exception_handling.register import (
+        init_exception_handler,
+    )
+    from vllm.entrypoints.serve.tokenize.api_router import (
+        router as tokenize_router,
+    )
+    from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+    from vllm.renderers import renderer_from_config
+
+    vocab = {"[UNK]": 0, "<s>": 1, "</s>": 2}
+    for tok in ("hi", "real_fn", "evil_fn", "user", "assistant", "TOOLS"):
+        vocab[tok] = len(vocab)
+    extra: list[str] = []
+    if tokenizer_mode != "hf":
+        extra = [
+            "<｜begin▁of▁sentence｜>",
+            "<｜end▁of▁sentence｜>",
+            "<｜User｜>",
+            "<｜Assistant｜>",
+            "<think>",
+            "</think>",
+            "<｜DSML｜>",
+            "<｜System｜>",
+            "<|image|>",
+        ]
+        for tok in extra:
+            vocab[tok] = len(vocab)
+
+    LlamaConfig(
+        max_position_embeddings=4096,
+        vocab_size=len(vocab),
+    ).save_pretrained(tmp_path)
+    tok_obj = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
+    tok_obj.pre_tokenizer = Whitespace()
+    tok = TokenizersBackend(
+        tokenizer_object=tok_obj,
+        unk_token="[UNK]",
+        bos_token="<s>",
+        eos_token="</s>",
+        chat_template=chat_template,
+    )
+    if extra:
+        tok.add_special_tokens({"additional_special_tokens": extra})
+    tok.save_pretrained(tmp_path)
+
+    cfg = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            tokenizer=str(tmp_path),
+            tokenizer_mode=tokenizer_mode,
+            dtype="float32",
+            max_model_len=4096,
+            skip_tokenizer_init=False,
+        ),
+        cache_config=CacheConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=4096,
+            is_encoder_decoder=False,
+            runner_type="generate",
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        load_config=LoadConfig(),
+    )
+    renderer = renderer_from_config(cfg)
+    captured_prompts: list[list[int]] = []
+
+    engine_client = MagicMock()
+    engine_client.vllm_config = cfg
+    engine_client.model_config = cfg.model_config
+    engine_client.renderer = renderer
+    engine_client.errored = False
+
+    async def fake_generate(prompt, sampling_params, request_id, **kwargs):
+        captured_prompts.append(prompt["prompt_token_ids"])
+        yield RequestOutput(
+            request_id=request_id,
+            prompt=None,
+            prompt_token_ids=prompt["prompt_token_ids"],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="ok",
+                    token_ids=[3],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    engine_client.generate = fake_generate
+    engine_client.check_health = AsyncMock()
+    online_renderer = OnlineRenderer(
+        cfg.model_config,
+        renderer,
+        request_logger=None,
+        chat_template=chat_template,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        exclude_tools_when_tool_choice_none=True,
+    )
+    models = OpenAIServingModels(
+        engine_client,
+        [BaseModelPath(name="stub", model_path=str(tmp_path))],
+    )
+    chat = OpenAIServingChat(
+        engine_client,
+        models,
+        "assistant",
+        online_renderer=online_renderer,
+        request_logger=None,
+        chat_template=chat_template,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        exclude_tools_when_tool_choice_none=True,
+    )
+    tok_srv = ServingTokenization(
+        models,
+        online_renderer,
+        chat_template=chat_template,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    init_exception_handler(app)
+    app.state.openai_serving_chat = chat
+    app.state.serving_tokenization = tok_srv
+    app.include_router(chat_router)
+    app.include_router(tokenize_router)
+    return TestClient(app), renderer, captured_prompts
+
+
+@pytest.mark.parametrize(
+    "tokenizer_mode",
+    ["hf", "deepseek_v32", "deepseek_v4", "deepseek_v41"],
+)
+def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
+    tmp_path, tokenizer_mode
+):
+    """Requests must not inject tools via chat_template_kwargs (HTTP 400)."""
+    template = (
+        "{% if tools %}TOOLS {% for t in tools %}{{ t.function.name }} "
+        "{% endfor %}{% endif %}"
+        "{% for m in messages %}{{ m.role }} {{ m.content }} {% endfor %}"
+        if tokenizer_mode == "hf"
+        else None
+    )
+    client, renderer, captured = _build_local_chat_and_tokenize_client(
+        tmp_path, tokenizer_mode, chat_template=template
+    )
+    real_tool = {
+        "type": "function",
+        "function": {
+            "name": "real_fn",
+            "description": "r",
+            "parameters": {"type": "object"},
+        },
+    }
+    evil_tool = {
+        "type": "function",
+        "function": {
+            "name": "evil_fn",
+            "description": "e",
+            "parameters": {"type": "object"},
+        },
+    }
+
+    ok = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "stub",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [real_tool],
+            "tool_choice": "none",
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    assert len(captured) == 1
+    if tokenizer_mode == "hf":
+        assert (
+            renderer.tokenizer.decode(captured[0], skip_special_tokens=False)
+            == "user hi"
+        )
+
+    bad_kwargs_cases: tuple[dict[str, Any], ...] = (
+        {"tools": None},
+        {"tools": []},
+        {"tools": [evil_tool]},
+        {"tools": [{}]},
+    )
+    for endpoint in ("/v1/chat/completions", "/tokenize"):
+        for bad_kwargs in bad_kwargs_cases:
+            resp = client.post(
+                endpoint,
+                json={
+                    "model": "stub",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": [real_tool],
+                    "tool_choice": "none",
+                    "chat_template_kwargs": bad_kwargs,
+                },
+            )
+            assert resp.status_code == 400, resp.text
+            error = resp.json()["error"]
+            assert error["param"] == "chat_template_kwargs"
+            assert "tools" in error["message"]
+
+    assert len(captured) == 1
+
+
+def test_online_renderer_pins_server_tools_above_chat_template_kwargs(tmp_path):
+    """Even for renderers without _server_owned_chat_template_kwargs,
+    OnlineRenderer keeps server-resolved tool_dicts authoritative."""
+    import asyncio
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import LlamaConfig, TokenizersBackend
+
+    from vllm.config import (
+        CacheConfig,
+        DeviceConfig,
+        LoadConfig,
+        ModelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+    from vllm.renderers.base import BaseRenderer
+    from vllm.renderers.inputs.preprocess import parse_dec_only_prompt
+
+    vocab = {"[UNK]": 0, "<s>": 1, "</s>": 2, "hi": 3}
+    LlamaConfig(max_position_embeddings=64, vocab_size=len(vocab)).save_pretrained(
+        tmp_path
+    )
+    tok = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="[UNK]")),
+        unk_token="[UNK]",
+        bos_token="<s>",
+        eos_token="</s>",
+    )
+    tok.save_pretrained(tmp_path)
+
+    seen_tools: list[Any] = []
+
+    class CustomRenderer(BaseRenderer):
+        def render_messages(self, messages, params):
+            seen_tools.append(params.chat_template_kwargs.get("tools"))
+            return [{"role": "user", "content": "hi"}], parse_dec_only_prompt([3])
+
+        async def render_messages_async(self, messages, params):
+            return self.render_messages(messages, params)
+
+    cfg = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            tokenizer=str(tmp_path),
+            dtype="float32",
+            max_model_len=64,
+            skip_tokenizer_init=False,
+        ),
+        cache_config=CacheConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=64,
+            is_encoder_decoder=False,
+            runner_type="generate",
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        load_config=LoadConfig(),
+    )
+    renderer = CustomRenderer(cfg, tok)
+    online_renderer = OnlineRenderer(
+        cfg.model_config,
+        renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        exclude_tools_when_tool_choice_none=True,
+    )
+
+    real_tool = {
+        "type": "function",
+        "function": {
+            "name": "real_fn",
+            "description": "r",
+            "parameters": {"type": "object"},
+        },
+    }
+    evil_tool = {
+        "type": "function",
+        "function": {
+            "name": "evil_fn",
+            "description": "e",
+            "parameters": {"type": "object"},
+        },
+    }
+
+    req_none = ChatCompletionRequest(
+        model="stub",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[real_tool],
+        tool_choice="none",
+        chat_template_kwargs={"tools": [evil_tool]},
+    )
+    asyncio.run(online_renderer.render_chat(req_none))
+    assert seen_tools[-1] is None
+
+    req_auto = ChatCompletionRequest(
+        model="stub",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[real_tool],
+        tool_choice="auto",
+        chat_template_kwargs={"tools": [evil_tool]},
+    )
+    asyncio.run(online_renderer.render_chat(req_auto))
+    assert seen_tools[-1] is not None
+    assert [t["function"]["name"] for t in seen_tools[-1]] == ["real_fn"]
