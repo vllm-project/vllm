@@ -107,6 +107,7 @@ def _layerwise_copy_worker(
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, cache
         ).connector_worker
+        assert worker is not None
         try:
             if register:
                 worker.register_kv_caches(
@@ -115,6 +116,9 @@ def _layerwise_copy_worker(
                         for name in names
                     }
                 )
+            assert isinstance(
+                worker.transfer_backend, mooncake_connector.TransferEngineBackend
+            )
             with patch.object(
                 worker.transfer_backend.engine, "batch_transfer_sync_write", write
             ):
@@ -189,6 +193,7 @@ async def test_layerwise_missing_layers_only_fail_the_affected_request(num_peers
                 covered_layers=list(names),
             ),
         ]
+        assert isinstance(mooncake_connector.make_zmq_socket, MagicMock)
         sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
         sock.recv.side_effect = [worker._encoder.encode(reply) for reply in responses]
         await worker.receive_kv_from_single_worker("tcp://producer:1234", pulls)
@@ -519,6 +524,7 @@ def test_layerwise_early_completion_releases_blocks_before_worker_retirement(can
     aggregator = KVOutputAggregator(config.parallel_config.world_size)
     size = config.cache_config.block_size
     request = create_request(num_tokens=size, max_tokens=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["transfer_id"] = request.request_id
     scheduler.add_request(request)
     first = scheduler.schedule()  # N+1: final chunk.
@@ -544,6 +550,7 @@ def test_layerwise_early_completion_releases_blocks_before_worker_retirement(can
         assert request.request_id in scheduler.requests  # One rank is insufficient.
     third = scheduler.schedule()  # N+3 carries the normal retirement metadata.
     if not cancel:
+        assert isinstance(third.kv_connector_metadata, MooncakeConnectorMetadata)
         assert request.request_id in third.kv_connector_metadata.reqs_to_send
         assert waiting.request_id not in third.num_scheduled_tokens
     # The existing executor aggregator joins reports arriving in different steps.
@@ -607,10 +614,12 @@ async def test_layerwise_finished_prefill_drains_late_ready(
             block_size=size,
             do_remote_decode=True,
         )
+        assert request.kv_transfer_params is not None
         request.kv_transfer_params["transfer_id"] = request.request_id
         scheduler.add_request(request)
         scheduled = scheduler.schedule()
         metadata = scheduled.kv_connector_metadata
+        assert isinstance(metadata, MooncakeConnectorMetadata)
         (snapshot,) = metadata.requests
         assert snapshot.num_computed_tokens == (size if warm_prefix else 0)
         blocks = list(snapshot.block_ids[0])

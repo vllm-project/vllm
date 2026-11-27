@@ -26,6 +26,7 @@ class BlockMappingTests(unittest.TestCase):
                     block_size=size,
                     final=False,
                 )
+                assert result is not None
                 self.assertEqual(result.source, (11,))
                 self.assertEqual(result.destination, (21,))
                 self.assertEqual(result.end_tokens, 2 * size)
@@ -38,6 +39,7 @@ class BlockMappingTests(unittest.TestCase):
                     block_size=size,
                     final=True,
                 )
+                assert tail is not None
                 self.assertEqual(tail.source, (12,))
                 self.assertEqual(tail.destination, (22,))
                 self.assertEqual(tail.end_tokens, 3 * size)
