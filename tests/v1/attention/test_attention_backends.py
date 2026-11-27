@@ -469,6 +469,7 @@ def _test_backend_correctness(
     layer_v_scale: float = 1.0,
     layer_q_scale: float = 1.0,
     attention_config: AttentionConfig | None = None,
+    hf_config_override: dict | None = None,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
@@ -491,8 +492,8 @@ def _test_backend_correctness(
     """
     set_random_seed(42)
 
-    hf_config_override = None
     if tensor_parallel_size > 1:
+        assert hf_config_override is None, "TP simulation sets its own head counts"
         from vllm.config import ModelConfig
 
         temp_config = ModelConfig(model=model, max_model_len=1)
@@ -2448,6 +2449,59 @@ def test_flashinfer_fa2_spec_decode_correctness(default_vllm_config, use_cuda_gr
             num_speculative_tokens=3,
         )
     assert plan.call_args.kwargs["q_len_per_req"] == 4
+
+
+def _aiter_unified_attn_available() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import (
+        is_aiter_found_and_supported,
+        is_aiter_found_and_supported_on_rdna,
+    )
+    from vllm.platforms.rocm import on_gfx1151, on_gfx1201
+
+    return is_aiter_found_and_supported() or (
+        is_aiter_found_and_supported_on_rdna() and (on_gfx1151() or on_gfx1201())
+    )
+
+
+@pytest.mark.skipif(
+    not _aiter_unified_attn_available(),
+    reason="aiter unified attention requires aiter on CDNA3+, gfx1151 or gfx1201.",
+)
+@pytest.mark.parametrize("use_sinks", [False, True])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+@pytest.mark.parametrize("q_len", [1, 4])
+def test_rocm_aiter_unified_decode_correctness(
+    default_vllm_config, q_len, use_cuda_graph, kv_cache_dtype, use_sinks
+):
+    """The ROCm counterpart of the FlashInfer XQA and NVFP4 decode tests.
+    Single-token and spec-decode queries at GQA 6 and head_dim 256 decode
+    through aiter's unified attention, eager and replayed, with and without
+    attention sinks, and match SDPA."""
+    if kv_cache_dtype == "fp8" and not current_platform.supports_fp8():
+        pytest.skip("FP8 is not supported on this hardware.")
+
+    def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BatchSpec(seq_lens=[40, 300, 1027], query_lens=[q_len] * 3),
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN],
+        causal_mask_mod,
+        # GQA 6 at head_dim 256, as in the FlashInfer NVFP4 decode test.
+        hf_config_override={
+            "num_attention_heads": 24,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        },
+        kv_cache_dtype=kv_cache_dtype,
+        use_sinks=use_sinks,
+        use_cuda_graph=use_cuda_graph,
+        num_speculative_tokens=q_len - 1,
+    )
 
 
 if current_platform.is_rocm():
