@@ -77,9 +77,9 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_flashinfer import (
     GROUP_SIZE,
-    flashinfer_qsa_query_dtype,
     get_workspace_size,
     is_flashinfer_qsa_supported,
+    q_dtype,
     qsa_sparse_paged_prefill,
 )
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
@@ -279,9 +279,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        query_dtype = flashinfer_qsa_query_dtype(
-            kv_cache_spec.dtype, vllm_config.attention_config
-        )
+        query_dtype = q_dtype(kv_cache_spec.dtype, vllm_config.attention_config)
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
             query_dtype,
@@ -861,7 +859,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
         attention_config = vllm_config.attention_config
-        self.flashinfer_query_dtype = flashinfer_qsa_query_dtype(
+        self.flashinfer_query_dtype = q_dtype(
             self.kv_cache_torch_dtype, attention_config
         )
 

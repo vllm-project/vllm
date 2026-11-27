@@ -18,9 +18,7 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 GROUP_SIZE = 8
 
 
-def flashinfer_qsa_query_dtype(
-    kv_dtype: torch.dtype, attention_config: AttentionConfig
-) -> torch.dtype:
+def q_dtype(kv_dtype: torch.dtype, attention_config: AttentionConfig) -> torch.dtype:
     """Q dtype of the FlashInfer prefill: FP8 for an FP8 cache when the
     operator opts in to prefill query quantization (and does not disable
     FlashInfer Q quantization), else BF16."""
