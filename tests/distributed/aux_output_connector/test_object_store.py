@@ -395,7 +395,8 @@ def test_writer_deadline_counts_from_queueing():
         if keys == ["g/0"]:
             time.sleep(1.5)
             return None
-        refusals.append(time.monotonic())
+        if keys == ["h/0"]:
+            refusals.append(time.monotonic())
         return -200
 
     client, _, writer = _writer(put, 2.0)
@@ -438,15 +439,15 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     writer.put(_objects("h/0"))
     writer.put(_objects("h/1"))
     time.sleep(1.2)
-    # Past their deadline the batches are dropped, also those queued behind
-    # the put that does not return, and the writer no longer holds their
-    # objects. While the put has not returned, queuing does not wait.
+    # Past their deadline the batches queued behind the put that does not
+    # return are dropped, and the writer no longer holds their objects. While
+    # the put has not returned, queuing does not wait.
     start = time.monotonic()
     k0 = _objects("k/0")
     writer.put(k0)
     assert time.monotonic() - start < 0.5
-    assert [batch.objects for batch in writer._pending] == [None] * 3 + [k0]
-    assert logger.error.call_count == 3
+    assert [batch.objects for batch in writer._pending] == [k0]
+    assert logger.error.call_count == 2
     # Closing waits for the put until the last deadline only.
     start = time.monotonic()
     writer.close()
@@ -457,15 +458,15 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     release.set()
     writer._thread.join(10)
     assert client.closed
-    assert calls == [["g/0"], ["g/dropped", "h/dropped", "k/dropped"]]
-    assert logger.error.call_count == 4
+    assert calls == [["g/0"], ["h/dropped", "k/dropped"]]
+    assert logger.error.call_count == 3
 
 
 @pytest.mark.parametrize(
     "stuck,written",
     [
         (False, ["g/0", "h/0", "k/0"]),
-        (True, ["g/0", "g/dropped", "h/dropped", "k/dropped"]),
+        (True, ["g/0", "h/dropped", "k/dropped"]),
     ],
     ids=["write-ends", "store-stuck"],
 )
@@ -546,3 +547,85 @@ def test_writer_keeps_the_batches_queued_while_the_store_fails():
     assert {"h/0", "h/1", "h/2"} <= set(client.objects)
     assert "g/0" not in client.objects
     writer.close()
+
+
+@pytest.mark.parametrize("caller", [False, True], ids=["alone", "behind-a-caller"])
+def test_writer_does_not_mark_a_batch_that_lands_after_its_deadline(caller):
+    land = threading.Event()
+    client, _, writer = _writer(lambda keys: land.wait(30) and None, 1.0)
+    writer.put(_objects("g/A"))
+    time.sleep(1.2)
+    if caller:
+        writer.put(_objects("h/0"))
+    land.set()
+    wait_for_writer(writer)
+    writer.close()
+    writer._thread.join(10)
+    # Its put decides: it landed, so the store is not failing.
+    assert sorted(client.objects) == ["g/A", "h/0"][: 1 + caller]
+    assert not writer._failing
+
+
+def test_writer_waits_on_a_full_queue_again_once_a_put_lands(monkeypatch):
+    monkeypatch.setattr(object_store, "_MAX_QUEUED_BATCHES", 2)
+    land, release = threading.Event(), threading.Event()
+
+    def put(keys):
+        if keys == ["f/0"]:
+            return -200
+        if keys == ["g/0"]:
+            land.wait(30)
+        elif keys == ["k/0"]:
+            release.wait(30)
+        return None
+
+    client, _, writer = _writer(put, 1.0)
+    writer.put(_objects("f/0"))
+    wait_for_writer(writer)
+    # f/0 missed its deadline; g/0 lands after its own, with no other put.
+    writer.put(_objects("g/0"))
+    time.sleep(1.2)
+    land.set()
+    wait_for_writer(writer)
+    writer.put(_objects("k/0"))
+    writer.put(_objects("k/1"))
+    threading.Timer(0.5, release.set).start()
+    start = time.monotonic()
+    writer.put(_objects("k/2"))
+    assert release.is_set() and time.monotonic() - start >= 0.3
+    wait_for_writer(writer)
+    writer.close()
+    writer._thread.join(10)
+    assert {"g/0", "k/0", "k/1", "k/2"} <= set(client.objects)
+    assert "g/dropped" not in client.objects
+
+
+def test_writer_does_not_spin_behind_a_batch_that_expired_during_a_marker_write(
+    monkeypatch,
+):
+    monkeypatch.setattr(object_store, "_MAX_QUEUED_BATCHES", 2)
+    land, in_marker, release = threading.Event(), threading.Event(), threading.Event()
+
+    def put(keys):
+        if keys == ["g/A"]:
+            land.wait(30)
+        elif keys[0].endswith("/dropped"):
+            in_marker.set()
+            release.wait(30)
+        return None
+
+    _, _, writer = _writer(put, 2.0)
+    writer.put(_objects("g/A"))
+    writer.put(_objects("g/B"))
+    time.sleep(2.2)
+    writer.put(_objects("g/C"))
+    # g/A lands late; the writer then writes the drop marker of g/B.
+    land.set()
+    assert in_marker.wait(5)
+    writer.put(_objects("g/D"))
+    start = time.thread_time()
+    writer.put(_objects("g/E"))
+    assert time.thread_time() - start < 0.2
+    release.set()
+    writer.close()
+    writer._thread.join(10)

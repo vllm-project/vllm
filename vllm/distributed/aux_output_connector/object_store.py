@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import threading
 import time
 from collections import deque
@@ -202,9 +201,7 @@ AuxObjects = list[tuple[str, dict[str, np.ndarray]]]
 
 @dataclass(slots=True)
 class _Batch:
-    # Dropped when the batch misses its deadline, so that a put that does not
-    # return holds no more than the batches queued before their deadline.
-    objects: AuxObjects | None
+    objects: AuxObjects
     deadline: float
 
 
@@ -213,20 +210,21 @@ class AuxObjectWriter:
     field. A batch not written within `timeout_s` of being queued is dropped:
     the store refused it until then (refusals are retried every
     `_RETRY_INTERVAL_S`), or it was still queued behind a put that had not
-    returned. A batch whose put fails otherwise is dropped at once. Its keys
-    are missing, and its namespaces get a drop marker that readers stop at;
-    nothing else changes. Queuing waits while
-    `_MAX_QUEUED_BATCHES` batches are queued, at most until the first of them
-    is written or misses its deadline. Once a batch has missed its deadline,
-    until a put succeeds, queuing never waits: a full queue drops the batch."""
+    returned. A batch whose put fails otherwise is dropped at once. Its
+    namespaces get a drop marker that readers stop at; nothing else changes.
+    Queuing waits while `_MAX_QUEUED_BATCHES` batches are queued or being
+    written, at most until the first of them is written or misses its deadline.
+    Once a batch has missed its deadline, until a put succeeds, queuing never
+    waits: a full queue drops the batch."""
 
     def __init__(self, store: AuxObjectStore, *, timeout_s: float) -> None:
         self._store = store
         self._timeout_s = timeout_s
-        self._queue: queue.SimpleQueue[_Batch | None] = queue.SimpleQueue()
         self._cond = threading.Condition()
-        # The batches not written yet, in queue order.
+        # The batches not written yet, in queue order, and the one being written.
         self._pending: deque[_Batch] = deque()
+        self._active: _Batch | None = None
+        self._closing = False
         self._failing = False
         self._markers: dict[str, bytes] = {}
         self._thread = threading.Thread(
@@ -239,48 +237,56 @@ class AuxObjectWriter:
         per step waits at most once per step."""
         with self._cond:
             self._expire(time.monotonic())
-            while len(self._pending) >= _MAX_QUEUED_BATCHES and not self._failing:
-                self._cond.wait(self._pending[0].deadline - time.monotonic())
+            while self._num_queued() >= _MAX_QUEUED_BATCHES and not self._failing:
+                head = self._active or self._pending[0]
+                self._cond.wait(head.deadline - time.monotonic())
                 self._expire(time.monotonic())
-            if len(self._pending) >= _MAX_QUEUED_BATCHES:
+            if self._num_queued() >= _MAX_QUEUED_BATCHES:
                 self._drop(
                     objects, "the queue is full after a write missed its deadline"
                 )
                 return
-            batch = _Batch(objects, time.monotonic() + self._timeout_s)
-            self._pending.append(batch)
-            self._queue.put(batch)
+            self._pending.append(_Batch(objects, time.monotonic() + self._timeout_s))
+            self._cond.notify_all()
+
+    def _num_queued(self) -> int:
+        return len(self._pending) + (self._active is not None)
 
     def _expire(self, now: float) -> None:
-        """Drop the pending batches past their deadline."""
-        for batch in self._pending:
-            if batch.deadline > now:
-                break
-            if batch.objects is not None:
-                self._drop(batch.objects, f"not written within {self._timeout_s:g} s")
-                batch.objects = None
-                self._failing = True
+        """Drop the queued batches past their deadline; the batch being written
+        past its deadline is settled by its put."""
+        if self._active is not None and self._active.deadline <= now:
+            self._failing = True
+        while self._pending and self._pending[0].deadline <= now:
+            batch = self._pending.popleft()
+            self._drop(batch.objects, f"not written within {self._timeout_s:g} s")
+            self._failing = True
 
     def _run(self) -> None:
         try:
-            while (batch := self._queue.get()) is not None:
-                error: object = None
-                late = False
-                if (objects := batch.objects) is not None:
-                    try:
-                        error = self._write(batch.deadline, objects)
-                        late = error is not None
-                    except Exception as e:
-                        error = e
+            while True:
                 with self._cond:
-                    if objects is not None and error is None:
+                    self._expire(time.monotonic())
+                    while not self._pending and not self._closing:
+                        self._cond.wait()
+                        self._expire(time.monotonic())
+                    if not self._pending:
+                        break
+                    batch = self._active = self._pending.popleft()
+                error: object = None
+                try:
+                    error = self._write(batch.deadline, batch.objects)
+                except Exception as e:
+                    error = e
+                late = time.monotonic() >= batch.deadline
+                with self._cond:
+                    self._active = None
+                    if error is None:
                         self._failing = False
-                    elif error is not None and batch.objects is not None:
+                    else:
                         self._drop(batch.objects, error)
-                        batch.objects = None
                         self._failing |= late
                     self._expire(time.monotonic())
-                    self._pending.popleft()
                     self._cond.notify_all()
                     markers, self._markers = self._markers, {}
                 if markers:
@@ -295,8 +301,9 @@ class AuxObjectWriter:
             objects[0][0],
             reason,
         )
+        text = str(reason).encode() or b"?"
         for key, _ in objects:
-            self._markers.setdefault(_drop_marker(key), str(reason).encode() or b"?")
+            self._markers.setdefault(_drop_marker(key), text)
 
     def _write_markers(self, markers: dict[str, bytes]) -> None:
         try:
@@ -321,7 +328,8 @@ class AuxObjectWriter:
         """Write what is queued, waiting until the last deadline at most; the
         writer thread closes the store once it is done."""
         with self._cond:
-            pending = self._pending[-1].deadline if self._pending else None
-        deadline = pending or time.monotonic() + self._timeout_s
-        self._queue.put(None)
+            last = self._pending[-1] if self._pending else self._active
+            deadline = last.deadline if last else time.monotonic() + self._timeout_s
+            self._closing = True
+            self._cond.notify_all()
         self._thread.join(max(deadline - time.monotonic(), 0.0))

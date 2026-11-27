@@ -78,6 +78,6 @@ def fake_store(code=0):
 
 def wait_for_writer(writer: AuxObjectWriter, interval_s: float = 0.01) -> None:
     deadline = time.monotonic() + 5
-    while writer._pending and time.monotonic() < deadline:
+    while (writer._pending or writer._active) and time.monotonic() < deadline:
         time.sleep(interval_s)
-    assert not writer._pending
+    assert not writer._pending and not writer._active
