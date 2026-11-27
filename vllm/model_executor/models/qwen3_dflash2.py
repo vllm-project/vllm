@@ -197,7 +197,11 @@ class DFlashGroupedConv(nn.Module):
             2 * taps * self.num_groups,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=quant_config,
+            # DFlash2 checkpoints store kernel_projection in BF16 (it is listed
+            # in modules_to_not_convert). Match CandidateSelector.hidden_projection
+            # below, which is already forced to BF16. Without this, an FP8 draft
+            # checkpoint misreads the BF16 weight as e4m3 -> inf -> NaN cascade.
+            quant_config=None,
             prefix=maybe_prefix(prefix, "kernel_projection"),
             return_bias=False,
         )
