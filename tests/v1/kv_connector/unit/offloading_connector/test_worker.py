@@ -104,6 +104,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
     canonical_layout: bool = False,
+    config_replicated_layout: bool = True,
 ):
     """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
@@ -114,8 +115,10 @@ def _make_worker(
     spec.replicated_layout = replicated_layout
     spec.async_init = False
     spec.config = MagicMock()
+    spec.config.replicated_layout = replicated_layout and config_replicated_layout
     spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
+    spec.config.parallel.local_world_size = 4
     spec.get_worker.return_value = MagicMock()
 
     worker = OffloadingConnectorWorker(
@@ -180,6 +183,7 @@ def _offloading_config(rank: int = 0) -> OffloadingConfig:
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=2,
+            local_world_size=2,
             tp_size=2,
             pp_size=1,
             pcp_size=1,
@@ -205,11 +209,15 @@ class BareExternalOffloadingSpec(OffloadingSpec):
 # ---------------------------------------------------------------------------
 
 
-def test_prepare_store_kv_non_writer_marks_completed_without_submit():
+@pytest.mark.parametrize(("rank", "config_replicated"), [(1, True), (4, False)])
+def test_prepare_store_kv_non_writer_marks_completed_without_submit(
+    rank, config_replicated
+):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=1,
+        config_replicated_layout=config_replicated,
+        rank=rank,
     )
 
     worker.prepare_store_kv(_store_metadata(7))
@@ -223,7 +231,9 @@ def test_prepare_store_kv_non_writer_marks_completed_without_submit():
     assert meta.completed_jobs == {7: 1}
 
 
-@pytest.mark.parametrize("rank,canonical_layout", [(0, False), (0, True), (1, True)])
+@pytest.mark.parametrize(
+    "rank,canonical_layout", [(0, False), (4, False), (0, True), (1, True)]
+)
 def test_prepare_store_kv_writer_submits_store(rank, canonical_layout):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),

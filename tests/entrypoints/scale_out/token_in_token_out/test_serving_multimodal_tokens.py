@@ -9,18 +9,39 @@ processor in the pytest parent process to keep os.fork() in other
 tests (e.g. entrypoints/rl/weight_transfer/test_offline.py) deadlock-free.
 """
 
+import asyncio
+import hashlib
+import json
+import threading
+import uuid
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import httpx
 import pytest
 import pytest_asyncio
+import torch
 from PIL import Image
+from safetensors.torch import save as save_safetensors
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    decode_mm_kwargs_item,
+    encode_mm_kwargs_item,
+)
+from vllm.multimodal.inputs import MultiModalBatchedField, MultiModalKwargsItem
 from vllm.multimodal.utils import encode_image_url
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 GEN_ENDPOINT = "/inference/v1/generate"
 RENDER_ENDPOINT = "/v1/chat/completions/render"
 DETOKENIZE_ENDPOINT = "/detokenize"
+S3_BUCKET = "mm-tensors"
+S3_PREFIX = "rollouts"
+# GETs of keys under `concurrent/` wait until this many are in flight.
+CONCURRENT_READS = threading.Barrier(2, timeout=30)
+# Keys of every GET the store served.
+GET_PATHS: list[str] = []
 
 
 @pytest.fixture(scope="module")
@@ -29,7 +50,39 @@ def test_image():
 
 
 @pytest.fixture(scope="module")
-def server():
+def s3_store():
+    """Objects served by a local stand-in for an S3 endpoint, by `bucket/key`."""
+    objects: dict[str, bytes] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.removeprefix("/")
+            GET_PATHS.append(path)
+            if "/concurrent/" in path:
+                CONCURRENT_READS.wait()
+            body = objects.get(path)
+            self.send_response(404 if body is None else 200)
+            body = body or b"<Error><Code>NoSuchKey</Code></Error>"
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_port}", objects
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
+
+
+@pytest.fixture(scope="module")
+def server(s3_store):
     args = [
         "--dtype",
         "bfloat16",
@@ -38,9 +91,25 @@ def server():
         "--enforce-eager",
         "--no-enable-prefix-caching",
         "--enable-scale-out",
+        "--mm-tensor-refs-config",
+        json.dumps(
+            {
+                "s3_allowed_uri_prefix": f"s3://{S3_BUCKET}/{S3_PREFIX}",
+                # Room for about three 224x224 items, so a leaked
+                # reservation blocks later requests.
+                "max_request_bytes": 1024**2,
+                "max_reserved_bytes": 2 * 1024**2,
+            }
+        ),
     ]
+    env = {
+        "S3_ENDPOINT_URL": s3_store[0],
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_DEFAULT_REGION": "us-east-1",
+    }
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env) as remote_server:
         yield remote_server
 
 
@@ -226,6 +295,7 @@ async def test_content_parts_generates_tokens(client, test_image):
     assert len(choice["token_ids"]) > 0
     assert gen_data["prompt_token_ids"] == expanded
     assert gen_data["mm_placeholders"] == mm_placeholders
+    assert gen_data["mm_hashes"] == render_data["features"]["mm_hashes"]
 
 
 @pytest.mark.asyncio
@@ -233,8 +303,9 @@ async def test_content_parts_generates_tokens(client, test_image):
 async def test_features_with_content_parts(client, test_image, cached):
     """Earlier items as features plus a new raw item must match /render.
 
-    With `cached`, features carry only `mm_hashes` (as in the docs), so
-    the earlier item resolves from the cache filled by a previous request.
+    With `cached`, features carry only the `mm_hashes` and `mm_placeholders`
+    returned by turn 1 (as in the docs), so the earlier item resolves from the
+    cache that request filled.
     """
     old_url = encode_image_url(test_image, format="PNG")
     new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
@@ -250,14 +321,15 @@ async def test_features_with_content_parts(client, test_image, cached):
                 "token_ids": _collapse_placeholders(
                     expanded[: new["offset"]], {"image": [old]}
                 ),
-                "content_parts": [{"type": "image_url", "url": old_url, "uuid": "old"}],
+                "content_parts": [{"type": "image_url", "url": old_url}],
                 "sampling_params": {"max_tokens": 1},
+                "return_token_ids": True,
             },
         )
         turn1.raise_for_status()
         old_features = {
-            "mm_hashes": {"image": ["uuid:old"]},
-            "mm_placeholders": {"image": [old]},
+            "mm_hashes": turn1.json()["mm_hashes"],
+            "mm_placeholders": turn1.json()["mm_placeholders"],
         }
     else:
         old_features = {k: {"image": v["image"][:1]} for k, v in features.items() if v}
@@ -275,6 +347,7 @@ async def test_features_with_content_parts(client, test_image, cached):
     gen_resp.raise_for_status()
     assert gen_resp.json()["prompt_token_ids"] == expanded
     assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]
+    assert gen_resp.json()["mm_hashes"] == features["mm_hashes"]
 
 
 @pytest.mark.asyncio
@@ -335,3 +408,244 @@ async def test_content_parts_streaming(client, test_image):
     assert len(prompt_metadata_chunks) == 1
     assert prompt_metadata_chunks[0]["prompt_token_ids"] == expanded
     assert prompt_metadata_chunks[0]["mm_placeholders"] == mm_placeholders
+    first = prompt_metadata_chunks[0]
+    assert first["mm_hashes"] == render_data["features"]["mm_hashes"]
+    assert all("mm_hashes" not in c for c in chunks if c is not first)
+
+
+def _upload_processed_image(
+    s3_store, render_data: dict, key_dir: str = "", **extra_tensors
+) -> dict:
+    """Store the rendered item's tensors with their batch dimension.
+
+    Returns its `kwargs_refs` entry.
+    """
+    _, objects = s3_store
+    item = decode_mm_kwargs_item(render_data["features"]["kwargs_data"]["image"][0])
+    tensors = {
+        name: elem.data[None]
+        if isinstance(elem.field, MultiModalBatchedField)
+        else elem.data
+        for name, elem in item.items()
+    }
+    # A `None` value drops that tensor.
+    tensors = {k: v for k, v in {**tensors, **extra_tensors}.items() if v is not None}
+    payload = save_safetensors(tensors)
+    key = f"{S3_PREFIX}/{key_dir}{uuid.uuid4().hex}/image-0"
+    objects[f"{S3_BUCKET}/{key}"] = payload
+    return {
+        "uri": f"s3://{S3_BUCKET}/{key}",
+        "format": "safetensors-v1",
+        "nbytes": len(payload),
+        "digest": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_kwargs_refs_generate_like_inline_kwargs_data(
+    client, s3_store, test_image
+):
+    """Tensors loaded from S3 must generate the same tokens as inline ones.
+
+    The referenced item gets a new `mm_hash` so the encoder runs on the
+    loaded tensors instead of reusing the inline request's output. The
+    requests run one at a time, so greedy outputs are comparable.
+    """
+    render_data = await _render_image_prompt(
+        client, encode_image_url(test_image, format="PNG")
+    )
+    features = render_data["features"]
+    reference = _upload_processed_image(s3_store, render_data)
+
+    outputs = []
+    for request_features in (
+        features,
+        {
+            "mm_hashes": {"image": [f"ref-{uuid.uuid4().hex}"]},
+            "mm_placeholders": features["mm_placeholders"],
+            "kwargs_refs": {"image": [reference]},
+        },
+    ):
+        gen_resp = await client.post(
+            GEN_ENDPOINT,
+            json={
+                "token_ids": render_data["token_ids"],
+                "features": request_features,
+                "sampling_params": {"max_tokens": 10, "temperature": 0.0},
+            },
+        )
+        gen_resp.raise_for_status()
+        outputs.append(gen_resp.json()["choices"][0]["token_ids"])
+
+    assert outputs[0]
+    assert outputs[1] == outputs[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "status", "error"),
+    [
+        ("uri", 400, "configured prefix"),
+        ("request_size", 400, "in one request declare"),
+        ("missing", 422, "Could not load multimodal tensor object"),
+        ("conflicting_metadata", 400, "doesn't match its kwargs_refs object"),
+        ("extra_tensor", 422, "not compatible with the served model"),
+        ("zero_dim", 422, "not compatible with the served model"),
+        ("short_rows", 422, "not compatible with the served model"),
+        ("extra_rows", 422, "not compatible with the served model"),
+        ("negative_grid", 422, "not compatible with the served model"),
+        ("grid_only", 422, "not compatible with the served model"),
+    ],
+)
+async def test_invalid_kwargs_refs_are_rejected(
+    client, s3_store, test_image, change, status, error
+):
+    """Bad references fail with a client error and leave the server healthy."""
+    render_data = await _render_image_prompt(
+        client, encode_image_url(test_image, format="PNG")
+    )
+    item = decode_mm_kwargs_item(render_data["features"]["kwargs_data"]["image"][0])
+    pixel_values = item["pixel_values"].data
+    grid = item["image_grid_thw"].data[None]
+    extra = {
+        "extra_tensor": {"attention_mask": torch.ones(1, 4)},
+        "zero_dim": {
+            "pixel_values": torch.tensor(1, dtype=torch.uint8),
+            "image_grid_thw": torch.tensor([[1, 2, 2]]),
+        },
+        # Fewer or more patches than image_grid_thw describes.
+        "short_rows": {"pixel_values": pixel_values[:-4]},
+        "extra_rows": {"pixel_values": torch.cat([pixel_values, pixel_values[:4]])},
+        # A negative size would slice from the end and still yield enough rows.
+        "negative_grid": {
+            "pixel_values": torch.cat([pixel_values, pixel_values]),
+            "image_grid_thw": grid * torch.tensor([1, -1, 1]),
+        },
+        # Only the grid, nothing for the vision encoder.
+        "grid_only": {"pixel_values": None},
+    }.get(change, {})
+    reference = _upload_processed_image(s3_store, render_data, **extra)
+    if change == "uri":
+        reference["uri"] = reference["uri"].replace(S3_PREFIX, "other", 1)
+    elif change == "request_size":
+        reference["nbytes"] = 1024**2 + 1
+    elif change == "missing":
+        s3_store[1].clear()
+
+    features = render_data["features"]
+    request_features = {
+        "mm_hashes": features["mm_hashes"],
+        "mm_placeholders": features["mm_placeholders"],
+        "kwargs_refs": {"image": [reference]},
+    }
+    if change == "conflicting_metadata":
+        # A stale grid in mm_metadata would undo the row-count check.
+        grid_elem = item["image_grid_thw"]
+        stale = replace(grid_elem, data=grid_elem.data * torch.tensor([1, 2, 1]))
+        request_features["mm_metadata"] = {
+            "image": [
+                encode_mm_kwargs_item(MultiModalKwargsItem({"image_grid_thw": stale}))
+            ]
+        }
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": render_data["token_ids"],
+            "features": request_features,
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+
+    assert gen_resp.status_code == status
+    assert error in gen_resp.text
+    assert (await client.get("/health")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_kwargs_refs_are_read_concurrently(client, s3_store, test_image):
+    """Two requests must be able to read their references at the same time.
+
+    Each GET blocks until the other one arrives, so serialized reads time out.
+    """
+    render_data = await _render_image_prompt(
+        client, encode_image_url(test_image, format="PNG")
+    )
+    features = render_data["features"]
+
+    async def generate():
+        reference = _upload_processed_image(s3_store, render_data, "concurrent/")
+        return await client.post(
+            GEN_ENDPOINT,
+            json={
+                "token_ids": render_data["token_ids"],
+                "features": {
+                    "mm_hashes": {"image": [f"ref-{uuid.uuid4().hex}"]},
+                    "mm_placeholders": features["mm_placeholders"],
+                    "kwargs_refs": {"image": [reference]},
+                },
+                "sampling_params": {"max_tokens": 1},
+            },
+        )
+
+    for gen_resp in await asyncio.gather(generate(), generate()):
+        gen_resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+async def test_kwargs_refs_release_their_memory(client, s3_store, test_image):
+    """Each request returns its reservation, streamed or not.
+
+    The server's budget fits about three of these items, so a request that
+    kept its reservation would make a later one wait forever.
+    """
+    render_data = await _render_image_prompt(
+        client, encode_image_url(test_image, format="PNG")
+    )
+    features = render_data["features"]
+    async with asyncio.timeout(120):
+        for stream in [False, True] * 4:
+            body = {
+                "token_ids": render_data["token_ids"],
+                "features": {
+                    "mm_hashes": {"image": [f"ref-{uuid.uuid4().hex}"]},
+                    "mm_placeholders": features["mm_placeholders"],
+                    "kwargs_refs": {
+                        "image": [_upload_processed_image(s3_store, render_data)]
+                    },
+                },
+                "sampling_params": {"max_tokens": 2},
+                "stream": stream,
+            }
+            async with client.stream("POST", GEN_ENDPOINT, json=body) as resp:
+                assert resp.status_code == 200
+                text = "".join([chunk async for chunk in resp.aiter_text()])
+            assert "token_ids" in text
+
+
+@pytest.mark.asyncio
+async def test_bad_reference_is_rejected_before_any_download(
+    client, s3_store, test_image
+):
+    """A disallowed reference fails the request before the valid one is read."""
+    data_url = encode_image_url(test_image, format="PNG")
+    render_data = await _render_image_prompt(client, data_url, data_url)
+    valid = _upload_processed_image(s3_store, render_data)
+    outside = {**valid, "uri": valid["uri"].replace(S3_PREFIX, "other", 1)}
+    features = render_data["features"]
+
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": render_data["token_ids"],
+            "features": {
+                "mm_hashes": features["mm_hashes"],
+                "mm_placeholders": features["mm_placeholders"],
+                "kwargs_refs": {"image": [valid, outside]},
+            },
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+
+    assert gen_resp.status_code == 400
+    assert "configured prefix" in gen_resp.text
+    assert valid["uri"].removeprefix("s3://") not in GET_PATHS
