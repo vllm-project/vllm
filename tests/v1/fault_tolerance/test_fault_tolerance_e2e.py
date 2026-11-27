@@ -19,7 +19,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_open_ports_list
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
 
@@ -297,6 +297,9 @@ def _wait_for_engines(
         for i, server in list(pending.items()):
             with contextlib.suppress(Exception):
                 for engine_status in _get_ft_status(server)["engines"]:
+                    # Engine recovery may finish before its frontend migration.
+                    if match_values == {"healthy"} and engine_status.get("ft_state"):
+                        continue
                     if engine_status.get(match_key) in match_values:
                         results[i] = engine_status
                         del pending[i]
@@ -434,8 +437,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("quantization", [None, "fp8_per_block"])
-def test_scale_down_removes_dead_rank_and_recovers(quantization):
-    """Preserve physical expert IDs and reload recovered placement after scale-down.
+def test_scale_down_removes_dead_rank_and_recovers(quantization, monkeypatch):
+    """Recover from 4 to 3 ranks, then restore rank 0 through Elastic EP scale-up.
 
     Survivors keep serving with a smaller DP group, including processed FP8
     weights whose checkpoint layout differs from their runtime layout.
@@ -448,19 +451,32 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
     Also verifies that a DEAD engine rejects ``retry``: recovery is gated on
     UNHEALTHY, so trying ``retry`` on the victim records a rejection reason.
 
-    Accuracy is measured before the fault and after scale_down; the survivor
-    must stay within ACCURACY_TOL of the pre-fault baseline.
+    Accuracy after scale-down and scale-up must stay within ACCURACY_TOL of
+    the pre-fault baseline.
     """
+    from tests.v1.distributed.test_external_lb_dp import (
+        _send_scale_command,
+        _wait_for_scale_requests_to_start,
+    )
+
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    dp_size = 4
     eplb_args = [
+        "--enable-elastic-ep",
+        "--elastic-ep-max-dp-size",
+        str(dp_size),
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
         str(NUM_REDUNDANT_EXPERTS),
+        "--eplb-config.use_async",
+        "false",
     ]
     if quantization is not None:
         eplb_args.extend(["--quantization", quantization])
-    dp_size = 4
     victim_rank = 0
-    with _ft_manager(eplb_args, dp_size=dp_size) as servers:
+    server_manager = _ft_manager(eplb_args, dp_size=dp_size)
+    with server_manager as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
         victim = servers_by_rank[victim_rank]
@@ -488,7 +504,7 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
 
         # 5. scale_down sent to every survivor: remove the dead rank.
         round_id = str(uuid.uuid4())
-        store_port = get_open_port()
+        store_port, coord_store_port = get_open_ports_list(2)
         for server in survivors:
             _apply_ft(
                 server,
@@ -496,6 +512,7 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
                 {
                     "removed_dp_ranks": [victim_rank],
                     "dp_store_port": store_port,
+                    "coord_store_port": coord_store_port,
                     "dp_master_ip": "127.0.0.1",
                 },
                 request_id=round_id,
@@ -530,4 +547,30 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
             f"  After scale down: {recovered_accuracy:.3f} "
             f"(diff: {recovered_accuracy - initial_accuracy:+.3f})\n"
             f"  Tolerance:        {ACCURACY_TOL:.3f}"
+        )
+
+        # 8. Stop the old rank 0 without waiting for the other GPUs to be freed.
+        victim._terminate_process_tree()
+        with ThreadPoolExecutor(max_workers=len(survivors)) as executor:
+            scale_requests = [
+                executor.submit(_send_scale_command, server, dp_size)
+                for server in survivors
+            ]
+            _wait_for_scale_requests_to_start(scale_requests)
+            replacement, _ = server_manager.start_rank(
+                rank=victim_rank,
+                dp_size=dp_size,
+                elastic_ep_scale_up_launch=True,
+            )
+            for request in scale_requests:
+                response = request.result(timeout=600)
+                assert response.status_code == 200, response.text
+
+        # 9. All four ranks, including the replacement, serve after scale-up.
+        restored_servers = [replacement, *survivors]
+        _assert_serving_and_healthy(restored_servers)
+        restored_accuracy = _run_gsm8k_eval(replacement, "After scale up")
+        assert restored_accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Accuracy dropped after scale_up: {restored_accuracy:.3f} < "
+            f"{initial_accuracy:.3f} - {ACCURACY_TOL}"
         )

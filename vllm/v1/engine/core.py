@@ -2090,20 +2090,9 @@ class EngineCoreProc(EngineCore):
                     elif request_type == EngineCoreRequestType.UTILITY:
                         request = generic_decoder.decode(data_frames)
                         client_idx, call_id, method, args = request
-                        if method == "reconnect_dp_coordinator":
-                            # Handle this on the IO thread even while the main
-                            # loop is participating in a DP collective.
-                            self._invoke_utility_method(
-                                method,
-                                lambda args=args: coordinator_connection.reconnect(
-                                    *args
-                                ),
-                                UtilityOutput(call_id),
-                                lambda out,
-                                idx=client_idx: self.output_queue.put_nowait(
-                                    (idx, EngineCoreOutputs(utility_output=out))
-                                ),
-                            )
+                        if coordinator_connection.handle_utility(
+                            client_idx, call_id, method, args
+                        ):
                             continue
                         if method == FT_UTILITY_METHOD:
                             self.ft_sentinel.handle_command(

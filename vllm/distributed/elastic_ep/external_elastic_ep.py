@@ -16,7 +16,12 @@ import msgspec.msgpack
 import zmq
 
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip, make_zmq_socket, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_ip,
+    get_open_zmq_inproc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.v1.engine import (
     EEPNotificationType,
     ReconfigureDistributedRequest,
@@ -395,6 +400,42 @@ class ExternalElasticEPScaleCoordinator:
                 "the target topology cannot retain all model experts."
             )
         return num_redundant_experts
+
+    async def reconnect_dp_coordinator(
+        self, input_address: str, output_address: str, stats_address: str
+    ) -> None:
+        """When scale-up restores rank 0's coordinator, reconnect the engine and
+        frontend to restore stats updates and idle-request wakeups.
+        """
+        client = self.client
+        await asyncio.wait_for(
+            client.call_utility_async(
+                "reconnect_dp_coordinator",
+                input_address,
+                output_address,
+                stats_address,
+            ),
+            timeout=300,
+        )
+        if client.stats_update_address != stats_address:
+            task = client.resources.stats_update_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            client.resources.stats_update_task = None
+            client.resources.stats_update_socket = None
+            client.resources.scale_rcv_socket = None
+            # Recreate both ends: an inproc PAIR cannot replace only its peer.
+            client.scale_send_socket.close(linger=0)
+            client.scale_sock_addr = get_open_zmq_inproc_path()
+            client.scale_send_socket = client.resources.scale_send_socket = (
+                make_zmq_socket(client.ctx, client.scale_sock_addr, zmq.PAIR, bind=True)
+            )
+            client.stats_update_address = stats_address
+            client._ensure_stats_update_task()
+        client.coordinator_input_address = input_address
+        client.coordinator_output_address = output_address
 
     async def migrate_coord_store(
         self, master_ip: str, port: int, rank: int, size: int, request_id: str
@@ -1002,7 +1043,7 @@ class ExternalElasticEPScaleCoordinator:
             if scale_up and 0 not in existing_dp_ranks:
                 # Start target-group preparation first: the new rank must join
                 # that group before it can subscribe to its coordinator.
-                await self.client.reconnect_dp_coordinator(*addresses)
+                await self.reconnect_dp_coordinator(*addresses)
 
             await self._wait_for_ready_ranks(
                 control_store,
@@ -1129,6 +1170,10 @@ class ExternalElasticEPScaleCoordinator:
             raise
         finally:
             self.prepared_scale = None
+
+        self.client.frontend_sentinel.reset_after_scale_reconfiguration(
+            bootstrap.new_data_parallel_size
+        )
 
     async def process_engine_core_notification(
         self, notification_data: tuple[str, int]

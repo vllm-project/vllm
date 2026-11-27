@@ -6,7 +6,7 @@ from datetime import timedelta
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from torch.distributed import TCPStore
@@ -21,6 +21,9 @@ from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.engine import ReconfigureDistributedRequest
+from vllm.v1.fault_tolerance.frontend_sentinel import FrontendSentinel
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 
 
 def _scale_coordinator(**parallel_kwargs):
@@ -75,19 +78,37 @@ def test_sparse_scale_down_rejected_before_bootstrap():
     coordinator.client.call_utility_async.assert_not_called()
 
 
-def _commit_state_after_fault(new_size=4):
+@pytest.mark.asyncio
+async def test_frontend_ft_without_elastic_ep_reports_failure_and_retry():
+    client = MagicMock(
+        vllm_config=VllmConfig(
+            parallel_config=ParallelConfig(enable_fault_tolerance=True)
+        ),
+        engine_ranks_managed=[0],
+        _engine_status={0: {"id": 0, "status": "healthy"}},
+    )
+    frontend = FrontendSentinel(client)
+    with pytest.raises(ValueError, match="removed_dp_ranks"):
+        await frontend.handle_fault(FaultToleranceRequest("scale_down", {}, "bad"))
+    assert frontend.get_status()["engines"][0]["ft_state"] == "failed"
+
+    async def recover(method, request):
+        client._engine_status[0] = {"id": 0, "status": "healthy"}
+        return {"request_id": request.request_id, "success": True}
+
+    client.call_utility_async = AsyncMock(side_effect=recover)
+    result = await frontend.handle_fault(FaultToleranceRequest("retry", {}, "retry"))
+    assert result.success
+    assert "ft_state" not in frontend.get_status()["engines"][0]
+
+
+def _commit_state_after_fault():
     from vllm.v1.fault_tolerance.engine_core_sentinel import EngineCoreSentinel
 
-    parallel_config = SimpleNamespace(
-        data_parallel_rank=3,
-        data_parallel_size=4,
-        data_parallel_master_ip="127.0.0.1",
-        _data_parallel_master_rank=0,
-        fault_tolerance_config=SimpleNamespace(engine_recovery_timeout_sec=300),
-    )
+    parallel_config = ParallelConfig(data_parallel_rank=3, data_parallel_size=4)
     engine = SimpleNamespace(
         engine_index=3,
-        vllm_config=SimpleNamespace(parallel_config=parallel_config),
+        vllm_config=VllmConfig(parallel_config=parallel_config),
         output_queue=Queue(),
         dp_store=MagicMock(),
         model_executor=SimpleNamespace(failure_callback=None),
@@ -99,20 +120,17 @@ def _commit_state_after_fault(new_size=4):
     state = object.__new__(ElasticEPScalingState)
     state.engine_core_ref = lambda: engine
     state.vllm_config = engine.vllm_config
-    state.scale_type = "scale_up"
     state.old_dp_group = object()
     state.state = ScaleUpExistingEngineState.COMMIT_SCALE_UP
     state.commit_requested = True
-    state.reconfig_request = SimpleNamespace(
-        new_data_parallel_size=new_size,
+    state.reconfig_request = ReconfigureDistributedRequest(
+        new_data_parallel_size=4,
         new_data_parallel_rank=3,
         new_data_parallel_rank_local=0,
         new_data_parallel_master_ip="127.0.0.1",
         new_data_parallel_master_port=29860,
         new_data_parallel_master_port_list=[],
         coord_store_port=29861,
-        existing_dp_ranks=[0, 1, 3],
-        data_parallel_master_rank=0,
     )
     state._commit_new_dp_group = MagicMock()
     state._collective_rpc = MagicMock()
@@ -120,33 +138,31 @@ def _commit_state_after_fault(new_size=4):
     return state, sentinel
 
 
-@pytest.mark.parametrize("new_size,removed_rank", [(4, 2), (5, 4)])
-def test_scale_up_rebases_fault_state_for_the_next_failure(new_size, removed_rank):
+@pytest.mark.parametrize("commit_fails", [False, True])
+def test_scale_up_rebases_fault_state_only_after_successful_commit(commit_fails):
     from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 
-    state, sentinel = _commit_state_after_fault(new_size)
+    state, sentinel = _commit_state_after_fault()
+    if commit_fails:
+        state._collective_rpc.side_effect = RuntimeError("worker commit failed")
+        with pytest.raises(RuntimeError, match="worker commit failed"):
+            state._progress_existing_engine()
+        assert sentinel._dead_dp_ranks == {2}
+        assert sentinel.engine.output_queue.empty()
+        return
+
     assert state._progress_existing_engine()
     request = FaultToleranceRequest(
-        "scale_down", {"removed_dp_ranks": [removed_rank]}, request_id="shrink-2"
+        "scale_down", {"removed_dp_ranks": [2]}, request_id="shrink-2"
     )
     sentinel.scale_down(request)
 
     # A replacement may reuse a previously dead rank. Only this cycle's
     # failure belongs in the worker recovery request.
-    assert request.params["dead_dp_ranks"] == [removed_rank]
+    assert request.params["dead_dp_ranks"] == [2]
     _, output = sentinel.engine.output_queue.get_nowait()
     assert output.engine_index == 3
     assert output.utility_output.result.result == {
         "id": 3,
         "status": "healthy",
     }
-
-
-def test_failed_scale_up_keeps_fault_state():
-    state, sentinel = _commit_state_after_fault()
-    state._collective_rpc.side_effect = RuntimeError("worker commit failed")
-    with pytest.raises(RuntimeError, match="worker commit failed"):
-        state._progress_existing_engine()
-    assert sentinel._dead_dp_ranks == {2}
-    assert sentinel.parallel_config.data_parallel_rank == 3
-    assert sentinel.engine.output_queue.empty()

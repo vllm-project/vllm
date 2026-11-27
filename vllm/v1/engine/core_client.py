@@ -64,7 +64,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.fault_tolerance.engine_core_sentinel import FT_UTILITY_METHOD
+from vllm.v1.fault_tolerance.frontend_sentinel import FrontendSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultToleranceRequest,
     FaultToleranceResult,
@@ -1195,6 +1195,7 @@ class AsyncMPClient(MPClient):
 
         self.client_count = client_count
         self.client_index = client_index
+        self.frontend_sentinel = FrontendSentinel(self)
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
         # locally-cached engine status
@@ -1483,34 +1484,7 @@ class AsyncMPClient(MPClient):
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        status = self._engine_status[self.engine_ranks_managed[0]]
-
-        # Reject a second recovery while one is in flight
-        if status.get("ft_state") == "recovering":
-            return FaultToleranceResult(
-                request_id=ft_request.request_id,
-                success=False,
-                reason="another recovery is in progress",
-            )
-
-        status["ft_state"] = "recovering"
-        status["last_ft_request_id"] = ft_request.request_id
-        status.pop("ft_error", None)
-
-        try:
-            res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
-            result = msgspec.convert(res, FaultToleranceResult)
-        except Exception as e:
-            result = FaultToleranceResult(ft_request.request_id, False, str(e))
-
-        if not result.success:
-            # Status pushes replace the cached entry; re-read before recording.
-            status = self._engine_status[self.engine_ranks_managed[0]]
-            status["ft_state"] = "failed"
-            status["last_ft_request_id"] = result.request_id
-            status["ft_error"] = result.reason
-
-        return result
+        return await self.frontend_sentinel.handle_fault(ft_request)
 
     @property
     def engine_status(self) -> dict:
@@ -1518,11 +1492,7 @@ class AsyncMPClient(MPClient):
         return self._engine_status.get(self.engine_ranks_managed[0], {})
 
     async def get_status(self):
-        return {
-            "schema_version": 1,
-            "total_engines": len(self.engine_ranks_managed),
-            "engines": list(self._engine_status.values()),
-        }
+        return self.frontend_sentinel.get_status()
 
 
 class DPAsyncMPClient(AsyncMPClient):
@@ -1749,10 +1719,15 @@ class DPAsyncMPClient(AsyncMPClient):
             f"new_data_parallel_size {new_data_parallel_size} must be "
             f"different from cur_data_parallel_size {cur_data_parallel_size}"
         )
+        self.frontend_sentinel.validate_scale_up(new_data_parallel_size)
         await self._get_external_eep_coordinator().prepare(
             cur_data_parallel_size,
             new_data_parallel_size,
-            existing_dp_ranks=existing_dp_ranks,
+            existing_dp_ranks=(
+                self.frontend_sentinel.active_dp_ranks.copy()
+                if existing_dp_ranks is None
+                else existing_dp_ranks
+            ),
         )
 
     async def commit_elastic_ep(self) -> None:
@@ -1764,37 +1739,9 @@ class DPAsyncMPClient(AsyncMPClient):
     async def reconnect_dp_coordinator(
         self, input_address: str, output_address: str, stats_address: str
     ) -> None:
-        """When scale-up restores rank 0's coordinator, reconnect the engine and
-        frontend to restore stats updates and idle-request wakeups.
-        """
-        await asyncio.wait_for(
-            self.call_utility_async(
-                "reconnect_dp_coordinator",
-                input_address,
-                output_address,
-                stats_address,
-            ),
-            timeout=300,
+        await self._get_external_eep_coordinator().reconnect_dp_coordinator(
+            input_address, output_address, stats_address
         )
-        if self.stats_update_address != stats_address:
-            task = self.resources.stats_update_task
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            self.resources.stats_update_task = None
-            self.resources.stats_update_socket = None
-            self.resources.scale_rcv_socket = None
-            # Recreate both ends: an inproc PAIR cannot replace only its peer.
-            self.scale_send_socket.close(linger=0)
-            self.scale_sock_addr = get_open_zmq_inproc_path()
-            self.scale_send_socket = self.resources.scale_send_socket = make_zmq_socket(
-                self.ctx, self.scale_sock_addr, zmq.PAIR, bind=True
-            )
-            self.stats_update_address = stats_address
-            self._ensure_stats_update_task()
-        self.coordinator_input_address = input_address
-        self.coordinator_output_address = output_address
 
     async def recover_elastic_ep_coord_store(
         self, master_ip: str, port: int, rank: int, size: int, request_id: str
@@ -2044,6 +1991,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             num_redundant_experts
         )
         self._prepared_elastic_ep = None
+        self.frontend_sentinel.reset_after_scale_reconfiguration(new_data_parallel_size)
 
     async def prepare_elastic_ep(
         self,

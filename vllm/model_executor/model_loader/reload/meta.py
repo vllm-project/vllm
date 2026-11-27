@@ -131,14 +131,16 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
         if name not in SKIP_TENSORS and hasattr(layer, name):
             delattr(layer, name)
 
+    # Each reload can attach its own weight loaders and other tensor attributes.
+    # Keep those changes off the metadata reused by subsequent reloads.
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
-            param = restore_layer_refs(param, layer)
+            param = restore_layer_refs(to_meta_tensor(param), layer)
             layer.register_parameter(name, param)
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
-            buffer = restore_layer_refs(buffer, layer)
+            buffer = restore_layer_refs(to_meta_tensor(buffer), layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
+"""Fault-tolerance coordination for engine cores."""
 
 import threading
 from collections.abc import Callable
@@ -98,6 +98,22 @@ class DPCoordinatorConnection:
     socket: zmq.Socket | None
     input_address: str | None
     ready: Future[None] | None = None
+
+    def handle_utility(
+        self, client_idx: int, call_id: int, method: str, args: tuple
+    ) -> bool:
+        """Handle reconnection on the IO thread while the main loop may be blocked."""
+        if method != "reconnect_dp_coordinator":
+            return False
+        self.engine._invoke_utility_method(
+            method,
+            lambda args=args: self.reconnect(*args),
+            UtilityOutput(call_id),
+            lambda out: self.engine.output_queue.put_nowait(
+                (client_idx, EngineCoreOutputs(utility_output=out))
+            ),
+        )
+        return True
 
     def reconnect(
         self, input_address: str, output_address: str, stats_address: str
