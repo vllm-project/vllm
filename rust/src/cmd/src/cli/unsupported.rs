@@ -461,4 +461,17 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+
+    /// Directory where Python's filesystem LoRA resolver plugin looks for
+    /// adapters that requests name but no one loaded. Like Python, it is set
+    /// only through `VLLM_LORA_RESOLVER_CACHE_DIR`. LoRA resolvers are Python
+    /// plugins, which the Rust frontend cannot load.
+    #[arg(long, hide = true, env = "VLLM_LORA_RESOLVER_CACHE_DIR")]
+    pub lora_resolver_cache_dir: Option<Unsupported>,
+
+    /// Comma-separated Hugging Face repositories that Python's Hub LoRA
+    /// resolver plugin downloads such adapters from. Like Python, it is set
+    /// only through `VLLM_LORA_RESOLVER_HF_REPO_LIST`.
+    #[arg(long, hide = true, env = "VLLM_LORA_RESOLVER_HF_REPO_LIST")]
+    pub lora_resolver_hf_repo_list: Option<Unsupported>,
 }

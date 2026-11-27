@@ -298,6 +298,8 @@ _RUST_FRONTEND_ENV_ARGS = {
     "use_modelscope": "VLLM_USE_MODELSCOPE",
     "enforce_strict_tool_calling": "VLLM_ENFORCE_STRICT_TOOL_CALLING",
     "request_body_log_level": "VLLM_REQUEST_BODY_LOG_LEVEL",
+    "lora_resolver_cache_dir": "VLLM_LORA_RESOLVER_CACHE_DIR",
+    "lora_resolver_hf_repo_list": "VLLM_LORA_RESOLVER_HF_REPO_LIST",
 }
 
 

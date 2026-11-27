@@ -3376,10 +3376,24 @@ fn unsupported_env_settings_fail_startup() {
         let error = serve(value).unwrap_err();
         assert!(error.contains("--max-tokenize-tokens"), "{value}: {error}");
     }
+    // LoRA resolvers are Python plugins, refused whether or not
+    // `VLLM_ALLOW_RUNTIME_LORA_UPDATING` would consult them.
+    for flag in ["--lora-resolver-cache-dir", "--lora-resolver-hf-repo-list"] {
+        let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, "x"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(flag), "{flag}: {error}");
+    }
 
     expect!["invalid JSON arguments: max_tokenize_tokens (VLLM_MAX_TOKENIZE_TOKENS): argument is not implemented in Rust frontend yet"].assert_eq(
         &parse_runtime_args_json(r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":4096}"#)
             .unwrap_err(),
+    );
+    expect!["invalid JSON arguments: lora_resolver_cache_dir (VLLM_LORA_RESOLVER_CACHE_DIR): argument is not implemented in Rust frontend yet"].assert_eq(
+        &parse_runtime_args_json(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","lora_resolver_cache_dir":"/loras"}"#,
+        )
+        .unwrap_err(),
     );
 }
 
