@@ -18,6 +18,9 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    get_replayssm_align_block_size,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -136,6 +139,15 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
 
+    # ReplaySSM standard decode: per-row ring cursor and flush flag. The first
+    # layer of each cache group fills them on the GPU from per-slot ring
+    # counters (see plan_replayssm_decode); prefix caching also reads the rows'
+    # sequence lengths. None unless use_replayssm is enabled.
+    write_pos_d: torch.Tensor | None = None
+    is_flush_d: torch.Tensor | None = None
+    replayssm_seq_lens_d: torch.Tensor | None = None
+    replayssm_align_block_size: int = 0
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -175,9 +187,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
-        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
-            vllm_config, layer_names
-        )
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
@@ -276,6 +286,29 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+
+        self.use_replayssm: bool = (
+            vllm_config.cache_config.use_replayssm
+            and not vllm_config.cache_config.use_kda_recoverssm
+        )
+        self.replayssm_buffer_len: int | None = (
+            vllm_config.cache_config.replayssm_buffer_len
+            if self.use_replayssm
+            else None
+        )
+        if self.use_replayssm:
+            # Filled on the GPU each step by plan_replayssm_decode; persistent
+            # so full CUDA graphs keep reading the same addresses.
+            replayssm_max_bs = max(
+                self.decode_cudagraph_max_bs,
+                self.vllm_config.scheduler_config.max_num_seqs,
+            )
+            self.decode_write_pos_d: torch.Tensor = torch.zeros(
+                (replayssm_max_bs,), dtype=torch.int32, device=device
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.zeros(
+                (replayssm_max_bs,), dtype=torch.int8, device=device
+            )
 
     @staticmethod
     def _check_chunk_metadata_override(
@@ -653,6 +686,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
+        write_pos_d = None
+        is_flush_d = None
+        replayssm_seq_lens_d = None
+        replayssm_align_block_size = 0
+        if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
+            # All rows: a padded full-CUDA-graph batch plans its NULL_BLOCK_ID
+            # rows as no-ops.
+            write_pos_d = self.decode_write_pos_d[: m.num_reqs]
+            is_flush_d = self.decode_is_flush_d[: m.num_reqs]
+            cache_config = self.vllm_config.cache_config
+            if cache_config.enable_prefix_caching:
+                replayssm_seq_lens_d = m.seq_lens[: m.num_reqs]
+                replayssm_align_block_size = get_replayssm_align_block_size(
+                    cache_config, self.kv_cache_spec.block_size
+                )
+
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
         # metadata below is indexed by request.
@@ -743,6 +792,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
             uniform_spec_sequence_length=uniform_spec_sequence_length,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
+            replayssm_seq_lens_d=replayssm_seq_lens_d,
+            replayssm_align_block_size=replayssm_align_block_size,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

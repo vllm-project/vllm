@@ -2657,10 +2657,6 @@ instanttensor==0.1.9 \
     --hash=sha256:d2e8a2ce8b63f2aadd551bfa35400c439ffae9fcb3df4651c8c7dc39a4de32e0 \
     --hash=sha256:d8692b97991c1a5fb2db7905b9a6ae90a7f967c7ddd853d35e41caa146750c02
     # via -r requirements/test/rocm.in
-interegular==0.3.3 \
-    --hash=sha256:b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c \
-    --hash=sha256:d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600
-    # via lm-format-enforcer
 isodate==0.7.2 \
     --hash=sha256:28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15 \
     --hash=sha256:4cd1aa0f43ca76f4a6c6c0292a85f40b35ec2e43e315b59f06e6d32171a953e6
@@ -3099,12 +3095,6 @@ lm-eval==0.4.12 \
     --hash=sha256:02971ff68284dd14cfa7fce9310a58452c4162e8d413ba96aa7988a0ff9352ef \
     --hash=sha256:45938d7c8024d5eee5c8a0da36abe7cc09c252413c577cf81666f0fcd28b4345
     # via -r requirements/test/rocm.in
-lm-format-enforcer==0.11.3 \
-    --hash=sha256:cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f \
-    --hash=sha256:e68081c108719cce284a9bcc889709b26ffb085a1945b5eba3a12cfa96d528da
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 logistro==2.0.1 \
     --hash=sha256:06ffa127b9fb4ac8b1972ae6b2a9d7fde57598bf5939cd708f43ec5bba2d31eb \
     --hash=sha256:8446affc82bab2577eb02bfcbcae196ae03129287557287b6a070f70c1985047
@@ -4386,7 +4376,6 @@ packaging==26.3 \
     #   huggingface-hub
     #   kaleido
     #   lazy-loader
-    #   lm-format-enforcer
     #   matplotlib
     #   optuna
     #   peft
@@ -4829,16 +4818,19 @@ py-cpuinfo==9.0.0 \
     --hash=sha256:3cdbbf3fac90dc6f118bfd64384f309edeadd902d7c8fb17f02ffa1fc3f49690 \
     --hash=sha256:859625bc251f64e21f077d099d4162689c762b5d6a4c3c97553d56241c9674d5
     # via -r requirements/test/../common.txt
-py-spy==0.4.1 \
-    --hash=sha256:1fb8bf71ab8df95a95cc387deed6552934c50feef2cf6456bc06692a5508fd0c \
-    --hash=sha256:4972c21890b6814017e39ac233c22572c4a61fd874524ebc5ccab0f2237aee0a \
-    --hash=sha256:532d3525538254d1859b49de1fbe9744df6b8865657c9f0e444bf36ce3f19226 \
-    --hash=sha256:6a80ec05eb8a6883863a367c6a4d4f2d57de68466f7956b6367d4edd5c61bb29 \
-    --hash=sha256:809094208c6256c8f4ccadd31e9a513fe2429253f48e20066879239ba12cd8cc \
-    --hash=sha256:d92e522bd40e9bf7d87c204033ce5bb5c828fca45fa28d970f58d71128069fdc \
-    --hash=sha256:e53aa53daa2e47c2eef97dd2455b47bb3a7e7f962796a86cc3e7dbde8e6f4db4 \
-    --hash=sha256:ee776b9d512a011d1ad3907ed53ae32ce2f3d9ff3e1782236554e22103b5c084
-    # via ray
+py-spy==0.4.4 \
+    --hash=sha256:1991e9d7dc55bd0a9239d91717aa9fba31068ff5269e1a66ac5041e98d0e2691 \
+    --hash=sha256:286a9ab113d255ffc10bf7e7fe2ae78c82d0dedb95259888e72935cdbd8f41d2 \
+    --hash=sha256:358c97827dfe53fb30e2068862367f3ee4bfacaec7a1ba37a184779a2a899dc3 \
+    --hash=sha256:8a5adbb5b3ef11bf5132edbd9f841052053abab572f18d3beec166c3f3c14790 \
+    --hash=sha256:a91503bfd625a8ebb304f02ebfe34dd8a5e9873043e6e39138d310840cec18cb \
+    --hash=sha256:aaf9a921788fa48fcbc13068f8171af422eb2024888e70406a790fee3613555e \
+    --hash=sha256:b6a19affdc08b2080f1cd6a05b70865700b92b146c3423f57335e0c06866e3a0 \
+    --hash=sha256:d3d3acf5a0cfe7fa8f5b7101dc7d964832e6dc11b0e81877270a071b8ffd6ba0 \
+    --hash=sha256:f8999a122ca2e17875e76114216b3821429f22e0a5d76c10a0a3ff966dca5f3b
+    # via
+    #   -r requirements/test/rocm.in
+    #   ray
 pyarrow==26.0.1 \
     --hash=sha256:0044cb9303c3ae082cc52a2493312109c955bcfa84e87be768736f7d6d8f6257 \
     --hash=sha256:0187cbe6558cb158e148dd7b779f59cab6104163d148d808d04f293dc897b7ec \
@@ -5222,7 +5214,6 @@ pydantic==2.14.3 \
     #   fastapi
     #   fastapi-cloud-cli
     #   gpt-oss
-    #   lm-format-enforcer
     #   mcp
     #   mcp-types
     #   mistral-common
@@ -5851,7 +5842,6 @@ pyyaml==6.0.3 \
     #   datasets
     #   genai-perf
     #   huggingface-hub
-    #   lm-format-enforcer
     #   optuna
     #   peft
     #   ray

@@ -68,6 +68,7 @@ def _make_layer(gqa_interleaved_layout: bool):
     layer.gqa_interleaved_layout = gqa_interleaved_layout
     layer.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
     layer.use_aiter_fused_gdn_decode = False
+    layer.use_replayssm = False
 
     layer.calls = []
     layer._forward_core_decode_aiter = lambda **kw: layer.calls.append("aiter")
@@ -103,6 +104,14 @@ def test_pure_decode_takes_the_fast_path(gqa_interleaved_layout: bool) -> None:
     """Both packings reach the fast path; flat used to be guarded out."""
     layer = _make_layer(gqa_interleaved_layout)
     assert _run(layer, _make_metadata()) == "aiter"
+
+
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_replayssm_decode_skips_the_fast_path(gqa_interleaved_layout: bool) -> None:
+    """ReplaySSM decodes through its ring kernel in `_forward_core`."""
+    layer = _make_layer(gqa_interleaved_layout)
+    layer.use_replayssm = True
+    assert _run(layer, _make_metadata()) == "generic"
 
 
 @pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
@@ -408,6 +417,7 @@ def test_fused_decode_matches_unfused(
         _aiter_fused_conv_bias=torch.zeros(
             qkv_dim, device="cuda", dtype=torch.bfloat16
         ),
+        use_replayssm=False,
     )
     for name in (
         "_forward_core_rocm",
