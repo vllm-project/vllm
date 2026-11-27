@@ -369,7 +369,7 @@ def test_tool_search_request_errors(messages, tools, match):
 def render_with_media(request, monkeypatch):
     # Keep real message parsing and image tracking; no model download is needed.
     processor = SimpleNamespace(
-        info=SimpleNamespace(validate_num_items=lambda *args: None)
+        info=SimpleNamespace(validate_num_input_items=lambda *args, **kwargs: None)
     )
     model_cls = SimpleNamespace(
         get_placeholder_str=lambda *args: "<｜deepseek_image｜>"
