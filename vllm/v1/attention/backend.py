@@ -71,18 +71,10 @@ class AttentionBackend(ABC):
     supports_kv_cache_update_bypass: bool = False
 
     @classmethod
-    def get_runtime_shapes(
-        cls,
-        spec: "KVCacheSpec",
-        num_blocks: int,
-        layout: KVCacheLayout,
-        kernel_block_size: int | None = None,
-    ) -> tuple[tuple[int, ...], ...] | None:
-        """Shapes of page components, with blocks first and bytes on the last axis.
-
-        Components are packed in order within each page. None delegates to
-        the layer's existing cache binding.
-        """
+    def get_runtime_views(
+        cls, kv_cache: torch.Tensor, spec: "KVCacheSpec", layout: KVCacheLayout
+    ) -> tuple[torch.Tensor, ...] | None:
+        """Return typed aliases of the page, or None to use default binding."""
         return None
 
     @staticmethod
@@ -800,7 +792,7 @@ class AttentionImplBase(ABC, Generic[T]):
     method - subclasses define their own forward interfaces.
     """
 
-    # Bound byte views for backends that consume both packed pages and components.
+    # Bound kernel views for backends that consume both packed pages and components.
     runtime_kv_cache_views: (
         tuple[torch.Tensor, KVCacheLayout, tuple[torch.Tensor, ...]] | None
     ) = None

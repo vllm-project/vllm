@@ -1538,12 +1538,14 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
-def test_gdn_runtime_states_alias_planned_pages(layout):
+@pytest.mark.parametrize("runner", ["cpu", "gpu"])
+def test_gdn_runtime_states_alias_planned_pages(layout, runner):
     from tests.v1.attention.utils import CheckpointingMambaLayer
     from vllm.config import DeviceConfig, VllmConfig
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.worker.gpu.attn_utils import init_kv_cache
+    from vllm.v1.worker.cpu import attn_utils as cpu_attn_utils
+    from vllm.v1.worker.gpu import attn_utils as gpu_attn_utils
     from vllm.v1.worker.utils import AttentionGroup
 
     spec = MambaSpec(
@@ -1568,7 +1570,6 @@ def test_gdn_runtime_states_alias_planned_pages(layout):
         layer_stride=layer_stride,
         block_stride=block_stride,
     )
-    raw = torch.zeros(tensor.size, dtype=torch.int8)
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.cache_config.kv_cache_layout = layout.name
     layer = CheckpointingMambaLayer(None)
@@ -1577,15 +1578,16 @@ def test_gdn_runtime_states_alias_planned_pages(layout):
         kv_cache_tensors=[tensor],
         kv_cache_groups=[new_kv_cache_group(tensor.layers, spec)],
     )
-    caches = init_kv_cache(
+    attn_utils = cpu_attn_utils if runner == "cpu" else gpu_attn_utils
+    caches = attn_utils.init_kv_cache(
         {"b": layer},
         kv_config,
-        raw.device,
+        torch.device("cpu"),
         [],
         config,
         attn_groups=[AttentionGroup(GDNAttentionBackend, ["b"], spec, 0)],
-        allocate=lambda _: raw,
     )
+    raw = torch.empty(0, dtype=torch.int8).set_(caches["b"].untyped_storage())
     assert caches["b"].data_ptr() == raw.data_ptr() + tensor.offset + layer_stride
     conv, recurrent = layer.kv_cache
 
@@ -1608,10 +1610,9 @@ def test_gdn_runtime_states_alias_planned_pages(layout):
 def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num_heads):
     from vllm.utils.torch_utils import nvfp4_split_data_scale
     from vllm.v1.attention.backends.utils import (
-        flashinfer_nvfp4_component_shapes,
+        flashinfer_nvfp4_kv_views,
         get_flashinfer_layout_string,
     )
-    from vllm.v1.kv_cache_interface import create_page_component_views
 
     layout = KVCacheLayout[layout]
     rows, width = 16, 72
@@ -1624,10 +1625,11 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     cache = layers.permute(tuple(order.index(i) for i in range(5)))[1]
     pages = cache.permute(layout.layer_view_order)
     kv_layout = get_flashinfer_layout_string(layout)
-    shapes = flashinfer_nvfp4_component_shapes(
-        num_blocks, num_heads, rows, width, kv_layout
+    (k_data, v_data), (k_scale, v_scale), actual_layout = flashinfer_nvfp4_kv_views(
+        cache, num_heads, layout
     )
-    actual = create_page_component_views(pages, shapes, (torch.uint8,) * 4)
+    assert actual_layout == kv_layout
+    actual = k_data, k_scale, v_data, v_scale
 
     dims = (num_heads, rows) if kv_layout == "HND" else (rows, num_heads)
     expected = []
@@ -1635,6 +1637,7 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
         side = side.as_strided(side.shape, (cache.stride(0), *side.stride()[1:]))
         expected.extend(nvfp4_split_data_scale(side))
     for view, reference in zip(actual, expected, strict=True):
+        assert view.dtype == reference.dtype
         assert view.shape == reference.shape
         assert view.stride() == reference.stride()
         assert view.data_ptr() == reference.data_ptr()

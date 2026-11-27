@@ -53,6 +53,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
+    KVCacheLayout,
     KVCacheSpec,
     get_kv_quant_mode,
 )
@@ -651,6 +652,20 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+
+    def bind_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        *,
+        spec: KVCacheSpec | None = None,
+        layout: KVCacheLayout | None = None,
+    ) -> None:
+        self.kv_cache = kv_cache
+        self.impl.runtime_kv_cache_views = None
+        if spec is not None and layout is not None:
+            views = self.get_attn_backend().get_runtime_views(kv_cache, spec, layout)
+            if views is not None:
+                self.impl.runtime_kv_cache_views = (kv_cache, layout, views)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

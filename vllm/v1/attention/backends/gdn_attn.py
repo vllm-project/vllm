@@ -21,6 +21,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_replayssm_align_block_size,
 )
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -92,18 +93,24 @@ class GDNFlashInferCheckpointPlan:
 
 class GDNAttentionBackend(AttentionBackend):
     @classmethod
-    def get_runtime_shapes(
-        cls,
-        spec: KVCacheSpec,
-        num_blocks: int,
-        layout: KVCacheLayout,
-        kernel_block_size: int | None = None,
-    ) -> tuple[tuple[int, ...], ...]:
+    def get_runtime_views(
+        cls, kv_cache: torch.Tensor, spec: KVCacheSpec, layout: KVCacheLayout
+    ) -> tuple[torch.Tensor, ...]:
         assert isinstance(spec, MambaSpec)
-        return tuple(
-            (num_blocks, *shape[:-1], shape[-1] * get_dtype_size(dtype))
-            for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True)
-        )
+        pages = kv_cache.squeeze(dim=(1, 2))
+        offset = 0
+        views = []
+        for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True):
+            nbytes = math.prod(shape) * get_dtype_size(dtype)
+            component = pages.narrow(1, offset, nbytes).view(dtype)
+            inner_strides = tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
+            views.append(
+                component.as_strided(
+                    (pages.shape[0], *shape), (component.stride(0), *inner_strides)
+                )
+            )
+            offset += round_up(nbytes, spec.state_alignment)
+        return tuple(views)
 
     @staticmethod
     def get_name() -> str:

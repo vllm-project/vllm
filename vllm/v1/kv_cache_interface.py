@@ -588,29 +588,6 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
 
-def create_page_component_views(
-    cache: torch.Tensor,
-    shapes: tuple[tuple[int, ...], ...],
-    dtypes: tuple[torch.dtype, ...],
-    alignment: int = 1,
-) -> tuple[torch.Tensor, ...]:
-    """Split a byte cache in physical page order, preserving its block stride."""
-    pages = cache.view(cache.shape[0], prod(cache.shape[1:]))
-    views = []
-    offset = 0
-    for shape, dtype in zip(shapes, dtypes, strict=True):
-        size = prod(shape[1:])
-        component = pages.narrow(1, offset, size)
-        # view(shape) may compact the block stride when there is only one page.
-        strides = (
-            cache.stride(0),
-            *(prod(shape[i + 1 :]) for i in range(1, len(shape))),
-        )
-        views.append(component.as_strided(shape, strides).view(dtype))
-        offset += round_up(size, alignment)
-    return tuple(views)
-
-
 def get_reusable_prefix_length(
     num_tokens: int,
     num_hash_lookahead_tokens: int,

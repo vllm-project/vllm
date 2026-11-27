@@ -31,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
-    create_page_component_views,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -42,7 +41,6 @@ from vllm.v1.worker.utils import (
     bind_kv_cache_to_layers,
     customize_layer_config,
     groups_with_metadata_builders,
-    layer_kernel_block_size,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
@@ -435,7 +433,6 @@ def init_kv_cache(
         kv_cache_config,
         vllm_config,
         attn_groups,
-        kernel_block_sizes,
     )
 
 
@@ -445,7 +442,6 @@ def bind_kv_caches(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     attn_groups: Iterable[AttentionGroup] = (),
-    kernel_block_sizes: list[int] | None = None,
 ) -> dict[str, Any]:
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
@@ -455,37 +451,12 @@ def bind_kv_caches(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    for group in attn_groups:
-        spec = group.kv_cache_spec
-        if not spec.has_layer_views:
-            continue
-        layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-        kernel_size = group.kernel_block_size or layer_kernel_block_size(
-            group.kv_cache_group_id, kernel_block_sizes
-        )
-        for name in group.layer_names:
-            if name not in bindable_caches:
-                continue
-            cache = bindable_caches[name]
-            shapes = group.backend.get_runtime_shapes(
-                spec, cache.shape[0], layout, kernel_size
-            )
-            if shapes is None:
-                continue
-            layer = forward_context[name]
-            if isinstance(spec, MambaSpec):
-                states = create_page_component_views(
-                    cache, shapes, spec.dtypes, spec.state_alignment
-                )
-                layer.bind_kv_cache(states)
-                del bindable_caches[name]
-            else:
-                pages = cache.permute(layout.layer_view_order)
-                views = create_page_component_views(
-                    pages, shapes, (torch.uint8,) * len(shapes)
-                )
-                layer.impl.runtime_kv_cache_views = (cache, layout, views)
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
+    bind_kv_cache_to_layers(
+        bindable_caches,
+        forward_context,
+        attn_groups=attn_groups,
+        cache_config=vllm_config.cache_config,
+    )
     return kv_caches
 
 

@@ -13,6 +13,7 @@ import torch
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
@@ -948,15 +949,30 @@ def bind_kv_cache(
 
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, Attention],
+    forward_context: Mapping[str, Any],
+    *,
+    attn_groups: Iterable[AttentionGroup] = (),
+    cache_config: CacheConfig | None = None,
 ) -> None:
-    """Bind layer cache views."""
-    # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
-    # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
-    # splits conv/ssm), so the kv_caches dict can hold a single tensor per
-    # layer for the KV connector to register.
-    for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].bind_kv_cache(kv_cache)
+    """Pass the planned geometry to layer binders that consume runtime shapes."""
+    specs = {
+        name: group.kv_cache_spec
+        for group in attn_groups
+        if group.kv_cache_spec.has_layer_views
+        for name in group.layer_names
+    }
+    for name, page in kv_caches.items():
+        bind = forward_context[name].bind_kv_cache
+        spec = specs.get(name)
+        # Custom layer binders may still accept only the cache tensor.
+        if spec is not None and getattr(bind, "__func__", None) in (
+            Attention.bind_kv_cache,
+            MambaBase.bind_kv_cache,
+        ):
+            assert cache_config is not None
+            bind(page, spec=spec, layout=cache_config.get_resolved_kv_cache_layout())
+        else:
+            bind(page)
 
 
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:

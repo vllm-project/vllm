@@ -66,7 +66,6 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
-    nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -80,7 +79,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
-    flashinfer_nvfp4_component_shapes,
+    flashinfer_nvfp4_kv_views,
     get_dcp_local_seq_lens,
     get_flashinfer_kv_cache_layouts,
     get_flashinfer_layout_string,
@@ -164,29 +163,6 @@ def _use_fa2_native_decode() -> bool:
 
 
 _KVPair = tuple[torch.Tensor, torch.Tensor]
-
-
-def _nvfp4_kv_views(
-    kv_cache: torch.Tensor, num_kv_heads: int
-) -> tuple[_KVPair, _KVPair, str]:
-    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
-    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
-    hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
-    if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
-        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
-    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
-    side_size = num_kv_heads * block_size * full_dim
-    (k_data, k_scale), (v_data, v_scale) = (
-        nvfp4_split_data_scale(
-            kv_cache.as_strided(
-                (num_blocks, *dims, full_dim),
-                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
-                kv_cache.storage_offset() + side * side_size,
-            )
-        )
-        for side in range(2)
-    )
-    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 def _get_trtllm_workspace_buffer():
@@ -668,23 +644,15 @@ class FlashInferBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
     @classmethod
-    def get_runtime_shapes(
-        cls,
-        spec: KVCacheSpec,
-        num_blocks: int,
-        layout: KVCacheLayout,
-        kernel_block_size: int | None = None,
-    ) -> tuple[tuple[int, ...], ...] | None:
+    def get_runtime_views(
+        cls, kv_cache: torch.Tensor, spec: KVCacheSpec, layout: KVCacheLayout
+    ) -> tuple[torch.Tensor, ...] | None:
         if not isinstance(spec, AttentionSpec) or not spec.kv_quant_mode.is_nvfp4:
             return None
-        rows = spec.get_num_kernel_states(kernel_block_size or spec.block_size)
-        return flashinfer_nvfp4_component_shapes(
-            num_blocks,
-            spec.num_kv_heads,
-            rows,
-            spec.state_content_size_bytes,
-            get_flashinfer_layout_string(layout),
+        (k, v), (ks, vs), _ = flashinfer_nvfp4_kv_views(
+            kv_cache, spec.num_kv_heads, layout
         )
+        return k, ks, v, vs
 
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
@@ -3276,13 +3244,10 @@ class FlashInferImpl(AttentionImpl):
                 k_data, k_scale, v_data, v_scale = views
                 return (
                     (k_data, v_data),
-                    (
-                        k_scale.view(torch.float8_e4m3fn),
-                        v_scale.view(torch.float8_e4m3fn),
-                    ),
+                    (k_scale, v_scale),
                     get_flashinfer_layout_string(layout),
                 )
-        return _nvfp4_kv_views(cache, self.num_kv_heads)
+        return flashinfer_nvfp4_kv_views(cache, self.num_kv_heads)
 
     def do_kv_cache_update(
         self,
