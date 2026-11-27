@@ -3474,23 +3474,30 @@ class MoRIIOConnectorWorker:
         """
         return self._single_kv_cache_group and not self._has_mamba
 
-    def _record_failed_recv(self, req_id: ReqId) -> None:
+    def _record_failed_recv(
+        self, req_id: ReqId, dst_block_ids: Collection[int] | None = None
+    ) -> None:
         """Hand a failed read to scheduler recovery.
 
         Block-level recovery needs one KV cache group and no recurrent state;
         otherwise the scheduler recovers the whole request.
 
-        Block-level destinations that skipped zeroing are also returned
-        through `build_connector_worker_meta`, for the scheduler to zero them
-        before they are reused.
+        Block-level destinations, by default those of the request's posted
+        reads, that skipped zeroing are also returned through
+        `build_connector_worker_meta`, for the scheduler to zero them before
+        they are reused.
         """
         if not self._block_load_errors_supported:
             self._failed_sync_recving.add(req_id)
             return
-        dst_block_ids = self._recving_local_blocks.get(req_id, ())
-        self._invalid_block_ids.update(dst_block_ids)
+        dst = (
+            self._recving_local_blocks.get(req_id, ())
+            if dst_block_ids is None
+            else dst_block_ids
+        )
+        self._invalid_block_ids.update(dst)
         self._failed_read_block_ids_to_zero.update(
-            self._unzeroed_read_block_ids.intersection(dst_block_ids)
+            self._unzeroed_read_block_ids.intersection(dst)
         )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -4755,12 +4762,9 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
-        if self._block_load_errors_supported:
-            self._invalid_block_ids.update(
-                block_id for group in meta.local_block_ids for block_id in group
-            )
-        else:
-            self._failed_sync_recving.add(req_id)
+        self._record_failed_recv(
+            req_id, [block_id for group in meta.local_block_ids for block_id in group]
+        )
         remote_tp_size = int(meta.tp_size) or self.world_size
         ports = self._read_notify_ports(
             meta.remote_notify_port,

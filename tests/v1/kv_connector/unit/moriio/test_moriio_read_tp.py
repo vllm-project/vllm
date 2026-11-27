@@ -610,7 +610,9 @@ def _fail_handshakes_to(worker, bad_host: str, monkeypatch) -> None:
 def test_failed_handshake_fails_only_its_requests(monkeypatch):
     """A failed prefill handshake turns that engine's requests into released
     load errors; other engines' requests are still read, and the failed
-    engine is retried next step instead of failing the whole decode step."""
+    engine is retried next step instead of failing the whole decode step.
+    Its destinations were neither zeroed nor read, so they are queued for
+    zeroing."""
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
@@ -632,11 +634,13 @@ def test_failed_handshake_fails_only_its_requests(monkeypatch):
         local_block_ids=[[90, 91]],
     )
     metadata.reqs_to_recv["req-ok"] = _meta(["full"], 2)
+    metadata.unzeroed_read_block_ids = {90, *DECODE_BLOCKS["full"]}
 
     worker.start_load_kv(metadata)
     worker._handshake_initiation_executor.shutdown()
 
     assert worker._invalid_block_ids == {90, 91}
+    assert worker._failed_read_block_ids_to_zero == {90}
     assert sorted(s for s in sent if s[0] == "t-bad") == [
         ("t-bad", "bad", 0),
         ("t-bad", "bad", 1),
