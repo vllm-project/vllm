@@ -215,8 +215,8 @@ example to run DeepSeek-V4.1-Flash on AITER's block-FP8 MoE kernels on ROCm
 gfx942:
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 --tensor-parallel-size 8 \
-  --moe-backend aiter \
+VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --tensor-parallel-size 8 --moe-backend aiter \
   --quantization-config '{"targets":{"*ffn.experts*":"fp8_per_block"}}'
 ```
 
