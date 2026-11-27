@@ -1026,8 +1026,9 @@ class AsyncLLM(EngineClient):
     ) -> None:
         """Pause generation to allow model weight updates.
 
-        All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. In `abort` and `wait` mode, new requests are rejected
+        Mode handling (abort / wait / keep) and cache clearing are done in
+        the engine, apart from the frontend multimodal processor cache. In
+        `abort` and `wait` mode, new requests are rejected
         with `RetryableRequestError` from when the pause starts until
         `resume_generation`; `keep` accepts and queues them.
 
@@ -1040,9 +1041,12 @@ class AsyncLLM(EngineClient):
                   `resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to `False` to preserve cache for faster resume.
+                With `mode="keep"`, running requests are preempted and
+                recomputed on resume, and the multimodal processor cache is
+                kept for the requests still queued.
 
         """
-        if clear_cache:
+        if clear_cache and mode != "keep":
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_generation_async(
             mode=mode, clear_cache=clear_cache

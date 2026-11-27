@@ -5,6 +5,7 @@ import asyncio
 import threading
 import time
 from contextlib import ExitStack
+from dataclasses import replace
 from http import HTTPStatus
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -13,7 +14,7 @@ import pytest
 
 import vllm.v1.engine.async_llm as async_llm_module
 from vllm import PoolingParams, SamplingParams
-from vllm.assets.image import ImageAsset
+from vllm.assets.image import ImageAsset, ImageAssetName
 from vllm.config import LoggingConfig, ProfilerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -1412,6 +1413,48 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+
+@pytest.mark.asyncio
+async def test_pause_keep_keeps_shm_mm_inputs_of_queued_requests():
+    """A keep pause leaves queued requests holding handles into the SHM
+    multimodal cache, so images added while paused must not overwrite their
+    inputs (#62123)."""
+    engine_args = replace(
+        VISION_ENGINE_ARGS, max_num_seqs=1, mm_processor_cache_type="shm"
+    )
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        def add(request_id: str, prompt: PromptType, max_tokens: int):
+            params = SamplingParams(
+                max_tokens=max_tokens,
+                ignore_eos=True,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            )
+            return engine.add_request(request_id, prompt, params)
+
+        def image_prompt(name: ImageAssetName) -> PromptType:
+            image = ImageAsset(name).pil_image
+            return {
+                "prompt": VISION_PROMPT_TEMPLATE,
+                "multi_modal_data": {"image": image},
+            }
+
+        # Holds the only slot, so the image request waits in the queue.
+        await add("running", TEXT_PROMPT, max_tokens=1000)
+        queued = await add("queued", image_prompt("stop_sign"), max_tokens=5)
+        await engine.pause_generation(mode="keep")
+        added = await add("added", image_prompt("cherry_blossom"), max_tokens=5)
+        await engine.resume_generation()
+        await engine.abort("running")
+
+        for collector in (queued, added):
+            output = await asyncio.wait_for(collector.get(), timeout=60)
+            assert output.finished
+            assert len(output.outputs[0].token_ids) == 5
 
 
 @pytest.mark.asyncio

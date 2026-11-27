@@ -1012,6 +1012,7 @@ class EngineCore:
         self,
         reset_running_requests: bool = True,
         reset_connector: bool = True,
+        reset_mm_cache: bool = True,
     ) -> None:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
@@ -1021,10 +1022,13 @@ class EngineCore:
             reset_connector=reset_connector,
         ):
             raise RuntimeError("Failed to reset the KV connector cache.")
-        self.reset_mm_cache()
+        if reset_mm_cache:
+            self.reset_mm_cache()
         self.reset_encoder_cache()
 
-    def _finish_pause(self, clear_cache: bool, reset_connector: bool) -> None:
+    def _finish_pause(
+        self, clear_cache: bool, reset_connector: bool, reset_mm_cache: bool
+    ) -> None:
         # The drain of a checkpoint prepare is complete. A failure leaves the
         # engine FAILED instead of serving, as nothing waits on this pause.
         preparing = self._checkpoint_state == CheckpointState.PREPARING
@@ -1033,7 +1037,9 @@ class EngineCore:
             # the last dummy batch an idle DP rank launches.
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
-                self._reset_caches(reset_connector=reset_connector)
+                self._reset_caches(
+                    reset_connector=reset_connector, reset_mm_cache=reset_mm_cache
+                )
                 self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
@@ -1050,6 +1056,7 @@ class EngineCore:
         mode: PauseMode = "abort",
         clear_cache: bool = True,
         reset_connector: bool = True,
+        reset_mm_cache: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -1064,8 +1071,8 @@ class EngineCore:
         - `keep`: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
 
-        `reset_connector` decides whether clearing caches also resets the
-        KV connector's cache.
+        `reset_connector` and `reset_mm_cache` decide whether clearing caches
+        also resets the KV connector's cache and the multimodal processor cache.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
@@ -1086,7 +1093,7 @@ class EngineCore:
                 self.post_step(model_executed)
                 if not model_executed:
                     time.sleep(0.001)
-        self._finish_pause(clear_cache, reset_connector)
+        self._finish_pause(clear_cache, reset_connector, reset_mm_cache)
 
         return None
 
@@ -2492,6 +2499,7 @@ class EngineCoreProc(EngineCore):
         mode: PauseMode = "abort",
         clear_cache: bool = True,
         reset_connector: bool = True,
+        reset_mm_cache: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -2511,7 +2519,7 @@ class EngineCoreProc(EngineCore):
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
-                engine._finish_pause(clear_cache, reset_connector)
+                engine._finish_pause(clear_cache, reset_connector, reset_mm_cache)
             except Exception as e:
                 future.set_exception(e)
             else:
@@ -2527,7 +2535,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            self._finish_pause(clear_cache, reset_connector)
+            self._finish_pause(clear_cache, reset_connector, reset_mm_cache)
             return None
 
         future = Future[Any]()
@@ -2539,8 +2547,12 @@ class EngineCoreProc(EngineCore):
     ) -> Future | None:
         """`pause_scheduler` for a user pause: "abort" and "wait" also reject
         new requests with a retryable error until resume, rather than queue
-        them. Other pauses (e.g. sleep) leave this policy unchanged."""
-        future = self.pause_scheduler(mode, clear_cache)
+        them. Other pauses (e.g. sleep) leave this policy unchanged.
+
+        "keep" also keeps the multimodal processor cache, which the requests it
+        keeps may still read and which does not depend on the weights.
+        `clear_cache` still clears the prefix and encoder caches."""
+        future = self.pause_scheduler(mode, clear_cache, reset_mm_cache=mode != "keep")
         self.reject_new_requests = mode != "keep"
         return future
 
