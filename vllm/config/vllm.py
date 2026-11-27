@@ -1545,12 +1545,18 @@ class VllmConfig:
             model_config = speculative_config.target_model_config
         if (
             model_config is not None
-            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and model_config.architecture
+            in (
+                "DeepseekV41ForCausalLM",
+                "HYV4FlashForCausalLM",
+                "HYV4FlashVLForConditionalGeneration",
+            )
             and getattr(model_config.hf_text_config, "engram_layer_ids", None)
             and self.parallel_config.use_ubatching
         ):
             raise ValueError(
-                "DeepSeek V4.1 Engram does not support DBO or microbatching. "
+                f"{model_config.architecture} Engram does not support DBO or "
+                "microbatching. "
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:

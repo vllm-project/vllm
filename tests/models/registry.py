@@ -1153,7 +1153,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-OCR-1.0",
-        min_transformers_version="5.19.0",
+        min_transformers_version="5.21.0",
         is_available_online=False,
     ),
     "MiniCPMV": _HfExamplesInfo(
