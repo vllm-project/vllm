@@ -364,6 +364,7 @@ if TYPE_CHECKING:
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
+    VLLM_ROCM_FP8_LM_HEAD: bool = False
 
 
 def get_default_cache_root():
@@ -2459,6 +2460,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
         "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
     ).upper(),
+    # FP8 lm_head: per-vocab-row weight scales (created on first use from the
+    # bf16 table) x per-token dynamic activations through torch._scaled_mm
+    "VLLM_ROCM_FP8_LM_HEAD": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FP8_LM_HEAD", "0"))
+    ),
 }
 
 

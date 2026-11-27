@@ -8,6 +8,7 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
@@ -94,6 +95,7 @@ class LogitsProcessor(PluggableLayer):
         # required for RL training-inference consistency.
         model_config = get_current_vllm_config().model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
+        self.fp8_head = current_platform.is_rocm() and envs.VLLM_ROCM_FP8_LM_HEAD
 
     def forward(
         self,
@@ -137,6 +139,37 @@ class LogitsProcessor(PluggableLayer):
             logits = tensor_model_parallel_gather(logits)
         return logits
 
+    @staticmethod
+    def _fp8_head_weights(lm_head: VocabParallelEmbedding):
+        cached = getattr(lm_head, "_fp8_head", None)
+        if cached is None:
+            w = lm_head.weight.data
+            fp8 = current_platform.fp8_dtype()
+            fmax = torch.finfo(fp8).max
+            q = torch.empty_like(w, dtype=fp8)
+            scale = torch.empty(1, w.shape[0], dtype=torch.float32, device=w.device)
+            for i in range(0, w.shape[0], 32768):
+                wf = w[i : i + 32768].float()
+                s = (wf.abs().amax(1, keepdim=True) / fmax).clamp_min_(1e-12)
+                q[i : i + 32768] = (wf / s).clamp_(-fmax, fmax).to(fp8)
+                scale[0, i : i + 32768] = s[:, 0]
+            cached = lm_head._fp8_head = (q.t(), scale)
+            logger.info_once("FP8 lm_head enabled: %s", tuple(q.shape))
+        return cached
+
+    def _apply_fp8_head(
+        self, lm_head: VocabParallelEmbedding, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        from vllm import _custom_ops as ops
+
+        wq_t, w_scale = self._fp8_head_weights(lm_head)
+        flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+        xq, x_scale = ops.scaled_fp8_quant(flat, None, use_per_token_if_dynamic=True)
+        out = torch._scaled_mm(
+            xq, wq_t, scale_a=x_scale, scale_b=w_scale, out_dtype=hidden_states.dtype
+        )
+        return out.reshape(*hidden_states.shape[:-1], out.shape[-1])
+
     def _apply_head(
         self,
         lm_head: VocabParallelEmbedding,
@@ -144,6 +177,14 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Project hidden states through the lm_head, honoring head_dtype."""
+        if (
+            self.fp8_head
+            and embedding_bias is None
+            and lm_head.tp_size == 1
+            and hidden_states.dtype == torch.bfloat16
+            and (self.head_dtype is None or self.head_dtype == hidden_states.dtype)
+        ):
+            return self._apply_fp8_head(lm_head, hidden_states)
         if self.head_dtype is None or self.head_dtype == hidden_states.dtype:
             return lm_head.quant_method.apply(
                 lm_head, hidden_states, bias=embedding_bias
