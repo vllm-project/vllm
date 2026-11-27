@@ -345,8 +345,12 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_transfer_hooks_pass_wait_event_for_store_only():
-    """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
+def test_transfer_hooks_pass_wait_event_for_load_and_store():
+    """Both start_load_kv and wait_for_save gate their copies on a compute event.
+
+    Loads overwrite GPU blocks that queued compute work may still use, so they
+    must be ordered after it, like stores.
+    """
     worker = _make_worker(
         kv_cache_config=None,
         cpu_capacity_bytes=0,
@@ -370,7 +374,7 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert len(store_calls) == 1
     assert len(load_calls) == 1
     assert isinstance(store_calls[0]["wait_event"], torch.Event)
-    assert load_calls[0]["wait_event"] is None
+    assert isinstance(load_calls[0]["wait_event"], torch.Event)
 
 
 def test_build_params_src_access_order():
