@@ -144,13 +144,9 @@ class ConvertWeights:
         pending: dict[str, dict[str, torch.Tensor]] = {}
         for name, tensor in weights:
             first, source = rename_source_key(name, self.renamings, self.converters)
-            if source is None or self.mapper.map_name(first) not in self.shapes:
-                pieces = self.split_like_weight(name, tensor)
-                if pieces is not None:
-                    yield from pieces.items()
-                    continue
             if source is None:
-                yield first, tensor
+                split = self.split_like_weight(name, tensor)
+                yield from (split or {first: tensor}).items()
                 continue
             converter = self.pattern_to_converter[source]
             sources, targets = converter.source_patterns, converter.target_patterns
@@ -163,11 +159,13 @@ class ConvertWeights:
                 yield first, tensor
                 continue
             if full_layer_name not in self.shapes:
-                raise ValueError(
-                    f"Cannot convert {name!r} into {targets}: {full_layer_name!r} is "
-                    "not a tensor of the model. Converting quantized tensors is not "
-                    "supported."
-                )
+                if (split := self.split_like_weight(name, tensor)) is None:
+                    raise ValueError(
+                        f"Cannot convert {name!r} into {targets}: {full_layer_name!r} "
+                        "is not a tensor of the model."
+                    )
+                yield from split.items()
+                continue
             pieces = pending.setdefault(first, {})
             pieces[source] = tensor
             if len(pieces) < len(sources):
@@ -188,9 +186,11 @@ class ConvertWeights:
     def split_like_weight(
         self, name: str, tensor: torch.Tensor
     ) -> dict[str, torch.Tensor] | None:
-        """Split a tensor stored with a weight that a converter splits (e.g. a quantized
-        checkpoint's `weight_scale`) like the weight: by rows if it has the weight's
-        rows, else copied to every piece. `None` if `name` is no such tensor."""
+        """Split another tensor of a module whose weight a converter splits (e.g. a
+        quantized checkpoint's `weight_scale`) like the weight: by its rows or by blocks
+        of them, and copy a single value or a 1-D tensor of another length (e.g.
+        `weight_shape`) to every piece. `None` if `name` is no such tensor or it
+        doesn't divide like the weight."""
         module, _, param = name.rpartition(".")
         if param == "weight":
             return None
@@ -199,22 +199,24 @@ class ConvertWeights:
         )
         if source is None:
             return None
-        converter = self.pattern_to_converter[source]
-        if len(converter.source_patterns) > 1:
+        targets = self.pattern_to_converter[source].target_patterns
+        if len(targets) < 2:
             return None
-        targets = converter.target_patterns
-        weights = [first.replace(targets[0], target) for target in targets]
-        full_layer_names = [self.mapper.map_name(weight) for weight in weights]
+        weight_names = [first.replace(targets[0], target) for target in targets]
+        full_layer_names = [self.mapper.map_name(n) for n in weight_names]
         if not all(n in self.shapes for n in full_layer_names):
             return None
         rows = [self.shapes[n][0] for n in full_layer_names]
-        if tensor.shape[:1] == (sum(rows),):
-            pieces = tensor.split(rows)
-        else:
+        if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
             pieces = (tensor,) * len(rows)
+        else:
+            block, rest = divmod(sum(rows), tensor.shape[0])
+            if not block or rest or any(r % block for r in rows):
+                return None
+            pieces = tensor.split([r // block for r in rows])
         return {
-            weight.removesuffix("weight") + param: piece
-            for weight, piece in zip(weights, pieces)
+            weight_name.removesuffix("weight") + param: piece
+            for weight_name, piece in zip(weight_names, pieces)
         }
 
 
