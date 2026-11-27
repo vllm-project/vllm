@@ -77,6 +77,28 @@ complete. To resume, rerun the input lines past the last one written; if the
 process was killed, drop a final line that is incomplete first. An output URL is
 uploaded only when the run succeeds.
 
+To avoid holding finished responses behind an earlier slow request, opt into
+completion-order output:
+
+```bash
+vllm run-batch \
+    -i examples/features/openai_batch/openai_example_batch.jsonl \
+    -o results.jsonl \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --output-order completion
+```
+
+In this mode, each finished response is written immediately. Responses already
+written to a local file remain available if another request fails or the run is
+cancelled. Match them by `custom_id`: their line positions do not correspond to
+the input, and a partial output is not necessarily an input prefix. Each input
+request must have a unique `custom_id`. To continue
+an interrupted job, filter the input by completed successful IDs rather than
+skipping an equal number of lines, and write retries to a different output file
+so the existing results are not overwritten. This option does not implement automatic
+resume or retry. A process killed during a write can still leave an incomplete
+final line, and output URLs are still uploaded only when the run succeeds.
+
 ```bash
 cat results.jsonl
 {"id":"vllm-383d1c59835645aeb2e07d004d62a826","custom_id":"request-1","response":{"id":"cmpl-61c020e54b964d5a98fa7527bfcdd378","object":"chat.completion","created":1715633336,"model":"meta-llama/Meta-Llama-3-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"Hello! It's great to meet you! I'm here to help with any questions or tasks you may have. What's on your mind today?"},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":25,"total_tokens":56,"completion_tokens":31}},"error":null}
