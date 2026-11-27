@@ -244,11 +244,15 @@ def test_sync_load_failure(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_sync_load_failure_restarts_running_request(async_scheduling: bool):
+@pytest.mark.parametrize("request_level", [False, True])
+def test_sync_load_failure_restarts_running_request(
+    async_scheduling: bool, request_level: bool
+):
     """A running request cannot be rewound in place after its synchronous load
     failed: the worker keeps its own progress for it, and with async scheduling
     its next step is already in flight. It must be handed to the worker again
-    from its valid prefix, without the in-flight token and without another load.
+    from its valid prefix, without the in-flight token and without another load,
+    whether the connector reports the failed blocks or the failed request.
     """
     vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     vllm_config.scheduler_config.async_scheduling = async_scheduling
@@ -272,12 +276,18 @@ def test_sync_load_failure_restarts_running_request(async_scheduling: bool):
     in_flight_step = scheduler.schedule()
     assert bool(in_flight_step.num_scheduled_tokens) == async_scheduling
 
-    scheduler.update_from_output(
-        load_step,
-        create_model_runner_output(
+    if request_level:
+        # The whole load is bad.
+        num_valid_tokens = 0
+        load_output = create_model_runner_output(
+            [request], failed_sync_recving={request.request_id}, token_id=7
+        )
+    else:
+        num_valid_tokens = block_size
+        load_output = create_model_runner_output(
             [request], invalid_block_ids={block_ids[1]}, token_id=7
-        ),
-    )
+        )
+    scheduler.update_from_output(load_step, load_output)
     if async_scheduling:
         scheduler.update_from_output(
             in_flight_step, create_model_runner_output([request], token_id=8)
@@ -287,8 +297,10 @@ def test_sync_load_failure_restarts_running_request(async_scheduling: bool):
     step = scheduler.schedule()
     assert step.preempted_req_ids == {request.request_id}
     (resumed,) = step.scheduled_new_reqs
-    assert resumed.num_computed_tokens == block_size
-    assert step.num_scheduled_tokens == {request.request_id: 2 * block_size + 1}
+    assert resumed.num_computed_tokens == num_valid_tokens
+    assert step.num_scheduled_tokens == {
+        request.request_id: request.num_tokens - num_valid_tokens
+    }
 
     for _ in range(3):
         assert not request.is_finished()
@@ -616,6 +628,45 @@ def test_sync_load_failure_of_a_request_preempted_before_its_output(policy: str)
     if policy == "recompute":
         assert failed.status == RequestStatus.PREEMPTED
         assert failed.num_output_tokens == 0
+    else:
+        assert failed.status == RequestStatus.FINISHED_ERROR
+
+
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+def test_sync_load_failure_reported_through_both_channels(policy: str):
+    """A connector may report a failed load as a request and as blocks in the
+    same step; the request is restarted or failed once."""
+    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
+    block_size = scheduler.block_size
+    failed = create_request(num_tokens=4 * block_size)
+    other = create_request(num_tokens=4 * block_size)
+    scheduler.add_request(failed)
+    scheduler.add_request(other)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {failed.request_id: 2 * block_size}, async_load=False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, other],
+            failed_sync_recving={failed.request_id},
+            invalid_block_ids={block_ids[1]},
+        ),
+    )
+
+    assert other.status == RequestStatus.RUNNING
+    if policy == "recompute":
+        assert failed.status == RequestStatus.PREEMPTED
+        assert failed.num_preemptions == 1
+        assert scheduler.schedule().preempted_req_ids == {failed.request_id}
     else:
         assert failed.status == RequestStatus.FINISHED_ERROR
 

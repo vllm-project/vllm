@@ -4130,20 +4130,33 @@ class Scheduler(SchedulerInterface):
         for req_id in preempted_early:
             # Its in-flight output came from the bad forward.
             failed[req_id].drop_stale_output = True
-        timestamp = time.monotonic()
-        preempted = [r for r in self.running if r.request_id in affected]
-        self.running = remove_all(self.running, set(preempted))
-        # Preempt in reverse order so the requests resume in FIFO order.
-        for request in reversed(preempted):
-            self._preempt_request(request, timestamp, drop_stale_output=True)
-        if preempted or preempted_early or async_affected:
+            failed[req_id].sync_kv_load_failed = True
+        self._restart_after_failed_sync_load(affected)
+        if affected or preempted_early or async_affected:
             logger.warning(
                 "Recovered from synchronous KV load failure: %d request(s) "
                 "preempted for recompute, %d waiting request(s) rescheduled.",
-                len(preempted) + len(preempted_early),
+                len(affected) + len(preempted_early),
                 len(async_affected),
             )
         return affected
+
+    def _restart_after_failed_sync_load(self, req_ids: set[str]) -> None:
+        """Preempt the running requests in `req_ids`, which consumed KV that
+        a synchronous load failed to deliver.
+
+        A running request cannot be rewound in place: the model runner keeps
+        its own progress for it and later steps may already be in flight.
+        Preemption drops both, and the request recomputes from its valid
+        cached prefix rather than loading again.
+        """
+        timestamp = time.monotonic()
+        restarted = [r for r in self.running if r.request_id in req_ids]
+        self.running = remove_all(self.running, set(restarted))
+        # Preempt in reverse order so the requests resume in FIFO order.
+        for request in reversed(restarted):
+            request.sync_kv_load_failed = True
+            self._preempt_request(request, timestamp, drop_stale_output=True)
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
@@ -4223,19 +4236,6 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
-        # A running request cannot be rewound in place: the model runner keeps
-        # its own progress for it and later steps may already be in flight.
-        # Preemption drops both and restarts it from its valid cached prefix.
-        timestamp = time.monotonic()
-        sync_failed_reqs = [
-            request
-            for request in self.running
-            if request.request_id in sync_failed_req_ids
-        ]
-        # Reverse order so they are re-admitted in FIFO order.
-        for request in reversed(sync_failed_reqs):
-            self.running.remove(request)
-            request.sync_kv_load_failed = True
-            self._preempt_request(request, timestamp, drop_stale_output=True)
+        self._restart_after_failed_sync_load(sync_failed_req_ids)
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
