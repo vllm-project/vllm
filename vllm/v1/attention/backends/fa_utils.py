@@ -187,6 +187,20 @@ def get_flash_attn_version(
             fa_version = 2
 
         if not is_fa_version_supported(fa_version):
+            requested = (
+                vllm_config.attention_config.flash_attn_version
+                if vllm_config is not None
+                else None
+            )
+            if fa_version == requested:
+                supported = [v for v in (2, 3, 4) if is_fa_version_supported(v)]
+                raise ValueError(
+                    f"flash_attn_version={fa_version} was requested, but "
+                    f"FlashAttention {fa_version} is not supported "
+                    f"({fa_version_unsupported_reason(fa_version)}). "
+                    f"Supported versions here: {supported or 'none'}. Omit "
+                    "flash_attn_version to select one automatically."
+                )
             logger.warning_once(
                 "FlashAttention %d is not supported (%s); it will not be used.",
                 fa_version,
