@@ -27,6 +27,7 @@ import torch
 from huggingface_hub import save_torch_state_dict
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.config import VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -3413,8 +3414,7 @@ def test_sparse_nccl_worker_subclass_transport_hooks(monkeypatch):
 
     class _CustomSparseWorkerEngine(SparseNCCLWeightTransferEngine):
         def _init_process_group(self, init_info: NCCLWeightTransferInitInfo):
-            group = MagicMock()
-            group.device = torch.device("cpu")
+            group = MagicMock(device=torch.device("cpu"))
 
             def receive_broadcast(tensor, *, src, stream):
                 assert src == 0
@@ -3438,34 +3438,27 @@ def test_sparse_nccl_worker_subclass_transport_hooks(monkeypatch):
         return {name for name, _ in weights}
 
     model.load_weights = load_weights
-    engine = _CustomSparseWorkerEngine(
-        WeightTransferConfig(backend="sparse_nccl"),
-        create_mock_vllm_config(),
-        torch.device("cpu"),
-        model,
+    config = WeightTransferConfig(backend="sparse_nccl")
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(), weight_transfer_config=config
     )
+    engine = _CustomSparseWorkerEngine(config, vllm_config, torch.device("cpu"), model)
 
-    with pytest.raises(ValueError, match="use_load_plan"):
-        engine.init_transfer_engine(
-            NCCLWeightTransferInitInfo(
-                master_address="127.0.0.1",
-                master_port=29500,
-                rank_offset=1,
-                world_size=2,
-                use_load_plan=True,
-            )
-        )
-    created_groups[0].destroy.assert_called_once()
-    assert engine.model_update_group is None
-
-    engine.init_transfer_engine(
-        NCCLWeightTransferInitInfo(
+    def make_init(use_load_plan: bool = False) -> NCCLWeightTransferInitInfo:
+        return NCCLWeightTransferInitInfo(
             master_address="127.0.0.1",
             master_port=29500,
             rank_offset=1,
             world_size=2,
+            use_load_plan=use_load_plan,
         )
-    )
+
+    with pytest.raises(ValueError, match="use_load_plan"):
+        engine.init_transfer_engine(make_init(use_load_plan=True))
+    created_groups[0].destroy.assert_called_once()
+    assert engine.model_update_group is None
+
+    engine.init_transfer_engine(make_init())
     assert engine.model_update_group is created_groups[1]
 
     engine.receive_weights(
@@ -3502,8 +3495,7 @@ def test_sparse_nccl_trainer_subclass_transport_hooks(monkeypatch):
 
         @classmethod
         def _open_trainer_endpoint(cls, init_info: SparseNCCLTrainerInitInfo):
-            group = MagicMock()
-            group.device = torch.device("cpu")
+            group = MagicMock(device=torch.device("cpu"))
             created_groups.append(group)
             return group
 
@@ -3511,10 +3503,7 @@ def test_sparse_nccl_trainer_subclass_transport_hooks(monkeypatch):
             return custom_stream
 
     init_info = SparseNCCLTrainerInitInfo(
-        master_address="127.0.0.1",
-        master_port=29500,
-        world_size=2,
-        rank=0,
+        master_address="127.0.0.1", master_port=29500, world_size=2, rank=0
     )
 
     with pytest.raises(ValueError, match="the workers refused"):
