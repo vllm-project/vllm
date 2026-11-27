@@ -1382,8 +1382,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 and "cu_seqlens" in inspect.signature(module.forward).parameters
             ):
                 module.config._attn_implementation = VLLM_MM_ENCODER_ATTN_IMPL
+                kv_groups = getattr(module, "num_key_value_groups", 1)
                 attn = MMEncoderAttention(
-                    num_heads=module.num_heads, head_size=module.head_dim
+                    num_heads=module.num_heads,
+                    head_size=module.head_dim,
+                    num_kv_heads=module.num_heads // kv_groups,
                 )
                 setattr(module, VLLM_ATTN_ATTR, attn)
 

@@ -21,6 +21,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
+    AutoProcessor,
     PreTrainedConfig,
     core_model_loading,
 )
@@ -1182,3 +1183,44 @@ def test_split_weights_splits_fused_gqa_qkv():
 
     skipped = ("vision_model.query_key_value.weight", fused)
     assert list(weights([skipped])) == [skipped]
+
+
+def test_mm_encoder_attention_gqa(tmp_path, tp_init):
+    """EXAONE 4.5's vision attention has fewer key/value heads than query heads."""
+    sizes = dict(hidden_size=128, intermediate_size=256, num_attention_heads=2)
+    config = AutoConfig.for_model(
+        "exaone4_5",
+        text_config=sizes
+        | dict(model_type="exaone4", num_hidden_layers=1, num_key_value_heads=2),
+        vision_config=sizes
+        | dict(depth=1, num_heads=2, num_key_value_heads=1, out_hidden_size=128),
+    )
+    hf_model = AutoModelForMultimodalLM.from_config(config).eval()
+    hf_model.save_pretrained(tmp_path)
+    # Only `ModelConfig` uses the processor, to find the supported modalities
+    AutoProcessor.from_pretrained("LGAI-EXAONE/EXAONE-4.5-33B").save_pretrained(
+        tmp_path
+    )
+
+    # Two images of different sizes, packed into one sequence
+    grid_thw = torch.tensor([[1, 8, 8], [1, 4, 12]])
+    vision_config = config.vision_config
+    patch_dim = 3 * vision_config.temporal_patch_size * vision_config.patch_size**2
+    pixel_values = torch.randn(int(grid_thw.prod(-1).sum()), patch_dim)
+    with torch.no_grad():
+        expected = hf_model.get_image_features(pixel_values, grid_thw).pooler_output
+
+    model_config = ModelConfig(
+        str(tmp_path), model_impl="transformers", dtype="float32"
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config)
+    device = next(model.parameters()).device
+    with set_current_vllm_config(vllm_config), torch.no_grad():
+        actual = model.embed_multimodal(
+            pixel_values=pixel_values.to(device),
+            image_grid_thw=grid_thw.to(device),
+            num_image_patches=grid_thw.prod(-1) // vision_config.spatial_merge_size**2,
+        )
+    torch.testing.assert_close(actual, [e.to(device) for e in expected])
