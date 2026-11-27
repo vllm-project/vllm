@@ -489,6 +489,8 @@ class DFlashQwen3Model(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
+        # Optional post-embedding norm shared from targets such as Inkling2.
+        self.embed_norm: nn.Module | None = None
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
         # checkpoints will have the mask embedding in the vocabulary embedding table
@@ -544,6 +546,8 @@ class DFlashQwen3Model(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
+        if self.embed_norm is not None:
+            embeds = self.embed_norm(embeds)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
             # Replace masked slots with the dedicated mask embedding.
             is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
