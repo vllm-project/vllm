@@ -323,7 +323,14 @@ class FlashEngram(nn.Module):
         ("unified_pre_gamma", ""): "unified_pre_gamma",
     }
 
-    def __init__(self, vllm_config, layout, layer_id, prefix):
+    def __init__(
+        self,
+        vllm_config,
+        layout,
+        layer_id,
+        prefix,
+        prefetch_stream: torch.cuda.Stream | None = None,
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
         index = layout.layer_ids.index(layer_id)
@@ -353,6 +360,19 @@ class FlashEngram(nn.Module):
         self.start = local.head_start * layout.head_dim
         self.stop = local.head_end * layout.head_dim
         self.rank = get_tensor_model_parallel_rank()
+        self._prefetch_stream = prefetch_stream
+        self._prefetch_done: torch.cuda.Event | None = None
+        self.register_buffer("_prefetched_lookup", None, persistent=False)
+        self._prefetched_tokens = -1
+        if prefetch_stream is not None:
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self._prefetched_lookup = torch.empty(
+                max_tokens,
+                self.stop - self.start,
+                dtype=vllm_config.model_config.dtype,
+                device=vllm_config.device_config.device,
+            )
+            self._prefetch_done = torch.cuda.Event()
         shapes = {
             "proj_weight": (self.hc_mult + 1, self.hidden_size, self.stop - self.start),
             "proj_bias": (self.hc_mult + 1, self.hidden_size),
@@ -421,18 +441,67 @@ class FlashEngram(nn.Module):
         parameter.copy_(value)
         return target, index
 
-    def forward(self, hidden, hashes):
+    @eager_break_during_capture
+    def prepare_lookup(self, hashes: torch.Tensor, dtype: torch.dtype) -> None:
+        """Prefetch lookup rows on a side stream for CPU-offloaded tables."""
+        if self._prefetch_stream is None:
+            return
+        assert self._prefetched_lookup is not None
+        assert self._prefetch_done is not None
+        num_tokens = hashes.shape[0]
+        if (
+            num_tokens > self._prefetched_lookup.shape[0]
+            or dtype != self._prefetched_lookup.dtype
+            or hashes.device != self._prefetched_lookup.device
+        ):
+            self._prefetched_tokens = -1
+            return
         local = self.multi_head_embedding
         table, scales = local.tables()
-        x = lookup_norm(
-            table,
-            scales,
-            hashes[:, local.head_start : local.head_end],
-            local.vocab_start,
-            local.vocab_end,
-            self.lookup_norm_weight,
-            hidden.dtype,
-        )
+        current = torch.cuda.current_stream(hashes.device)
+        stream = self._prefetch_stream
+        stream.wait_stream(current)
+        hashes.record_stream(stream)
+        with torch.cuda.stream(stream):
+            lookup_norm(
+                table,
+                scales,
+                hashes[:, local.head_start : local.head_end],
+                local.vocab_start,
+                local.vocab_end,
+                self.lookup_norm_weight,
+                dtype,
+                out=self._prefetched_lookup[:num_tokens],
+                background=True,
+            )
+        self._prefetch_done.record(stream)
+        self._prefetched_tokens = num_tokens
+
+    @eager_break_during_capture
+    def _wait_for_lookup(self, num_tokens: int) -> torch.Tensor:
+        assert self._prefetch_done is not None
+        assert self._prefetched_lookup is not None
+        current = torch.cuda.current_stream(self._prefetched_lookup.device)
+        current.wait_event(self._prefetch_done)
+        output = self._prefetched_lookup[:num_tokens]
+        self._prefetched_tokens = -1
+        return output
+
+    def forward(self, hidden, hashes):
+        local = self.multi_head_embedding
+        if self._prefetch_stream is None or self._prefetched_tokens != hashes.shape[0]:
+            table, scales = local.tables()
+            x = lookup_norm(
+                table,
+                scales,
+                hashes[:, local.head_start : local.head_end],
+                local.vocab_start,
+                local.vocab_end,
+                self.lookup_norm_weight,
+                hidden.dtype,
+            )
+        else:
+            x = self._wait_for_lookup(hashes.shape[0])
         proj = F.linear(x, self.proj_weight.flatten(0, 1), self.proj_bias.flatten())
         if local.tp_size > 1:
             proj = tensor_model_parallel_all_reduce(proj)

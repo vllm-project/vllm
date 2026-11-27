@@ -38,9 +38,19 @@ class HYV4FlashModelMixin(nn.Module):
     def init_engram(self, vllm_config: VllmConfig, prefix: str) -> None:
         self.loaded_parts: dict[str, set[Any]] = {}
         self.engram_hash: FlashNgramHashState | None = None
+        self.engram_prefetch_stream: torch.cuda.Stream | None = None
         if self.config.engram_layer_ids:
+            engram_config = vllm_config.engram_config
+            if engram_config is None:
+                raise ValueError("HYV4 Flash Engram requires an EngramConfig")
             self.engram_hash = FlashNgramHashState(
                 self.config, dummy=vllm_config.load_config.load_format == "dummy"
+            )
+            # A shared stream serializes host-table reads across Engram layers.
+            self.engram_prefetch_stream = (
+                torch.cuda.Stream(device=vllm_config.device_config.device)
+                if engram_config.cpu_offload
+                else None
             )
             for layer_id in self.config.engram_layer_ids:
                 self.layers[layer_id - 1].engram_layer = FlashEngram(
@@ -48,10 +58,20 @@ class HYV4FlashModelMixin(nn.Module):
                     self.engram_hash.layout,
                     layer_id,
                     f"{prefix}.layers.{layer_id - 1}.engram_layer",
+                    prefetch_stream=self.engram_prefetch_stream,
                 )
         self.token_lookback_depth = (
             self.config.engram_max_ngram_size - 1 if self.engram_hash is not None else 0
         )
+
+    def prepare_engram_lookups(self, hashes: torch.Tensor, dtype: torch.dtype) -> None:
+        if self.engram_prefetch_stream is None:
+            return
+        assert self.engram_hash is not None
+        for hash_index, layer_id in enumerate(self.config.engram_layer_ids):
+            self.layers[layer_id - 1].engram_layer.prepare_lookup(
+                hashes[hash_index], dtype
+            )
 
     def _record_part(self, name: str, part: Any) -> None:
         parts = self.loaded_parts.setdefault(name, set())
