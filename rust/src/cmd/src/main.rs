@@ -182,8 +182,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                     engine_count = args.managed_engine.data_parallel_size,
                     "running Rust frontend without a managed local Python engine"
                 );
-                let engine_core = args.to_engine_core_config(handshake_address, &topology);
-                return Server::new(server_config, LlmSource::EngineCore(engine_core))
+                let engine_core_config = args.to_engine_core_config(handshake_address, &topology);
+                return Server::new(server_config, LlmSource::EngineCore(engine_core_config))
                     .serve(shutdown_signal())
                     .await;
             }
@@ -217,12 +217,13 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let engine_core = args.to_engine_core_config(handshake_address, &topology);
+                let engine_core_config = args.to_engine_core_config(handshake_address, &topology);
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = Server::new(server_config, LlmSource::EngineCore(engine_core))
-                        .serve(shutdown)
-                        .await;
+                    let result =
+                        Server::new(server_config, LlmSource::EngineCore(engine_core_config))
+                            .serve(shutdown)
+                            .await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }
