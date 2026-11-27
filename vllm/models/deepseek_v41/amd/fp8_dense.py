@@ -69,5 +69,7 @@ class Bf16EmulatedLinearMethod(ModelOptLinearMethod):
         del layer.weight_scale
         # Layerwise reload restores the original MXFP8 tensors and their
         # loaders, then calls the active method's post-load hook again.
-        method.process_weights_after_loading = self.process_weights_after_loading
+        method.process_weights_after_loading = (  # type: ignore[method-assign]
+            self.process_weights_after_loading
+        )
         layer.quant_method = method

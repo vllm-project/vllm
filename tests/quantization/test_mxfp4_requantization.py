@@ -137,15 +137,16 @@ def test_block_fp8_silu_limit_requires_dispatch_and_ck_stage1(
 ):
     import sys
     from types import ModuleType
+    from typing import Any
 
     from vllm._aiter_ops import rocm_aiter_ops
 
-    fused = ModuleType("aiter.fused_moe")
+    fused: Any = ModuleType("aiter.fused_moe")
     # Older AITER already accepts the argument on the outer fused_moe.
     fused.fused_moe = lambda swiglu_limit: None
     if dispatcher:
         fused.swiglu_limit_tag = lambda limit: str(limit)
-    ck = ModuleType("aiter.ops.moe_op")
+    ck: Any = ModuleType("aiter.ops.moe_op")
     ck.ck_moe_stage1_fwd = (lambda swiglu_limit: None) if stage1 else (lambda: None)
     monkeypatch.setitem(sys.modules, fused.__name__, fused)
     monkeypatch.setitem(sys.modules, ck.__name__, ck)

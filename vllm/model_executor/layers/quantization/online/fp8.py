@@ -910,8 +910,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         self.moe_kernel = runtime.moe_kernel
         self.moe_quant_config = runtime.moe_quant_config
         self.accepts_quantized_input = runtime.accepts_quantized_input
-        self.apply = runtime.apply
-        self.apply_monolithic = runtime.apply_monolithic
+        self.apply = runtime.apply  # type: ignore[method-assign]
+        self.apply_monolithic = (  # type: ignore[method-assign]
+            runtime.apply_monolithic
+        )
 
     def maybe_roundup_sizes(
         self,
