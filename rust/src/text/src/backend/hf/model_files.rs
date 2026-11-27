@@ -408,19 +408,24 @@ impl SourceFiles {
 
         let api = build_api(&cache, hf_token)
             .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
-        let repo = api.repo(repo);
-        let info = repo.info().await.map_err(|error| {
-            Error::Tokenizer(format!(
-                "failed to fetch model '{}' at revision '{}': {}",
-                source.id,
-                source.revision.as_deref().unwrap_or("main"),
-                error.as_report()
-            ))
-        })?;
+        let remote_repo = api.repo(repo.clone());
+        let info = match remote_repo.info().await {
+            Ok(info) => info,
+            Err(error) => {
+                return cached_snapshot_dir(&cache, &repo).map(Self::Dir).ok_or_else(|| {
+                    Error::Tokenizer(format!(
+                        "failed to fetch model '{}' at revision '{}': {}",
+                        source.id,
+                        source.revision.as_deref().unwrap_or("main"),
+                        error.as_report()
+                    ))
+                });
+            }
+        };
         let siblings = info.siblings.into_iter().map(|sibling| sibling.rfilename).collect();
         Ok(Self::Remote {
             model_id: source.id.clone(),
-            repo,
+            repo: remote_repo,
             siblings,
         })
     }
@@ -746,7 +751,9 @@ mod tests {
     use tempfile::tempdir;
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
-    use super::{HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
+    use super::{
+        HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, SourceFiles, TokenizerSource,
+    };
 
     fn source(id: impl AsRef<std::ffi::OsStr>, revision: Option<&str>) -> ModelSource {
         ModelSource {
@@ -1148,6 +1155,52 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn online_fingerprint_uses_cached_snapshot_when_hub_is_unavailable() {
+        const CHILD: &str = "VLLM_TEST_HF_FINGERPRINT_CACHE_FALLBACK_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let files =
+                SourceFiles::open_for_fingerprint(&source("test/model", Some("release")), None)
+                    .await
+                    .unwrap();
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            match files {
+                SourceFiles::Dir(path) => {
+                    assert_eq!(path, cache.join("models--test--model/snapshots/commit"));
+                }
+                SourceFiles::Remote { .. } => panic!("expected cached snapshot"),
+            }
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        let repo = cache.join("models--test--model");
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::create_dir_all(repo.join("snapshots/commit")).unwrap();
+        fs::write(repo.join("refs/release"), "commit").unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::hf::model_files::tests::online_fingerprint_uses_cached_snapshot_when_hub_is_unavailable",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HF_HOME", dir.path().join("hf-home"))
+            .env("HF_HUB_CACHE", &cache)
+            .env("HF_ENDPOINT", "http://127.0.0.1:1")
+            .env_remove("HF_HUB_OFFLINE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,10 @@ impl TekkenTokenizer {
 }
 
 impl Tokenizer for TekkenTokenizer {
+    fn library_tag(&self) -> String {
+        format!("tekken/{}", env!("VLLM_TEKKEN_VERSION"))
+    }
+
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         self.inner
             .encode(text, add_special_tokens, false)

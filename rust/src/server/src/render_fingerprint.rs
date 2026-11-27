@@ -8,8 +8,8 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use tracing::{debug, info};
 use vllm_chat::RendererSelection;
-use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::backend::hf::ResolvedModelFiles;
 
 use crate::config::ServerConfig;
@@ -17,14 +17,14 @@ use crate::render::RenderConfig;
 
 const RENDER_FINGERPRINT_SCHEMA: u8 = 1;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct RenderFingerprintManifest {
     schema: u8,
     files: BTreeMap<String, Option<String>>,
     flags: RenderFingerprintFlags,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct RenderFingerprintFlags {
     tokenizer_mode: RendererSelection,
     config_format: &'static str,
@@ -49,12 +49,14 @@ struct RenderFingerprintFlags {
 
 pub(crate) async fn for_render_server(
     config: &RenderConfig,
-    renderer: RendererSelection,
-    model_dtype: Option<ModelDtype>,
+    renderer: Option<RendererSelection>,
+    tokenizer_library: Option<&str>,
+    multimodal: bool,
     files: &ResolvedModelFiles,
 ) -> Result<String> {
-    fingerprint(
+    fingerprint_with_identity(
         renderer,
+        tokenizer_library,
         manifest(
             flags(
                 config.renderer,
@@ -67,7 +69,7 @@ pub(crate) async fn for_render_server(
                 config.chat_template_content_format.to_string(),
                 optional_canonical_map(&config.mm_processor_kwargs),
                 config.language_model_only,
-                model_dtype.is_some().then(|| config.max_model_len.map(u64::from)).flatten(),
+                multimodal.then(|| config.max_model_len.map(u64::from)).flatten(),
                 config.trust_request_chat_template,
             )?,
             file_fingerprints(files).await?,
@@ -77,15 +79,17 @@ pub(crate) async fn for_render_server(
 
 pub(crate) async fn for_server(
     config: &ServerConfig,
-    renderer: RendererSelection,
+    renderer: Option<RendererSelection>,
+    tokenizer_library: Option<&str>,
     max_model_len: u64,
-    model_dtype: Option<ModelDtype>,
+    multimodal: bool,
     files: &ResolvedModelFiles,
 ) -> Result<String> {
     let default_chat_template_kwargs =
         config.default_chat_template_kwargs.as_ref().and_then(optional_canonical_map);
-    fingerprint(
+    fingerprint_with_identity(
         renderer,
+        tokenizer_library,
         manifest(
             flags(
                 config.renderer,
@@ -98,7 +102,7 @@ pub(crate) async fn for_server(
                 config.chat_template_content_format.to_string(),
                 optional_canonical_map(&config.mm_processor_kwargs),
                 config.language_model_only,
-                model_dtype.is_some().then_some(max_model_len),
+                multimodal.then_some(max_model_len),
                 config.trust_request_chat_template,
             )?,
             file_fingerprints(files).await?,
@@ -154,18 +158,31 @@ fn manifest(
     }
 }
 
-fn fingerprint(renderer: RendererSelection, manifest: RenderFingerprintManifest) -> Result<String> {
+fn fingerprint_with_identity(
+    renderer: Option<RendererSelection>,
+    tokenizer_library: Option<&str>,
+    manifest: RenderFingerprintManifest,
+) -> Result<String> {
     let payload =
         serde_jcs::to_vec(&manifest).context("failed to serialize render fingerprint manifest")?;
+    let renderer = renderer.map(|renderer| renderer.to_string()).unwrap_or_else(|| "none".into());
+    let tokenizer_library = tokenizer_library.unwrap_or("none");
     let tag = format!(
-        "vllm-rs/{};renderer={renderer};tokenizer=vllm-tokenizer/{}",
+        "vllm-rs/{};renderer={renderer};tokenizer={tokenizer_library}",
         vllm_build_info::VERSION,
-        env!("CARGO_PKG_VERSION"),
     );
-    Ok(format!(
+    let render_fingerprint = format!(
         "rf{RENDER_FINGERPRINT_SCHEMA}:{:x}:{tag}",
         Sha256::digest(payload)
-    ))
+    );
+    debug!(?manifest, "computed render fingerprint manifest");
+    info!(%render_fingerprint, "computed render fingerprint");
+    Ok(render_fingerprint)
+}
+
+#[cfg(test)]
+fn fingerprint(renderer: RendererSelection, manifest: RenderFingerprintManifest) -> Result<String> {
+    fingerprint_with_identity(Some(renderer), Some("fastokens/test"), manifest)
 }
 
 async fn file_fingerprints(files: &ResolvedModelFiles) -> Result<BTreeMap<String, Option<String>>> {
@@ -234,6 +251,8 @@ mod tests {
     use super::*;
     use crate::config::HttpListenerMode;
     use crate::fingerprint::FingerprintMode;
+
+    const TEST_TOKENIZER_LIBRARY: &str = "fastokens/test";
 
     fn render_config(model: &str) -> RenderConfig {
         RenderConfig {
@@ -362,7 +381,7 @@ mod tests {
         assert!(first.starts_with("rf1:"));
         assert_eq!(first.split(':').count(), 3);
         assert!(first.contains(":vllm-rs/"));
-        assert!(first.contains(";renderer=hf;tokenizer=vllm-tokenizer/"));
+        assert!(first.contains(";renderer=hf;tokenizer=fastokens/test"));
     }
 
     #[test]
@@ -435,13 +454,65 @@ mod tests {
         server_config.tool_strict_level = Some(vllm_chat::ToolStrictLevel::Parameter);
 
         assert_eq!(
-            for_render_server(&render_config, RendererSelection::Hf, None, &files)
-                .await
-                .unwrap(),
-            for_server(&server_config, RendererSelection::Hf, 4096, None, &files)
-                .await
-                .unwrap()
+            for_render_server(
+                &render_config,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap(),
+            for_server(
+                &server_config,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                4096,
+                false,
+                &files,
+            )
+            .await
+            .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn multimodal_render_and_server_fingerprints_require_matching_max_model_len() {
+        let (_dir, files) = model_files().await;
+        let render_config = render_config("org/model");
+        let server_config = server_config("/models/model");
+        let render_fingerprint = for_render_server(
+            &render_config,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            true,
+            &files,
+        )
+        .await
+        .unwrap();
+        let matching_server_fingerprint = for_server(
+            &server_config,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            4096,
+            true,
+            &files,
+        )
+        .await
+        .unwrap();
+        let mismatched_server_fingerprint = for_server(
+            &server_config,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            2048,
+            true,
+            &files,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(render_fingerprint, matching_server_fingerprint);
+        assert_ne!(render_fingerprint, mismatched_server_fingerprint);
     }
 
     #[tokio::test]
@@ -449,8 +520,9 @@ mod tests {
         let (_dir, files) = model_files().await;
         let baseline = for_render_server(
             &render_config("org/model"),
-            RendererSelection::Hf,
-            None,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            false,
             &files,
         )
         .await
@@ -461,7 +533,15 @@ mod tests {
 
         assert_eq!(
             baseline,
-            for_render_server(&changed, RendererSelection::Hf, None, &files).await.unwrap()
+            for_render_server(
+                &changed,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap()
         );
     }
 
@@ -470,8 +550,9 @@ mod tests {
         let (dir, files) = model_files().await;
         let baseline = for_render_server(
             &render_config("org/model"),
-            RendererSelection::Hf,
-            None,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            false,
             &files,
         )
         .await
@@ -481,17 +562,28 @@ mod tests {
         changed_reasoning.reasoning_parser = ParserSelection::None;
         assert_ne!(
             baseline,
-            for_render_server(&changed_reasoning, RendererSelection::Hf, None, &files)
-                .await
-                .unwrap()
+            for_render_server(
+                &changed_reasoning,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap()
         );
 
         let mut changed_tokenizer_mode = render_config("org/model");
         changed_tokenizer_mode.renderer = RendererSelection::Auto;
-        let changed =
-            for_render_server(&changed_tokenizer_mode, RendererSelection::Hf, None, &files)
-                .await
-                .unwrap();
+        let changed = for_render_server(
+            &changed_tokenizer_mode,
+            Some(RendererSelection::Hf),
+            Some(TEST_TOKENIZER_LIBRARY),
+            false,
+            &files,
+        )
+        .await
+        .unwrap();
         assert_ne!(baseline, changed);
 
         let mut changed_mm_kwargs = render_config("org/model");
@@ -500,17 +592,24 @@ mod tests {
             .insert("image".to_string(), serde_json::json!({"size": 256}));
         assert_ne!(
             baseline,
-            for_render_server(&changed_mm_kwargs, RendererSelection::Hf, None, &files)
-                .await
-                .unwrap()
+            for_render_server(
+                &changed_mm_kwargs,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap()
         );
 
         assert_ne!(
             baseline,
             for_render_server(
                 &render_config("org/model"),
-                RendererSelection::Harmony,
-                None,
+                Some(RendererSelection::Harmony),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
                 &files,
             )
             .await
@@ -522,8 +621,9 @@ mod tests {
             baseline,
             for_render_server(
                 &render_config("org/model"),
-                RendererSelection::Hf,
-                None,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
                 &files,
             )
             .await
@@ -543,10 +643,24 @@ mod tests {
         inline.chat_template = Some("{{ messages }}\r\n".to_string());
 
         assert_eq!(
-            for_render_server(&from_file, RendererSelection::Hf, None, &files)
-                .await
-                .unwrap(),
-            for_render_server(&inline, RendererSelection::Hf, None, &files).await.unwrap()
+            for_render_server(
+                &from_file,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap(),
+            for_render_server(
+                &inline,
+                Some(RendererSelection::Hf),
+                Some(TEST_TOKENIZER_LIBRARY),
+                false,
+                &files,
+            )
+            .await
+            .unwrap()
         );
     }
 

@@ -312,6 +312,15 @@ impl HuggingFaceTokenizer {
 }
 
 impl Tokenizer for HuggingFaceTokenizer {
+    fn library_tag(&self) -> String {
+        match &self.backend {
+            Backend::Hf(_) => format!("tokenizers/{}", env!("VLLM_TOKENIZERS_VERSION")),
+            Backend::Fastokens(_) | Backend::FastokensByteLevel(_) => {
+                format!("fastokens/{}", env!("VLLM_FASTOKENS_VERSION"))
+            }
+        }
+    }
+
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         match &self.backend {
             Backend::Hf(t) => {
@@ -431,6 +440,21 @@ mod tests {
             .build()
             .expect("build bpe tokenizer");
         HfTokenizer::new(model)
+    }
+
+    #[test]
+    fn library_tag_names_the_selected_backend() {
+        let tokenizers = HuggingFaceTokenizer::from_hf_backend(tiny_bpe_tokenizer());
+        let fastokens = HuggingFaceTokenizer::from_fastokens_backend(tiny_byte_level_bpe());
+
+        assert_eq!(
+            tokenizers.library_tag(),
+            format!("tokenizers/{}", env!("VLLM_TOKENIZERS_VERSION"))
+        );
+        assert_eq!(
+            fastokens.library_tag(),
+            format!("fastokens/{}", env!("VLLM_FASTOKENS_VERSION"))
+        );
     }
 
     fn ordinary_test_tokenizer_json(fused: bool, with_added_tokens: bool) -> Value {

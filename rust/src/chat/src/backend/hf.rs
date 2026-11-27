@@ -36,6 +36,7 @@ use crate::{DynChatOutputProcessor, RendererSelection};
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
     chat_renderer: DynChatRenderer,
+    renderer: RendererSelection,
     multimodal_model_info: Option<MultimodalModelInfo>,
     /// How model output is parsed, resolved from the parser selections.
     output_parsers: OutputParsers,
@@ -155,6 +156,7 @@ impl HfChatBackend {
 
         Ok(Self {
             chat_renderer,
+            renderer,
             multimodal_model_info,
             output_parsers,
         })
@@ -241,11 +243,6 @@ pub(super) async fn load_model_backends(
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
-    let renderer = options.renderer.resolve(
-        load_model_config(files.config_path.as_deref())?
-            .model_type()
-            .unwrap_or_default(),
-    );
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
         model_id.to_string(),
@@ -254,23 +251,28 @@ pub(super) async fn load_model_backends(
     )?;
     let resolved_model_files = files.clone();
     let tokenizer = text_backend.tokenizer();
+    let tokenizer_library = text_backend.has_tokenizer().then(|| tokenizer.library_tag());
     // Rendering and parsing a chat need a tokenizer.
-    let chat_backend: DynChatBackend = if text_backend.has_tokenizer() {
-        Arc::new(HfChatBackend::from_resolved_model_files(
-            files,
-            model_id.to_string(),
-            options,
-            tokenizer,
-        )?)
-    } else {
-        Arc::new(TokenizerlessChatBackend)
-    };
+    let (chat_backend, renderer): (DynChatBackend, Option<RendererSelection>) =
+        if text_backend.has_tokenizer() {
+            let chat_backend = HfChatBackend::from_resolved_model_files(
+                files,
+                model_id.to_string(),
+                options,
+                tokenizer,
+            )?;
+            let renderer = Some(chat_backend.renderer);
+            (Arc::new(chat_backend), renderer)
+        } else {
+            (Arc::new(TokenizerlessChatBackend), None)
+        };
     let text_backend: DynTextBackend = Arc::new(text_backend);
 
     Ok(LoadedModelBackends {
         text_backend,
         chat_backend,
         renderer,
+        tokenizer_library,
         resolved_model_files,
     })
 }

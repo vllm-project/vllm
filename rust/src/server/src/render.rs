@@ -230,7 +230,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .with_accept_any(config.skip_model_name_validation);
     validate_lora_modules(&served_model_names, &config.lora_modules)?;
     // Only multimodal preprocessing reads the dtype.
-    let model_dtype = (loaded.chat_backend.multimodal_model_info().is_some()).then(|| {
+    let multimodal = loaded.chat_backend.multimodal_model_info().is_some();
+    let model_dtype = multimodal.then(|| {
         (config.dtype).unwrap_or_else(|| auto_model_dtype(loaded.text_backend.config_dtype()))
     });
     if let Some(model_dtype) = model_dtype {
@@ -255,7 +256,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let render_fingerprint = render_fingerprint::for_render_server(
         config,
         loaded.renderer,
-        model_dtype,
+        loaded.tokenizer_library.as_deref(),
+        multimodal,
         &loaded.resolved_model_files,
     )
     .await?;

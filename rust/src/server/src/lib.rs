@@ -172,16 +172,13 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         }
         LlmSource::Provided(llm) => (llm, None),
     };
-    let model_dtype = chat_backend
-        .multimodal_model_info()
-        .is_some()
-        .then_some(llm.info().model_dtype)
-        .flatten();
+    let multimodal = chat_backend.multimodal_model_info().is_some();
     let render_fingerprint = render_fingerprint::for_server(
         config,
         loaded.renderer,
+        loaded.tokenizer_library.as_deref(),
         u64::from(llm.info().max_model_len),
-        model_dtype,
+        multimodal,
         &loaded.resolved_model_files,
     )
     .await?;
