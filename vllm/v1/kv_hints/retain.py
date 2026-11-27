@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``kv.retain`` KV-hint action: per-request retention directives for
+"""The `kv.retain` KV-hint action: per-request retention directives for
 priority-based KV-cache eviction.
 
-Payload: ``{"scope": str | null, "directives": [directive, ...]}`` where a
-directive is ``{"start", "end", "priority", "duration"}`` or
-``{"covers_output": true, "priority", "duration"}``. Priority 1-100 protects
+Payload: `{"scope": str | null, "directives": [directive, ...]}` where a
+directive is `{"start", "end", "priority", "duration"}` or
+`{"covers_output": true, "priority", "duration"}`. Priority 1-100 protects
 the token range, 0 releases it; ranges no directive covers are left as they
 are. Priorities must be non-increasing along the token axis, because a
 prefix cache can only ever serve a block whose predecessors survived.
@@ -33,9 +33,9 @@ _DIRECTIVE_FIELDS = frozenset({"start", "end", "priority", "duration", "covers_o
 class RetainDirective:
     """One token range of a request and how strongly to keep its blocks.
 
-    ``end`` None means the end of the sequence, generated tokens included.
-    ``duration`` is seconds until the protection lapses, None for never. A
-    ``covers_output`` directive has no position of its own: the engine
+    `end` None means the end of the sequence, generated tokens included.
+    `duration` is seconds until the protection lapses, None for never. A
+    `covers_output` directive has no position of its own: the engine
     resolves it to the generated tail once the prompt length is known.
     """
 
@@ -160,22 +160,22 @@ def _parse_action(
 def parse_retain_actions(
     envelope: KvHintsEnvelope | None, *, strict: bool
 ) -> RetainDirectives | None:
-    """Collect the ``kv.retain`` actions of an envelope into one claim.
+    """Collect the `kv.retain` actions of an envelope into one claim.
 
     Args:
         envelope: The request's KV hints, or None.
-        strict: Raise ``ValueError`` on the first invalid action (frontend
+        strict: Raise `ValueError` on the first invalid action (frontend
             validation). When False, an invalid action is skipped and the
             valid ones still apply, as the KV-hints RFC asks of executors;
-            actions beyond ``MAX_ACTIONS`` and directives beyond
-            ``MAX_DIRECTIVES`` are dropped instead of rejected.
+            actions beyond `MAX_ACTIONS` and directives beyond
+            `MAX_DIRECTIVES` are dropped instead of rejected.
 
     Returns:
         The scope and the concatenated directives, or None when the envelope
-        carries no usable ``kv.retain`` action.
+        carries no usable `kv.retain` action.
 
     Raises:
-        ValueError: If ``strict`` and the ``kv.retain`` actions are invalid or
+        ValueError: If `strict` and the `kv.retain` actions are invalid or
             exceed the caps.
 
     """

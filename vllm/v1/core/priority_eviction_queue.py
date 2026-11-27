@@ -329,10 +329,10 @@ class PriorityEvictionQueue:
         pop_lowest evicts it at the new priority rather than the one it was
         freed with.
 
-        Returns (released, lowered). ``released`` lists the block_ids that lost
+        Returns (released, lowered). `released` lists the block_ids that lost
         their last hold while queued: they are in neither free structure now,
         and the LRU list belongs to the pool, so the caller has to route them,
-        the same way release_expired()'s return value is routed. ``lowered``
+        the same way release_expired()'s return value is routed. `lowered`
         lists (block, new_priority) for every block on which this scope's hold
         went down (0 = dropped), so the pool can cap the scope's holds on the
         block's descendants, whose content is unreachable without it.
@@ -381,7 +381,7 @@ class PriorityEvictionQueue:
     def cap_hold(
         self, block: KVCacheBlock, scope: str | None, priority: int
     ) -> tuple[bool, bool]:
-        """Lower this scope's hold on the block to ``priority`` if it is
+        """Lower this scope's hold on the block to `priority` if it is
         higher (0 drops it). Returns (had_hold, released): whether the scope
         held the block at all, and whether the block lost its last hold while
         queued and must be routed to the LRU list by the caller."""
