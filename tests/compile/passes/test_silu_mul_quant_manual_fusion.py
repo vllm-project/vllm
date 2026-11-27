@@ -231,10 +231,10 @@ def test_manual_fusion_fp8_dynamic_128_with_cutlass_block_linear(
         pytest.skip("kFp8Dynamic128Sym fusion not available")
 
     dtype = torch.bfloat16
-    torch.set_default_device("cuda")
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(0)
-    x = torch.randn(num_tokens, hidden_size * 2)
+    g = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(
+        num_tokens, hidden_size * 2, generator=g, device="cuda", dtype=dtype
+    )
 
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["none"]),
@@ -247,6 +247,8 @@ def test_manual_fusion_fp8_dynamic_128_with_cutlass_block_linear(
             weight_quant_key=kFp8Static128BlockSym,
             force_kernel=CutlassFp8BlockScaledMMKernel,
             input_dtype=dtype,
+            out_dtype=dtype,
+            device="cuda",
         )
         assert fp8_linear.kernel.input_quant_key() == kFp8Dynamic128Sym
 
