@@ -426,6 +426,9 @@ class InputProcessor:
 
             engine_input: EngineInput = prompt  # type: ignore[assignment]
         else:
+            if self.lora_config is not None and isinstance(params, SamplingParams):
+                self.lora_config.validate_prompt_logprobs(params)
+
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
                 "and will be removed in the future. You should instead pass "

@@ -192,6 +192,7 @@ class WorkerLoRAManager:
 
             # Validate classification-head weights.
             self._adapter_manager._validate_classification_head_lora(lora)
+            self._adapter_manager.warn_disabled_embedding_modules(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
