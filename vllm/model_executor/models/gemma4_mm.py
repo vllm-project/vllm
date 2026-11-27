@@ -14,6 +14,7 @@ processor inserts `mm:ss` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
@@ -346,20 +347,53 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
+    def get_default_image_soft_tokens(self) -> int:
+        return self.get_hf_config().vision_config.default_output_length
+
     def get_max_image_soft_tokens(self) -> int:
         merged_kwargs = self.ctx.get_merged_mm_kwargs({})
         val, _ = _get_max_soft_tokens(merged_kwargs)
         if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
             return val
-        return self.get_hf_config().vision_config.default_output_length
+        return self.get_default_image_soft_tokens()
 
-    def get_dummy_size_for_soft_tokens(self, max_soft_tokens: int) -> tuple[int, int]:
+    def get_dummy_size_for_soft_tokens(
+        self,
+        max_soft_tokens: int,
+        do_resize: bool,
+        max_width: int | None,
+        max_height: int | None,
+    ) -> tuple[int, int]:
         vision_cfg = self.get_hf_config().vision_config
         unit = vision_cfg.patch_size * vision_cfg.pooling_kernel_size
+        if not do_resize:
+            max_cols = max(max_width // unit, 1) if max_width else max_soft_tokens
+            max_rows = max(max_height // unit, 1) if max_height else max_soft_tokens
+            cols, rows = max(
+                (
+                    (min(max_cols, max_soft_tokens // r), r)
+                    for r in range(1, min(max_rows, max_soft_tokens) + 1)
+                ),
+                key=lambda grid: (grid[0] * grid[1], min(grid)),
+            )
+            return cols * unit, rows * unit
+
         rows = math.isqrt(max_soft_tokens)
         while max_soft_tokens % rows:
             rows -= 1
-        return max_soft_tokens // rows * unit, rows * unit
+        cols = max_soft_tokens // rows
+        width_limit = max_width or cols * unit
+        height_limit = max_height or rows * unit
+        scale, cols, rows = next(
+            (
+                (s, c, r)
+                for c, r in ((cols, rows), (rows, cols))
+                for s in range(unit, 0, -1)
+                if unit % s == 0 and c * s <= width_limit and r * s <= height_limit
+            ),
+            (1, cols, rows),
+        )
+        return min(cols * scale, width_limit), min(rows * scale, height_limit)
 
     def get_data_parser(self) -> MultiModalDataParser:
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
@@ -588,8 +622,15 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
+        image_overrides = mm_options.get("image") if mm_options else None
         img_width, img_height = self.info.get_dummy_size_for_soft_tokens(
-            self.info.get_max_image_soft_tokens()
+            self.info.get_max_image_soft_tokens(),
+            _get_do_resize(
+                self.info.ctx.get_merged_mm_kwargs({}),
+                processor.image_processor.do_resize,
+            ),
+            image_overrides.width if image_overrides else None,
+            image_overrides.height if image_overrides else None,
         )
 
         data: dict[str, Any] = {
@@ -597,7 +638,6 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 width=img_width,
                 height=img_height,
                 num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image") if mm_options else None,
             ),
         }
 
@@ -610,15 +650,30 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             )
 
         if num_videos > 0:
+            video_overrides = mm_options.get("video") if mm_options else None
+            video_mm_kwargs = {
+                "images_kwargs": {},
+                "max_soft_tokens": _VIDEO_MAX_SOFT_TOKENS,
+            }
             frame_width, frame_height = self.info.get_dummy_size_for_soft_tokens(
-                _VIDEO_MAX_SOFT_TOKENS
+                _VIDEO_MAX_SOFT_TOKENS,
+                _get_do_resize(
+                    self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
+                    self.info.get_hf_processor(
+                        **video_mm_kwargs
+                    ).image_processor.do_resize,
+                ),
+                video_overrides.width if video_overrides else None,
+                video_overrides.height if video_overrides else None,
             )
             data["video"] = self._get_dummy_videos(
                 width=frame_width,
                 height=frame_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=mm_options.get("video") if mm_options else None,
+                overrides=dataclasses.replace(video_overrides, width=None, height=None)
+                if video_overrides
+                else None,
             )
 
         return data

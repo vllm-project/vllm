@@ -34,7 +34,6 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
-    _SUPPORTED_SOFT_TOKENS,
     _VIDEO_MAX_FRAMES,
     _VIDEO_MAX_SOFT_TOKENS,
     Gemma4AudioInputs,
@@ -46,7 +45,6 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
     Gemma4VideoInputs,
-    _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -167,18 +165,14 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
             **kwargs,
         )
 
+    def get_default_image_soft_tokens(self) -> int:
+        return self.get_hf_config().vision_config.num_soft_tokens
+
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         config = self.get_hf_config()
-        # Unified field is `num_soft_tokens`.  Tower-based parent uses
-        # `default_output_length`, hence the override.
-        tokens_per_image = config.vision_config.num_soft_tokens
-        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
-        val, _ = _get_max_soft_tokens(merged_kwargs)
-        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-            tokens_per_image = val
-        tokens: dict[str, int] = {"image": tokens_per_image}
+        tokens: dict[str, int] = {"image": self.get_max_image_soft_tokens()}
         if config.audio_config is not None:
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
