@@ -284,7 +284,7 @@ class LRUCachePolicy(CachePolicy):
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
-        if n == 0:
+        if n <= 0:
             return []
 
         selected: list[OffloadKey] = []

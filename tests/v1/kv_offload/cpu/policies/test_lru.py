@@ -466,6 +466,16 @@ def test_lru_pinning_and_removal_unindex_chunks():
     _assert_index_invariant(policy)
 
 
+def test_lru_negative_eviction_count_keeps_entries():
+    policy = LRUCachePolicy(1)
+    key = _key(0)
+    chunk = _ready_chunk(0)
+    policy.insert(key, chunk, ReqContext(req_id="r"))
+
+    assert policy.evict(-1, set()) == []
+    assert policy.evict(1, set()) == [(key, chunk)]
+
+
 def test_sorted_entries_matches_sorted_list_across_sublist_splits():
     rng = random.Random(0)
     entries = _SortedEntries()
