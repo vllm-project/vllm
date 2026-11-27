@@ -223,6 +223,12 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+def _is_remote_disconnect(error: BaseException | None) -> bool:
+    return nixlRemoteDisconnectError is not None and isinstance(
+        error, nixlRemoteDisconnectError
+    )
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -237,6 +243,8 @@ class NixlBaseConnectorWorker:
     # Push additionally supports MLA HMA and packed PP; attention-only HMA
     # pull uses the shared layer pairing without these paths.
     _supports_pp_hma = False
+    _engine_heartbeat_interval: float = 0.0
+    _next_engine_heartbeat: float = 0.0
 
     def _compute_desc_ids(
         self,
@@ -1146,6 +1154,17 @@ class NixlBaseConnectorWorker:
         )
         # Map of pull peer (host, port) -> engine_id currently serving it.
         self._engine_by_address: dict[tuple[str, int], EngineId] = {}
+        self._engine_last_heartbeat: dict[EngineId, float] = {}
+        self._engine_heartbeat_interval = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "engine_heartbeat_interval", 5.0
+            )
+        )
+        self._next_engine_heartbeat = (
+            time.perf_counter() + self._engine_heartbeat_interval
+            if self._engine_heartbeat_interval > 0
+            else 0.0
+        )
 
         self.model_config = vllm_config.model_config
 
@@ -1646,7 +1665,9 @@ class NixlBaseConnectorWorker:
                         logger.info(
                             "NIXL clock offset to engine %s: %.3fs", eid, clock_offset
                         )
-                        self._engine_last_active[eid] = time.perf_counter()
+                        now = time.perf_counter()
+                        self._engine_last_active[eid] = now
+                        self._engine_last_heartbeat[eid] = now
                         self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
                         self._log_failure(
@@ -3645,6 +3666,7 @@ class NixlBaseConnectorWorker:
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)
 
+        self._heartbeat_remote_engines()
         self._cleanup_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
@@ -3716,9 +3738,11 @@ class NixlBaseConnectorWorker:
 
         Args:
             payload: comma-separated P-side request IDs, e.g.
-                     "req_abc,req_def".
+                     "req_abc,req_def", or empty for a liveness probe.
 
         """
+        if not payload:
+            return
         new_expiry = time.perf_counter() + self._lease_extension
         for req_id in payload.split(","):
             if req_id in self._reqs_to_send:
@@ -3833,9 +3857,7 @@ class NixlBaseConnectorWorker:
                 and meta.remote is not None
             ):
                 self._failed_remote_engines.add(meta.remote.engine_id)
-                if nixlRemoteDisconnectError is not None and isinstance(
-                    error, nixlRemoteDisconnectError
-                ):
+                if _is_remote_disconnect(error):
                     self._disconnected_remote_engines.add(meta.remote.engine_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
@@ -3861,6 +3883,11 @@ class NixlBaseConnectorWorker:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
         now = time.perf_counter()
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
+            if (
+                engine_id in self._invalid_remote_engines
+                or engine_id in self._disconnected_remote_engines
+            ):
+                continue
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
             if (
@@ -3885,13 +3912,19 @@ class NixlBaseConnectorWorker:
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
-                except Exception:
+                except Exception as e:
                     all_sent = False
+                    if _is_remote_disconnect(e):
+                        self._record_disconnected_remote_engine(engine_id)
+                        break
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
                         engine_id,
                         exc_info=True,
                     )
+            if all_sent:
+                with self._handshake_lock:
+                    self._engine_last_heartbeat[engine_id] = now
             clock_offset = self._engine_clock_offset.get(engine_id)
             if all_sent and clock_offset is not None:
                 # Only count rounds that reached every remote rank.
@@ -4370,6 +4403,60 @@ class NixlBaseConnectorWorker:
             engine_id,
         )
 
+    def _record_disconnected_remote_engine(self, engine_id: EngineId) -> None:
+        if self._TRANSFER_MODE != "pull":
+            return
+        self._failed_remote_engines.add(engine_id)
+        self._disconnected_remote_engines.add(engine_id)
+
+    def _heartbeat_remote_engines(self) -> None:
+        """Send an empty heartbeat to idle pull peers so UCX keepalive failures
+        surface as disconnects and release their NIXL state."""
+        if self._TRANSFER_MODE != "pull" or self._engine_heartbeat_interval <= 0:
+            return
+        now = time.perf_counter()
+        if now < self._next_engine_heartbeat:
+            return
+        skip = self._invalid_remote_engines | self._disconnected_remote_engines
+        with self._handshake_lock:
+            engines = {
+                engine_id: list(agents.values())
+                for engine_id, agents in self._remote_agents.items()
+                if engine_id not in skip
+                and (
+                    engine_id not in self._engine_last_heartbeat
+                    or now - self._engine_last_heartbeat[engine_id]
+                    >= self._engine_heartbeat_interval
+                )
+            }
+            for engine_id in engines:
+                self._engine_last_heartbeat[engine_id] = now
+        hb_msg = HB_NOTIF_PREFIX.encode()
+        for engine_id, agent_names in engines.items():
+            for agent_name in agent_names:
+                try:
+                    self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
+                except Exception as e:
+                    if _is_remote_disconnect(e):
+                        self._record_disconnected_remote_engine(engine_id)
+                        break
+                    logger.debug(
+                        "Failed to send heartbeat to engine %s",
+                        engine_id,
+                        exc_info=True,
+                    )
+        skip = self._invalid_remote_engines | self._disconnected_remote_engines
+        with self._handshake_lock:
+            self._next_engine_heartbeat = min(
+                (
+                    self._engine_last_heartbeat.get(eid, now)
+                    + self._engine_heartbeat_interval
+                    for eid in self._remote_agents
+                    if eid not in skip
+                ),
+                default=now + self._engine_heartbeat_interval,
+            )
+
     def _cleanup_remote_engines(self) -> None:
         """Release replaced or locally invalid pull peers after their reads drain."""
         # TODO: Also handle push mode, which handshakes in both directions.
@@ -4474,6 +4561,7 @@ class NixlBaseConnectorWorker:
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            self._engine_last_heartbeat.pop(engine_id, None)
             for address, eid in list(self._engine_by_address.items()):
                 if eid == engine_id:
                     del self._engine_by_address[address]

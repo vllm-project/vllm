@@ -192,6 +192,11 @@ def test_handle_heartbeat():
     # req-unknown: not added.
     assert "req-unknown" not in w._reqs_to_send
 
+    # Empty probe payload is a no-op.
+    snapshot = dict(w._reqs_to_send)
+    w._handle_heartbeat("")
+    assert w._reqs_to_send == snapshot
+
 
 def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
     """A heartbeated head entry must not strand expired leases behind it.

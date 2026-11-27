@@ -2603,6 +2603,9 @@ def recv_worker():
     worker._handshake_futures = {}
     worker._remote_agents = {}
     worker._engine_by_address = {}
+    worker._engine_last_heartbeat = {}
+    worker._engine_heartbeat_interval = 0.0
+    worker._next_engine_heartbeat = 0.0
     worker._failed_remote_engines = set()
     worker._disconnected_remote_engines = set()
     worker._invalid_remote_engines = set()
@@ -3936,6 +3939,137 @@ class TestPeerReplacement:
         self.transport.make_prepped_xfer.assert_not_called()
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert "old" in self.worker._handshake_futures
+
+    @pytest.mark.parametrize("disconnected", [False, True])
+    def test_heartbeat_probe_releases_disconnected_peer(
+        self, disconnected, monkeypatch
+    ):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+        class RemoteDisconnectError(RuntimeError):
+            pass
+
+        monkeypatch.setattr(bw, "nixlRemoteDisconnectError", RemoteDisconnectError)
+        now = {"t": time.perf_counter()}
+        monkeypatch.setattr(bw.time, "perf_counter", lambda: now["t"])
+        self.worker._engine_last_heartbeat["old"] = now["t"]
+        self.worker._next_engine_heartbeat = (
+            now["t"] + self.worker._engine_heartbeat_interval
+        )
+
+        # Rate-limited before engine_heartbeat_interval elapses.
+        self.worker.get_transfer_results()
+        self.transport.send_notif.assert_not_called()
+
+        self.transport.send_notif.side_effect = (
+            RemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+            if disconnected
+            else RuntimeError("transient")
+        )
+        now["t"] += self.worker._engine_heartbeat_interval
+        self.worker.get_transfer_results()
+
+        self.transport.send_notif.assert_called_once_with("old", notif_msg=b"HB:")
+        assert ("old" not in self.worker._remote_agents) is disconnected
+        assert self.transport.release_dlist_handle.call_count == disconnected
+        if disconnected:
+            self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    def test_heartbeat_probe_waits_for_inflight_reads_and_handshakes(self, monkeypatch):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+        class RemoteDisconnectError(RuntimeError):
+            pass
+
+        monkeypatch.setattr(bw, "nixlRemoteDisconnectError", RemoteDisconnectError)
+        now = {"t": time.perf_counter()}
+        monkeypatch.setattr(bw.time, "perf_counter", lambda: now["t"])
+        self.worker._engine_last_heartbeat["old"] = now["t"]
+        self.worker._next_engine_heartbeat = (
+            now["t"] + self.worker._engine_heartbeat_interval
+        )
+
+        self.transport.check_xfer_state.return_value = "PROC"
+        self.worker.start_load_kv(self._request("old"))
+        self.worker._ensure_handshake("other", "other-host", 1234, 1)
+
+        self.transport.send_notif.side_effect = RemoteDisconnectError("disconnected")
+        now["t"] += self.worker._engine_heartbeat_interval
+        self.worker.get_transfer_results()
+        self.transport.send_notif.assert_called_once_with("old", notif_msg=b"HB:")
+        self.transport.remove_remote_agent.assert_not_called()
+
+        # Already-disconnected peer is not re-probed while waiting on handshake.
+        now["t"] += self.worker._engine_heartbeat_interval
+        self.worker.get_transfer_results()
+        assert self.transport.send_notif.call_count == 1
+
+        # Handshake finishes: peer becomes invalid (new reads fail fast) and
+        # waits for its in-flight read to drain before cleanup.
+        self._connect("other", host="other-host")
+        self.worker.get_transfer_results()
+        assert "old" in self.worker._invalid_remote_engines
+        assert "old" in self.worker._remote_agents
+        self.transport.make_prepped_xfer.reset_mock()
+        self.worker.start_load_kv(self._request("old", req_id="blocked"))
+        self.transport.make_prepped_xfer.assert_not_called()
+
+        self.transport.check_xfer_state.return_value = "DONE"
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req", "blocked"}
+        assert result.failed_recving == {"blocked"}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert set(self.worker._remote_agents) == {"other"}
+
+    def test_heartbeat_probe_disabled_and_lease_heartbeat_disconnect(self, monkeypatch):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+        class RemoteDisconnectError(RuntimeError):
+            pass
+
+        monkeypatch.setattr(bw, "nixlRemoteDisconnectError", RemoteDisconnectError)
+        now = {"t": time.perf_counter()}
+        monkeypatch.setattr(bw.time, "perf_counter", lambda: now["t"])
+
+        # Disabled when interval <= 0.
+        self.worker._engine_heartbeat_interval = 0.0
+        now["t"] += 100.0
+        self.worker.get_transfer_results()
+        self.transport.send_notif.assert_not_called()
+
+        # Re-enable: a lease heartbeat at t+3 suppresses an empty probe at t+5.
+        self.worker._engine_heartbeat_interval = 5.0
+        self.worker._engine_last_heartbeat["old"] = now["t"]
+        self.worker._next_engine_heartbeat = now["t"] + 5.0
+        self.worker._engine_clock_offset["old"] = 0.0
+        hb_meta = NixlConnectorMetadata()
+        hb_meta.heartbeat_by_engine = {
+            "old": HeartbeatInfo(
+                req_ids={"req-1"},
+                host="localhost",
+                port=1234,
+                tp_size=1,
+                leases={"req-1": (now["t"] + 30.0, 20)},
+            )
+        }
+
+        now["t"] += 3.0
+        self.worker._send_heartbeats(hb_meta)
+        self.transport.send_notif.assert_called_once_with("old", notif_msg=b"HB:req-1")
+        self.transport.send_notif.reset_mock()
+
+        now["t"] += 2.0
+        self.worker.get_transfer_results()
+        self.transport.send_notif.assert_not_called()
+
+        # A lease heartbeat that hits a disconnect neither renews leases nor
+        # keeps the dead peer.
+        self.worker._remote_leases.clear()
+        self.transport.send_notif.side_effect = RemoteDisconnectError("disconnected")
+        self.worker._send_heartbeats(hb_meta)
+        assert not self.worker._remote_leases
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
 
 
 def test_transfer_topology_unregister():
