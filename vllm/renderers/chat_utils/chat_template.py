@@ -17,6 +17,7 @@ class ChatTemplateConfig:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     trust_request_chat_template: bool = False
     trust_request_mm_kwargs: bool = False
+    default_chat_template_kwargs: dict[str, Any] | None = None
 
 
 def has_request_chat_template(
