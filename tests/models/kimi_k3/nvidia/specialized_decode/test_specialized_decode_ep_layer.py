@@ -97,7 +97,9 @@ def test_ep_moe_layer_matches_stock_sequence(tokens, impl, front_gemm):
         )
         # Elementwise: up to two BF16 ulps of the output's scale. The split-K GEMMs
         # round some elements one ulp away from cuBLAS, and cancellation can leave
-        # such an element near zero, where rtol does not cover it.
+        # such an element near zero, where rtol does not cover it. Measured on GB300
+        # (every case here): max |out - expected| 0.0625, 0.54-0.74 of one such ulp,
+        # the same as the stock order at 96 tokens; relative norm 5.6e-4 to 1.5e-3.
         ulp = torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
         torch.testing.assert_close(out, expected, atol=max(3e-2, 2 * ulp), rtol=2e-2)
         rel = (out.float() - expected.float()).norm() / expected.float().norm()
