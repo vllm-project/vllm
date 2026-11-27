@@ -35,6 +35,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 def clear_linear_attention_cache_for_new_sequences(
@@ -106,7 +107,11 @@ def linear_attention_prefill_and_mix(
         for part, (part_start, part_end) in enumerate(zip(bounds, bounds[1:])):
             if part > 0:
                 assert checkpoint is not None
-                kv_cache[checkpoint.state_indices[_prefill_idx]] = slice_layer_cache
+                # The null block marks a checkpoint block that was not reserved.
+                dst = checkpoint.state_indices[_prefill_idx]
+                kv_cache[dst] = torch.where(
+                    dst != NULL_BLOCK_ID, slice_layer_cache, kv_cache[dst]
+                )
             out_slice = prefix_fn(
                 q[part_start:part_end].transpose(0, 1).contiguous(),
                 k[part_start:part_end].transpose(0, 1).contiguous(),

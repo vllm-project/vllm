@@ -275,7 +275,8 @@ def test_bailing_prefill_exports_state_at_checkpoint():
     """A checkpoint holds the state of the prefill stopped at its offset.
 
     One offset is on the kernel's 256-token block grid and one is not. A decode
-    leads the batch, and nothing else in the cache changes.
+    leads the batch, and nothing else in the cache changes, including the null
+    block of a row whose checkpoint block was not reserved.
     """
     from vllm.model_executor.layers.mamba.checkpoint import (
         MambaPrefillCheckpointMetadata,
@@ -286,6 +287,7 @@ def test_bailing_prefill_exports_state_at_checkpoint():
     from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
         MiniMaxText01LinearKernel,
     )
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
     torch.set_default_device(DEVICE)
     set_random_seed(0)
@@ -320,18 +322,21 @@ def test_bailing_prefill_exports_state_at_checkpoint():
         )
         return out[num_decodes:], kv_cache.clone()
 
-    prefill_lens, offsets, ckpt_slots = [600, 300], [512, 100], [5, 6]
+    prefill_lens, offsets = [600, 300, 400], [512, 100, 256]
+    slots, ckpt_slots = [1, 2, 3, 4], [5, 6, NULL_BLOCK_ID]
     qkv = [0.1 * torch.randn(1 + sum(prefill_lens), heads, dim) for _ in range(3)]
     checkpoint = MambaPrefillCheckpointMetadata(
         checkpoint_offsets=torch.tensor(offsets, dtype=torch.int32),
         state_indices=torch.tensor(ckpt_slots, dtype=torch.int32),
         offsets=offsets,
     )
-    out, without_checkpoint = run(qkv, 1, prefill_lens, [1, 2, 3])
-    out_ckpt, with_checkpoint = run(qkv, 1, prefill_lens, [1, 2, 3], checkpoint)
+    out, without_checkpoint = run(qkv, 1, prefill_lens, slots)
+    out_ckpt, with_checkpoint = run(qkv, 1, prefill_lens, slots, checkpoint)
 
-    starts = [1, 1 + prefill_lens[0]]
-    for start, offset, slot, ckpt_slot in zip(starts, offsets, [2, 3], ckpt_slots):
+    starts = [1 + sum(prefill_lens[:i]) for i in range(len(prefill_lens))]
+    for start, offset, slot, ckpt_slot in zip(starts, offsets, slots[1:], ckpt_slots):
+        if ckpt_slot == NULL_BLOCK_ID:
+            continue
         part = [x[start : start + offset] for x in qkv]
         _, stopped = run(part, 0, [offset], [slot])
         torch.testing.assert_close(
@@ -343,7 +348,7 @@ def test_bailing_prefill_exports_state_at_checkpoint():
     # Splitting changes the kernel's tiling, so the outputs differ by its
     # rounding; the split must be no less accurate than the single pass.
     ref = []
-    for start, n, slot in zip(starts, prefill_lens, [2, 3]):
+    for start, n, slot in zip(starts, prefill_lens, slots[1:]):
         q, k, v = (x[start : start + n].transpose(0, 1)[None].double() for x in qkv)
         out_ref, _ = reference_lightning_attention(
             q, k, v, slope.double(), 256, initial[slot][None].double()
