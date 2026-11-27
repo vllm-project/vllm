@@ -65,7 +65,9 @@ steps:
       - csrc/
       - tests/kernels/core
       - vllm/kernels/triton/
-      - tests/kernels/test_top_k_per_row.py
+      - tests/kernels/test_indexer_topk_decode.py
+      - tests/kernels/test_indexer_topk_prefill.py
+      - tests/kernels/indexer_topk_utils.py
       - vllm/model_executor/layers/indexer_topk.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - tests/kernels/test_concat_mla_q.py
@@ -84,7 +86,8 @@ steps:
         --ignore=kernels/core/test_minimax_reduce_rms.py
         kernels/test_fused_qk_norm_rope_gate.py
         kernels/test_concat_mla_q.py
-        kernels/test_top_k_per_row.py
+        kernels/test_indexer_topk_decode.py
+        kernels/test_indexer_topk_prefill.py
         kernels/test_rocm_fp32_router_gemm.py
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
@@ -135,7 +138,9 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
+  - tests/kernels/test_indexer_topk_decode.py # it runs on Blackwell too - some kernels have arch-specific optimizations
+  - tests/kernels/test_indexer_topk_prefill.py
+  - tests/kernels/indexer_topk_utils.py
   - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
   - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
   - vllm/models/deepseek_v41/attention.py
@@ -148,7 +153,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-    - pytest -v -s kernels/test_top_k_per_row.py
+    - pytest -v -s kernels/test_indexer_topk_decode.py kernels/test_indexer_topk_prefill.py
     - >-
       pytest -v -s
       model_executor/layers/test_mla_short_prefill_indexer.py
@@ -176,11 +181,13 @@ steps:
       - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
       - vllm/model_executor/layers/indexer_topk.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
-      - tests/kernels/test_top_k_per_row.py
+      - tests/kernels/test_indexer_topk_decode.py
+      - tests/kernels/test_indexer_topk_prefill.py
+      - tests/kernels/indexer_topk_utils.py
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-      - pytest -v -s kernels/test_top_k_per_row.py -k "persistent or sparse_indexer"
+      - pytest -v -s kernels/test_indexer_topk_decode.py kernels/test_indexer_topk_prefill.py -k "persistent or sparse_indexer"
 
 - label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
   key: kernels-bf16x3-router-gemm-h100
@@ -395,7 +402,8 @@ steps:
         --ignore=kernels/test_concat_mla_q.py
         --ignore=kernels/test_fused_qk_norm_rope_gate.py
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-        --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_indexer_topk_decode.py
+        --ignore=kernels/test_indexer_topk_prefill.py
         --ignore=kernels/test_cpu_fused_sampling.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
         --ignore=kernels/test_bf16x3_router_gemm_rocm.py
@@ -908,7 +916,9 @@ steps:
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-  - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_indexer_topk_decode.py
+  - tests/kernels/test_indexer_topk_prefill.py
+  - tests/kernels/indexer_topk_utils.py
   - csrc/attention/dsa/fused_mqa_topk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
@@ -928,7 +938,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_cache.py -k nvfp4
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-    - pytest -v -s tests/kernels/test_top_k_per_row.py
+    - pytest -v -s tests/kernels/test_indexer_topk_decode.py tests/kernels/test_indexer_topk_prefill.py
     - pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py

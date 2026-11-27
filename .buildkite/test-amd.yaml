@@ -1161,7 +1161,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_indexer_topk_decode.py
+  - tests/kernels/test_indexer_topk_prefill.py
+  - tests/kernels/indexer_topk_utils.py
   - vllm/model_executor/layers/indexer_topk.py
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/kernels/test_concat_mla_q.py
@@ -1180,7 +1182,8 @@ steps:
     --ignore=kernels/core/test_minimax_reduce_rms.py
     kernels/test_fused_qk_norm_rope_gate.py
     kernels/test_concat_mla_q.py
-    kernels/test_top_k_per_row.py
+    kernels/test_indexer_topk_decode.py
+    kernels/test_indexer_topk_prefill.py
     kernels/test_rocm_fp32_router_gemm.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -4587,11 +4590,13 @@ steps:
   - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
   - vllm/model_executor/layers/indexer_topk.py
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
-  - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_indexer_topk_decode.py
+  - tests/kernels/test_indexer_topk_prefill.py
+  - tests/kernels/indexer_topk_utils.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - pytest -v -s kernels/test_top_k_per_row.py -k "persistent or sparse_indexer"
+  - pytest -v -s kernels/test_indexer_topk_decode.py kernels/test_indexer_topk_prefill.py -k "persistent or sparse_indexer"
 
 - label: ":amd: (MI355 DPX) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 90
