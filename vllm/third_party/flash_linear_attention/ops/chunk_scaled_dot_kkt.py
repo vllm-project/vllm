@@ -14,7 +14,18 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE
+from .utils import FLA_CHUNK_SIZE, is_rdna
+
+KKT_CONFIGS = (
+    [triton.Config({"BK": 64}, num_warps=4, num_stages=2)]
+    if is_rdna
+    else [
+        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+)
 
 
 @triton.heuristics(
@@ -24,13 +35,8 @@ from .utils import FLA_CHUNK_SIZE
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "BT", "IS_VARLEN"],
+    configs=KKT_CONFIGS,
+    key=["H", "K", "BT", "IS_VARLEN", "HEAD_FIRST"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -48,8 +54,12 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    if HEAD_FIRST:
+        i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    else:
+        i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = (
@@ -138,7 +148,9 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
-    chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
+    # RDNA: co-schedule all heads of a chunk to keep it in the Infinity Cache.
+    grid = (B * H, NT) if is_rdna else (NT, B * H)
+    chunk_scaled_dot_kkt_fwd_kernel[grid](
         k=k,
         g=g,
         beta=beta,
@@ -150,5 +162,6 @@ def chunk_scaled_dot_kkt_fwd(
         Hg=Hg,
         K=K,
         BT=BT,
+        HEAD_FIRST=is_rdna,
     )
     return A
