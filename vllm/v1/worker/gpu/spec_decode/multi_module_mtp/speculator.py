@@ -1062,6 +1062,9 @@ def _shift_input_ids_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
         input_ids = tl.load(input_ids_ptr + query_start + block, mask=mask)
+        # The shift is in place and the block is spread over several warps:
+        # every load must finish before any warp overwrites its neighbour.
+        tl.debug_barrier()
         tl.store(input_ids_ptr + query_start + block - 1, input_ids, mask=mask)
     draft_token = tl.load(draft_tokens_ptr + req_idx)
     tl.store(input_ids_ptr + last_token_index, draft_token)
@@ -1106,6 +1109,9 @@ def _shift_input_embeds_kernel(
             + dim_block[None, :],
             mask=mask,
         )
+        # Rows r and r - 1 of the tile live in different warps, so wait for
+        # every load before the in-place store into row r - 1.
+        tl.debug_barrier()
         tl.store(
             input_embeds_ptr
             + (query_start + query_block - 1)[:, None] * input_embeds_stride0
