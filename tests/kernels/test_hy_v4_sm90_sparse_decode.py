@@ -27,8 +27,10 @@ DSA, SWA = (8, 2048), (16, 512)
 SHAPES = [(*DSA, t) for t in (1, 2, 3, 8, 9, 16, 17, 24, 40)] + [
     (*SWA, t) for t in (1, 4, 5, 8, 9, 16)
 ]
-# Two BF16 kernels that round P at different block boundaries.
-ATOL, RTOL = 8e-3, 1.6e-2
+# Two BF16 kernels that round P at different block boundaries. About 2x the
+# worst gap to FlashMLA over 40 seeds of every taken shape on H200 (1.4e-3 at
+# rtol 2^-7).
+ATOL, RTOL = 3e-3, 2**-7
 
 
 def _inputs(num_tokens, heads, width, seed, num_kv=NUM_KV):
