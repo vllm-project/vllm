@@ -369,6 +369,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FLYDSL_MX_MLP: bool = True
     VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
     VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS: int = 136
+    VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN: bool = True
 
 
 def get_default_cache_root():
@@ -2488,6 +2489,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # weight copy.
     "VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS", "136")
+    ),
+    # Gemma4 decoder-layer residual / RMSNorm chain (post-attn norm + add + pre-FF norm
+    # (+ FP8 quant), post-FF norm + add, PLE norm + add + layer scalar + next input norm)
+    # in three row-wise Triton kernels
+    "VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN": lambda: bool(
+        int(os.getenv("VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN", "1"))
     ),
 }
 

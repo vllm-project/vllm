@@ -413,10 +413,7 @@ class FlyDSLPerTokenFp8ScaledMMLinearKernel(RowWiseTorchFP8ScaledMMLinearKernel)
         return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
 
 
-def maybe_fused_gelu_mlp_mx(gate_up_proj, down_proj, act_fn, x: torch.Tensor):
-    """The gated MLP ``down(gelu_tanh(gate) * up)`` of two FP8 per-token/per-channel layers through the FlyDSL
-    fused gate_up + MX-quant and MX down kernels for prefill-size token counts (smaller ones keep the unfused
-    path inside the op). Returns None when the layers or the activation do not qualify."""
+def _gelu_mlp_mx_layers(gate_up_proj, down_proj, act_fn):
     from vllm.model_executor.layers.activation import GeluAndMul
 
     if not envs.VLLM_ROCM_FLYDSL_MX_MLP:
@@ -434,16 +431,38 @@ def maybe_fused_gelu_mlp_mx(gate_up_proj, down_proj, act_fn, x: torch.Tensor):
     w2_name = k2.layer_param_names[0]
     w1_il = getattr(gate_up_proj, f"{w1_name}_il", None)
     w2_sh = getattr(down_proj, f"{w2_name}_shuffled", None)
-    if w1_il is None or w2_sh is None or x.dtype != torch.bfloat16:
+    if w1_il is None or w2_sh is None:
         return None
     if tuple(w2_sh.shape) != _MX_DOWN or getattr(gate_up_proj, "bias", None) is not None:
         return None
     if getattr(down_proj, "bias", None) is not None or down_proj.tp_size != 1:
         return None
+    return k1, k2, w1_name, w2_name, w1_il, w2_sh
+
+
+def gelu_mlp_mx_supported(gate_up_proj, down_proj, act_fn) -> bool:
+    """True when maybe_fused_gelu_mlp_mx takes a bf16 activation through the FlyDSL MX MLP."""
+    return _gelu_mlp_mx_layers(gate_up_proj, down_proj, act_fn) is not None
+
+
+def maybe_fused_gelu_mlp_mx(
+    gate_up_proj, down_proj, act_fn, x: torch.Tensor | None, x_quant=None
+):
+    """The gated MLP ``down(gelu_tanh(gate) * up)`` of two FP8 per-token/per-channel layers through the FlyDSL
+    fused gate_up + MX-quant and MX down kernels for prefill-size token counts (smaller ones keep the unfused
+    path inside the op). Returns None when the layers or the activation do not qualify. ``x_quant`` is an
+    already quantized (fp8 data, per-token scale) activation, used instead of quantizing ``x``."""
+    layers = _gelu_mlp_mx_layers(gate_up_proj, down_proj, act_fn)
+    if layers is None or (x_quant is None and x.dtype != torch.bfloat16):
+        return None
+    k1, k2, w1_name, w2_name, w1_il, w2_sh = layers
     w1, w1_s, x_s, x_s_ub = k1._get_layer_params(gate_up_proj)
     w2, w2_s, *_ = k2._get_layer_params(down_proj)
-    x_2d = x.view(-1, x.shape[-1])
-    x_q, x_s = k1.quant_fp8(x_2d, x_s, x_s_ub)
+    if x_quant is not None:
+        x_q, x_s = x_quant
+    else:
+        x_2d = x.view(-1, x.shape[-1])
+        x_q, x_s = k1.quant_fp8(x_2d, x_s, x_s_ub)
     if x_s.dim() == 1:
         x_s = x_s.view(-1, 1)
     out = torch.ops.vllm.rocm_flydsl_gelu_mlp_mx(
@@ -461,4 +480,4 @@ def maybe_fused_gelu_mlp_mx(gate_up_proj, down_proj, act_fn, x: torch.Tensor):
         w2_s,
         _mx_unit_scale(w2_sh.device, *_MX_DOWN),
     )
-    return out.view(*x.shape[:-1], out.shape[-1])
+    return out.view(*x_q.shape[:-1], out.shape[-1])

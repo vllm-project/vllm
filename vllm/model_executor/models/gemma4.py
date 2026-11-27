@@ -27,6 +27,7 @@ import torch
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.utils import getattr_iter
@@ -40,9 +41,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.kernels.linear.scaled_mm.flydsl import (
+    gelu_mlp_mx_supported,
     maybe_fused_gelu_mlp_mx,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion import gemma4_norm_chain
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -332,9 +335,16 @@ class Gemma4MLP(nn.Module):
         )
         self.act_fn = get_act_and_mul_fn(hidden_activation)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def supports_prequant_input(self) -> bool:
+        return gelu_mlp_mx_supported(self.gate_up_proj, self.down_proj, self.act_fn)
+
+    def forward(
+        self,
+        x: torch.Tensor | None,
+        x_quant: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         fused = maybe_fused_gelu_mlp_mx(
-            self.gate_up_proj, self.down_proj, self.act_fn, x
+            self.gate_up_proj, self.down_proj, self.act_fn, x, x_quant
         )
         if fused is not None:
             return fused
@@ -777,14 +787,90 @@ class Gemma4DecoderLayer(nn.Module):
         # Layer scalar (loaded from checkpoint) — applies to ALL text layers
         self.register_buffer("layer_scalar", torch.ones(1))
 
+    def can_fuse_norm_chain(self) -> bool:
+        """The residual / norm chain of the layer runs as three row-wise Triton kernels."""
+        return (
+            envs.VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN
+            and current_platform.is_rocm()
+            and not self.enable_moe_block
+            and self.per_layer_input_gate is not None
+            and self.post_per_layer_input_norm is not None
+            and gemma4_norm_chain.supports_hidden_size(self.hidden_size)
+        )
+
+    def _forward_fused_chain(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        normed_input: torch.Tensor | None,
+        per_layer_input: torch.Tensor,
+        next_input_norm_weight: torch.Tensor | None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert self.per_layer_projection is not None
+        assert self.per_layer_input_gate is not None
+        assert self.post_per_layer_input_norm is not None
+        eps = self.post_attention_layernorm.variance_epsilon
+        residual = hidden_states
+        if normed_input is None:
+            normed_input = self.input_layernorm(residual)
+        attn_out = self.self_attn(
+            positions=positions, hidden_states=normed_input, **kwargs
+        )
+        quant = self.mlp.supports_prequant_input()
+        residual, y, y_scale = torch.ops.vllm.gemma4_attn_ff_norm(
+            attn_out,
+            residual,
+            self.post_attention_layernorm.weight,
+            self.pre_feedforward_layernorm.weight,
+            eps,
+            quant,
+        )
+        mlp_out = self.mlp(None, (y, y_scale)) if quant else self.mlp(y)
+        residual = torch.ops.vllm.gemma4_post_ff_norm_add(
+            mlp_out, residual, self.post_feedforward_layernorm.weight, eps
+        )
+        gate = self.per_layer_input_gate(residual)
+        gate = torch.nn.functional.gelu(gate, approximate="tanh")
+        per_layer_contribution = self.per_layer_projection(gate * per_layer_input)
+        has_next = next_input_norm_weight is not None
+        hidden_states, next_normed = torch.ops.vllm.gemma4_ple_norm_add_scale(
+            per_layer_contribution,
+            residual,
+            self.post_per_layer_input_norm.weight,
+            self.layer_scalar,
+            next_input_norm_weight
+            if has_next
+            else self.post_per_layer_input_norm.weight,
+            eps,
+            has_next,
+        )
+        return hidden_states, (next_normed if has_next else None)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         per_layer_input: torch.Tensor | None = None,
+        next_input_norm_weight: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # With the fused norm chain, ``residual`` is the already normalized input of
+        # this layer (the previous layer's input_layernorm output), or None.
+        if (
+            per_layer_input is not None
+            and hidden_states.dtype == torch.bfloat16
+            and self.can_fuse_norm_chain()
+        ):
+            return self._forward_fused_chain(
+                positions,
+                hidden_states,
+                residual,
+                per_layer_input,
+                next_input_norm_weight,
+                **kwargs,
+            )
         # Gemma4 residual pattern:
         # 1. input_norm(x) → attn → post_attn_norm → ADD residual
         # 2. pre_ff_norm → mlp → post_ff_norm → ADD residual
@@ -860,11 +946,18 @@ def _run_decoder_layers(
         layer_per_input = (
             per_layer_inputs[:, layer_idx, :] if per_layer_inputs is not None else None
         )
+        next_layer = decoder_layers[idx + 1] if idx + 1 < len(decoder_layers) else None
+        next_norm_weight = (
+            next_layer.input_layernorm.weight
+            if next_layer is not None and next_layer.can_fuse_norm_chain()
+            else None
+        )
         hidden_states, residual = layer(
             positions,
             hidden_states,
             residual,
             per_layer_input=layer_per_input,
+            next_input_norm_weight=next_norm_weight,
             **kwargs,
         )
     return hidden_states
@@ -1426,10 +1519,19 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
-        ):
+        local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
+        for local_idx, layer in enumerate(local_layers):
+            layer_idx = self.start_layer + local_idx
+            next_layer = (
+                local_layers[local_idx + 1]
+                if local_idx + 1 < len(local_layers)
+                else None
+            )
+            next_norm_weight = (
+                next_layer.input_layernorm.weight
+                if next_layer is not None and next_layer.can_fuse_norm_chain()
+                else None
+            )
             # Extract the per-layer embedding for this specific layer
             if per_layer_inputs is not None:
                 layer_per_input = per_layer_inputs[
@@ -1442,6 +1544,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 hidden_states,
                 residual,
                 per_layer_input=layer_per_input,
+                next_input_norm_weight=next_norm_weight,
                 **kwargs,
             )
             self._maybe_add_hidden_state(
