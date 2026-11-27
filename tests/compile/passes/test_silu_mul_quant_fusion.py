@@ -226,7 +226,7 @@ CUDA_KERNELS = [
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
 
-@pytest.mark.parametrize("num_tokens", [32, 64])
+@pytest.mark.parametrize("num_tokens", [7, 32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])

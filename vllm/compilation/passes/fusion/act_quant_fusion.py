@@ -248,18 +248,6 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
             result = torch.empty(
                 output_shape, device=input.device, dtype=self.quant_dtype
             )
-            if self.is_scale_transposed:
-                scale = torch.empty(
-                    (d // self.group_size, input.shape[0]),
-                    device=input.device,
-                    dtype=torch.float32,
-                ).permute(-1, -2)
-            else:
-                scale = torch.empty(
-                    (input.shape[0], d // self.group_size),
-                    device=input.device,
-                    dtype=torch.float32,
-                )
             at = auto_functionalized(
                 self.FUSED_OP,
                 out=result,
