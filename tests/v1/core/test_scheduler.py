@@ -3092,6 +3092,7 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     core = object.__new__(EngineCore)
     core._checkpoint_state = CheckpointState.RUNNING
     core._kv_cache_reclaimable = False
+    core.vllm_config = Mock(weight_transfer_config=None)
     core.scheduler = scheduler
     core.model_executor = Mock(is_sleeping=False)
     core.mm_receiver_cache = None
@@ -3130,6 +3131,7 @@ def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible
     core = object.__new__(EngineCore)
     core._checkpoint_state = CheckpointState.RUNNING
     core._kv_cache_reclaimable = False
+    core.vllm_config = SimpleNamespace(weight_transfer_config=None)
     core.scheduler = create_scheduler()
     core.mm_receiver_cache = None
     core.batch_queue = None

@@ -846,6 +846,7 @@ def _pausable_engine_core_proc() -> tuple[EngineCoreProc, MagicMock]:
     core._checkpoint_state = CheckpointState.RUNNING
     core._checkpoint_error = None
     core._kv_cache_reclaimable = False
+    core.vllm_config = MagicMock(weight_transfer_config=None)
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     scheduler = MagicMock()
@@ -968,6 +969,7 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     scheduling resumes. Repeating either is a no-op."""
     core, scheduler = _pausable_engine_core_proc()
     core.vllm_config = MagicMock()
+    core.vllm_config.weight_transfer_config = None
     core.model_executor.is_sleeping = False
     core._reset_caches = MagicMock()  # type: ignore[method-assign]
     core.reject_new_requests = False
