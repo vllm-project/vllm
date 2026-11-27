@@ -2125,7 +2125,11 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             if (
                 self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
+                and (
+                    self.speculative_config.uses_target_hidden_states
+                    or self.speculative_config.uses_aux_hidden_states
+                )
+                and not self.speculative_config.use_gemma4_mtp()
             ):
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
