@@ -550,15 +550,6 @@ class FalconModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return super().get_total_num_kv_heads()
 
 
-class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_total_num_kv_heads(self) -> int:
-        return getattr(
-            self.hf_text_config.attn_config,
-            "kv_n_heads",
-            self.hf_text_config.num_attention_heads,
-        )
-
-
 class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_total_num_kv_heads(self) -> int:
         for block in self.hf_text_config.block_configs:
@@ -865,14 +856,12 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
-    "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "deepseek_v4": DeepseekV4ModelArchConfigConvertor,
     "diffusion_gemma": Gemma4ModelArchConfigConvertor,
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
