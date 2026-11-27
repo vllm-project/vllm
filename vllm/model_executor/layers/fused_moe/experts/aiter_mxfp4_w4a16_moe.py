@@ -5,7 +5,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -137,6 +140,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     score_mode: str | None = None,
     input_ids: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -269,6 +273,19 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
+    if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        # The clamp, alpha and beta `apply_moe_activation` resolves for it.
+        assert activation_config is not None
+        assert activation_config.clamp_limit is not None, (
+            "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
+        )
+        assert activation_config.beta in (0.0, 1.0), (
+            "aiter's fused swiglu multiplies by up or (up + 1); "
+            f"beta={activation_config.beta} cannot be expressed"
+        )
+        swiglu_alpha = activation_config.alpha
+        swiglu_limit = activation_config.clamp_limit
+        swiglu_add_residual = activation_config.beta == 1.0
 
     # Weight loading already swizzled the block scales on gfx950, so the kernel
     # has to be told; the load-time swizzle and this gate must agree or the
@@ -339,6 +356,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         )
 
     @staticmethod
@@ -398,7 +416,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SILU,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -421,6 +443,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         ]
 
     @staticmethod
@@ -460,13 +483,16 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routing_method = self.moe_config.routing_method
         if routing_method == RoutingMethodType.DeepseekV4:
             score_mode = "sqrtsoftplus"
-        elif routing_method == RoutingMethodType.DeepSeekV3:
-            # MiMo-V2.6: an ungrouped sigmoid router with a per-expert
+        elif routing_method in (
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
+        ):
+            # MiMo-V2.6, MiniMax: an ungrouped sigmoid router with a per-expert
             # correction bias. aiter's flat top-k implements this natively
             # (select on sigmoid(logits) + bias, return the unbiased sigmoid
             # scores).
             assert e_score_correction_bias is not None, (
-                "DeepSeekV3 routing requires e_score_correction_bias"
+                f"{routing_method.name} routing requires e_score_correction_bias"
             )
             score_mode = "sigmoid"
         else:
@@ -494,4 +520,5 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             score_mode=score_mode,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            activation_config=self.activation_config,
         )
