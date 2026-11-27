@@ -152,7 +152,12 @@ class FSOffloadingWorker(OffloadingWorker):
             t = self._transfers.get(job_id)
             if t is not None:
                 for c in t.completions:
-                    c.result()
+                    try:
+                        c.result()
+                    except Exception:
+                        # A flush must still wait for the remaining I/O.
+                        # get_finished() reports the failed job to the scheduler.
+                        logger.exception("I/O failed while waiting for job %d", job_id)
 
     def shutdown(self) -> None:
         try:

@@ -10,6 +10,7 @@ temp-file publishing, cleanup) without GDS hardware.
 import os
 from collections.abc import Iterator
 
+import numpy as np
 import pytest
 import torch
 
@@ -17,8 +18,11 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    DevicePointers,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.common import FSLoadStoreSpec
 from vllm.v1.kv_offload.fs.gds import worker as gds_worker
 from vllm.v1.kv_offload.fs.gds.cufile_bindings import CUfileBoolConfigParameter
 from vllm.v1.kv_offload.fs.gds.worker import GDSOffloadingWorker
@@ -280,3 +284,36 @@ def test_read_block_short_read_raises(worker, cufile, tmp_path):
 
     with pytest.raises(RuntimeError, match="cuFileRead short read"):
         worker.read_block(str(path), [FileOp(0x11, _PAGE_SIZE, _PAGE_SIZE)])
+
+
+def test_wait_preserves_failed_store_for_completion_poll(worker, cufile, kv_caches):
+    """A store flush fences failed I/O without bypassing failure reporting."""
+    tensor = kv_caches.tensors[0].tensor
+    device_ptrs = DevicePointers(
+        ptrs=np.array([tensor.data_ptr()], dtype=np.uint64),
+        sizes=np.array([_PAGE_SIZE], dtype=np.uint64),
+        group_block_counts=(1,),
+        group_data_ref_counts=(1,),
+        block_indices=(0,),
+    )
+    key = make_offload_key(b"failed-store", 0)
+    cufile.fail = "cuFileWrite"
+    assert worker.submit_store(1, device_ptrs, FSLoadStoreSpec([key]))
+    try:
+        worker.wait({1})
+    finally:
+        # Also drain on the unfixed implementation, so teardown cannot hide
+        # the exception raised by wait().
+        results = worker.get_finished()
+    assert len(results) == 1
+    assert results[0].job_id == 1
+    assert not results[0].success
+    assert worker.get_finished() == []
+
+    cufile.fail = None
+    assert worker.submit_store(2, device_ptrs, FSLoadStoreSpec([key]))
+    worker.wait({2})
+    results = worker.get_finished()
+    assert len(results) == 1
+    assert results[0].job_id == 2
+    assert results[0].success
