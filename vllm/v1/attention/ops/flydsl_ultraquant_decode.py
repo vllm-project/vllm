@@ -376,6 +376,16 @@ def _get_kernel(
     )
     flyc = _FLYC
     fx = _FX
+    # Block size belongs to the module that built the kernel: the four-wave
+    # verify schedule needs 256 threads, the single-token kernel needs 64.
+    if int(num_verify_tokens) > 1:
+        from vllm.v1.attention.ops.flydsl_kernels import (
+            ultraquant_decode_hd256_verify as verify_mod,
+        )
+
+        block_threads = verify_mod.BLOCK_THREADS
+    else:
+        block_threads = _ULTRAQUANT_MOD.BLOCK_THREADS
 
     @flyc.jit
     def _launch(
@@ -395,7 +405,7 @@ def _get_kernel(
     ):
         kfn(out, es, ml, q, kvc, cents, bt, sl, qsl).launch(
             grid=(gx, gy, gz),
-            block=(kmod.BLOCK_THREADS, 1, 1),
+            block=(block_threads, 1, 1),
             stream=stream,
         )
 
