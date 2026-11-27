@@ -380,7 +380,9 @@ mod tests {
             let mut content_length = 0;
             loop {
                 let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
                 if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                     content_length = v.trim().parse().unwrap();
                 }
