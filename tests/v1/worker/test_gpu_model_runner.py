@@ -15,7 +15,6 @@ from vllm.config.load import LoadConfig
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader.base_loader import (
     BaseModelLoader,
     bind_model_loader,
@@ -33,7 +32,6 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
@@ -237,38 +235,29 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
         platform.update_block_size_for_backend(vllm_config)
 
 
-class _CheckpointingMambaLayer(MambaBase):
-    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
-
-    def __init__(self, prefill_checkpoint_alignment: int | None):
-        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
-
-    def get_prefill_checkpoint_alignment(self) -> int | None:
-        return self._prefill_checkpoint_alignment
-
-    def get_state_shape(self):
-        return ()
-
-    def get_state_dtype(self):
-        return ()
-
-
-def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
-    from tests.v1.attention.utils import create_vllm_config
+def _align_qwen3_5_blocks(
+    *prefill_checkpoint_alignments: int | None,
+    grid_layers: set[int] | None = None,
+    prefix_match_unit: int | None = None,
+):
+    from tests.v1.attention.utils import CheckpointingMambaLayer, create_vllm_config
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
     cache_config.enable_prefix_caching = True
+    cache_config.prefix_match_unit = prefix_match_unit
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
-        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
+        forward_context[f"mamba.{i}"] = CheckpointingMambaLayer(
+            alignment, requires_grid=bool(grid_layers and i in grid_layers)
+        )
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
     return vllm_config
 
 
 @pytest.mark.parametrize(
     ("prefill_checkpoint_alignments", "block_size"),
-    [((64,), 576), ((None,), 544), ((64, None), 544)],
+    [((64,), 576), ((16, 64), 576), ((None,), 544), ((64, None), 544)],
 )
 def test_blocks_land_on_the_mamba_checkpoint_grid(
     prefill_checkpoint_alignments, block_size
@@ -282,6 +271,42 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     vllm_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
 
     assert vllm_config.cache_config.block_size == block_size
+
+
+@pytest.mark.parametrize(
+    ("alignments", "grid_layers", "prefix_match_unit", "expected_alignment"),
+    [
+        ((64, 1), set(), None, 64),
+        ((64, 1), {0}, None, 576),
+        ((64, 1), {0}, 16, 64),
+        ((64, 1), {0}, 256, 256),
+        ((64, None), {0}, None, None),
+    ],
+)
+def test_heterogeneous_mamba_layers_share_checkpoint_alignment(
+    alignments, grid_layers, prefix_match_unit, expected_alignment
+):
+    """All Mamba layers in a heterogeneous model derive one shared KV cache
+    checkpoint alignment from their per-layer declarations."""
+    from vllm.model_executor.layers.mamba.abstract import (
+        get_kv_cache_checkpoint_alignment,
+    )
+
+    vllm_config = _align_qwen3_5_blocks(
+        *alignments,
+        grid_layers=grid_layers,
+        prefix_match_unit=prefix_match_unit,
+    )
+    layers = vllm_config.compilation_config.static_forward_context
+
+    assert get_kv_cache_checkpoint_alignment(vllm_config) == expected_alignment
+    for i in range(len(alignments)):
+        layer_cfg = layers[f"mamba.{i}"].get_kv_cache_config(vllm_config)
+        params = layer_cfg.manager_config.params
+        assert params.prefill_checkpoint_alignment == expected_alignment
+        assert params.num_prefill_checkpoint_blocks == int(
+            expected_alignment is not None
+        )
 
 
 @pytest.mark.parametrize(
@@ -318,7 +343,7 @@ def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
     Mamba pages, and the planner pads every Mamba page up to it. A drafter page
     that is not a multiple of the target's (3072 and 2048 bytes per token with 6
     heads) must not grow the planned blocks to an lcm none of them divides."""
-    from tests.v1.attention.utils import create_vllm_config
+    from tests.v1.attention.utils import CheckpointingMambaLayer, create_vllm_config
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     draft = SimpleNamespace(
@@ -347,7 +372,7 @@ def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
 
     block_size = cache_config.block_size
     layer_configs = {
-        "mamba.0": _CheckpointingMambaLayer(None).get_kv_cache_config(vllm_config),
+        "mamba.0": CheckpointingMambaLayer(None).get_kv_cache_config(vllm_config),
         "attn.0": FullAttentionManager.layer_config(
             AttentionSpec(
                 block_size=block_size,

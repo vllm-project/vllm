@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm/tiny-random-LlamaForCausalLM"]
 
 
 @pytest.mark.asyncio

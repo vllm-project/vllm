@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -752,8 +753,10 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32, packed_fp4=False)
     "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
 )
 @pytest.mark.parametrize("packed_fp4", [False, True])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_engram_meta_initialization_does_not_allocate_host_tables(
-    dist_init, cpu_offload, use_thp, packed_fp4
+    default_vllm_config, cpu_offload, use_thp, packed_fp4
 ):
     """Encoder-only language-model placeholders must not allocate host storage."""
     with torch.device("meta"):
@@ -774,7 +777,11 @@ def test_engram_meta_initialization_does_not_allocate_host_tables(
 
 
 @pytest.mark.parametrize("cpu_offload", [False, True])
-def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_offload):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_engram_layerwise_reload_preserves_storage(
+    default_vllm_config, monkeypatch, cpu_offload
+):
     """Reload FP8 values and E8M0 scale bytes without replacing host/UVA storage."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     with torch.device("cuda"):
@@ -1098,7 +1105,11 @@ def test_engram_mxfp4_lookup_matches_torch(cpu_offload, background, num_tokens):
 @pytest.mark.parametrize(
     "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
 )
-def test_engram_packed_weight_is_half_width_uint8(dist_init, cpu_offload, use_thp):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_engram_packed_weight_is_half_width_uint8(
+    default_vllm_config, cpu_offload, use_thp
+):
     dim, head_sizes = 256, (31,) * 24
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(
