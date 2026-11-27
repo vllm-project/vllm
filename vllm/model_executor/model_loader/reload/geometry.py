@@ -7,6 +7,10 @@ the byte runs a write covers. No torch state."""
 import itertools
 from dataclasses import dataclass
 from math import prod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 Box = tuple[tuple[int, int], ...]  # half-open (start, stop) per dim, HF coords
 
@@ -18,7 +22,7 @@ class Fallback(Exception):
 @dataclass(frozen=True, slots=True)
 class Region:
     """`as_strided` arguments relative to the target's storage offset, in
-    checkpoint-dtype elements. `shape` is the shape of the write's box, or
+    elements of the write's dtype. `shape` is the shape of the write's box, or
     that shape with some dimensions split."""
 
     offset: int
@@ -32,6 +36,8 @@ class Write:
     module: str  # target tensor, by name
     tensor: str
     dst: Region
+    # dtype the loader's copy_ casts to; None: a byte copy in the checkpoint dtype
+    dtype: "torch.dtype | None" = None
 
 
 def box_and_region(
@@ -133,7 +139,7 @@ def _merge(a: Write, b: Write) -> Write | None:
     """`a` and `b` as one write if `b` continues `a` along exactly one
     box dim, into the same target, with an equal destination stride there."""
     rank = len(a.src)
-    if (a.module, a.tensor) != (b.module, b.tensor) or not (
+    if (a.module, a.tensor, a.dtype) != (b.module, b.tensor, b.dtype) or not (
         len(a.dst.shape) == len(b.dst.shape) == rank
     ):
         return None  # other target, or a split dim
@@ -156,10 +162,19 @@ def _merge(a: Write, b: Write) -> Write | None:
     src = tuple((a.src[j][0], b.src[j][1]) if j == k else a.src[j] for j in range(rank))
     shape = tuple(na + nb if j == k else n for j, n in enumerate(a.dst.shape))
     stride = tuple(stride_a if j == k else s for j, s in enumerate(a.dst.stride))
-    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride))
+    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride), a.dtype)
 
 
 _MAX_RUNS = 1 << 16
+
+
+def byte_span(
+    byte_offset: int, shape: tuple[int, ...], stride: tuple[int, ...], itemsize: int
+) -> tuple[int, int]:
+    """The [start, stop) bytes from the first to the last element of a
+    non-empty strided write with non-negative strides."""
+    span = sum((n - 1) * s for n, s in zip(shape, stride)) + 1
+    return byte_offset, byte_offset + span * itemsize
 
 
 def byte_runs(
@@ -172,8 +187,7 @@ def byte_runs(
     while dims and dims[-1][1] == run:
         run *= dims.pop()[0]
     if prod(n for n, _ in dims) > _MAX_RUNS:
-        span = sum((n - 1) * s for n, s in dims) + run
-        return [(byte_offset, byte_offset + span * itemsize)]
+        return [byte_span(byte_offset, shape, stride, itemsize)]
     return [
         (byte_offset + sum(o) * itemsize, byte_offset + (sum(o) + run) * itemsize)
         for o in itertools.product(*(range(0, n * s, s) for n, s in dims))

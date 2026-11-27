@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek's first experimental multimodal V4 model — the V4-Flash MoE backbone plus a 32-layer vision tower, 1M context, and a fused DSpark draft module."
   date_added: 2026-09-01
-  date_updated: 2026-09-14
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -28,10 +28,8 @@ meta:
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
-  # Support targets the next release; nothing has shipped yet, so the pinned
-  # image below is the only runnable path.
+  # v0.30.0 is the first release that resolves this checkpoint to the vision class.
   min_vllm_version: "0.30.0"
-  nightly_required: true
   docker_image:
     nvidia: "vllm/vllm-openai:deepseekv4-flash-vision"
     amd: "vllm/vllm-openai-rocm:nightly"

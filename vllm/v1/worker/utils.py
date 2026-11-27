@@ -615,6 +615,9 @@ def allocate_kv_cache(
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
+    # Create the wvSplitKrc workspaces before the backing allocation and any capture.
+    if current_platform.is_rocm():
+        warmup_rocm_skinny_gemm_workspaces(device)
     if allocate is not None:
         buf = allocate(raw_size)
     else:
@@ -663,13 +666,7 @@ def layer_kernel_block_size(
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
-    # wvSplitKrc's process-lifetime static workspaces
-    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
-    # qualifying GEMM. Force that now, before
-    # the giant backing allocation below: if one landed in this segment's
-    # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
-        warmup_rocm_skinny_gemm_workspaces(device)
         # Pad to the page granularity MoRIIO needs to register the shared
         # backing as a single RDMA memory region. Other platforms keep the
         # exact-size allocation (see #53974), so anything reading
@@ -766,6 +763,30 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
+
+
+def reserve_encoder_cache_residency(
+    encoder_outputs: dict[str, torch.Tensor],
+    dummy_outputs: Sequence[torch.Tensor],
+    encoder_cache_size: int,
+) -> int:
+    """Reserve the encoder cache's resident footprint during profiling, in bytes.
+
+    The dummy run only materialises one compute batch, so a cache larger than the
+    compute budget would be under-reserved and the surplus handed to the KV cache.
+    """
+    if not dummy_outputs:
+        return 0
+
+    # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
+    ref = dummy_outputs[0]
+    bytes_per_token = ref.element_size() * ref.shape[1]
+    shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
+    if shortfall > 0:
+        encoder_outputs["tmp_residency"] = torch.empty(
+            (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
+        )
+    return encoder_cache_size * bytes_per_token
 
 
 def request_memory(
@@ -957,9 +978,46 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            if hasattr(layer.impl, "_kv_view_cache"):
+                layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
             if hasattr(layer, name):
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
+
+
+def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
+    """Split copies between the `[2, num_copies]` source and destination
+    `block_ids` of `blocks` into contiguous runs.
+
+    Returns:
+        An int64 array of shape `[3, num_runs]` holding source addresses,
+        destination addresses and sizes in bytes.
+
+    """
+    shape, strides = list(blocks.shape[1:]), list(blocks.stride()[1:])
+    run_len = 1
+    while shape and (shape[-1] == 1 or strides[-1] == run_len):
+        run_len *= shape.pop()
+        strides.pop()
+    offsets = np.zeros(1, dtype=np.int64)
+    for size, stride in zip(shape, strides):
+        offsets = (offsets[:, None] + np.arange(size) * stride).ravel()
+    elements = (block_ids[:, :, None] * blocks.stride(0) + offsets).reshape(2, -1)
+    addresses = blocks.data_ptr() + elements * blocks.element_size()
+    sizes = np.full((1, addresses.shape[1]), run_len * blocks.element_size())
+    return np.concatenate([addresses, sizes])
+
+
+@triton.jit(do_not_specialize=["num_runs"])
+def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
+    # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
+    # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
+    run = tl.program_id(0)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < tl.load(runs_ptr + 2 * num_runs + run)
+    src = tl.load(runs_ptr + run).to(tl.pointer_type(WORD))
+    dst = tl.load(runs_ptr + num_runs + run).to(tl.pointer_type(WORD))
+    tl.store(dst + offsets, tl.load(src + offsets, mask=mask), mask=mask)
 
 
 def copy_kv_cache_blocks_inplace(
@@ -971,7 +1029,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    block_views: list[torch.Tensor] = []
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
@@ -991,11 +1049,6 @@ def copy_kv_cache_blocks_inplace(
         if key in seen:
             continue
         seen.add(key)
-
-        if indices is None:
-            indices = async_tensor_h2d(indices_np, device=cache.device)
-        assert cache.device == indices.device
-        src, dst = indices.unbind(dim=1)
 
         kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
         assert remainder == 0, (
@@ -1018,6 +1071,35 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        block_views.append(blocks)
+
+    if not block_views:
+        return
+    device = block_views[0].device
+    block_ids = indices_np.T
+    # Copy GPU blocks directly in one kernel: gathering the sources into a
+    # temporary can take GiBs. The kernel copies runs concurrently, which is
+    # safe because copy-on-write destinations are freshly allocated blocks.
+    if device.type == "cuda":
+        assert not np.intersect1d(*block_ids).size, "Chained block copies"
+        runs = np.concatenate(
+            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+        )
+        # Copy in the widest word that divides every address and size.
+        bits = int(np.bitwise_or.reduce(runs, axis=None))
+        word_bytes = min(8, bits & -bits)
+        runs[2] //= word_bytes
+        block = 4096
+        _copy_runs_kernel[(runs.shape[1], triton.cdiv(int(runs[2].max()), block))](
+            async_tensor_h2d(runs, device=device),
+            runs.shape[1],
+            WORD={8: tl.int64, 4: tl.int32, 2: tl.int16, 1: tl.int8}[word_bytes],
+            BLOCK=block,
+        )
+        return
+
+    src, dst = async_tensor_h2d(indices_np, device=device).unbind(dim=1)
+    for blocks in block_views:
         blocks[dst] = blocks[src]
 
 

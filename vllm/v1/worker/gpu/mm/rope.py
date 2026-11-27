@@ -61,11 +61,26 @@ class RopeState:
         model: nn.Module,
         prefill_token_ids: list[int],
         mm_features: list,
+        position_delta: int | None = None,
     ) -> None:
+        """Stage the request's prefill positions and decode delta.
+
+        `position_delta` is the delta a P/D prefill instance reported for a
+        prompt whose multimodal inputs never reached this instance. It is only
+        applied when `mm_features` is empty.
+        """
         mrope_model = cast(SupportsMRoPE, model)
         prefill_positions, delta = mrope_model.get_mrope_input_positions(
             prefill_token_ids, mm_features
         )
+        if position_delta is not None and not mm_features:
+            # Past the last media item, text positions advance by one per token
+            # from `index + delta`, so shifting the text-only positions gives
+            # the positions prefill computed for every token this instance
+            # will compute. Tokens before it arrive as KV and are never read;
+            # clamp so none index below 0.
+            prefill_positions = (prefill_positions + position_delta).clamp_(min=0)
+            delta = position_delta
         self.prefill_delta.np[req_idx] = delta
 
         for i in range(self.num_dims):
@@ -75,6 +90,9 @@ class RopeState:
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
         self.prefill_delta.copy_to_uva()
+
+    def get_prefill_delta(self, req_idx: int) -> int:
+        return int(self.prefill_delta.np[req_idx])
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]

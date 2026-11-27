@@ -107,6 +107,10 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
 
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Match the MXFP8 emulation path when explicitly enabled: dequantize
         # once at load time so inference uses a plain high-precision linear.

@@ -8,6 +8,13 @@ from typing import Protocol
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if current_platform.is_xpu():
+    pytest.skip(
+        "GLM-5.3-Flash does not currently support XPU.", allow_module_level=True
+    )
+
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.models.glm5next.common.attention import Glm5NextIndexerCache

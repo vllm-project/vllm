@@ -67,6 +67,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
     - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
+    - A decoder does not wait out this timeout for a prefill worker that is gone. A pull fails as soon as its connection to the worker closes or is refused, as when the prefill process exits, or after the worker leaves ZMQ heartbeats unanswered for 10 seconds, as when it hangs or its host drops off the network. The failure is handled per `kv_load_failure_policy`.
 
 ## KV Transfer Config
 

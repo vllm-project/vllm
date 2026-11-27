@@ -23,7 +23,11 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
+
+from ...utils import create_new_process_for_each_test
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -33,6 +37,133 @@ requires_qsa_metadata_kernels = pytest.mark.skipif(
     not current_platform.is_cuda_alike() or not HAS_TRITON,
     reason="QSA metadata kernels require CUDA or ROCm and Triton",
 )
+
+
+_HISPARSE_KV_TRANSFER_CONFIG = {
+    "kv_connector": "HiSparseConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {"host_pool_gib": 1 / 64},
+}
+_TINY_QSA_TEXT_CONFIG = {
+    "hidden_size": 256,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "indexer_n_heads": 8,
+    "indexer_kv_heads": 1,
+    "indexer_head_dim": 128,
+    "indexer_compress_ratio": 4,
+    "indexer_budget": 2048,
+}
+
+
+@requires_qsa_kernels
+def test_qsa_hisparse_starts_with_automatic_cache_layout(
+    tmp_path, vllm_runner, monkeypatch
+):
+    from transformers import Qwen4ExpConfig
+
+    from vllm import SamplingParams
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            **_TINY_QSA_TEXT_CONFIG,
+            "vocab_size": 128,
+            "num_hidden_layers": 2,
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "output_gate_type": "sigmoid",
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            "hc_lowrank": 28,
+            "mtp_num_hidden_layers": 0,
+        },
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        language_model_only=True,
+        skip_tokenizer_init=True,
+        load_format="dummy",
+        dtype="bfloat16",
+        kv_cache_dtype="fp8_e4m3",
+        attention_config={"hisparse_config": {}, "indexer_kv_dtype": "bf16"},
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=128 * 1024**2,
+    ) as runner:
+        (result,) = runner.llm.generate(
+            {"prompt_token_ids": [1, 2, 3, 4]},
+            SamplingParams(
+                temperature=0, max_tokens=2, ignore_eos=True, detokenize=False
+            ),
+        )
+        assert len(result.outputs[0].token_ids) == 2
+
+
+@requires_qsa_kernels
+def test_qsa_kv_cache_spec_ignores_language_model_only(
+    tmp_path, vllm_runner, enable_pickle
+):
+    """A text-only decode must accept KV from a multimodal prefill."""
+    from transformers import Qwen4ExpConfig
+
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        vision_config={
+            "depth": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_heads": 2,
+            "out_hidden_size": 256,
+            "deepstack_visual_indexes": [],
+        },
+        text_config={
+            **_TINY_QSA_TEXT_CONFIG,
+            "vocab_size": 128,
+            "num_hidden_layers": 2,
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "output_gate_type": "sigmoid",
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            "hc_lowrank": 28,
+            "mtp_num_hidden_layers": 0,
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_section": [11, 11, 10],
+                "mrope_interleaved": True,
+                "partial_rotary_factor": 1.0,
+            },
+        },
+    ).save_pretrained(tmp_path)
+    layouts = []
+    for language_model_only in (False, True):
+        with vllm_runner(
+            str(tmp_path),
+            tokenizer_name="Qwen/Qwen3-VL-2B-Instruct",  # for the mm processor
+            language_model_only=language_model_only,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            load_format="dummy",
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=128,
+            kv_cache_memory_bytes=128 * 1024**2,
+        ) as runner:
+            layouts += runner.llm.collective_rpc(
+                lambda worker: repr(worker.get_kv_cache_layer_configs())
+            )
+    assert layouts[0] == layouts[1]
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
@@ -105,6 +236,8 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         attn=attn,
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
+        main_kv_cache=attn.kv_cache,
+        block_indices=torch.empty(2, 1, dtype=torch.int32),
     )
 
     assert actual is rows
@@ -571,6 +704,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
         attn=SimpleNamespace(use_fused_qsa_prepare=False),
+        block_indices=torch.empty(8, 1, dtype=torch.int32, device=device),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -724,6 +858,54 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
 
 
 @requires_qsa_kernels
+@create_new_process_for_each_test("spawn")
+def test_qsa_sparse_attention_warmup_covers_different_cache_pools() -> None:
+    """Host and resident pool sizes must reuse the warmed logical-index kernel."""
+    from vllm.triton_utils import triton
+
+    torch.manual_seed(7)
+    # The packed selection's final column contains the valid count.
+    q = torch.randn(3, 24, 64, device="cuda", dtype=torch.bfloat16)
+    gate = torch.randn_like(q)
+    cache = torch.randn(17, 16, 2, 128, device="cuda", dtype=q.dtype)
+    block_table = torch.zeros(2, 1, device="cuda", dtype=torch.int32)
+    requests = torch.tensor([0, 1, 1], device="cuda", dtype=torch.int32)
+    indices = torch.full((3, 32), -1, device="cuda", dtype=torch.int32)
+    indices[:, :16] = torch.arange(16, device="cuda")
+    indices[:, -1] = 16
+    k_cache, v_cache = cache.split(64, dim=-1)
+    expected = _qsa_sparse_paged_attention_reference(
+        q, k_cache, v_cache, indices[:, :-1], block_table, requests, 64**-0.5
+    ) * torch.sigmoid(gate)
+
+    qsa_ops.warmup_qsa_sparse_paged_attention(
+        cache.transpose(1, 2),
+        block_table,
+        num_query_heads=24,
+        selection_width=31,
+    )
+
+    def fail_compile(**kwargs):
+        pytest.fail(f"QSA compiled after warmup: {kwargs.get('fn')}")
+
+    # Restore Triton's compilation observer after checking the runtime calls.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(triton.knobs.runtime, "jit_post_compile_hook", fail_compile)
+        for num_blocks in (16, 1, 17):
+            actual = qsa_ops.qsa_sparse_paged_attention(
+                q,
+                k_cache[:num_blocks],
+                v_cache[:num_blocks],
+                indices,
+                block_table,
+                requests,
+                use_prefill_config=True,
+                output_gate=gate,
+            )
+            torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize(
     ("decode_query_len", "num_requests"),
     [
@@ -835,35 +1017,52 @@ def test_qsa_decode_selection_correctness(
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
+@pytest.mark.parametrize(
+    ("query_lens", "sequence_lens"),
+    [
+        ([3, 33], [5120, 4224]),
+        ([1030, 64], [5120, 4224]),
+        ([1030, 64], [140_000, 139_264]),
+    ],
+    ids=["small-chunk", "large-chunk", "large-chunk-wide"],
+)
 def test_qsa_prefill_selection_correctness(
     monkeypatch: pytest.MonkeyPatch,
     seq_len_slack: int,
     force_chunk: bool,
     dtype: torch.dtype,
+    query_lens: list[int],
+    sequence_lens: list[int],
 ) -> None:
     # page_size=24 (does not divide the 64-aligned clipped width) and an
     # oversized page table, so the clipped logits width comes from
     # max_seq_len, not page geometry. seq_len_slack > 0 simulates the
     # spec-decode case where the bound is an over-estimate. force_chunk
-    # drives the logits budget to one row per chunk.
+    # drives the logits budget to one row per chunk. large-chunk-wide
+    # covers gvr_2's streaming prefill engine on SM100.
     if force_chunk:
         monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "0")
     torch.manual_seed(2)
-    query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
         dtype
     )
-    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16).to(
-        dtype
+    pages_per_request = max(64, -(-max(sequence_lens) // (4 * 24)) + 1)
+    num_pages = len(query_lens) * pages_per_request
+    cache = torch.randn(
+        num_pages, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    ).to(dtype)
+    page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        len(query_lens), -1
     )
-    page_table = torch.randperm(128, device="cuda", dtype=torch.int32).reshape(2, 64)
     token_to_req = torch.repeat_interleave(
-        torch.arange(2, device="cuda", dtype=torch.int32),
+        torch.arange(len(query_lens), device="cuda", dtype=torch.int32),
         torch.tensor(query_lens, device="cuda"),
     )
-    query_start_loc = torch.tensor([0, 3, 36], device="cuda", dtype=torch.int32)
-    sequence_lengths = torch.tensor([5120, 4224], device="cuda", dtype=torch.int32)
+    query_start_loc = torch.tensor(
+        [0, *itertools.accumulate(query_lens)], device="cuda", dtype=torch.int32
+    )
+    sequence_lengths = torch.tensor(sequence_lens, device="cuda", dtype=torch.int32)
     query_positions = torch.cat(
         [
             torch.arange(length - query_len, length, device="cuda", dtype=torch.int32)
@@ -881,6 +1080,7 @@ def test_qsa_prefill_selection_correctness(
     actual = torch.empty(
         (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
     )
+    qsa_indexer_ops.init_gvr2(rows)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,
@@ -1108,7 +1308,10 @@ def test_qsa_sparse_paged_attention_correctness(
     else:
         k_scale, v_scale = 1.0, 1.0
 
-    actual = qsa_ops.qsa_sparse_paged_attention(
+    actual = torch.full_like(q, torch.nan)
+    # Poisoned out buffer: the assert below fails if any actual row is left
+    # unwritten, which is what lets the caller skip zero-filling it.
+    qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
         v_cache,
@@ -1116,6 +1319,7 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         use_prefill_config=use_prefill_config,
+        out=actual,
         k_scale=k_scale,
         v_scale=v_scale,
         output_gate=output_gate,
@@ -1134,6 +1338,149 @@ def test_qsa_sparse_paged_attention_correctness(
     expected = expected * torch.sigmoid(output_gate)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
+)
+# Per-rank heads at TP1 and TP4.
+@pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
+def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
+    """FlashInfer prefill matches the dense reference. Slots past each sequence
+    hold NaN, like stale bytes of another cache group."""
+    from flashinfer.attention.prims_ts import make_q_token_kv_block_sparse_qo_indptr
+
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
+        GROUP_SIZE,
+        get_workspace_size,
+        qsa_sparse_paged_prefill,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    head_dim, page_size, budget, ratio, pages = 256, 1600, 2048, 4, 4
+    max_seq_len_kv = pages * page_size
+    scale = head_dim**-0.5
+    # Prefill requests as (cached prefix, new rows): shorter than a group, a
+    # fresh prefill and a chunked prefill past the selection budget, none
+    # ending on a block boundary. A leading decode request owns block table row
+    # 0 but no rows here, so prefill requests index the table from row 1.
+    num_decodes = 1
+    requests = [(0, 5), (0, 301), (2500, 503)]
+    kv_rows = torch.full(
+        ((num_decodes + len(requests)) * pages, page_size, kv_heads, 2 * head_dim),
+        torch.nan,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    block_table = (
+        torch.randperm(kv_rows.shape[0], device="cuda", generator=generator)
+        .view(-1, pages)
+        .int()
+    )
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        slots = torch.arange(prefix + n, device="cuda")
+        kv_rows[block_table[req, slots // page_size].long(), slots % page_size] = (
+            torch.randn(
+                slots.numel(),
+                kv_heads,
+                2 * head_dim,
+                device="cuda",
+                dtype=torch.bfloat16,
+                generator=generator,
+            )
+        )
+
+    query_lens = [n for _, n in requests]
+    num_rows = sum(query_lens)
+    seq_lens = torch.tensor(
+        [p + n for p, n in requests], dtype=torch.int32, device="cuda"
+    )
+    token_to_req = torch.repeat_interleave(
+        torch.arange(
+            num_decodes, num_decodes + len(requests), dtype=torch.int32, device="cuda"
+        ),
+        torch.tensor(query_lens, device="cuda"),
+        output_size=num_rows,
+    )
+    positions = torch.cat([torch.arange(p, p + n, device="cuda") for p, n in requests])
+    q, output_gate = torch.randn(
+        2,
+        num_rows,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    # Top-k of random block scores, -1 padded like the indexer's top-k.
+    visible_blocks = ((positions + 1) // ratio).int()
+    scores = torch.rand(
+        num_rows, max_seq_len_kv // ratio, device="cuda", generator=generator
+    )
+    blocks = torch.arange(scores.shape[1], device="cuda")
+    scores[blocks >= visible_blocks.unsqueeze(1)] = -1
+    top_scores, block_indices = scores.topk(budget // ratio, dim=1)
+    block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
+    selected = torch.empty(num_rows, budget + ratio, device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
+        block_indices, positions, visible_blocks, ratio, budget, selected
+    )
+    k_cache, v_cache = kv_rows.split(head_dim, dim=-1)
+    expected = _qsa_sparse_paged_attention_reference(
+        q,
+        k_cache,
+        v_cache,
+        selected[:, : budget + ratio - 1],
+        block_table,
+        token_to_req,
+        scale,
+    ) * torch.sigmoid(output_gate)
+
+    qo_indptr = make_q_token_kv_block_sparse_qo_indptr(
+        torch.tensor([0, *itertools.accumulate(query_lens)]),
+        num_rows,
+        group_size=GROUP_SIZE,
+        device="cuda",
+    )
+    actual = torch.full_like(q, torch.nan)
+    qsa_sparse_paged_prefill(
+        q,
+        kv_rows.transpose(1, 2),
+        block_table,
+        num_decodes,
+        seq_lens,
+        block_indices,
+        token_to_req,
+        positions,
+        qo_indptr,
+        ratio,
+        max_seq_len_kv,
+        get_workspace_size(
+            num_rows,
+            len(requests),
+            heads,
+            kv_heads,
+            head_dim,
+            page_size,
+            max_seq_len_kv,
+            ratio,
+            budget // ratio,
+            torch.device("cuda"),
+        ),
+        scale,
+        output_gate,
+        actual,
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+    # Each open-block tail is zeroed, and nothing past it is written.
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        end = prefix + n
+        tail = torch.arange(end, cdiv(end, ratio) * ratio + 1, device="cuda")
+        rows = kv_rows[block_table[req, tail // page_size].long(), tail % page_size]
+        assert (rows[:-1] == 0).all() and rows[-1].isnan().all()
 
 
 @requires_qsa_kernels
@@ -1245,6 +1592,307 @@ def test_qsa_fp8_kernel_correctness(
 
 
 @requires_qsa_kernels
+# 33 FP8 rows x 2 KV heads cross the Blackwell FP8 decode-kernel threshold.
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "large-fp8"])
+def test_qsa_attention_consumes_hisparse_physical_indices(fp8: bool) -> None:
+    """Resolved HiSparse rows bypass the logical block table on padded pages."""
+    from vllm.v1.hisparse.runtime import PagedCacheView
+
+    if fp8 and not current_platform.has_device_capability(89):
+        pytest.skip("Native FP8 pointers require sm_89 or newer")
+
+    torch.manual_seed(7)
+    num_blocks, block_size, num_kv_heads, head_dim = 4, 16, 2, 64
+    row_width = num_kv_heads * 2 * head_dim
+    block_stride = (2 * block_size + 1) * row_width
+    storage_dtype = torch.uint8 if fp8 else torch.bfloat16
+    k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
+    backing = torch.full(
+        (num_blocks * block_stride,), 7, device="cuda", dtype=storage_dtype
+    )
+    view = PagedCacheView.bind(
+        backing.view(torch.uint8),
+        dtype=backing.dtype,
+        row_width=row_width,
+        byte_offset=block_size * row_width * backing.element_size(),
+        block_stride=block_stride * backing.element_size(),
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+    original = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        2 * head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    original_key, original_value = original.split(head_dim, dim=-1)
+    if fp8:
+        original_key = (original_key.float() / k_scale).to(torch.float8_e4m3fn)
+        original_value = (original_value.float() / v_scale).to(torch.float8_e4m3fn)
+    stored = torch.cat(
+        (original_key.view(storage_dtype), original_value.view(storage_dtype)), dim=-1
+    )
+    view.cache.copy_(stored.flatten(2))
+    attention_cache = view.attention_cache.unflatten(-1, (num_kv_heads, 2 * head_dim))
+    key_cache, value_cache = attention_cache.split(head_dim, dim=-1)
+    if fp8:
+        key_cache = key_cache.view(torch.float8_e4m3fn)
+        value_cache = value_cache.view(torch.float8_e4m3fn)
+    selected = torch.tensor(
+        [[55, 2, 43, -1, -1], [16, 63, 33, 6, 30], [-1, -1, -1, -1, -1]],
+        device="cuda",
+        dtype=torch.int32,
+    ).repeat(11 if fp8 else 1, 1)
+    counts = (selected >= 0).sum(dim=1, keepdim=True, dtype=torch.int32)
+    physical_rows = torch.where(
+        selected >= 0,
+        selected // block_size * view.attention_block_stride + selected % block_size,
+        -1,
+    )
+    # Counts stay in the logical packed buffer; resolved rows have no count.
+    logical_packed = torch.cat((selected, counts), dim=1)
+    num_rows = selected.shape[0]
+    q = torch.randn(num_rows, 24, head_dim, device="cuda", dtype=torch.bfloat16)
+    output_gate = torch.randn_like(q)
+    token_to_req = torch.zeros(num_rows, device="cuda", dtype=torch.int32)
+    identity = torch.arange(num_blocks, device="cuda", dtype=torch.int32)[None]
+    expected = _qsa_sparse_paged_attention_reference(
+        q,
+        original_key,
+        original_value,
+        selected,
+        identity,
+        token_to_req,
+        head_dim**-0.5,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    ) * torch.sigmoid(output_gate)
+
+    actual = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        key_cache,
+        value_cache,
+        physical_rows,
+        identity.roll(1, dims=1),
+        token_to_req,
+        use_prefill_config=False,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        output_gate=output_gate,
+        valid_counts=logical_packed[:, -1],
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("all_context_pages_resident", [False, True])
+def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
+    tmp_path, dist_init, workspace_init, all_context_pages_resident: bool
+) -> None:
+    """Unequal active lengths and reordered state slots keep the right KV rows."""
+    from dataclasses import replace
+
+    from transformers import Qwen4ExpTextConfig
+
+    from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.forward_context import set_forward_context
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.hisparse.runtime import (
+        allocate_pinned_host_pool,
+        release_pinned_state,
+    )
+
+    torch.manual_seed(7)
+    num_blocks, block_size, heads, dim = 8, 16, 2, 64
+    config = Qwen4ExpTextConfig(
+        **_TINY_QSA_TEXT_CONFIG,
+        architectures=["Qwen4ExpForCausalLM"],
+        num_hidden_layers=1,
+        layer_types=["full_attention"],
+        intermediate_size=512,
+        partial_rotary_factor=1.0,
+        ple_layer_ids=[],
+    )
+    config.save_pretrained(tmp_path)
+    vllm_config = EngineArgs(
+        model=str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        kv_cache_dtype="bfloat16",
+        block_size=block_size,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        enforce_eager=True,
+        async_scheduling=False,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(),
+            indexer_kv_dtype="bf16",
+        ),
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
+    ).create_engine_config()
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        owner = Qwen4ExpQSAAttention(
+            vllm_config=vllm_config,
+            config=config,
+            layer_id=0,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            ),
+            prefix="model.layers.0.self_attn",
+        )
+        owner.process_weights_after_loading()
+    row_width = heads * 2 * dim
+    original = torch.randn(
+        num_blocks, block_size, heads, 2 * dim, device="cuda", dtype=torch.bfloat16
+    )
+    original[6].fill_(17)
+    original[7].fill_(-19)
+    backing = original.flatten().clone()
+    source_table = torch.tensor(
+        [[1, 2, 0], [3, 4, 5], [6, 6, 6], [7, 7, 7]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    resident_table = source_table.clone()
+    if not all_context_pages_resident:
+        resident_table[1, 0] = 0
+    # Residency uses persistent state rows, independent of this batch's order.
+    state_indices = torch.tensor([1, 0, 2, 3], device="cuda", dtype=torch.int32)
+    resident_table = resident_table.index_select(0, state_indices)
+    slots = torch.tensor([31, 32, 79, 80], device="cuda", dtype=torch.int64)
+    requests = torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int32)
+    positions = torch.tensor([15, 16, 31, 32], device="cuda", dtype=torch.int64)
+    selection = torch.arange(33, device="cuda", dtype=torch.int32).expand(4, -1)
+    selection = selection.masked_fill(selection > positions[:, None], -1)
+    q = torch.zeros(4, 24, dim, device="cuda", dtype=torch.bfloat16)
+    key = torch.zeros(4, heads, dim, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    hidden = torch.eye(4, 256, device="cuda", dtype=torch.bfloat16)
+    # Real projections produce Q=K=gate=0 and the specified V rows. Output
+    # projection selects two Q heads from each KV head, exercising both shards.
+    output_columns = torch.cat((torch.arange(128), torch.arange(768, 896))).cuda()
+    with torch.no_grad():
+        for parameter in owner.parameters():
+            parameter.zero_()
+        owner.qkv_proj.weight[
+            2 * owner.q_size + owner.kv_size : 2 * owner.q_size + 2 * owner.kv_size,
+            :4,
+        ].copy_(value.flatten(1).transpose(0, 1))
+        owner.o_proj.weight[torch.arange(256, device="cuda"), output_columns] = 1
+    common = CommonAttentionMetadata(
+        num_actual_tokens=4,
+        num_reqs=2,
+        max_query_len=2,
+        query_start_loc=torch.tensor([0, 2, 4], device="cuda", dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32),
+        max_seq_len=33,
+        seq_lens=torch.tensor([17, 33], device="cuda", dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([17, 33], dtype=torch.int32),
+        block_table_tensor=source_table[:2],
+        slot_mapping=slots,
+    )
+    builder = owner.get_attn_backend().get_builder_cls()(
+        owner.get_kv_cache_config(vllm_config).spec,
+        [owner.layer_name],
+        vllm_config,
+        torch.device("cuda"),
+    )
+    all_metadata = {owner.layer_name: builder.build(0, common)}
+    for side_cache, table in (
+        (owner.indexer.raw_key_cache, torch.tensor([[1], [2]], dtype=torch.int32)),
+        (owner.indexer.compressed_key_cache, source_table[:2]),
+    ):
+        spec = side_cache.get_kv_cache_config(vllm_config).spec
+        assert isinstance(spec, AttentionSpec)
+        side_cache.bind_kv_cache(
+            torch.zeros(
+                num_blocks, 1, spec.num_states, 128, device="cuda", dtype=spec.dtype
+            )
+        )
+        all_metadata[side_cache.prefix] = QSAIndexerMetadataBuilder(
+            spec, [side_cache.prefix], vllm_config, torch.device("cuda")
+        ).build(0, replace(common, block_table_tensor=table.cuda()))
+    cache = owner.hisparse_cache
+    assert cache is not None
+    runtime = cache.runtime
+    cache.bind_cache(
+        backing.view(torch.uint8),
+        byte_offset=0,
+        block_stride=block_size * row_width * backing.element_size(),
+        num_blocks=num_blocks,
+        block_size=block_size,
+        block_table=resident_table,
+        slot_mapping=slots,
+    )
+    assert cache.view is not None
+    cache.source_block_table = source_table
+    runtime.request_state_indices = state_indices
+    cache.all_context_pages_resident = all_context_pages_resident
+    owner.bind_kv_cache(original.transpose(1, 2))
+    host, registered = allocate_pinned_host_pool(original.nbytes)
+    try:
+        host_rows = host.view(original.dtype).view(-1, row_width)
+        host_rows.copy_(original.flatten(2).reshape(-1, row_width).cpu())
+        runtime.bind_source_cache(host_rows, registered_host_pool=registered)
+        if not all_context_pages_resident:
+            # Only host retains this selected history page.
+            cache.view.cache[3].fill_(29)
+        new_rows = torch.cat((key, value), dim=-1)
+        reference = original.clone()
+        reference[slots // block_size, slots % block_size] = new_rows
+        reference_k, reference_v = reference.split(dim, dim=-1)
+        expected = (
+            _qsa_sparse_paged_attention_reference(
+                q,
+                reference_k,
+                reference_v,
+                selection,
+                source_table[:2],
+                requests,
+                dim**-0.5,
+            )
+            * 0.5
+        )
+        expected = expected.flatten(1)[:, output_columns]
+        # Two active requests need five pages; max-length staging reserves six.
+        # The unused capacity must not index row 2 of the two-row seq_lens.
+        with (
+            torch.inference_mode(),
+            set_current_vllm_config(vllm_config),
+            set_forward_context(all_metadata, vllm_config, num_tokens=4),
+        ):
+            actual = owner(positions, hidden)
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        stored_rows = cache.view.cache[slots // block_size, slots % block_size]
+        torch.testing.assert_close(
+            stored_rows.view(new_rows.dtype).reshape_as(new_rows),
+            new_rows,
+            rtol=0,
+            atol=0,
+        )
+        if not all_context_pages_resident:
+            assert torch.all(cache.view.cache[3] == 29)
+    finally:
+        release_pinned_state([registered])
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize("decode_query_len", [1, 2, 3, 4])
 def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) -> None:
     query_lens = [decode_query_len, decode_query_len, 33]
@@ -1294,6 +1942,7 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         block_indices[decode_slice],
     )
     prefill_slice = slice(num_decode_tokens, rows)
+    qsa_indexer_ops.init_gvr2(rows)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q[prefill_slice],
         cache,
@@ -1352,6 +2001,7 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
     visible_blocks = torch.zeros(2, device="cuda", dtype=torch.int32)
 
     block_indices = torch.empty((2, 512), device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.init_gvr2(2)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,

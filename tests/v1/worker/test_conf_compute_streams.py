@@ -79,9 +79,12 @@ def test_new_d2h_stream_is_outside_the_pool(d2h_stream):
 
 def test_new_d2h_stream_without_cc_is_a_pool_stream(monkeypatch):
     _set_cc(monkeypatch, False)
+    registered = set(conf_compute_utils._d2h_streams)
     stream = new_d2h_stream(torch.accelerator.current_device_index())
+    # A pool stream is a plain torch.Stream: it exposes no cuda_stream handle, so
+    # the non-CC path must simply leave the CC stream registry untouched.
     assert not isinstance(stream, torch.cuda.ExternalStream)
-    assert stream.cuda_stream not in conf_compute_utils._d2h_streams
+    assert conf_compute_utils._d2h_streams == registered
 
 
 def test_capture_on_pool_stream_after_d2h_stream(d2h_stream):
