@@ -8,8 +8,14 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
     flashinfer_replayssm_autotune_supported,
+)
+from vllm.v1.worker.replayssm_utils import (
+    replayssm_state,
+    uses_replayssm,
+    uses_ring_trackers,
 )
 
 if TYPE_CHECKING:
@@ -23,7 +29,11 @@ def _replayssm_autotune_kwargs(
     max_token_prefill_kwargs: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
     config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
+    layers = config.compilation_config.static_forward_context.values()
+    if not config.cache_config.use_replayssm or not any(
+        getattr(layer, "ssu_kernel", None) is FlashInferReplaySSMKernel
+        for layer in layers
+    ):
         return None
     if not flashinfer_replayssm_autotune_supported():
         logger.info_once(
@@ -64,16 +74,14 @@ def _temporary_replayssm_autotune_state(
     *,
     prepare_dummy_block_tables: bool = True,
 ) -> Generator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+        if not uses_replayssm(module):
             continue
-        assert module.replayssm_buffer_len is not None
-        ring_start = module._replayssm_ring_start
-        prev_num_accepted = module._replayssm_prev_num_accepted
+        state = replayssm_state(module)
+        ring_start = state.ring_start
+        prev_num_accepted = state.prev_num_accepted
         for tensor in module.kv_cache:
             if tensor.numel():
                 # Overlaid groups may start at the same address with different
@@ -97,7 +105,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_replayssm_trackers:
+    if not config.cache_config.use_replayssm:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,
@@ -108,7 +116,6 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     if num_slots <= 0:
         return
 
-    from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.core.kv_cache_utils import (
         is_mamba_group,
         is_mamba_prefix_caching_group,
@@ -123,11 +130,9 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         mixers = [
             layer
             for name in group.layer_names
-            if isinstance(
-                layer := config.compilation_config.static_forward_context[name],
-                MambaBase,
+            if uses_ring_trackers(
+                layer := config.compilation_config.static_forward_context[name]
             )
-            and layer.use_replayssm_trackers
         ]
         if not mixers:
             continue
@@ -156,8 +161,9 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
             for mixer in mixers:
                 for state in mixer.kv_cache:
                     state[1 : num_slots + 1].zero_()
-                mixer._replayssm_ring_start.zero_()
-                mixer._replayssm_prev_num_accepted.zero_()
+                state = replayssm_state(mixer)
+                state.ring_start.zero_()
+                state.prev_num_accepted.zero_()
 
         context = ReplaySSMModelContext.create(
             grouped, runner.max_num_reqs, materialize_prefixes=prefix_caching

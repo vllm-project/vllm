@@ -70,6 +70,10 @@ FlashInfer ReplaySSM has these limits:
 
 With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports speculative decoding with or without prefix caching. It has the same speculative-decoding buffer requirement and parallelism limits, has no 16-token buffer cap, and does not support stochastic rounding.
 
+Without `--mamba-backend`, ReplaySSM uses Triton, or FlashInfer where only FlashInfer can run the configuration (for example, stochastic rounding below compute capability 10.x or with speculative decoding).
+
+Neither ReplaySSM backend takes `--mamba-ssu-algorithm`, which selects the algorithm of FlashInfer's non-ReplaySSM decode kernel.
+
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
 ### Gated DeltaNet ReplaySSM

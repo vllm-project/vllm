@@ -1,0 +1,170 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Triton ReplaySSM standard-decode planning, shared by the Mamba2 and Gated
+DeltaNet ReplaySSM decodes."""
+
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from vllm.config.cache import CacheConfig
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+from .state import ReplaySSMLayerState
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear_attention.lifecycle import GroupLayers
+
+
+@triton.jit(
+    do_not_specialize=["n_rows", "num_states", "state_batch_indices_stride"],
+    do_not_specialize_on_alignment=["state_batch_indices", "seq_lens"],
+)
+def _plan_replayssm_decode_kernel(
+    ring_pos,
+    state_batch_indices,
+    seq_lens,
+    write_pos,
+    is_flush,
+    state_batch_indices_stride,
+    n_rows,
+    num_states,
+    buffer_len: tl.constexpr,
+    align_block_size: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = rows < n_rows
+    slots = tl.load(
+        state_batch_indices + rows * state_batch_indices_stride,
+        mask=mask,
+        other=pad_slot_id,
+    )
+    valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
+    pos = tl.load(ring_pos + slots, mask=valid, other=0)
+    pos = tl.minimum(pos, buffer_len - 1)
+    flush = pos == buffer_len - 1
+    if align_block_size > 0:
+        # Standard decode rows carry one token: num_computed = seq_len - 1.
+        seq_len = tl.load(seq_lens + rows, mask=valid, other=1)
+        # The first step of a block restarts that block's empty ring, and the
+        # step completing a block flushes its exact state for prefix caching.
+        pos = tl.where((seq_len - 1) % align_block_size == 0, 0, pos)
+        flush = (pos == buffer_len - 1) | (seq_len % align_block_size == 0)
+    pos = tl.where(valid, pos, 0)
+    flush = valid & flush
+    tl.store(write_pos + rows, pos, mask=mask)
+    tl.store(is_flush + rows, flush.to(tl.int8), mask=mask)
+    tl.store(ring_pos + slots, tl.where(flush, 0, pos + 1), mask=valid)
+
+
+def plan_replayssm_decode(
+    ring_pos: torch.Tensor,
+    state_batch_indices: torch.Tensor,
+    write_pos: torch.Tensor,
+    is_flush: torch.Tensor,
+    buffer_len: int,
+    seq_lens: torch.Tensor | None = None,
+    align_block_size: int = 0,
+    pad_slot_id: int = NULL_BLOCK_ID,
+) -> None:
+    """Plan one Triton ReplaySSM standard-decode step on the GPU.
+
+    `ring_pos[slot]` counts the tokens buffered since the slot's last
+    full-state write. For each decode row this writes the step's
+    `write_pos`/`is_flush` (read by every layer of the cache group) and
+    advances the slot's counter. `ReplaySSMRingPlanner` calls it once per cache
+    group and step, after emptying the rings of the step's prefill slots.
+
+    With `align_block_size` > 0 (prefix caching, see
+    `get_replayssm_align_block_size`), the ring restarts at the first step of
+    every `align_block_size` tokens and flushes on the step completing them;
+    `seq_lens` must then hold each row's sequence length.
+    """
+    if state_batch_indices.dim() > 1:
+        state_batch_indices = state_batch_indices[:, 0]
+    n_rows = state_batch_indices.numel()
+    if n_rows == 0:
+        return
+    assert write_pos.numel() >= n_rows and is_flush.numel() >= n_rows
+    if align_block_size > 0:
+        assert seq_lens is not None and seq_lens.numel() >= n_rows
+    block = 128
+    _plan_replayssm_decode_kernel[(triton.cdiv(n_rows, block),)](
+        ring_pos,
+        state_batch_indices,
+        seq_lens if align_block_size > 0 else state_batch_indices,
+        write_pos,
+        is_flush,
+        state_batch_indices.stride(0),
+        n_rows,
+        ring_pos.numel(),
+        buffer_len,
+        align_block_size,
+        pad_slot_id,
+        BLOCK=block,
+    )
+
+
+@dataclass
+class ReplaySSMRingPlanner:
+    """The step lifecycle of ReplaySSM decodes that read planned ring
+    positions (Triton standard decode, Gated DeltaNet): before each forward,
+    per cache group, it empties the rings of the step's prefill slots and
+    plans the step's decode rows."""
+
+    # One layer per group: the group's layers share its metadata and state.
+    groups: list[tuple[str, ReplaySSMLayerState]]
+
+    @classmethod
+    def from_groups(
+        cls, layers_by_group: "Sequence[GroupLayers]"
+    ) -> "ReplaySSMRingPlanner":
+        groups = []
+        for layers in layers_by_group:
+            name, layer = layers[0]
+            assert isinstance(layer.ssu_state, ReplaySSMLayerState)
+            groups.append((name, layer.ssu_state))
+        return cls(groups)
+
+    def record_step(self, attn_metadata: Mapping[str, Any]) -> None:
+        """The forward reads no prefill slot's ring, and decode reads only the
+        planned rows. Capture's null slots plan as no-ops, which compiles the
+        planner before serving."""
+        for name, state in self.groups:
+            metadata = attn_metadata.get(name)
+            # Memory profiling builds no Mamba metadata.
+            if metadata is None:
+                continue
+            prefill_slots, decode_slots = metadata.replayssm_step_slots()
+            if prefill_slots is not None:
+                state.ring_start.index_fill_(0, prefill_slots.long(), 0)
+            if decode_slots is not None:
+                plan_replayssm_decode(
+                    state.ring_start,
+                    decode_slots,
+                    metadata.write_pos_d,
+                    metadata.is_flush_d,
+                    buffer_len=state.buffer_len,
+                    seq_lens=metadata.replayssm_seq_lens_d,
+                    align_block_size=metadata.replayssm_align_block_size,
+                )
+
+
+def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -> int:
+    """`plan_replayssm_decode` alignment for a Mamba group with prefix caching.
+
+    A prefix-cache hit may resume a request at any prefix match unit inside a
+    Mamba block, as a one-token decode in a copied block whose ring counter
+    belongs to another request. Restarting the ring on every unit makes that
+    step start from the exact cached state; with a unit that is a multiple of
+    the ring length this adds no flushes.
+    """
+    if cache_config.prefix_match_unit is None:
+        return block_size
+    return math.gcd(block_size, cache_config.prefix_match_unit)

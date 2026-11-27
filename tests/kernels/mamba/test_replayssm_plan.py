@@ -11,7 +11,9 @@ runner used to compute on the CPU from each request's admission length.
 import pytest
 import torch
 
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import plan_replayssm_decode
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
+    plan_replayssm_decode,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 

@@ -167,93 +167,6 @@ def test_dspark_refuses_unsupported_draft_quantization(architecture, field, valu
 
 
 @pytest.mark.parametrize(
-    ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
-    [
-        (True, torch.bfloat16, False, 1, None),
-        (True, torch.float16, False, 1, "bfloat16 model inputs"),
-        (False, torch.float16, False, 1, None),
-        (True, torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
-        (True, torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
-    ],
-    ids=[
-        "prefix-caching-bf16",
-        "prefix-caching-fp16-rejected",
-        "no-prefix-caching-fp16",
-        "microbatch-rejected",
-        "pp-rejected",
-    ],
-)
-def test_flashinfer_replayssm_validates_config(
-    enable_prefix_caching, input_dtype, use_ubatching, pp_size, error
-):
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            enable_prefix_caching=enable_prefix_caching,
-            mamba_ssm_cache_dtype="float16",
-            replayssm_buffer_len=16,
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="NemotronHForCausalLM",
-            dtype=input_dtype,
-        ),
-        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
-        ),
-        kv_transfer_config=None,
-    )
-    if error:
-        with pytest.raises(ValueError, match=error):
-            VllmConfig.validate_mamba_cached_kernel(config)
-    else:
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-@pytest.mark.parametrize(
-    ("buffer_len", "stochastic_rounding", "pp_size", "error"),
-    [
-        (16, False, 1, None),
-        (3, False, 1, "--replayssm-buffer-len >= 1 \\+ num_speculative_tokens"),
-        (16, True, 1, "does not support --enable-mamba-cache-stochastic-rounding"),
-        (16, False, 2, "pipeline_parallel_size=1"),
-    ],
-    ids=["accepted", "short-buffer", "stochastic-rounding", "pp"],
-)
-def test_triton_replayssm_spec_decode_validates_config(
-    buffer_len, stochastic_rounding, pp_size, error
-):
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            enable_prefix_caching=True,
-            replayssm_buffer_len=buffer_len,
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="NemotronHForCausalLM",
-            dtype=torch.float16,
-        ),
-        mamba_config=SimpleNamespace(
-            backend=MambaBackendEnum.TRITON,
-            enable_stochastic_rounding=stochastic_rounding,
-        ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=pp_size, use_ubatching=False
-        ),
-        kv_transfer_config=None,
-    )
-    if error:
-        with pytest.raises(ValueError, match=error):
-            VllmConfig.validate_mamba_cached_kernel(config)
-    else:
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-@pytest.mark.parametrize(
     (
         "num_speculative_tokens",
         "backend",
@@ -264,6 +177,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     ),
     [
         (0, MambaBackendEnum.TRITON, False, 32, 1.0, None),
+        (0, None, False, 16, 1.0, None),
         (2, MambaBackendEnum.TRITON, False, 16, 1.0, "speculative decoding"),
         (0, MambaBackendEnum.FLASHINFER, False, 16, 1.0, "--mamba-backend triton"),
         (0, MambaBackendEnum.TRITON, True, 16, 1.0, "stochastic-rounding"),
@@ -272,6 +186,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     ],
     ids=[
         "stp",
+        "auto-backend",
         "spec",
         "flashinfer",
         "stochastic-rounding",

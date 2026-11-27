@@ -1269,6 +1269,16 @@ class SupportsReplaySSM(Protocol):
 
     supports_replayssm: ClassVar[Literal[True]] = True
 
+    @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        """Byte alignment of each Mamba state within a cache page: the selected
+        decode kernel's `state_alignment` (FlashInfer ReplaySSM aligns to 16
+        bytes). Hybrid models without ReplaySSM support use 1."""
+        raise NotImplementedError(
+            f"{cls.__name__} supports ReplaySSM but does not define "
+            "get_mamba_state_alignment_from_config"
+        )
+
 
 @overload
 def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
