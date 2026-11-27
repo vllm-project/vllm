@@ -60,6 +60,7 @@ class _VerifyMetadataBuilder(GDNAttentionMetadataBuilder):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # A verify row's block table holds its state block and its ring block.
+        self.num_speculative_blocks = 1
         self.spec_state_indices_tensor = self.spec_state_indices_tensor[:, :2]
 
 
