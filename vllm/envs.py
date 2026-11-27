@@ -2683,4 +2683,8 @@ def compile_factors() -> dict[str, object]:
     for var in ray_noset_env_vars:
         factors[var] = normalize_value(os.getenv(var))
 
+    # torch.compile can trace into kernels the selected packages swap in.
+    for var in ("FLASHINFER_KERNEL_PACKAGES", "FLASHINFER_KERNEL_PLUGINS_DISABLE"):
+        factors[var] = normalize_value(os.getenv(var))
+
     return factors

@@ -73,6 +73,7 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor import kernel_packages
 from vllm.model_executor.layers.quantization.online.lm_head import (
     restore_quantized_lm_heads,
     share_source_lm_heads,
@@ -658,6 +659,7 @@ class Worker(WorkerBase):
             self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        kernel_packages.activate(self.vllm_config)
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -715,6 +717,7 @@ class Worker(WorkerBase):
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
+        kernel_packages.refuse_weight_rewrites("reload_weights")
         # Kernel-format weights are copied into place, needing no room.
         kv_cache_loan = (
             kv_cache_lent_for_weight_update(

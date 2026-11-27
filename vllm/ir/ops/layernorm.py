@@ -3,10 +3,13 @@
 import torch
 from torch import Tensor
 
+from vllm.model_executor.kernel_packages import kernel_site
+
 from ..op import register_op
 
 
 @register_op
+@kernel_site
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
@@ -41,6 +44,7 @@ rms_norm.override_tolerance(torch.float16, atol=1e-2, rtol=2e-3)
 
 
 @register_op(allow_inplace=True)
+@kernel_site
 def fused_add_rms_norm(
     x: Tensor,
     x_residual: Tensor,

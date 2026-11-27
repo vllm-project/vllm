@@ -658,9 +658,10 @@ class IrOpImpl:
         Source file contents do not change so we cache uuid.
         TODO(luka): Cache the file hash as multiple impls are likely in the same file.
         """
-        sources = [Path(inspect.getfile(self.impl_fn))]
+        # unwrap: a decorated implementation is hashed by its own file
+        sources = [Path(inspect.getfile(inspect.unwrap(self.impl_fn)))]
         if self.functional_impl is not None:
-            sources.append(Path(inspect.getfile(self.functional_impl)))
+            sources.append(Path(inspect.getfile(inspect.unwrap(self.functional_impl))))
         return hash_source(*sources)
 
     def func_impl_fn(self, *args, **kwargs) -> Any:
