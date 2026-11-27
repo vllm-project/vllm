@@ -1321,6 +1321,56 @@ async fn generate_validates_preprocessed_model_limits_and_prompt() {
     server_task.abort();
 }
 
+/// Media whose placeholder the request's token IDs leave out is the request's
+/// error, as in Python (`PromptUpdateMismatchError`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_media_without_placeholder_in_token_ids() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-missing-placeholder",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |_| {},
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-missing-placeholder".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 12, 13],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("media without a placeholder must be rejected");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert!(
+        status.message().contains("was not found in tokenized prompt"),
+        "{status:?}"
+    );
+    server_task.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_rejects_text_prompt_with_media() {

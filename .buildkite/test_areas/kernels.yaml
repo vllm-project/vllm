@@ -394,6 +394,7 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/kernels/
+  - tests/single_rank_group.py
   commands:
     - pytest -v -s kernels/
         --ignore=kernels/attention
@@ -431,6 +432,7 @@ steps:
       - csrc/
       - vllm/
       - tests/kernels/
+      - tests/single_rank_group.py
       - vllm/platforms/rocm.py
       # Keep the ROCm exclusions from #50519: incompatible FlyDSL TurboQuant
       # and a CUDA source check whose files are absent from the AMD test image.
