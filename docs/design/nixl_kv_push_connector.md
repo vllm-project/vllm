@@ -340,9 +340,10 @@ Two per-request timers are armed on the scheduler:
 
   Ending the request does not free its blocks. They remain held until all
   workers report receive completion through the existing delayed-free path.
-  If the producer disappears permanently, those blocks remain unavailable
-  until the engine is restarted. The watchdog bounds the request's wait;
-  it is not evidence that a remote WRITE has stopped.
+  If no completion ever arrives (for example, the producer died, its reverse
+  handshake failed, or its request ended without pushing), those blocks stay
+  unavailable until the engine is restarted. The watchdog bounds the
+  request's wait; it is not evidence that a remote WRITE has stopped.
 * **P-side block lease** — same ``_kv_lease_duration`` used by pull
   mode. ``request_finished`` sets the expiration in ``_reqs_need_send``
   and ``update_connector_output(finished_sending=...)`` clears it on

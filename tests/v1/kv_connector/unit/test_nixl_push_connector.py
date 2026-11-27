@@ -2288,16 +2288,15 @@ def test_push_handshake_rejects_different_block_sizes(
         worker._validate_remote_parallel_config(metadata)
 
 
-@pytest.mark.cpu_test
-def test_push_heartbeat_renews_producer_lease(monkeypatch, dist_init):
-    """A router ID and independently randomized P/D IDs renew the same lease."""
+@pytest.fixture
+def push_heartbeat_setup(monkeypatch, dist_init):
     import os
 
     from vllm.config import set_current_vllm_config
     from vllm.platforms import current_platform
 
     from .test_nixl_desc_geometry import _RecordingNixl as FakeNixlWrapper
-    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+    from .utils import create_scheduler, create_vllm_config
 
     monkeypatch.setattr(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
@@ -2329,33 +2328,114 @@ def test_push_heartbeat_renews_producer_lease(monkeypatch, dist_init):
         (cache,) = dense_kv_cache_views(raw, spec, 32, 1, KVCacheLayout.LBNHC)
         worker.register_kv_caches({"layer": cache})
     try:
-        prefill = create_request(num_tokens=32, do_remote_decode=True)
-        prefill.request_id = "cmpl-shared-0-aaaaaaaa"
-        p.add_request(prefill)
-        step = p.schedule()
-        worker.start_load_kv(step.kv_connector_metadata)
-        p.update_from_output(step, create_model_runner_output([prefill]))
-        worker.start_load_kv(p.schedule().kv_connector_metadata)
-
-        clock[0] = 120.0
-        decode = create_request(num_tokens=32, do_remote_prefill=True)
-        decode.request_id = "cmpl-shared-0-bbbbbbbb"
-        assert decode.kv_transfer_params is not None
-        decode.kv_transfer_params["remote_request_id"] = "shared"
-        d.add_request(decode)
-        heartbeat_meta = d.schedule().kv_connector_metadata
-        assert isinstance(heartbeat_meta, NixlConnectorMetadata)
-        for heartbeat in heartbeat_meta.heartbeat_by_engine.values():
-            worker._handle_heartbeat(",".join(heartbeat.req_ids))
-
-        clock[0] = 131.0
-        assert prefill.request_id not in worker.get_transfer_results().finished_sending
-        clock[0] = 141.0
-        assert worker.get_transfer_results().finished_sending == {prefill.request_id}
+        yield clock, p, d, worker
     finally:
         worker.shutdown()
         p.shutdown()
         d.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_push_heartbeat_renews_producer_lease(push_heartbeat_setup):
+    """A router ID and independently randomized P/D IDs renew the same lease."""
+    from .utils import create_model_runner_output
+
+    clock, p, d, worker = push_heartbeat_setup
+    prefill = create_request(num_tokens=32, do_remote_decode=True)
+    prefill.request_id = "cmpl-shared-0-aaaaaaaa"
+    p.add_request(prefill)
+    step = p.schedule()
+    worker.start_load_kv(step.kv_connector_metadata)
+    p.update_from_output(step, create_model_runner_output([prefill]))
+    worker.start_load_kv(p.schedule().kv_connector_metadata)
+
+    clock[0] = 120.0
+    decode = create_request(num_tokens=32, do_remote_prefill=True)
+    decode.request_id = "cmpl-shared-0-bbbbbbbb"
+    assert decode.kv_transfer_params is not None
+    decode.kv_transfer_params["remote_request_id"] = "shared"
+    d.add_request(decode)
+    heartbeat_meta = d.schedule().kv_connector_metadata
+    assert isinstance(heartbeat_meta, NixlConnectorMetadata)
+    for heartbeat in heartbeat_meta.heartbeat_by_engine.values():
+        worker._handle_heartbeat(",".join(heartbeat.req_ids))
+
+    clock[0] = 131.0
+    assert prefill.request_id not in worker.get_transfer_results().finished_sending
+    clock[0] = 141.0
+    assert worker.get_transfer_results().finished_sending == {prefill.request_id}
+
+
+@pytest.mark.cpu_test
+def test_push_heartbeat_renews_shared_base_leases(push_heartbeat_setup, monkeypatch):
+    clock, _, d, worker = push_heartbeat_setup
+    first = "cmpl-shared-0-aaaaaaaa"
+    retry = "cmpl-shared-0-bbbbbbbb"
+    meta = NixlConnectorMetadata()
+    meta.reqs_in_batch = {first, retry}
+    meta.reqs_to_send = {first: 130.0, retry: 130.0}
+    worker.start_load_kv(meta)
+    worker._push_finished_blocks.update({first: ([1],), retry: ([2],)})
+
+    # Pair both registrations while their reverse handshakes are pending.
+    monkeypatch.setattr(worker, "_ensure_handshake", lambda *args: Future())
+    reg = _registration_data("cmpl-shared-0-cccccccc")
+    worker._handle_push_reg_notif(PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg))
+    assert set(worker._push_finished_blocks) == {retry}
+
+    clock[0] = 120.0
+    decode = create_request(num_tokens=32, do_remote_prefill=True)
+    decode.request_id = "cmpl-shared-0-dddddddd"
+    d.add_request(decode)
+    meta = d.schedule().kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    reg = meta.push_registrations[decode.request_id]
+    worker._handle_push_reg_notif(PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg))
+    assert not worker._push_finished_blocks
+    for heartbeat in meta.heartbeat_by_engine.values():
+        worker._handle_heartbeat(",".join(heartbeat.req_ids))
+
+    clock[0] = 131.0
+    assert worker.get_transfer_results().finished_sending == set()
+    clock[0] = 141.0
+    assert worker.get_transfer_results().finished_sending == {first, retry}
+
+
+@pytest.mark.cpu_test
+def test_abort_before_push_registration_expiry(monkeypatch):
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    now = 100.0
+    monkeypatch.setattr(time, "perf_counter", lambda: now)
+    scheduler = create_scheduler(
+        create_vllm_config(
+            kv_connector="NixlPushConnector",
+            kv_connector_extra_config={"push_registration_timeout": 10},
+        )
+    )
+    try:
+        request = create_request(num_tokens=32, do_remote_prefill=True)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        scheduler.update_from_output(step, create_model_runner_output([]))
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+        now = 109.0
+        aborted = scheduler.finish_requests(
+            request.request_id, RequestStatus.FINISHED_ABORTED
+        )
+        assert aborted == [request]
+        now = 111.0
+        for expected_finished in ({request.request_id}, set()):
+            step = scheduler.schedule()
+            assert step.finished_req_ids == expected_finished
+            outputs = scheduler.update_from_output(step, create_model_runner_output([]))
+            assert all(not batch.outputs for batch in outputs.values())
+        assert request.status == RequestStatus.FINISHED_ABORTED
+    finally:
+        scheduler.shutdown()
 
 
 @pytest.mark.cpu_test

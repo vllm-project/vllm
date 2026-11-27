@@ -883,16 +883,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return set()
 
     def _handle_heartbeat(self, payload: str) -> None:
-        # Match the D-side IDs using the same identity as PUSH_REG.
-        by_base: dict[str, str] = {}
-        for req_id in self._reqs_to_send:
-            by_base.setdefault(get_base_request_id(req_id), req_id)
-        matched = set()
-        for req_id in payload.split(","):
-            if req_id in self._reqs_to_send:
-                matched.add(req_id)
-            elif producer_id := by_base.get(get_base_request_id(req_id)):
-                matched.add(producer_id)
+        # TODO(#59758): Until PUSH_REG has a transfer ID, renew all matching leases.
+        base_ids = {get_base_request_id(req_id) for req_id in payload.split(",")}
+        matched = [
+            rid for rid in self._reqs_to_send if get_base_request_id(rid) in base_ids
+        ]
         if matched:
             super()._handle_heartbeat(",".join(matched))
 
