@@ -17,12 +17,40 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
-The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
-requirements remain cached independently of per-commit vLLM wheels and source.
+The stages are cut by how often their inputs change, so that a build reruns,
+and a host pulls, only what a commit changed.
 
-Mount only the requirement files a dependency stage reads. Mounting the entire
+The `requirement-pins` stage cuts the PyTorch and FlashInfer pins out of
+`requirements/cuda.txt` into one small file each. `base` installs only the
+PyTorch pins, so the native builds on top of it (`csrc-build`,
+`extensions-build`, `hybrid-test-wheels`) recompile when a pin changes, not on
+every edit to `requirements/`. It also passes on
+`requirements/rubin-prerelease.txt`, as an empty file unless
+`INSTALL_RUBIN_PRERELEASE=true`, so an edit to the Rubin pins keeps non-Rubin
+dependency and native-build layers cached, and extracts `[tool.uv]` from
+`pyproject.toml` (verified with `tomllib`, failing closed on mismatch) so
+unrelated `pyproject.toml` edits leave `test-deps` cached. `rust-build-cache`
+branches from `toolchain` and depends on no Python requirements. `vllm-runtime-base` installs PyTorch,
+FlashInfer with its precompiled kernels, and the remaining requirements as
+three layers in that order, so a routine dependency bump rebuilds only the last.
+
+Copy into a stage only the requirement files it reads. Copying the entire
 `requirements/` directory makes unrelated changes, such as ROCm test pins,
 invalidate CUDA dependency layers and their downstream native builds.
+
+The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
+requirements remain cached independently of per-commit vLLM wheels and source.
+It ends by installing vLLM's own runtime requirements, `tests/vllm_test_utils`,
+and DeepEP, so the per-commit wheel install has nothing left to change; the
+`test-wheel` stage fails the build if it still does.
+
+The `test` image adds four `COPY --link` layers to `test-deps`: the compiled
+extensions, the Rust frontend, the Python files of the vLLM wheel, and the
+source tree. The first three come from `test-wheel`, which installs the wheel
+and sorts its files with `tools/ci/split_vllm_install.sh`; the last comes from
+`test-src` (which branches from `toolchain` so it runs in parallel with
+`test-deps`). A host that has the previous commit's image pulls only the layers
+whose files changed.
 
 The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
 wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
