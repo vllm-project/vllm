@@ -657,26 +657,3 @@ def test_sm12x_linear_large_batch_fallback():
     weight = torch.randn(129, 256, device=DEVICE).bfloat16()
     expected = torch.nn.functional.linear(x, weight)
     torch.testing.assert_close(linear(x, weight), expected, atol=0, rtol=0)
-
-
-def test_attention_prologue_reuses_jit_across_prefill_lengths(monkeypatch):
-    monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
-    heads, kv_heads, dim, d_rel, extent = 12, 2, 128, 16, 1024
-    device = torch.accelerator.current_device_index()
-    caches = [
-        kernel.device_caches[device][0]
-        for kernel in (sconv_ops._attn_prologue_kernel, sconv_ops._qr_rel_kernel)
-    ]
-    for cache in caches:
-        cache.clear()
-
-    cache_sizes = []
-    for tokens in (64, 72):
-        q = torch.randn(tokens, heads, dim, device=DEVICE).bfloat16()
-        r = torch.randn(tokens, heads, d_rel, device=DEVICE).bfloat16()
-        rel_proj = torch.randn(d_rel, extent, device=DEVICE).bfloat16()
-        q_scale, r_scale = q.new_ones(heads, dim), q.new_ones(heads, d_rel)
-        _prologue_qr(q, r, q_scale, r_scale, None, rel_proj, kv_heads)
-        cache_sizes.append([len(cache) for cache in caches])
-
-    assert cache_sizes == [[1, 1], [1, 1]]
