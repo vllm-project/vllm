@@ -35,8 +35,6 @@ BASE_MODELS_TO_TEST = [
     # (NonGeoDataset import error). Tested in model initialization tests.
     # "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
     "Zyphra/Zamba2-7B-instruct",
-    # FIXME: databricks/dbrx-instruct has been deleted
-    # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
     "vllm-project/deepseek_mtp_main_random",

@@ -202,7 +202,7 @@ fn label_read_sampling_params(label_token_ids: &[u32]) -> SamplingParams {
 
 /// Read the logprob of each label token, in `label_token_ids` order, from the
 /// item's single output position.
-fn label_logprobs(
+pub(super) fn label_logprobs(
     output: &CollectedTextOutput,
     label_token_ids: &[u32],
     index: usize,
