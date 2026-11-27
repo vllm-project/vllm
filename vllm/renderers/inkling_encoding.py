@@ -453,15 +453,18 @@ def render_inkling2_messages(
 ) -> list[int]:
     """Render chat messages to Inkling2 input ids.
 
-    With `continue_final_message`, a final assistant message holding only
-    a text string is left open so generation continues its text.
+    With `continue_final_message`, the last text block of a text-only final
+    assistant message is left open for generation.
     """
     messages = list(messages)
     assistant_prefix = None
+    preceding_text_parts: list[str] = []
     if continue_final_message and messages:
         assistant_prefix = continuation_prefix(messages[-1])
         if assistant_prefix is not None:
-            messages.pop()
+            content = messages.pop()["content"]
+            if not isinstance(content, str):
+                preceding_text_parts = [part["text"] for part in content[:-1]]
 
     input_ids: list[int] = []
     choice = _inkling2_tool_choice(tool_choice)
@@ -527,6 +530,8 @@ def render_inkling2_messages(
         _append_message(input_ids, tokenizer, "system", "text", effort_text)
 
     if assistant_prefix is not None:
+        for text in preceding_text_parts:
+            _append_message(input_ids, tokenizer, "assistant", "text", text)
         input_ids.append(tokenizer.encode_special(MESSAGE_MODEL))
         input_ids.append(tokenizer.encode_special(CONTENT_TEXT))
         input_ids.extend(tokenizer.encode_text(assistant_prefix))
@@ -541,18 +546,31 @@ def _assistant_reasoning(message: Mapping[str, Any]) -> Any:
 def continuation_prefix(message: Mapping[str, Any]) -> str | None:
     """Return the text an Inkling2 `continue_final_message` request extends.
 
-    Only a plain-string assistant message with no tool calls or reasoning is
-    continued; `None` means the message renders as a closed turn.
+    A text-only assistant message can be continued. `None` means the message
+    renders as a closed turn.
     """
-    content = message.get("content")
     if (
         message.get("role") != "assistant"
-        or not isinstance(content, str)
         or message.get("tool_calls")
+        or message.get("refusal")
         or _assistant_reasoning(message)
     ):
         return None
-    return content
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if (
+        isinstance(content, Sequence)
+        and content
+        and all(
+            isinstance(part, Mapping)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            for part in content
+        )
+    ):
+        return content[-1]["text"]
+    return None
 
 
 def _inkling2_blocks(
@@ -567,14 +585,22 @@ def _inkling2_blocks(
     reasoning = _assistant_reasoning(message)
     if reasoning is not None and not isinstance(reasoning, str):
         raise TypeError("assistant reasoning_content must be a string")
+    refusal = message.get("refusal")
+    if refusal is not None and not isinstance(refusal, str):
+        raise TypeError("assistant refusal must be a string")
     tool_calls = message.get("tool_calls") or []
-    if content == "" and (tool_calls or reasoning):
+    if not content and refusal:
+        content = [{"type": "refusal", "refusal": refusal}]
+    elif content == "" and (tool_calls or reasoning):
         content = None
 
     blocks: list[tuple[str, str, str | None]] = (
         [("thinking", reasoning, None)] if reasoning else []
     )
-    blocks.extend((kind, text, None) for kind, text in _iter_inkling2_parts(content))
+    blocks.extend(
+        (kind, text, None)
+        for kind, text in _iter_inkling2_parts(content, allow_refusal=True)
+    )
     for tool_call in tool_calls:
         name, args = _tool_call_name_and_args(tool_call)
         tool_call_id = _as_mapping(tool_call).get("id")
@@ -643,7 +669,9 @@ def _with_appended_text(message: Mapping[str, Any], text: str) -> dict[str, Any]
     return {**message, "content": content}
 
 
-def _iter_inkling2_parts(content: Any) -> Iterator[tuple[str, str]]:
+def _iter_inkling2_parts(
+    content: Any, *, allow_refusal: bool = False
+) -> Iterator[tuple[str, str]]:
     if content is None:
         return
     if isinstance(content, str):
@@ -660,6 +688,11 @@ def _iter_inkling2_parts(content: Any) -> Iterator[tuple[str, str]]:
         ptype = part.get("type")
         if ptype in (None, "text", "input_text"):
             yield ("text", part.get("text") or "")
+        elif ptype == "refusal" and allow_refusal:
+            refusal = part.get("refusal")
+            if not isinstance(refusal, str):
+                raise TypeError("assistant refusal must be a string")
+            yield ("text", refusal)
         elif ptype == "thinking":
             yield ("thinking", part.get("thinking") or "")
         elif ptype == "tool_error":
