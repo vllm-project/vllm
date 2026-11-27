@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreTriggerHandler,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, StoreTrigger
 
 
@@ -47,10 +47,12 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
 
     @override
     def first_live_chunk_idx(
-        self, req_status: RequestOffloadState, config_idx: int
+        self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
-        # The source blocks come from the scheduler output, not from the
-        # request's block list.
+        # The aligned boundary and CoW sources come from the scheduler output.
+        # The partial tail reads the request's block ids only of full-attention
+        # groups: supports_partial_tail excludes sliding-window groups that are
+        # not CoW sources, and the scheduler zeroes only sliding-window groups.
         return None
 
     @override
@@ -66,9 +68,7 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             return
         self._build_aligned_boundary_store_jobs(handoffs, req_states, sink)
         if self._config.supports_partial_tail:
-            self._build_partial_tail_store_jobs(
-                scheduler_output, handoffs, req_states, sink
-            )
+            self._build_partial_tail_store_jobs(handoffs, req_states, sink)
 
     def _build_aligned_boundary_store_jobs(
         self,
@@ -77,9 +77,9 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
         sink: StoreJobSink,
     ) -> None:
         num_groups = len(self._config.kv_group_configs)
-        config_idx_by_group = {
-            config.group_idx: idx
-            for idx, config in enumerate(self._config.kv_group_configs)
+        config_group_idx_by_group = {
+            config.group_idx: config_group_idx
+            for config_group_idx, config in enumerate(self._config.kv_group_configs)
         }
         for req_id, entries in handoffs.items():
             req_status = req_states.get(req_id)
@@ -88,10 +88,10 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             req = req_status.req
             max_boundary = req_status.num_offloadable_tokens(req.num_tokens)
             for group_idx, block_id, boundary in entries:
-                config_idx = config_idx_by_group.get(group_idx)
-                if config_idx is None:
+                config_group_idx = config_group_idx_by_group.get(group_idx)
+                if config_group_idx is None:
                     continue
-                group_config = self._config.kv_group_configs[config_idx]
+                group_config = self._config.kv_group_configs[config_group_idx]
                 if (
                     block_id == 0
                     or boundary > max_boundary
@@ -103,13 +103,16 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                 store_output = sink.prepare_store([key], req_status.req_context)
                 if store_output is None:
                     continue
+                if store_output.keys_to_retry:
+                    # A hand-off is not offered again.
+                    sink.record_allocation_failure()
                 if not store_output.keys_to_store:
                     continue
 
                 group_sizes = [0] * num_groups
-                group_sizes[config_idx] = 1
+                group_sizes[config_group_idx] = 1
                 block_indices = [0] * num_groups
-                block_indices[config_idx] = (
+                block_indices[config_group_idx] = (
                     boundary // group_config.tokens_per_block - 1
                 )
                 sink.add_job(
@@ -132,13 +135,11 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
 
     def _build_partial_tail_store_jobs(
         self,
-        scheduler_output: SchedulerOutput,
         handoffs: dict[str, list[tuple[int, int, int]]],
         req_states: Mapping[ReqId, RequestOffloadState],
         sink: StoreJobSink,
     ) -> None:
         partial_tail_block_size = self._config.partial_tail_block_size
-        max_eagle_proof_margin = self._config.max_eagle_proof_margin
         for req_id, entries in handoffs.items():
             entries = [
                 entry for entry in entries if entry[2] % partial_tail_block_size != 0
@@ -147,18 +148,13 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                 continue
             req_status = req_states.get(req_id)
             assert req_status is not None
-            if max_eagle_proof_margin and not req_status.loaded_from_offload:
-                # Requests that did not load from the offload tier keep their
-                # EAGLE tail in the GPU prefix cache; skip the store.
-                continue
             req = req_status.req
             cache_hit_alignment = self._config.cache_hit_alignment_tokens
             assert cache_hit_alignment is not None
-            boundary = get_mamba_prefill_checkpoint_position(
+            boundary = get_reusable_prefix_length(
                 req.num_prompt_tokens,
-                cache_hit_alignment,
-                drop_eagle_block=self._config.drop_eagle_checkpoint_block,
                 num_hash_lookahead_tokens=self._config.num_hash_lookahead_tokens,
+                alignment_tokens=cache_hit_alignment,
             )
             entries = [entry for entry in entries if entry[2] == boundary]
             if not entries:
@@ -177,20 +173,6 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             assert boundary % self._config.tokens_per_hash == 0
             assert boundary <= max_boundary
 
-            if max_eagle_proof_margin:
-                # The CoW hand-off arrives on the step that computes the prompt
-                # tokens past the boundary, and it is not offered again. Workers
-                # submit a store at the next step's start, after this step's
-                # forward, so count the prompt tokens this step computes.
-                prompt_tokens_after_step = min(
-                    req.num_computed_tokens
-                    + scheduler_output.num_scheduled_tokens.get(req_id, 0),
-                    req.num_prompt_tokens,
-                )
-                if boundary + max_eagle_proof_margin > prompt_tokens_after_step:
-                    # The EAGLE proof is not computed by the end of this step.
-                    continue
-
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
@@ -201,51 +183,52 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             ]
             if any(
                 group.group_idx not in self._cow_source_groups
-                and group_block_idx[config_idx]
+                and group_block_idx[config_group_idx]
                 >= len(group_states[group.group_idx].block_ids)
-                for config_idx, group in enumerate(self._config.kv_group_configs)
+                for config_group_idx, group in enumerate(self._config.kv_group_configs)
             ):
                 continue
-            key_tokens = [
-                self._config.partial_tail_key_tokens(config_idx, boundary)
-                for config_idx in range(len(self._config.kv_group_configs))
-            ]
             keys = [
-                req_status.register_boundary_key(group.group_idx, tokens)
-                for group, tokens in zip(self._config.kv_group_configs, key_tokens)
+                req_status.register_boundary_key(group.group_idx, boundary)
+                for group in self._config.kv_group_configs
             ]
             block_ids = [
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
                 else group_states[group.group_idx].block_ids[
-                    group_block_idx[config_idx]
+                    group_block_idx[config_group_idx]
                 ]
-                for config_idx, group in enumerate(self._config.kv_group_configs)
+                for config_group_idx, group in enumerate(self._config.kv_group_configs)
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
             store_output = sink.prepare_store(keys, req_status.req_context)
             if store_output is None:
                 continue
+            if store_output.keys_to_retry:
+                # A hand-off is not offered again.
+                sink.record_allocation_failure()
             if not store_output.keys_to_store:
                 continue
 
-            for group_config, tokens, key in zip(
-                self._config.kv_group_configs, key_tokens, keys
-            ):
+            for group_config, key in zip(self._config.kv_group_configs, keys):
                 if key in store_output.keys_to_store:
                     self._events_tracker.record_partial_store(
-                        req, group_config, tokens, key
+                        req, group_config, boundary, key
                     )
 
-            group_by_key = {key: idx for idx, key in enumerate(keys)}
+            group_by_key = {
+                key: config_group_idx for config_group_idx, key in enumerate(keys)
+            }
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self._config.kv_group_configs)
             block_indices = [0] * len(self._config.kv_group_configs)
-            for config_idx in accepted_groups:
-                group_sizes[config_idx] = 1
-                block_indices[config_idx] = group_block_idx[config_idx]
-            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
+            for config_group_idx in accepted_groups:
+                group_sizes[config_group_idx] = 1
+                block_indices[config_group_idx] = group_block_idx[config_group_idx]
+            source_blocks = [
+                block_ids[config_group_idx] for config_group_idx in accepted_groups
+            ]
 
             sink.add_job(
                 req_id,

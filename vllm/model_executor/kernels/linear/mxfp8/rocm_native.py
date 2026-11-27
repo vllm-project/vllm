@@ -508,6 +508,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K] fp8
         N, K = weight.shape

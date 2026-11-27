@@ -198,7 +198,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
-        return 1 if self.cache_config.mamba_cache_mode == "align" else None
+        return 1 if self.cache_config.enable_prefix_caching else None
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The scheduler takes internal checkpoints only when every Mamba layer

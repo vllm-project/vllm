@@ -15,7 +15,6 @@ from typing import ClassVar
 import torch
 from flashinfer.msa_ops import msa_proxy_score, msa_topk_select
 
-from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
@@ -29,7 +28,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 # KV page size == sparse block size == flashinfer's MSA block size.
 PAGE_SIZE = 128
@@ -57,26 +55,11 @@ class MiniMaxM3IndexerFlashInferMetadata(MiniMaxM3IndexerMetadata):
     proxy_max_seqlen_q: int = 0
     max_k_tiles: int = 0
     num_valid_pages: torch.Tensor | None = None  # [total_q] int32
-    # Trailing local window, forced into every token's own selection.
-    local_blocks: int = 0
 
 
 class MiniMaxM3IndexerFlashInferMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     """Whole-batch metadata; the impl runs under the eager cudagraph break,
     so nothing here needs a stable address."""
-
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ) -> None:
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        hf_config = vllm_config.model_config.hf_config
-        text_config = getattr(hf_config, "text_config", hf_config)
-        sparse_cfg = text_config.sparse_attention_config
-        self.local_blocks = sparse_cfg.get("sparse_local_block", 0)
 
     def build(
         self,
@@ -121,7 +104,6 @@ class MiniMaxM3IndexerFlashInferMetadataBuilder(MiniMaxM3IndexerMetadataBuilder)
             proxy_max_seqlen_q=common_attn_metadata.max_query_len,
             max_k_tiles=(common_attn_metadata.max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE,
             num_valid_pages=num_valid_pages,
-            local_blocks=self.local_blocks,
         )
 
 
@@ -180,7 +162,7 @@ class MiniMaxM3IndexerFlashInferImpl(MiniMaxM3IndexerImpl):
         assert md.num_valid_pages is not None
         # Both clamped so msa_topk_select's force-region checks cannot raise.
         force_begin = min(self.init_blocks, md.max_k_tiles, self.topk_blocks)
-        force_end = min(md.local_blocks, self.topk_blocks - force_begin)
+        force_end = min(self.local_blocks, self.topk_blocks - force_begin)
         msa_topk_select(
             scores,
             self.topk_blocks,

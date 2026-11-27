@@ -52,7 +52,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1170;gfx1171;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -473,8 +473,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
-    "csrc/topk.cu"
-    "csrc/mamba/selective_scan_fwd.cu"
+    "csrc/attention/dsa/topk/top_k_per_row.cu"
+    "csrc/attention/dsa/topk/topk.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
     "csrc/custom_all_gather_reduce_scatter.cu"
@@ -486,6 +486,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+    # CUDA-only: the tanh.approx inline PTX does not hipify.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/mamba/gdn_prefill_conv.cu")
+    # The f32x2 path needs an sm_103a image (see GDN_HAS_F32X2).
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/mamba/gdn_prefill_conv.cu"
+        CUDA_ARCHS "10.3a")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
@@ -648,9 +658,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/cooperative_topk.cu")
+        "csrc/attention/dsa/topk/cooperative_topk.cu")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/cooperative_topk.cu"
+        SRCS "csrc/attention/dsa/topk/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
     endif()
 
@@ -793,6 +803,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
+  endif()
+
+  # HY V4 iHC boundary (mma.sync BF16). Requires SM90+.
+  cuda_archs_sm90plus(HY_V4_IHC_ARCHS "${CUDA_ARCHS}")
+  if(HY_V4_IHC_ARCHS)
+    set(HY_V4_IHC_SRCS "csrc/hy_v4_ihc_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${HY_V4_IHC_SRCS}"
+      CUDA_ARCHS "${HY_V4_IHC_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${HY_V4_IHC_SRCS}")
+    message(STATUS "Building hy_v4_ihc_boundary for archs: ${HY_V4_IHC_ARCHS}")
+  else()
+    message(STATUS "Not building hy_v4_ihc_boundary as no compatible archs "
+                   "found (requires SM90+).")
   endif()
 
   #
@@ -1147,7 +1171,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_GDN_DECODE_ARCHS)
     set(FUSED_GDN_DECODE_SRC
-      "csrc/gdn/fused_gdn_decode_kernel.cu")
+      "csrc/gdn/fused_gdn_decode_kernel.cu"
+      "csrc/gdn/fused_gdn_decode_16bit_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_GDN_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")
@@ -1176,6 +1201,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
     list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
     message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
+  endif()
+
+  # Inkling2's fused all-reduce uses NVLink multicast and thread-block
+  # clusters. The mixes and norms of its kernels must not contract into FMAs.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(INKLING2_KERNEL_ARCHS)
+    set(INKLING2_KERNEL_SRCS
+      "csrc/inkling2/allreduce_conv_mix.cu"
+      "csrc/inkling2/conv_mix.cu"
+      "csrc/inkling2/seq_parallel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${INKLING2_KERNEL_SRCS}"
+      CUDA_ARCHS "${INKLING2_KERNEL_ARCHS}")
+    set_property(SOURCE ${INKLING2_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${INKLING2_KERNEL_SRCS}")
+    message(STATUS
+      "Building Inkling2 kernels for archs: ${INKLING2_KERNEL_ARCHS}")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -1229,7 +1278,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC "csrc/attention/dsa/fused_mqa_topk/fused_mqa_topk.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
@@ -1324,6 +1373,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(BEAM_KERNEL_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_BEAM_KERNELS=1)
+    endif()
+    if(INKLING2_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_INKLING2_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1621,6 +1674,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # family gets its own translation unit so ninja compiles them in parallel.
   set(VLLM_SKINNY_SRC
     "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_swmmac.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
     "csrc/rocm/skinny_gemms_wvsplitkq.cu")
@@ -1629,14 +1683,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
   # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
-  # with extern template keeping the device code in the five units.
+  # with extern template keeping the device code in the per-N_in units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"
     "csrc/rocm/skinny_gemms_int4_n2.cu"
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
   # Both families are built into _rocm_C_skinny below.
   list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 
@@ -1787,6 +1844,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna35_gdn_chunked.cu")
   endif()
 
+  # The W4A8 MoE decode kernel supports every gfx11 GPU (gfx1100-gfx1103,
+  # gfx1150, gfx1151), so it does not need gfx1100 in the target list.
+  set(VLLM_ROCM_HAS_GFX11 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")
+    set(VLLM_ROCM_HAS_GFX11 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_w4a8_decode_rdna3.cu")
+  endif()
+
   # RDNA3.5 attention kernels (gfx1151 only).
   set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
   if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
@@ -1836,6 +1902,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_RDNA_ATTN)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
+  endif()
+  if(VLLM_ROCM_HAS_GFX11)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX11)
   endif()
 endif()
 

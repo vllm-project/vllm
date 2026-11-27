@@ -77,7 +77,6 @@ def _run_eagle_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=False,
             max_model_len=max_model_len,
             tensor_parallel_size=tp_size,
             attention_config=attention_config,
@@ -94,7 +93,6 @@ def _run_eagle_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
                 "method": method,

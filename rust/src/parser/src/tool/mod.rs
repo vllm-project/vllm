@@ -15,6 +15,7 @@ mod kimi_k2;
 mod mimo;
 mod minimax_m2;
 mod minimax_m3;
+mod mistral;
 mod parameters;
 mod qwen_coder;
 mod seed_oss;
@@ -33,12 +34,13 @@ pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3JsonToolParser,
+    Qwen3JsonToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub use mistral::MistralToolParser;
 pub(crate) use parameters::{ToolSchemas, convert_integer_text, convert_number_text};
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;

@@ -384,7 +384,7 @@ class Sm100DenseGemm1Mxfp8:
             Q_ = Q_[(0, None), None]
 
             f8x32_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
+                cute.nvgpu.CopyR2GOp(),
                 Float8E4M3FN,
                 num_bits_per_copy=256,
                 l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,

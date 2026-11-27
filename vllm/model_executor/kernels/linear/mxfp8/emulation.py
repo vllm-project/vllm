@@ -8,7 +8,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.utils import replace_parameter
 
@@ -27,6 +31,13 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
         return None
 
     @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        # Retain the existing A16 fallback for W8A8 checkpoints.
+        return weight_key == kMxfp8Static and activation_key in (None, kMxfp8Dynamic)
+
+    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
@@ -35,6 +46,10 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]

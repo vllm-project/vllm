@@ -9,6 +9,10 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -107,6 +111,10 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
+
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
@@ -147,6 +155,24 @@ class WorkerBase:
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def probe_forward(self) -> str | None:
+        """Readiness probe for `/health_generate`: run a dummy forward pass and
+        wait for it to complete on the device.
+
+        Returns:
+            None if the probe passed, else the error. Errors are returned, not
+            raised, so the executor reads every worker's reply and its reply
+            queues stay in step.
+
+        """
+        return f"{type(self).__name__} does not implement probe_forward"
+
+    def notify_kv_cache_ready(self) -> None:
+        """Finish startup device work before notifying the worker connector."""
+        if has_kv_transfer_group():
+            self.synchronize_device()
+            get_kv_transfer_group().on_kv_cache_ready()
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside

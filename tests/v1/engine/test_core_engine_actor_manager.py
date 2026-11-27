@@ -36,7 +36,7 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Any],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -175,7 +175,7 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     with launch_core_engines(
         vllm_config,
         executor_class=_DummyExecutor,
-        log_stats=False,
+        collect_stats=False,
         addresses=_make_addresses(),
     ) as engine_launch:
         assert engine_launch.engine_manager is not None
@@ -248,7 +248,7 @@ def test_driver_nixl_side_channel_host_does_not_leak_to_engine_core_actor(
             vllm_config=_make_vllm_config(),
             addresses=_make_addresses(),
             executor_class=_DummyExecutor,
-            log_stats=False,
+            collect_stats=False,
         )
         actor = manager.local_engine_actors[0]
         actor_host = ray.get(actor.get_nixl_side_channel_host.remote())
@@ -356,7 +356,7 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
         with launch_core_engines(
             vllm_config,
             executor_class=_DummyExecutor,
-            log_stats=False,
+            collect_stats=False,
             addresses=addresses,
         ) as engine_launch:
             engine_manager = engine_launch.engine_manager

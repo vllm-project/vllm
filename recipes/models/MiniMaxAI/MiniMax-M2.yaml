@@ -222,9 +222,8 @@ guide: |
     explicit `fuse_minimax_qk_norm` compile pass.
   - **Corrupted output on stable release:** Upgrade to a nightly after commit
     `cf3eacfe58fa9e745c2854782ada884a9f992cf7`.
-  - **DeepGEMM:** vLLM uses DeepGEMM by default; install via
-    [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/main/tools/install_deepgemm.sh)
-    when missing.
+  - **DeepGEMM:** vLLM uses DeepGEMM by default; it is bundled in vLLM wheels
+    since v0.20.0, so no separate install is needed.
   - **AITER first launch:** AMD initial launch JIT-compiles CK-based FP8 MoE, RMSNorm,
     and activation kernels. Subsequent launches use cached kernels.
 

@@ -210,13 +210,6 @@ class Mistral3MultiModalProjector(nn.Module):
 
 
 class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
-    def __init__(self, hf_config: Mistral3Config, image_size: int) -> None:
-        super().__init__(hf_config)
-        self.image_size = image_size
-
-    def get_image_size(self) -> int:
-        return self.image_size
-
     def get_patch_grid_size(
         self,
         *,

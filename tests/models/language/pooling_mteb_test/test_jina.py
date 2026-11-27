@@ -22,6 +22,7 @@ from .mteb_score_utils import mteb_test_rerank_models
 EMBEDDING_MODELS = [
     EmbedModelInfo(
         "jinaai/jina-embeddings-v3",
+        trust_remote_code=True,
         mteb_score=0.824413164,
         mteb_tol=2e-3,
         architecture="XLMRobertaModel",
@@ -33,6 +34,7 @@ EMBEDDING_MODELS = [
     ),
     EmbedModelInfo(
         "jinaai/jina-embeddings-v5-text-small",
+        trust_remote_code=True,
         mteb_score=0.794535707854956,
         mteb_tol=2e-3,
         architecture="JinaEmbeddingsV5Model",
@@ -43,6 +45,7 @@ EMBEDDING_MODELS = [
     ),
     EmbedModelInfo(
         "jinaai/jina-embeddings-v5-text-nano",
+        trust_remote_code=True,
         architecture="JinaEmbeddingsV5Model",
         mteb_tol=2e-3,
         dtype="bfloat16" if current_platform.is_rocm() else "auto",
@@ -56,6 +59,7 @@ EMBEDDING_MODELS = [
 RERANK_MODELS = [
     RerankModelInfo(
         "jinaai/jina-reranker-v2-base-multilingual",
+        trust_remote_code=True,
         mteb_score=0.33643,
         mteb_tol=1e-2,
         architecture="XLMRobertaForSequenceClassification",
@@ -137,12 +141,17 @@ def test_matryoshka(
         model_info.name,
         dtype=dtype,
         is_sentence_transformer=True,
+        trust_remote_code=model_info.trust_remote_code,
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts, task=task)
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(
-        model_info.name, runner="pooling", dtype=dtype, max_model_len=None
+        model_info.name,
+        runner="pooling",
+        dtype=dtype,
+        max_model_len=None,
+        trust_remote_code=model_info.trust_remote_code,
     ) as vllm_model:
         assert vllm_model.llm.llm_engine.model_config.is_matryoshka
 
