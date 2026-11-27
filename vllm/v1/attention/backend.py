@@ -28,9 +28,11 @@ if TYPE_CHECKING:
         KVQuantMode,
     )
 
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    KVCacheRuntimeShapes,
     compute_layer_kv_cache_shape_bytes,
     get_kv_quant_mode,
 )
@@ -82,16 +84,15 @@ class AttentionBackend(ABC):
         num_blocks: int,
         layout: KVCacheLayout,
         kernel_block_size: int | None = None,
-    ) -> tuple[tuple[int, ...], ...]:
-        """Describe a layer's kernel views for an allocation of manager blocks.
+    ) -> KVCacheRuntimeShapes:
+        """Return (element shape, dtype) pairs in physical page order.
 
-        The default singleton is the logical `[B, H, N, C_bytes]` cache with
-        strides given by layout. Overrides may describe contiguous components
-        in physical page order, with bytes on each component's last axis.
+        The default describes the packed layer tensor in the resolved layout.
+        Overrides describe contiguous components within each page.
         """
-        return (
-            compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
-        )
+        shape = compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size)
+        dtype = getattr(spec, "dtype", torch.int8)
+        return (((*shape[:-1], shape[-1] // get_dtype_size(dtype)), dtype),)
 
     @staticmethod
     def get_supported_kernel_block_sizes(

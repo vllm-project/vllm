@@ -100,6 +100,7 @@ from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    KVCacheRuntimeShapes,
     KVCacheSpec,
     KVQuantMode,
     is_quantized_kv_cache,
@@ -648,7 +649,7 @@ class FlashInferBackend(AttentionBackend):
         num_blocks: int,
         layout: KVCacheLayout,
         kernel_block_size: int | None = None,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> KVCacheRuntimeShapes:
         if not isinstance(spec, AttentionSpec) or not spec.kv_quant_mode.is_nvfp4:
             return super().get_runtime_shapes(
                 spec, num_blocks, layout, kernel_block_size

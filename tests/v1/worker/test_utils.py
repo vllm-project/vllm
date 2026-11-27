@@ -1685,7 +1685,7 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     assert second.data_ptr() == cache.data_ptr()
     assert set(runtime.components) == {"b"}
     assert runtime.components["b"].page is second
-    actual = runtime.components["b"].views
+    binding = runtime.components["b"].views
 
     from vllm.model_executor.layers.attention import Attention
 
@@ -1693,22 +1693,15 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     torch.nn.Module.__init__(layer)
     bind_kv_cache_to_layers({"b": second}, {"b": layer}, runtime=runtime)
     assert layer.kv_cache is second
-    assert isinstance(layer.bound_kv_cache, tuple)
-    packed, *components = layer.bound_kv_cache
+    assert layer.bound_kv_cache is binding
+    packed, *components = binding
     assert packed is second
-    assert all(x is y for x, y in zip(components, actual, strict=True))
     data, scales, runtime_layout = flashinfer_nvfp4_kv_views(
         layer.bound_kv_cache, num_heads
     )
     assert runtime_layout == kv_layout
-    assert tuple(x.data_ptr() for x in data) == (
-        components[0].data_ptr(),
-        components[2].data_ptr(),
-    )
-    assert tuple(x.data_ptr() for x in scales) == (
-        components[1].data_ptr(),
-        components[3].data_ptr(),
-    )
+    assert data[0] is components[0] and data[1] is components[2]
+    assert scales[0] is components[1] and scales[1] is components[3]
     assert all(x.dtype == torch.float8_e4m3fn for x in scales)
     bind_kv_cache_to_layers({"b": first}, {"b": layer}, runtime=runtime)
     assert layer.bound_kv_cache is first
@@ -1718,7 +1711,8 @@ def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num
     for side in pages.view(num_blocks, 2, *dims, width).unbind(1):
         side = side.as_strided(side.shape, (cache.stride(0), *side.stride()[1:]))
         expected.extend(nvfp4_split_data_scale(side))
-    for view, reference in zip(actual, expected, strict=True):
+    for view, reference in zip(components, expected, strict=True):
+        assert view.dtype == reference.dtype
         assert view.shape == reference.shape
         assert view.stride() == reference.stride()
         assert view.data_ptr() == reference.data_ptr()

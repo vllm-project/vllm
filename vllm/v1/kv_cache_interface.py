@@ -356,6 +356,9 @@ def compute_layout_strides(
     return tuple(strides)
 
 
+KVCacheRuntimeShapes = tuple[tuple[tuple[int, ...], torch.dtype], ...]
+
+
 class KVCacheLayerComponents(NamedTuple):
     page: torch.Tensor
     views: tuple[torch.Tensor, ...]
@@ -371,27 +374,25 @@ class KVCacheRuntimeViews:
 
 def _create_page_component_views(
     raw: torch.Tensor,
-    shapes: tuple[tuple[int, ...], ...],
+    shapes: KVCacheRuntimeShapes,
     spec: KVCacheSpec,
     num_pages: int,
     offset: int,
     block_stride: int,
     payload_size: int,
 ) -> tuple[torch.Tensor, ...]:
-    dtypes = (
-        spec.dtypes if isinstance(spec, MambaSpec) else (torch.uint8,) * len(shapes)
-    )
     alignment = spec.state_alignment if isinstance(spec, MambaSpec) else 1
     components = []
     used = 0
-    for shape, dtype in zip(shapes, dtypes, strict=True):
-        size = prod(shape[1:])
+    for shape, dtype in shapes:
+        byte_shape = (*shape[:-1], shape[-1] * get_dtype_size(dtype))
+        size = prod(byte_shape[1:])
         if shape[0] != num_pages or used + size > payload_size:
             raise ValueError(
                 f"Runtime component {shape} exceeds the planned cache page"
             )
-        inner_strides = tuple(prod(shape[i + 1 :]) for i in range(1, len(shape)))
-        view = raw.as_strided(shape, (block_stride, *inner_strides), offset + used)
+        inner_strides = tuple(prod(byte_shape[i + 1 :]) for i in range(1, len(shape)))
+        view = raw.as_strided(byte_shape, (block_stride, *inner_strides), offset + used)
         components.append(view.view(dtype))
         used += round_up(size, alignment)
     return tuple(components)
@@ -420,7 +421,9 @@ def create_kv_cache_views(
     default_shapes = AttentionBackend.get_runtime_shapes(
         spec, num_blocks, layout, kernel_block_size
     )
-    (shape_bytes,) = default_shapes
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, kernel_block_size
+    )
     ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
         # Distribute page padding evenly among the kernel blocks. Other
@@ -483,6 +486,9 @@ def create_kv_cache_views(
                 block_stride,
                 prod(shape_bytes[1:]),
             )
+            if isinstance(spec, AttentionSpec):
+                # FlashInfer also consumes the packed page for fused cache updates.
+                components = (page, *components)
             runtime.components[name] = KVCacheLayerComponents(page, components)
         offset += layer_stride
     return views

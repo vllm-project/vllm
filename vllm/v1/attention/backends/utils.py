@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
     KVCacheLayout,
+    KVCacheRuntimeShapes,
     KVCacheSpec,
     MambaSpec,
     get_kv_quant_mode,
@@ -233,7 +234,7 @@ def flashinfer_nvfp4_kv_views(
         layout = "HND" if page.stride(1) >= page.stride(2) else "NHD"
         return (
             (k_data, v_data),
-            (k_scale.view(torch.float8_e4m3fn), v_scale.view(torch.float8_e4m3fn)),
+            (k_scale, v_scale),
             layout,
         )
     num_blocks, num_slots, block_size, full_dim = kv_cache.shape
@@ -260,7 +261,7 @@ def flashinfer_nvfp4_component_shapes(
     num_blocks: int,
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
-) -> tuple[tuple[int, ...], ...]:
+) -> KVCacheRuntimeShapes:
     """FlashInfer packs K data, K scales, V data, V scales within each page."""
     bs = kernel_block_size or spec.block_size
     num_blocks *= spec.block_size // bs
@@ -275,7 +276,8 @@ def flashinfer_nvfp4_component_shapes(
     data_width = full_dim * 8 // 9
     data = (num_blocks, *dims, data_width)
     scales = (num_blocks, *dims, full_dim - data_width)
-    return data, scales, data, scales
+    pair = ((data, torch.uint8), (scales, torch.float8_e4m3fn))
+    return (*pair, *pair)
 
 
 def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:

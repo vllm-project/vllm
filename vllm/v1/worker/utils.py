@@ -979,13 +979,10 @@ def bind_kv_cache_to_layers(
                 entry is not None
                 and entry.page is page
                 and runtime.backends.get(name) is runtime.backends[owner]
+                and isinstance(layer, (MambaBase, Attention))
             ):
-                if isinstance(layer, MambaBase):
-                    layer.bind_kv_cache(entry.views)
-                    continue
-                if isinstance(layer, Attention):
-                    layer.bind_kv_cache((page, *entry.views))
-                    continue
+                layer.bind_kv_cache(entry.views)
+                continue
         layer.bind_kv_cache(page)
 
 
