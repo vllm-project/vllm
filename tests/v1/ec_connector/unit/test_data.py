@@ -468,6 +468,7 @@ def test_timed_out_read_keeps_its_blocks_until_it_finishes(fake_mori):
             mm_hash="h1", status=XferStatus.OK, session_id="s", src_block_indices=[0]
         )
         assert xfer.handle_ack(ack, agent)
+        assert xfer.transfer_handle is not None
         status = xfer.transfer_handle.status
         now = time.monotonic()
 
@@ -685,6 +686,7 @@ def test_scheduler_shutdown_keeps_unsettled_read_target_alive(fake_mori, monkeyp
             )
         )
         (xfer,) = session._xfers.values()
+        assert xfer.transfer_handle is not None
         transport = weakref.ref(s._data)
         status = weakref.ref(xfer.transfer_handle.status)
         path = region._mmap_path
