@@ -6,7 +6,7 @@ Adapted from AITER's ``kernel_unified_attention_3d`` / ``reduce_segments``
 (``aiter/ops/triton/_triton_kernels/attention/unified_attention.py``). AITER's
 kernel bounds each query row by a causal prefix. Here every query row of a
 request attends to the request's whole sequence ``[0, seq_len)``, which is the
-DSpark/DFlash draft block semantics. All rows of a request share one KV read
+DSpark draft block semantics. All rows of a request share one KV read
 per (kv head, segment) when ``BLOCK_Q`` covers the block.
 
 Not supported: sliding window, sinks, alibi, softcap, qq bias, shuffled KV.

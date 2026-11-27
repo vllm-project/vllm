@@ -75,7 +75,7 @@ def is_ultraquant_flydsl_available() -> bool:
 
 _ULTRAQUANT_FLYDSL_GQA = (6, 8, 16)
 # Packed verify is compiled and tested for these groups only. 8 is the per-rank
-# group at TP=4 on Qwen3.5-397B (32 Q heads, 2 KV heads, each rank 8 Q / 1 KV).
+# group at TP=4 with 32 Q heads and 2 KV heads (each rank 8 Q / 1 KV).
 _ULTRAQUANT_VERIFY_GQA = (6, 8, 16)
 
 
