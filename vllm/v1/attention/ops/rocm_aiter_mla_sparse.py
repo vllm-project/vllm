@@ -1007,6 +1007,141 @@ def fp8_mqa_logits_torch(
     return logits
 
 
+@triton.jit
+def _fp8_mqa_logits_bf16_triton_kernel(
+    Q,
+    K,
+    S,
+    W,
+    KS,
+    KE,
+    OUT,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_wm,
+    stride_om,
+    M,
+    N,
+    H: tl.constexpr,
+    H_PAD: tl.constexpr,
+    D: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    m0 = pid_m * BM
+    n0 = pid_n * BN
+
+    offs_m = m0 + tl.arange(0, BM)
+    offs_n = n0 + tl.arange(0, BN)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+
+    ks = tl.load(KS + offs_m, mask=m_mask, other=N)
+    ke = tl.load(KE + offs_m, mask=m_mask, other=0)
+    max_ke = tl.max(ke, axis=0)
+    min_ks = tl.min(ks, axis=0)
+    if (min_ks >= max_ke) | (n0 >= max_ke) | (n0 + BN <= min_ks):
+        neg_inf = tl.full((BM, BN), float("-inf"), dtype=tl.float32)
+        tl.store(
+            OUT + offs_m[:, None] * stride_om + offs_n[None, :],
+            neg_inf,
+            mask=m_mask[:, None] & n_mask[None, :],
+        )
+        return
+
+    offs_d = tl.arange(0, D)
+    offs_h = tl.arange(0, H_PAD)
+    h_mask = offs_h < H
+
+    k_tile = tl.load(
+        K + offs_n[:, None] * stride_kn + offs_d[None, :],
+        mask=n_mask[:, None],
+        other=0.0,
+    )
+    k_t = tl.trans(k_tile)
+    s_tile = tl.load(S + offs_n, mask=n_mask, other=0.0)
+
+    for mi in range(BM):
+        m = m0 + mi
+        if m < M:
+            ks_i = tl.load(KS + m)
+            ke_i = tl.load(KE + m)
+            if (ks_i >= ke_i) | (n0 >= ke_i) | (n0 + BN <= ks_i):
+                neg = tl.full((BN,), float("-inf"), dtype=tl.float32)
+                tl.store(OUT + m * stride_om + offs_n, neg, mask=n_mask)
+            else:
+                q_m = tl.load(
+                    Q + m * stride_qm + offs_h[:, None] * stride_qh + offs_d[None, :],
+                    mask=h_mask[:, None],
+                    other=0.0,
+                )
+                w_m = tl.load(W + m * stride_wm + offs_h, mask=h_mask, other=0.0)
+                scores = tl.dot(q_m, k_t, out_dtype=tl.float32)
+                scores = tl.maximum(scores * s_tile[None, :], 0.0)
+                acc = tl.sum(scores * w_m[:, None], axis=0)
+                valid = (offs_n >= ks_i) & (offs_n < ke_i)
+                acc = tl.where(valid, acc, float("-inf"))
+                tl.store(OUT + m * stride_om + offs_n, acc, mask=n_mask)
+
+
+def fp8_mqa_logits_triton(
+    q: torch.Tensor,
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    """Fused Triton BF16-WMMA fallback for FP8 MQA prefill logits.
+
+    Avoids materializing the `[H, M, N]` fp32 intermediate tensor (which OOMs
+    at long context lengths) and skips masked-out `(BM, BN)` causal tiles
+    in-kernel.
+    """
+    k_fp8, scale = kv
+    M, H, D = q.shape
+    N = k_fp8.shape[0]
+    if M == 0 or N == 0:
+        return torch.empty((M, N), dtype=torch.float32, device=q.device)
+    if not q.is_cuda or H > 64 or D > 128 or D < 16 or (D & (D - 1)) != 0:
+        return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+
+    q_bf16 = q.to(torch.bfloat16).contiguous()
+    k_bf16 = k_fp8.to(torch.bfloat16).contiguous()
+    s_flat = scale.reshape(-1).contiguous()
+    w = weights.contiguous()
+    out = torch.empty((M, N), dtype=torch.float32, device=q.device)
+    bm = 16
+    bn = 128 if H <= 32 else 64
+    h_pad = max(16, triton.next_power_of_2(H))
+    grid = (triton.cdiv(M, bm), triton.cdiv(N, bn))
+    _fp8_mqa_logits_bf16_triton_kernel[grid](
+        q_bf16,
+        k_bf16,
+        s_flat,
+        w,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        out,
+        q_bf16.stride(0),
+        q_bf16.stride(1),
+        k_bf16.stride(0),
+        w.stride(0),
+        out.stride(0),
+        M,
+        N,
+        H=H,
+        H_PAD=h_pad,
+        D=D,
+        BM=bm,
+        BN=bn,
+        num_warps=4,
+    )
+    return out
+
+
 @functools.lru_cache
 def mqa_logits_module():
     mqa_logits_module_path = None
@@ -1070,7 +1205,7 @@ def rocm_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
         )
     else:
-        return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+        return fp8_mqa_logits_triton(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
 # Programs along the column axis of the decode mask grid. The shared kernel in

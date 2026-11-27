@@ -113,6 +113,44 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
 
 
+@pytest.mark.parametrize("num_heads", [32, 64])
+@pytest.mark.parametrize("column_scales", [False, True])
+def test_fp8_mqa_logits_triton(num_heads: int, column_scales: bool):
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    dtype = current_platform.fp8_dtype()
+    M, N, D = 37, 519, 128
+    q = torch.randn(M, num_heads, D, device=device).to(dtype)
+    k = torch.randn(N, D, device=device).to(dtype)
+    scales = torch.linspace(0.25, 1.25, N, device=device)
+    if column_scales:
+        scales = scales[:, None]
+    weights = torch.rand((M, num_heads), device=device) / num_heads
+    starts = torch.zeros(M, device=device, dtype=torch.int32)
+    ends = torch.arange(1, M + 1, device=device, dtype=torch.int32).clamp_max(N)
+    # Include a packed second sequence and empty ranges (start == end).
+    half = M // 2
+    starts[half:] = N // 2
+    ends[half:] = (
+        N // 2 + torch.arange(1, M - half + 1, device=device, dtype=torch.int32)
+    ).clamp_max(N)
+    starts[3] = ends[3] = 5
+    starts[-1] = ends[-1] = N
+
+    actual = mod.fp8_mqa_logits_triton(q, (k, scales), weights, starts, ends)
+    score = torch.einsum("mhd,nd->mhn", q.float(), k.float()) * scales.reshape(-1)
+    expected = (score.relu() * weights[..., None]).sum(dim=1)
+    positions = torch.arange(N, device=device)
+    valid = (positions >= starts[:, None]) & (positions < ends[:, None])
+    assert actual.shape == expected.shape
+    assert actual.dtype == torch.float32
+    assert torch.isneginf(actual[~valid]).all()
+    assert not torch.isneginf(actual[valid]).any()
+    torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
+
+
 def _ref_global_topk_ragged(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
