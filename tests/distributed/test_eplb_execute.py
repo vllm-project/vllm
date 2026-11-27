@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+import faulthandler
 import random
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +16,15 @@ import torch.distributed
 import vllm.distributed.eplb.eplb_communicator as eplb_comm
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
 )
+from vllm.distributed.eplb.eplb_state import EplbModelState, EplbState
+from vllm.distributed.eplb.policy.abstract import AbstractEplbPolicy, EplbStats
 from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -1011,3 +1020,405 @@ def test_eplb_communicator_pipeline_parallel(world_size, backend):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_eplb_communicator_pipeline_parallel, world_size, backend)
+
+
+_SCENARIO_NUM_LAYERS = 4
+_SCENARIO_NUM_LOCAL_EXPERTS = 3
+_SCENARIO_NUM_REDUNDANT_EXPERTS = 2
+_SCENARIO_HIDDEN_SIZES = [16, 32]
+_SCENARIO_STEP_INTERVAL = 16
+# A cycle commits at most one layer per step, so it needs a few steps per layer.
+# Waiting this long for one means it is hung.
+_SCENARIO_CYCLE_TIMEOUT_S = 60.0
+# Last resort: dump every thread's stack and kill the rank, so a rank stuck in a
+# collective fails the test instead of stalling the CI step.
+_SCENARIO_HANG_DUMP_S = 240.0
+
+
+class _ScriptedEplbPolicy(AbstractEplbPolicy):
+    """Plans cycle `i` by rolling the experts of the layers in `script[i]`.
+
+    Layers outside that set keep their placement exactly, so each cycle changes
+    a known set of layers whatever the expert load is.
+    """
+
+    def __init__(self, script: list[set[int]]):
+        self.script = script
+        self.planned: list[torch.Tensor] = []
+
+    def rebalance_experts(
+        self,
+        stats: EplbStats,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert old_global_expert_indices is not None
+        new_map = old_global_expert_indices.clone()
+        for layer in self.script[len(self.planned)]:
+            # A different shift per layer catches one layer's map being
+            # committed to another layer.
+            new_map[layer] = old_global_expert_indices[layer].roll(layer + 1)
+            assert not torch.equal(new_map[layer], old_global_expert_indices[layer])
+        self.planned.append(new_map)
+        return new_map
+
+
+class _ScriptedMoEModel:
+    """The `MixtureOfExperts` surface EPLB uses: expert weights, no forward pass."""
+
+    def __init__(
+        self,
+        expert_weights: list[list[torch.Tensor]],
+        num_logical_experts: int,
+        num_redundant_experts: int,
+    ):
+        self.expert_weights = expert_weights
+        self.num_moe_layers = len(expert_weights)
+        self.num_expert_groups = 1
+        self.num_logical_experts = num_logical_experts
+        self.num_routed_experts = num_logical_experts
+        self.num_redundant_experts = num_redundant_experts
+        self.num_physical_experts = num_logical_experts + num_redundant_experts
+        self.num_local_physical_experts = expert_weights[0][0].shape[0]
+        self.num_shared_experts = 0
+        self.moe_layers = ()
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        pass
+
+
+class _ScriptedModelConfig:
+    model = "scripted-moe"
+
+    def compile_factors(self) -> dict[str, object]:
+        return {"model": self.model}
+
+
+def _observed_model_state_cls(
+    consumed: list[tuple[int | None, bool]],
+) -> type[EplbModelState]:
+    """`EplbModelState` that logs `(layer, completes_cycle)` per result consumed."""
+
+    class ObservedModelState(EplbModelState):
+        def _move_to_workspace(self, ep_rank: int) -> None:
+            result = self.pending_result
+            assert result is not None
+            layer_idx = (
+                result.layer_idx if isinstance(result, AsyncEplbLayerResult) else None
+            )
+            consumed.append((layer_idx, result.completes_cycle))
+            super()._move_to_workspace(ep_rank)
+
+    return ObservedModelState
+
+
+@dataclass
+class _AsyncEplbHarness:
+    state: EplbState
+    model_state: EplbModelState
+    policy: _ScriptedEplbPolicy
+    consumed: list[tuple[int | None, bool]]
+    expert_weights: list[list[torch.Tensor]]
+    ep_rank: int
+    cpu_group: torch.distributed.ProcessGroup
+    checked_consumptions: int = 0
+
+
+@contextlib.contextmanager
+def _scripted_async_eplb(
+    env,
+    world_size: int,
+    communicator: str,
+    script: list[set[int]],
+    migration_batching: bool = False,
+) -> Iterator[_AsyncEplbHarness]:
+    """Production async EPLB (state, worker thread, communicator, EP and EPLB
+    groups) on a model that has expert weights and a scripted policy."""
+    set_env_vars_and_device(env)
+    faulthandler.dump_traceback_later(_SCENARIO_HANG_DUMP_S, exit=True)
+
+    vllm_config = VllmConfig()
+    parallel_config = vllm_config.parallel_config
+    parallel_config.tensor_parallel_size = world_size
+    parallel_config.enable_expert_parallel = True
+    parallel_config.enable_eplb = True
+    eplb_config = parallel_config.eplb_config
+    eplb_config.use_async = True
+    eplb_config.window_size = _SCENARIO_STEP_INTERVAL
+    eplb_config.step_interval = _SCENARIO_STEP_INTERVAL
+    eplb_config.communicator = communicator
+    eplb_config.enable_migration_batching = migration_batching
+
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(
+            f"{torch.accelerator.current_accelerator().type}:{ep_rank}"
+        )
+        num_physical = world_size * _SCENARIO_NUM_LOCAL_EXPERTS
+        num_logical = num_physical - _SCENARIO_NUM_REDUNDANT_EXPERTS
+        initial_map = torch.tensor(
+            EplbState.build_initial_global_physical_to_logical_map(
+                num_logical, _SCENARIO_NUM_REDUNDANT_EXPERTS
+            )
+        ).repeat(_SCENARIO_NUM_LAYERS, 1)
+        model = _ScriptedMoEModel(
+            create_expert_weights(
+                _SCENARIO_NUM_LAYERS,
+                _SCENARIO_NUM_LOCAL_EXPERTS,
+                _SCENARIO_HIDDEN_SIZES,
+                ep_rank,
+                device,
+                initial_map,
+            ),
+            num_logical,
+            _SCENARIO_NUM_REDUNDANT_EXPERTS,
+        )
+
+        consumed: list[tuple[int | None, bool]] = []
+        policy = _ScriptedEplbPolicy(script)
+        state = EplbState(parallel_config, device)
+        state.model_state_cls = _observed_model_state_cls(consumed)
+        state.policy = policy
+        model_config = _ScriptedModelConfig()
+        state.add_model(model, model_config)  # type: ignore[arg-type]
+        state.start_async_loop()
+
+        try:
+            yield _AsyncEplbHarness(
+                state=state,
+                model_state=state.model_states[hash_config_cached(model_config)],
+                policy=policy,
+                consumed=consumed,
+                expert_weights=model.expert_weights,
+                ep_rank=ep_rank,
+                cpu_group=get_tp_group().cpu_group,
+            )
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+
+
+def _assert_serving_state_consistent(h: _AsyncEplbHarness, context: str) -> None:
+    """Every layer's weights match its committed placement, as a forward pass
+    run at this point would need."""
+    committed = h.model_state.physical_to_logical_map.cpu()
+    assert verify_expert_weights_after_shuffle(
+        h.expert_weights,
+        committed,
+        _SCENARIO_HIDDEN_SIZES,
+        h.ep_rank,
+        _SCENARIO_NUM_LOCAL_EXPERTS,
+    ), f"{context}: expert weights do not match the committed placement"
+
+
+def _step_until(h: _AsyncEplbHarness, done: Callable[[], bool], what: str) -> None:
+    """Step like the forward-pass loop does until `done()`, failing on a hang.
+
+    All ranks leave together: the conditions used flip in `EplbState.step`, in
+    lockstep across ranks.
+    """
+    deadline = time.monotonic() + _SCENARIO_CYCLE_TIMEOUT_S
+    while not done():
+        if time.monotonic() > deadline:
+            model_state = h.model_state
+            raise AssertionError(
+                f"Timed out waiting for {what} (rank {h.ep_rank}): "
+                f"rebalanced={model_state.rebalanced}, "
+                f"num_committed_layers={model_state.num_committed_layers}, "
+                f"worker_progress={model_state.worker_progress}, "
+                f"consumed={h.consumed}, "
+                f"worker_alive={h.state.async_worker.is_alive()}, "
+                f"worker_error={h.state.async_worker_error!r}"
+            )
+        h.state.step()
+        if len(h.consumed) != h.checked_consumptions:
+            # The placement only changes when the main thread consumes a result.
+            h.checked_consumptions = len(h.consumed)
+            _assert_serving_state_consistent(h, f"while waiting for {what}")
+        time.sleep(0.001)
+
+
+def _assert_logical_maps_match(model_state: EplbModelState, planned: torch.Tensor):
+    """The maps a router reads agree with the committed physical placement."""
+    logical_to_physical = model_state.logical_to_physical_map.cpu()
+    replica_count = model_state.logical_replica_count.cpu()
+    for layer in range(planned.shape[0]):
+        for logical in range(replica_count.shape[1]):
+            slots = logical_to_physical[layer, logical]
+            expected = (planned[layer] == logical).nonzero().flatten().tolist()
+            assert sorted(slots[slots >= 0].tolist()) == expected, (layer, logical)
+            assert int(replica_count[layer, logical]) == len(expected), (layer, logical)
+
+
+def _assert_cycle_committed(
+    h: _AsyncEplbHarness, cycle: int, changed: set[int]
+) -> None:
+    """The cycle transferred exactly the changed layers, and the placement and
+    weights on every rank are the planned ones."""
+    context = f"cycle {cycle}"
+    model_state = h.model_state
+    last = len(changed) - 1
+    expected_results: list[tuple[int | None, bool]] = [
+        (layer, i == last) for i, layer in enumerate(sorted(changed))
+    ] or [(None, True)]
+    assert h.consumed == expected_results, context
+    assert not model_state.rebalanced, context
+    assert model_state.pending_result is None, context
+    assert model_state.num_committed_layers == _SCENARIO_NUM_LAYERS, context
+    assert h.state.async_worker.is_alive(), context
+    assert h.state.async_worker_error is None, context
+
+    planned = h.policy.planned[cycle]
+    committed = model_state.physical_to_logical_map.cpu()
+    assert torch.equal(committed, planned), f"{context}: committed {committed}"
+    _assert_logical_maps_match(model_state, planned)
+
+    local_ok = verify_expert_weights_after_shuffle(
+        h.expert_weights,
+        planned,
+        _SCENARIO_HIDDEN_SIZES,
+        h.ep_rank,
+        _SCENARIO_NUM_LOCAL_EXPERTS,
+    )
+    local_ok = (
+        verify_redundant_experts_have_same_weights(
+            h.expert_weights,
+            planned,
+            _SCENARIO_HIDDEN_SIZES,
+            h.ep_rank,
+            torch.distributed.get_world_size(),
+            _SCENARIO_NUM_LOCAL_EXPERTS,
+            cpu_group=h.cpu_group,
+        )
+        and local_ok
+    )
+    assert_verification_synced(
+        local_ok, f"{context}: weights wrong on at least one rank", h.cpu_group
+    )
+
+
+def _run_cycle(h: _AsyncEplbHarness, cycle: int, changed: set[int]) -> None:
+    h.consumed.clear()
+    h.checked_consumptions = 0
+    _step_until(h, lambda: h.model_state.rebalanced, f"cycle {cycle} to start")
+    _step_until(h, lambda: not h.model_state.rebalanced, f"cycle {cycle} to commit")
+    _assert_cycle_committed(h, cycle, changed)
+
+
+def _test_async_eplb_cycles(
+    env,
+    world_size: int,
+    communicator: str,
+    script: list[set[int]],
+    migration_batching: bool,
+) -> None:
+    with _scripted_async_eplb(
+        env, world_size, communicator, script, migration_batching
+    ) as h:
+        for cycle, changed in enumerate(script):
+            _run_cycle(h, cycle, changed)
+
+
+def _skip_unless_communicator_usable(communicator: str, world_size: int) -> None:
+    if communicator == "nixl" and not has_nixl():
+        pytest.skip("NIXL is not available")
+    if communicator == "nixl" and current_platform.is_xpu():
+        pytest.skip("NIXL does not support XPU")
+    if communicator == "torch_xccl" and not current_platform.is_xpu():
+        pytest.skip("torch_xccl requires XPU")
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if communicator == "symm_mem":
+        _skip_unless_symm_mem(world_size)
+
+
+_ALL_LAYERS = set(range(_SCENARIO_NUM_LAYERS))
+
+# name -> (world_size, layers changed by each cycle, migration batching)
+_CYCLE_SCENARIOS: dict[str, tuple[int, list[set[int]], bool]] = {
+    "empty_cycles": (2, [set(), set(), set(), _ALL_LAYERS], False),
+    # The last physical layer never changes, so a cycle must not wait for it.
+    "middle_layer_last_unchanged": (2, [{1}, {1, 2}], False),
+    "sparse_then_dense": (2, [{0, 2}, _ALL_LAYERS, {3}], False),
+    "migration_batching": (2, [{0, 2}, _ALL_LAYERS, {3}], True),
+    "sparse_then_dense_4gpu": (4, [{0, 2}, _ALL_LAYERS, {3}], False),
+}
+# The communicator only moves the weights of the layers a cycle changes, so
+# torch_gloo runs every script and the others one representative script.
+_CYCLE_CASES = [("torch_gloo", name) for name in _CYCLE_SCENARIOS] + [
+    (communicator, "sparse_then_dense")
+    for communicator in ("torch_xccl", "nixl", "symm_mem")
+]
+
+
+@pytest.mark.parametrize(
+    "eplb_communicator,scenario",
+    _CYCLE_CASES,
+    ids=[f"{communicator}-{name}" for communicator, name in _CYCLE_CASES],
+)
+def test_async_eplb_cycles_through_production_worker(
+    eplb_communicator: str,
+    scenario: str,
+):
+    """Cycles that change a known set of layers, from none to all, run through
+    the real async worker, communicator and per-step main-thread commits: each
+    completes without a hang, transfers exactly the changed layers, and leaves
+    the committed maps and expert weights equal to the plan."""
+    world_size, script, migration_batching = _CYCLE_SCENARIOS[scenario]
+    _skip_unless_communicator_usable(eplb_communicator, world_size)
+    distributed_run(
+        _test_async_eplb_cycles,
+        world_size,
+        eplb_communicator,
+        script,
+        migration_batching,
+    )
+
+
+def _test_drain_in_flight_cycle_then_resume(
+    env, world_size: int, communicator: str
+) -> None:
+    # Cycle 0 leaves the last layer unchanged, so draining it must stop at the
+    # result that completes the cycle, not at the last layer.
+    script = [{0, 1, 2}, {1, 3}]
+    with _scripted_async_eplb(env, world_size, communicator, script) as h:
+        initial = h.model_state.physical_to_logical_map.cpu().clone()
+        _step_until(h, lambda: h.model_state.rebalanced, "cycle 0 to start")
+        _step_until(
+            h,
+            lambda: h.model_state.num_committed_layers >= 1,
+            "the first layer of cycle 0 to commit",
+        )
+        assert h.model_state.rebalanced, "cycle 0 ended before it could be drained"
+
+        h.state.drain_async()
+
+        assert not h.model_state.rebalanced
+        assert h.model_state.pending_result is None
+        assert h.state.async_worker.is_alive()
+        assert h.state.async_worker_error is None
+        # Only the committed layer took the new placement; draining drops the rest.
+        expected = initial.clone()
+        expected[0] = h.policy.planned[0][0]
+        assert torch.equal(h.model_state.physical_to_logical_map.cpu(), expected)
+        _assert_serving_state_consistent(h, "after the drain")
+
+        # The next rearrangement plans from the partially committed placement.
+        _run_cycle(h, 1, {1, 3})
+
+
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_gloo", "torch_xccl", "nixl", "symm_mem"]
+)
+def test_async_eplb_drain_in_flight_cycle_then_resume(eplb_communicator: str):
+    """Draining a cycle with some layers committed and others in flight leaves
+    a consistent placement, and the next rearrangement completes and serves
+    from it."""
+    _skip_unless_communicator_usable(eplb_communicator, 2)
+    distributed_run(_test_drain_in_flight_cycle_then_resume, 2, eplb_communicator)

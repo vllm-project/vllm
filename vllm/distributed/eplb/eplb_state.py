@@ -57,6 +57,7 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
 from .rebalance_execute import (
     AsyncEplbLayerResult,
+    AsyncEplbResult,
     copy_rows,
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -188,25 +189,27 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
-    pending_result: AsyncEplbLayerResult | None = None
+    pending_result: AsyncEplbResult | None = None
     """
-    Set by the async worker after all writes to expert_buffer are done. Consumed
-    and reset to None by the main thread in move_to_workspace() after the contents of
-    expert_buffer have been transferred out. At most one result is pending at a time.
+    Set by the async worker after all writes to expert_buffer are done, or when a
+    cycle has no layer to transfer. Consumed and reset to None by the main thread in
+    move_to_workspace() after the contents of expert_buffer have been transferred
+    out. At most one result is pending at a time.
 
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
     num_committed_layers: int = 0
     """
-    Number of layers committed by move_to_workspace in the current async EPLB
-    rearrangement.
+    Number of leading layers finished in the current async EPLB rearrangement:
+    committed by move_to_workspace, or skipped because their mapping is unchanged.
     """
     worker_progress: int = -1
     """
     Async worker progress in the current rearrangement, written by the worker:
     2 * layer while transferring the layer, plus 1 once it is published. -1
-    until the worker starts the first layer.
+    until the worker starts the first layer, and 2 * num_moe_layers once it has
+    published a cycle that has no layer to transfer.
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
@@ -296,21 +299,23 @@ class EplbModelState:
     ) -> None:
         result = self.pending_result
         assert result is not None
-        move_from_buffer(
-            expert_weights=self.model.expert_weights[result.layer_idx],
-            expert_weights_buffers=self.expert_buffer,
-            transfer_metadata=result.transfer_metadata,
-            new_indices=result.new_physical_to_logical_map.numpy(),
-            ep_rank=ep_rank,
-        )
+        if isinstance(result, AsyncEplbLayerResult):
+            move_from_buffer(
+                expert_weights=self.model.expert_weights[result.layer_idx],
+                expert_weights_buffers=self.expert_buffer,
+                transfer_metadata=result.transfer_metadata,
+                new_indices=result.new_physical_to_logical_map.numpy(),
+                ep_rank=ep_rank,
+            )
 
-        self._commit_eplb_maps_for_layer(
-            result.new_physical_to_logical_map,
-            result.layer_idx,
-        )
-        self.num_committed_layers = result.layer_idx + 1
+            self._commit_eplb_maps_for_layer(
+                result.new_physical_to_logical_map,
+                result.layer_idx,
+            )
+            self.num_committed_layers = result.layer_idx + 1
 
-        if result.layer_idx == self.model.num_moe_layers - 1:
+        if result.completes_cycle:
+            self.num_committed_layers = self.model.num_moe_layers
             self.rebalanced = False
 
         # Reset pending_result before unblocking the async worker
@@ -829,6 +834,8 @@ class EplbState:
             slowest = int(progress.min())
             if slowest < 0:
                 stage = "computing the new placement"
+            elif slowest >= 2 * model_state.model.num_moe_layers:
+                stage = "published the empty cycle"
             else:
                 layer, published = divmod(slowest, 2)
                 stage = f"{'published' if published else 'transferring'} layer {layer}"
@@ -1209,7 +1216,7 @@ class EplbState:
                 if self._all_ranks_result_ready(ms):
                     result = ms.pending_result
                     assert result is not None
-                    if result.layer_idx == ms.model.num_moe_layers - 1:
+                    if result.completes_cycle:
                         ms.rebalanced = False
                     ms.pending_result = None
                     result.consumed_event.record()
