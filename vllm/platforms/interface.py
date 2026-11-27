@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -395,6 +396,13 @@ class Platform:
         kernel launch. The default implementation does nothing.
         """
         return
+
+    @classmethod
+    def get_moe_backends(cls) -> dict[str, type["FusedMoEExperts"]]:
+        """Out-of-tree MoE backends by `--moe-backend` name, in the priority
+        order used by `auto`. Names are lowercase with underscores and must not
+        reuse an in-tree backend's."""
+        return {}
 
     @classmethod
     def get_attn_backend_cls(
@@ -1374,7 +1382,7 @@ class Platform:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """

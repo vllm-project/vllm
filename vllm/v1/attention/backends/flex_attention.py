@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
-    is_torch_equal_or_newer,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -798,11 +797,8 @@ class FlexAttentionMetadata:
             "full_kv_indices": None,
             "BLOCK_SIZE": (self.q_block_size, self.kv_block_size),
             "mask_mod": self.mask_mod,
+            "compute_q_blocks": False,
         }
-
-        # compute_q_blocks parameter is available in PyTorch 2.9+
-        if is_torch_equal_or_newer("2.9.0.dev0"):
-            block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
@@ -855,7 +851,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
         layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
         self.uses_paged_kv = (
             get_attn_type_from_layers(vllm_config, layer_names)
@@ -868,11 +863,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.sliding_window = (
             sliding_windows.pop() if len(sliding_windows) == 1 else None
         )
-        self.direct_build: bool = supports_small_blocks
+        self.direct_build: bool = True
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
             vllm_config.attention_config,
-            supports_small_blocks,
             self.block_size,
             uses_paged_kv,
         )
@@ -941,7 +935,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
     @staticmethod
     def _get_block_sizes(
         attn_cfg,
-        supports_small_blocks: bool,
         cache_block_size: int,
         uses_paged_kv: bool,
     ) -> tuple[int, int]:
@@ -951,9 +944,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         # cache and therefore cannot use that path. Keeping its generic path at
         # 16-token blocks creates very large mask-conversion graphs and makes
         # Inductor compilation dominate the first request.
-        use_small_blocks = supports_small_blocks and uses_paged_kv
-        q_block_size = 16 if use_small_blocks else 128
-        kv_block_size = cache_block_size if use_small_blocks else 128
+        q_block_size = 16 if uses_paged_kv else 128
+        kv_block_size = cache_block_size if uses_paged_kv else 128
 
         q_block_size = attn_cfg.flex_attn_q_block_size or q_block_size
         if (q_block_size & (q_block_size - 1)) != 0 or (

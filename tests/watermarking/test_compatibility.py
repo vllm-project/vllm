@@ -41,6 +41,7 @@ def _input_processor(
     renderer = MagicMock(spec=BaseRenderer)
     renderer.tokenizer = None
     renderer._executor = None
+    renderer._mm_executor = None
     return InputProcessor(config, renderer)
 
 
@@ -213,6 +214,7 @@ def test_direct_engine_trace_replay_warns_and_disables(
         )
 
     assert "trace replay requests will run without watermarking" in caplog_vllm.text
+    assert request.sampling_params is not None
     assert request.sampling_params.watermarking is False
     assert request.sampling_params._watermarking_skipped is True
     assign_request_id.assert_called_once_with(request)
@@ -234,6 +236,7 @@ def test_direct_engine_request_uses_embedded_opt_out(monkeypatch):
         SamplingParams(temperature=0),
     )
 
+    assert request.sampling_params is not None
     assert request.sampling_params._watermarking_skipped is False
     assign_request_id.assert_called_once_with(request)
 
@@ -266,6 +269,7 @@ def test_direct_async_engine_trace_replay_warns_and_disables(
         asyncio.run(add_request())
 
     assert "trace replay requests will run without watermarking" in caplog_vllm.text
+    assert request.sampling_params is not None
     assert request.sampling_params.watermarking is False
     assert request.sampling_params._watermarking_skipped is True
 
@@ -300,6 +304,7 @@ def test_direct_async_engine_greedy_request_warns_and_disables_watermarking(
     assert "subsequent greedy requests will use ordinary greedy sampling" in (
         caplog_vllm.text
     )
+    assert request.sampling_params is not None
     assert request.sampling_params.watermarking is False
     assert request.sampling_params._watermarking_skipped is True
 
@@ -404,6 +409,7 @@ def _preprocess_in_engine_core(
     core.prefix_hash_config = None
     request = _engine_core_request(params)
     core.preprocess_add_request(request)
+    assert request.sampling_params is not None
     return request.sampling_params
 
 

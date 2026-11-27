@@ -743,6 +743,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
+        chat_template_kwargs = merge_kwargs(self.template_kwargs, chat_template_kwargs)
         if chat_template is None and self.saved_chat_template is not None:
             chat_template = self.saved_chat_template
             chat_template_kwargs = merge_kwargs(
@@ -887,6 +888,34 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
+_JINA_QUERY_MARKER = "<|rerank_token|>"
+_JINA_DOC_MARKER = "<|embed_token|>"
+_JINA_MARKER_BYTES = (_JINA_QUERY_MARKER.encode(), _JINA_DOC_MARKER.encode())
+
+
+def _strip_jina_markers(text: str) -> str:
+    if _JINA_QUERY_MARKER not in text and _JINA_DOC_MARKER not in text:
+        return text
+
+    # Compact the kept prefix in one pass. These markers cannot overlap, so
+    # deleting each suffix as it completes also removes markers formed by
+    # earlier deletions, without rescanning the text.
+    buffer = bytearray(text, "utf-8", errors="surrogatepass")
+    marker_end = ord(">")
+    kept = 0
+    for byte in buffer:
+        buffer[kept] = byte
+        kept += 1
+        if byte == marker_end:
+            for marker in _JINA_MARKER_BYTES:
+                if buffer.endswith(marker, 0, kept):
+                    kept -= len(marker)
+                    break
+
+    del buffer[kept:]
+    return buffer.decode(errors="surrogatepass")
+
+
 class JinaRankingIOProcessorMixin(PoolingIOProcessor):
     def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
         if render_params["tok_params"].truncate_prompt_tokens is not None:
@@ -902,29 +931,12 @@ class JinaRankingIOProcessorMixin(PoolingIOProcessor):
     def format_docs_prompts_func(
         query: str,
         docs: list[str],
-        special_tokens: dict[str, str] | None = None,
         instruction: str | None = None,
         no_thinking: bool = True,
     ) -> str:
         # TODO: Try converting the code below into a chat template.
-
-        default_special_tokens = {
-            "query_embed_token": "<|rerank_token|>",
-            "doc_embed_token": "<|embed_token|>",
-        }
-        if special_tokens is None:
-            special_tokens = default_special_tokens
-
-        def sanitize_input(text: str) -> str:
-            while True:
-                previous = text
-                for token in special_tokens.values():
-                    text = text.replace(token, "")
-                if text == previous:
-                    return text
-
-        query = sanitize_input(query)
-        docs = [sanitize_input(doc) for doc in docs]
+        query = _strip_jina_markers(query)
+        docs = [_strip_jina_markers(doc) for doc in docs]
 
         prefix = (
             "<|im_start|>system\n"
@@ -938,24 +950,21 @@ class JinaRankingIOProcessorMixin(PoolingIOProcessor):
         if no_thinking:
             suffix += "<think>\n\n</think>\n\n"
 
-        doc_emb_token = special_tokens["doc_embed_token"]
-        query_emb_token = special_tokens["query_embed_token"]
-
         prompt = (
             f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "  # noqa: E501
             f"Rank the passages based on their relevance to query: {query}\n"
         )
 
         if instruction:
-            instruction = sanitize_input(instruction)
+            instruction = _strip_jina_markers(instruction)
             prompt += f"<instruct>\n{instruction}\n</instruct>\n"
 
         doc_prompts = [
-            f'<passage id="{i}">\n{doc}{doc_emb_token}\n</passage>'
+            f'<passage id="{i}">\n{doc}{_JINA_DOC_MARKER}\n</passage>'
             for i, doc in enumerate(docs)
         ]
         prompt += "\n".join(doc_prompts) + "\n"
-        prompt += f"<query>\n{query}{query_emb_token}\n</query>"
+        prompt += f"<query>\n{query}{_JINA_QUERY_MARKER}\n</query>"
 
         return prefix + prompt + suffix
 
