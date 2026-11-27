@@ -185,35 +185,35 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend. A
-/// request that cannot be taken now, such as one over a queue limit, maps to
-/// a retryable 503. Everything else stays an internal 500.
-pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    match error.kind() {
+/// Classify a text-pipeline request failure, wherever it surfaces: while
+/// preparing or submitting the request, or from its output stream. Request
+/// validation failures are the client's fault and map to HTTP 400, mirroring
+/// the Python frontend. A request that cannot be taken now, such as one over a
+/// queue limit or one whose remote worker went away, maps to a retryable 503.
+/// Everything else stays an internal 500.
+pub fn text_request_error(context: &'static str, error: vllm_text::Error) -> ApiError {
+    classified_error(context, error.kind(), &error)
+}
+
+/// Like [`text_request_error`], for the chat pipeline, which wraps the text
+/// errors.
+pub fn chat_request_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    classified_error(context, error.kind(), &error)
+}
+
+fn classified_error(
+    context: &'static str,
+    kind: vllm_text::ErrorKind,
+    error: &impl std::error::Error,
+) -> ApiError {
+    match kind {
         vllm_text::ErrorKind::InvalidRequest { param } => {
             invalid_request!(param = param, "{}", error.as_report())
         }
-        vllm_text::ErrorKind::Internal if error.is_unavailable() => ApiError::ServiceUnavailable {
+        vllm_text::ErrorKind::Unavailable => ApiError::ServiceUnavailable {
             message: error.to_report_string(),
         },
         vllm_text::ErrorKind::Internal => {
-            server_error!("{}: {}", context, error.to_report_string())
-        }
-    }
-}
-
-/// Like [`text_submit_error`], for the chat pipeline, which wraps the text
-/// errors.
-pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    match error.kind() {
-        vllm_chat::ErrorKind::InvalidRequest { param } => {
-            invalid_request!(param = param, "{}", error.as_report())
-        }
-        vllm_chat::ErrorKind::Internal if error.is_unavailable() => ApiError::ServiceUnavailable {
-            message: error.to_report_string(),
-        },
-        vllm_chat::ErrorKind::Internal => {
             server_error!("{}: {}", context, error.to_report_string())
         }
     }
@@ -304,7 +304,7 @@ mod tests {
         let response = errors
             .into_iter()
             .map(|error| {
-                let api_error = text_submit_error("failed to submit completion request", error);
+                let api_error = text_request_error("failed to submit completion request", error);
                 assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
                 serde_json::to_string(&api_error.to_error_response()).unwrap()
             })
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn invalid_thinking_token_budget_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::InvalidThinkingTokenBudget,
         );
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn min_tokens_above_max_tokens_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::MinTokensExceedsMaxTokens {
                 min_tokens: 5,
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn sampling_params_validation_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::SamplingParams(vllm_text::SamplingParamsError::OutOfRange {
                 parameter: "top_p",
@@ -370,7 +370,7 @@ mod tests {
             max_model_len: 8192,
             prompt_len: 9000,
         });
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(
             api_error.to_error_response().error.param.as_deref(),
@@ -388,7 +388,7 @@ mod tests {
                 message: "template kwarg `thinking` must be a boolean".to_string(),
             },
         ] {
-            let api_error = chat_submit_error("failed to submit chat request", error);
+            let api_error = chat_request_error("failed to submit chat request", error);
             assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
             assert_eq!(
                 api_error.to_error_response().error.error_type,
@@ -402,7 +402,7 @@ mod tests {
         let error = vllm_chat::Error::ChatTemplateRender {
             message: "Unexpected reasoning effort high.".to_string(),
         };
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn untrusted_request_chat_template_maps_to_invalid_request() {
-        let api_error = chat_submit_error(
+        let api_error = chat_request_error(
             "tokenize failed",
             vllm_chat::Error::UntrustedRequestChatTemplate,
         );
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn chat_template_failure_stays_internal() {
         let error = vllm_chat::Error::ChatTemplate("render task join error".to_string());
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -438,7 +438,7 @@ mod tests {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
             request_id: "req-1".to_string(),
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
     }
 
@@ -449,7 +449,7 @@ mod tests {
             requested: 1000,
             max_allowed: 20,
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
@@ -466,7 +466,7 @@ mod tests {
                 max_allowed: 20,
             },
         ));
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(
             api_error.to_error_response().error.param.as_deref(),
@@ -481,7 +481,7 @@ mod tests {
             token_ids: vec![1000],
             vocab_size: 1000,
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(
             api_error.to_error_response().error.param.as_deref(),
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn empty_allowed_token_ids_maps_to_invalid_request() {
         let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::EmptyAllowedTokenIds);
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
@@ -506,7 +506,7 @@ mod tests {
             value: 8000,
             max_model_len: 4000,
         };
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
         let error = vllm_text::Error::InvalidTruncatePromptTokens { value: -2 };
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
@@ -537,11 +537,11 @@ mod tests {
     #[test]
     fn queue_limit_errors_map_to_service_unavailable() {
         let errors = [
-            text_submit_error(
+            text_request_error(
                 "failed to submit completion request",
                 vllm_text::Error::Llm(vllm_llm::Error::QueueFull),
             ),
-            chat_submit_error(
+            chat_request_error(
                 "failed to submit chat request",
                 vllm_chat::Error::Text(vllm_text::Error::Llm(vllm_llm::Error::PrefillBacklogFull)),
             ),
@@ -556,9 +556,9 @@ mod tests {
     }
 
     #[test]
-    fn other_submit_errors_stay_internal() {
+    fn other_request_errors_stay_internal() {
         let error = vllm_text::Error::Tokenizer("backend exploded".to_string());
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
         let response = api_error.to_error_response();
         assert!(response.error.message.starts_with("failed to submit completion request:"));
