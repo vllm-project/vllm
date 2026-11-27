@@ -10,6 +10,7 @@ from vllm.models.qwen4_exp.nvidia.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
+    hc_down_silu_sm100,
     hc_gate_mix,
     hc_silu,
     hc_up_gate_mix,
@@ -42,6 +43,13 @@ requires_hc_up_gate_mix = pytest.mark.skipif(
         )
     ),
     reason="fused HC up+gate mix requires SM90 or an SM100-family build",
+)
+
+
+requires_hc_down_silu_sm100 = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100)
+    or not hasattr(torch.ops._C, "qwen4_exp_hc_down_silu"),
+    reason="fused HC down+SiLU SM100 requires an SM100-family build",
 )
 
 
@@ -167,6 +175,33 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     torch.testing.assert_close(
         injection, down[:, LORA_RANK : LORA_RANK + HC], rtol=0.01, atol=0.01
     )
+
+
+@requires_hc_down_silu_sm100
+# One M per config the cost model picks on 148-152 SMs (1-SM split-K 16/8, 2-SM
+# split-K 5/2/2, persistent BM 64/128 x BN 112/176), mostly with M tails.
+# M = 40000 runs several tiles per CTA pair, so both TMEM accumulators get reused.
+@pytest.mark.parametrize(
+    "num_tokens", [1, 129, 384, 1025, 2048, 4097, 5000, 8192, 40000]
+)
+def test_hc_down_silu_sm100(num_tokens: int) -> None:
+    gen = torch.Generator(device="cuda").manual_seed(num_tokens)
+    kwargs = dict(dtype=torch.bfloat16, device="cuda", generator=gen)
+    xn = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, **kwargs)
+    w_down = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, **kwargs) * HYPER_HIDDEN_SIZE**-0.5
+    # The padding rows must never contribute to the outputs.
+    w_down[LORA_RANK + HC :] = float("nan")
+
+    actual_lr, actual_inj = hc_down_silu_sm100(xn, w_down)
+
+    # fp32 reference: the kernel applies SiLU on the fp32 accumulator, before
+    # the bf16 cast.
+    down_ref = F.linear(xn.float(), w_down.float())
+    lr_ref = down_ref[:, :LORA_RANK] / HC
+    expected_lr = (lr_ref * torch.sigmoid(lr_ref)).bfloat16()
+    expected_inj = down_ref[:, LORA_RANK : LORA_RANK + HC].bfloat16()
+    torch.testing.assert_close(actual_lr, expected_lr, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(actual_inj, expected_inj, atol=1e-2, rtol=1e-2)
 
 
 @requires_hc_up_gate_mix

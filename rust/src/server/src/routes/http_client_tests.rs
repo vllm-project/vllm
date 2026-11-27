@@ -20,7 +20,8 @@ use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
+    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
+    RenderedPrompt, ResolvedParsers,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -161,14 +162,17 @@ impl ChatBackend for FakeChatBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }

@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::multimodal::{
-    MmFeatureSpec, MmField, MmKwargValue, MmKwargsItem,
+    MmFeatureSpec, MmField, MmKwargValue, MmKwargsItem, PlaceholderRange,
 };
+use vllm_engine_core_client::protocol::tensor::WireArrayData;
 
 use crate::error::{
     Error, Result, bail_invalid_preprocessed_multimodal, invalid_preprocessed_multimodal,
@@ -55,7 +56,50 @@ pub(super) fn validate_features(features: &mut [MmFeatureSpec], prompt_len: usiz
     // Mirror the Python frontend (`argsort_mm_positions`): features are
     // ordered by their placeholder position in the prompt.
     features.sort_by_key(|feature| feature.mm_position.offset);
+    validate_overlaps(features)
+}
+
+/// Check that placeholder ranges do not overlap, except that items of
+/// different modalities may share one span when they embed disjoint positions.
+/// Qwen2.5-Omni and Qwen3-Omni place a video and its audio track this way
+/// with `use_audio_in_video`. `features` must be sorted by offset.
+fn validate_overlaps(features: &[MmFeatureSpec]) -> Result<()> {
+    // Every accepted overlap is an identical span, so a feature overlaps an
+    // earlier one exactly when it starts before the end of the current span.
+    let mut span_start = 0;
+    for index in 1..features.len() {
+        let span = &features[span_start].mm_position;
+        let position = &features[index].mm_position;
+        if position.offset >= span.offset + span.length {
+            span_start = index;
+            continue;
+        }
+        let shares_span = position.offset == span.offset && position.length == span.length;
+        if !shares_span
+            || features[span_start..index].iter().any(|shared| {
+                shared.modality == features[index].modality
+                    || (0..position.length)
+                        .any(|i| embeds(&shared.mm_position, i) && embeds(position, i))
+            })
+        {
+            bail_invalid_preprocessed_multimodal!(
+                "placeholder ranges overlap; only items of different modalities may share one \
+                 span, with disjoint is_embed masks"
+            );
+        }
+    }
     Ok(())
+}
+
+/// Whether position `index` of a validated placeholder receives an embedding.
+/// An absent mask means every position does.
+fn embeds(position: &PlaceholderRange, index: usize) -> bool {
+    match position.is_embed.as_ref().map(|mask| &mask.data) {
+        None => true,
+        Some(WireArrayData::RawView(bytes)) => bytes[index] != 0,
+        // `validate_features` rejects masks stored outside the request.
+        Some(WireArrayData::AuxIndex(_)) => true,
+    }
 }
 
 /// Check that the features of each modality batch every kwargs field the
@@ -179,17 +223,101 @@ mod tests {
         MmField::Batched(MmBatchedField { keep_on_cpu: false })
     }
 
+    /// A batched feature of `modality` on `[offset, offset + length)`.
+    fn placed(
+        modality: MmModality,
+        offset: usize,
+        length: usize,
+        is_embed: Option<Vec<bool>>,
+    ) -> MmFeatureSpec {
+        let mut item = feature(offset, batched());
+        item.modality = modality;
+        item.mm_position = PlaceholderRange {
+            offset,
+            length,
+            is_embed: is_embed.map(|mask| WireTensor::from_bool(vec![length], mask).unwrap()),
+        };
+        item
+    }
+
     #[test]
-    fn inline_features_preserve_overlaps_and_stably_sort_prompt_positions() {
-        let info = qwen3_vl_info();
-        let mut a = feature(2, batched());
-        a.mm_position.is_embed = Some(WireTensor::from_bool(vec![2], vec![true, false]).unwrap());
-        let b = feature(1, batched());
-        let mut c = feature(2, batched());
-        c.modality = MmModality::Video;
-        let expected = vec![b.clone(), a.clone(), c.clone()];
-        let features = info.prepare_preprocessed(vec![a, b, c], 4).unwrap();
-        assert_eq!(features, expected);
+    fn inline_features_share_a_span_across_modalities_and_stably_sort_prompt_positions() {
+        // Qwen2.5-Omni `use_audio_in_video`: a video and its audio track on one
+        // span, each embedding its own positions.
+        let video = placed(
+            MmModality::Video,
+            2,
+            4,
+            Some(vec![true, false, true, false]),
+        );
+        let audio = placed(
+            MmModality::Audio,
+            2,
+            4,
+            Some(vec![false, true, false, true]),
+        );
+        let image = placed(MmModality::Image, 0, 2, None);
+        let mut features = vec![video.clone(), audio.clone(), image.clone()];
+        validate_features(&mut features, 6).unwrap();
+        assert_eq!(features, vec![image, video, audio]);
+    }
+
+    #[test]
+    fn inline_features_reject_other_overlaps() {
+        use MmModality::{Audio, Image, Video};
+        let cases = [
+            (
+                "partial",
+                vec![placed(Image, 0, 3, None), placed(Video, 2, 2, None)],
+            ),
+            (
+                "nested",
+                vec![placed(Video, 0, 4, None), placed(Audio, 1, 2, None)],
+            ),
+            (
+                "same offset",
+                vec![
+                    placed(Video, 0, 4, Some(vec![true, false, true, false])),
+                    placed(Audio, 0, 2, Some(vec![false, true])),
+                ],
+            ),
+            (
+                "same modality",
+                vec![
+                    placed(Video, 0, 2, Some(vec![true, false])),
+                    placed(Video, 0, 2, Some(vec![false, true])),
+                ],
+            ),
+            (
+                "intersecting masks",
+                vec![
+                    placed(Video, 0, 2, Some(vec![true, false])),
+                    placed(Audio, 0, 2, Some(vec![true, true])),
+                ],
+            ),
+            (
+                "absent mask",
+                vec![
+                    placed(Video, 0, 2, None),
+                    placed(Audio, 0, 2, Some(vec![false, true])),
+                ],
+            ),
+            (
+                "third item",
+                vec![
+                    placed(Video, 0, 2, Some(vec![true, false])),
+                    placed(Audio, 0, 2, Some(vec![false, true])),
+                    placed(Image, 0, 2, Some(vec![false, true])),
+                ],
+            ),
+        ];
+        for (case, mut features) in cases {
+            let error = validate_features(&mut features, 4).unwrap_err();
+            assert!(
+                matches!(error, Error::InvalidPreprocessedMultimodal { .. }),
+                "{case}: {error:?}"
+            );
+        }
     }
 
     #[test]

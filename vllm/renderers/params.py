@@ -33,6 +33,8 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
+    "prompt_echo_mask",
+    "prompt_special_tokens_mask",
 )
 
 
@@ -524,6 +526,34 @@ class TokenizeParams:
             return slice(-max_length, None)
 
         return slice(0, max_length)
+
+    def _tokenizer_truncation_probe(self, num_tokens: int) -> "TokenizeParams | None":
+        """Params to re-encode a text prompt with one more token of room.
+
+        Without an explicit `truncation_side` the tokenizer truncates by itself,
+        so a prompt cut to `max_length` tokens looks like one that fits exactly.
+        `None` unless `num_tokens == max_length`.
+        """
+        if (
+            not self.needs_detokenization
+            or self.truncation_side is not None
+            or self.truncate_prompt_tokens is None
+        ):
+            return None
+
+        max_length = self.get_encode_kwargs().get("max_length")
+        if num_tokens != max_length:
+            return None
+
+        # At the context limit, `None` makes `get_encode_kwargs` allow one more.
+        max_input_tokens = self.max_input_tokens
+        at_limit = max_input_tokens is not None and max_length >= max_input_tokens
+        return replace(
+            self,
+            truncate_prompt_tokens=None if at_limit else max_length + 1,
+            return_token_offsets=False,
+            needs_detokenization=False,
+        )
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""

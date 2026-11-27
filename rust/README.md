@@ -154,7 +154,8 @@ vLLM it does not look at the weights or the GPU, so pass the engine's dtype
 when they decide it. Set `--max-model-len` to the engine's too: some image
 processors size images to fit the context. Large images make `features` big;
 the generate server may need `VLLM_HTTP_MAX_REQUEST_BODY_SIZE` raised above
-its 32 MiB default to accept them. Set
+its 32 MiB default to accept them; the same limit applies to gRPC request
+messages. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
 be sent to generate. `"mm_payload": "metadata"` drops the processed tensors but
@@ -162,8 +163,9 @@ keeps each item's `keep_on_cpu` fields as `mm_metadata`, for prefill that loads
 the embeddings through the EC connector: generate accepts such features only
 with `ec_transfer_params`, and render returns a 400 if a modality has no such
 field. Pass `--language-model-only` to skip multimodal processing, and set
-`--limit-mm-per-prompt` to the engine's limits so that render rejects the same
-requests.
+`--limit-mm-per-prompt` to the engine's limits so that render enforces the same
+item counts. The `VLLM_MAX_MEDIA_PREPROCESSING_BYTES` setting applies to
+supported Python processors.
 
 Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is
@@ -212,10 +214,16 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
 ```
 
 Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
-`Render.RenderChat` renders a chat request into prompt token IDs plus the
-settings rendering decides (structured-output constraint, reasoning gate,
-preprocessed media), which the client copies into its `vllm.GenerateRequest`
-for `Inference.Generate`. See [`render.proto`](proto/render.proto).
+`Render.RenderChat` accepts a typed chat request; `Render.Render` accepts a raw
+JSON body with `API_CHAT`. The raw RPC's `mm_payload` enum alone controls media
+output: unspecified and `MM_PAYLOAD_TENSORS` include inline tensors;
+`MM_PAYLOAD_NONE` retains hashes and placeholder ranges only. JSON
+`mm_payload` and `return_mm_kwargs` do not select the gRPC output mode.
+
+The response includes prompt token IDs, the structured-output constraint,
+reasoning gate, and preprocessed media.
+See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
+and [`render.proto`](proto/render.proto) for the contract.
 
 ### Example Request
 
