@@ -1014,7 +1014,7 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("enabled", "kwargs", "invalid"),
+    ("enabled", "kwargs", "invalid_at_proxy"),
     [
         (True, {"num_frames": [16]}, True),
         (True, {"videos_kwargs": {"num_frames": [16]}}, True),
@@ -1026,18 +1026,26 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
         (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False),
         (True, {"_epd_video_partition": [0, 2]}, True),
         (False, {"_epd_video_partition": [0, 2]}, True),
+        pytest.param(
+            True, {"second_per_grid_ts": [0.5]}, False, id="encoder-rejects-hy4"
+        ),
     ],
 )
 async def test_per_video_kwargs_http_validation(
-    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid
+    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid_at_proxy
 ):
-    """Reject invalid opted-in requests before ASGI response headers or fan-out."""
+    """Distinguish proxy-side 400s from encoder 400s after SSE starts."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
     expected = b"data: [DONE]\n\n" if stream else b'{"choices": []}'
+    encoder_rejects = "second_per_grid_ts" in kwargs
+    encoder_error = "second_per_grid_ts must match video count"
+    stream_finished = False
 
     async def backend(request):
         stage = request.match_info["stage"]
         seen[stage].append(await request.json())
+        if stage == "encode" and encoder_rejects:
+            return web.json_response({"error": encoder_error}, status=400)
         if stage in ("encode", "prefill"):
             return web.json_response({})
         return web.Response(
@@ -1081,9 +1089,22 @@ async def test_per_video_kwargs_http_validation(
         }
         await proxy.on_startup()
         try:
+
+            async def observe_response(scope, receive, send):
+                async def observe_send(message):
+                    nonlocal stream_finished
+                    if (
+                        scope["path"] == "/v1/chat/completions"
+                        and message["type"] == "http.response.body"
+                    ):
+                        stream_finished |= not message.get("more_body", False)
+                    await send(message)
+
+                await target_app(scope, receive, observe_send)
+
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(
-                    app=target_app, raise_app_exceptions=False
+                    app=observe_response, raise_app_exceptions=False
                 ),
                 base_url="http://proxy",
             ) as client:
@@ -1102,7 +1123,7 @@ async def test_per_video_kwargs_http_validation(
         finally:
             await proxy.on_shutdown()
 
-    if invalid:
+    if invalid_at_proxy:
         assert response.status_code == 400
         detail = response.json()["detail"]
         assert (
@@ -1111,9 +1132,21 @@ async def test_per_video_kwargs_http_validation(
             else "entries, one per video"
         ) in detail
         assert seen == {"encode": [], "prefill": [], "decode": []}
+    elif encoder_rejects:
+        assert len(seen["encode"]) == 2
+        assert seen["prefill"] == seen["decode"] == []
+        if stream:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            assert response.content == b""
+            assert not stream_finished
+        else:
+            assert response.status_code == 400
+            assert encoder_error in response.json()["detail"]
     else:
         assert response.status_code == 200
         assert response.content == expected
+        assert stream_finished
         assert len(seen["encode"]) == 2
         assert len(seen["prefill"]) == len(seen["decode"]) == 1
         for stage in ("prefill", "decode"):
