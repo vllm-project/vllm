@@ -73,10 +73,10 @@ def is_ultraquant_flydsl_available() -> bool:
     return _FLYDSL_AVAILABLE
 
 
+# GQA groups compiled for decode and packed verify. Packed verify is tested for
+# these groups only. 8 is the per-rank group at TP=4 with 32 Q heads and 2 KV
+# heads (each rank 8 Q / 1 KV).
 _ULTRAQUANT_FLYDSL_GQA = (6, 8, 16)
-# Packed verify is compiled and tested for these groups only. 8 is the per-rank
-# group at TP=4 with 32 Q heads and 2 KV heads (each rank 8 Q / 1 KV).
-_ULTRAQUANT_VERIFY_GQA = (6, 8, 16)
 
 
 def ultraquant_flydsl_decode_eligible(
@@ -131,8 +131,6 @@ def _fp4_value_lut(device: torch.device) -> torch.Tensor:
         ).contiguous()
         _FP4_LUT_CACHE[key] = t
     return t
-
-    # Per-device cached qperm head-dim permutation for scaled QK MFMA.
 
 
 # qperm[phys] = the natural head-dim placed at physical operand position phys.
@@ -673,10 +671,10 @@ def flydsl_ultraquant_decode_attention(
     )
     num_verify_tokens = int(num_verify_tokens)
     if num_verify_tokens > 1:
-        if QG not in _ULTRAQUANT_VERIFY_GQA:
+        if QG not in _ULTRAQUANT_FLYDSL_GQA:
             raise ValueError(
                 "UltraQuant verify decode requires GQA "
-                f"{' or '.join(map(str, _ULTRAQUANT_VERIFY_GQA))}, got {QG}"
+                f"{' or '.join(map(str, _ULTRAQUANT_FLYDSL_GQA))}, got {QG}"
             )
         if not 2 <= num_verify_tokens <= 8:
             raise ValueError(
@@ -739,7 +737,7 @@ def flydsl_ultraquant_decode_attention(
     # batch adds resident wavefronts and cuts ITL; at high batch the grid is
     # already full so extra partitions only inflate _reduce_partitions + empty-
     # partition overhead. Measured end-to-end (graphs on, TP=8, uniform 75k,
-    # median ITL vs kv8): cap512 vs cap256 -> C4 +9.0%->+4.9%, C8 +6.6%->+2.5%
+    # median ITL): cap512 vs cap256 -> C4 +9.0%->+4.9%, C8 +6.6%->+2.5%
     # (better), C16 +2.8%->+4.3% (worse). So use 512 at low batch, 256 at high.
     MAX_PARTITIONS = 512 if B <= 8 else 256
     if num_verify_tokens > 1:

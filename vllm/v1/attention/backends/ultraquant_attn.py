@@ -235,7 +235,8 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
     def _decode_slice_max_query_len(self, attn_metadata, num_decodes: int) -> int:
         """Longest query in the verify half of a mixed step.
 
-        KV8 reads this from the CPU query lengths of the decode requests.
+        The UltraQuant backend reads this from the CPU query lengths of the
+        decode requests.
         The kernel then masks each request with ``query_start_loc``, so a
         slice such as ``[2, 4]`` scores every real row. Width 1 stays the
         single-token decode. A width above 8 fails the verify gate and the
