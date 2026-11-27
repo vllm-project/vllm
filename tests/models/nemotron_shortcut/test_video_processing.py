@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
@@ -209,7 +211,7 @@ def test_video_resize_is_independent_of_checkpoint_image_size(
         pixels[0], ((reference - mean) / std).to(pixels[0].dtype), rtol=0, atol=0
     )
     builder = NemotronShortcutDummyInputsBuilder(mm_processor.info)
-    [video] = builder.get_dummy_mm_data(4096, {"video": 1}, {})["video"]
+    [video] = cast(list, builder.get_dummy_mm_data(4096, {"video": 1}, {})["video"])
     assert video[0].shape[:2] == (448, 448)
 
 

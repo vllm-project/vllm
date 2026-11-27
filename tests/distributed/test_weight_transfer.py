@@ -74,6 +74,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 )
 from vllm.distributed.weight_transfer.sparse_disk_engine import (
     SparseDiskTrainerInitInfo,
+    SparseDiskTrainerWeightTransferEngine,
     SparseDiskWeightTransferEngine,
     patch_file,
     save_sparse_patches,
@@ -1549,6 +1550,7 @@ def _sparse_disk(tmp_path, monkeypatch):
     trainer = WeightTransferTrainerFactory.trainer_init(
         SparseDiskTrainerInitInfo(patch_dir=str(patch_dir), rank=0), client=server
     )
+    assert isinstance(trainer, SparseDiskTrainerWeightTransferEngine)
     for patches in _SPARSE_DISK_VERSIONS:
         trainer.publish(patches)
         trainer.send_weights()
