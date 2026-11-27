@@ -85,13 +85,25 @@ except ImportError:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
 if current_platform.is_rocm():
-    from vllm._aiter_ops import is_aiter_found_and_supported
+    from vllm._aiter_ops import (
+        is_aiter_found_and_supported,
+        is_aiter_found_and_supported_on_rdna,
+    )
+    from vllm.platforms.rocm import on_gfx1151, on_gfx1201
+
+    # Only gfx1151 and gfx1201 are validated among the RDNA archs.
+    _AITER_ON_TESTED_RDNA = is_aiter_found_and_supported_on_rdna() and (
+        on_gfx1151() or on_gfx1201()
+    )
 
     if is_aiter_found_and_supported():
         BACKENDS_TO_TEST += [
             AttentionBackendEnum.ROCM_AITER_FA,
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         ]
+    elif _AITER_ON_TESTED_RDNA:
+        # RDNA has aiter's Triton kernels but no CK build, so no ROCM_AITER_FA.
+        BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -2457,7 +2469,7 @@ if current_platform.is_rocm():
         AttentionBackendEnum.TRITON_ATTN,
         "FLEX_ATTENTION_SLOW",
     ]
-    if is_aiter_found_and_supported():
+    if is_aiter_found_and_supported() or _AITER_ON_TESTED_RDNA:
         SLIDING_WINDOW_BACKENDS_TO_TEST.append(
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
         )
