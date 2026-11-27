@@ -449,6 +449,7 @@ class HiSparseConnectorWorker:
             resident_caches.append(cache.view.cache)
         self.host_caches = host_caches
         self.resident_caches = tuple(resident_caches)
+        # The backing tensors and source groups are fixed for this binding.
         self._row_dma_geometry_layers: tuple[int, ...] = ()
         self._row_dma_geometry: _RowDMAGeometry | None = None
 

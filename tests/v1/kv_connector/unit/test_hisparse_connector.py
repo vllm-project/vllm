@@ -79,24 +79,36 @@ def test_batched_row_dma_descriptors_copy_strided_pages():
     )
     assert descriptors.sizes[-1].item() == -1
 
-    expected_sizes = (counts[:, None] * geometry.row_bytes).ravel()
-    np.testing.assert_array_equal(descriptors.sizes_np[:8], expected_sizes)
-    for src, dst, size in zip(
-        descriptors.src[:8].tolist(),
-        descriptors.dst[:8].tolist(),
-        descriptors.sizes[:8].tolist(),
-        strict=True,
+    expected_host = [torch.full_like(tensor, -1) for tensor in host]
+    expected_descriptors = []
+    for source_by_group, dst, count in zip(
+        source_starts, destinations, counts, strict=True
     ):
-        ctypes.memmove(dst, src, size)
+        for i, source_group in enumerate(group_indices):
+            page, offset = divmod(int(source_by_group[source_group]), block_size)
+            rows = resident[i][page, offset : offset + count]
+            expected_host[i][dst : dst + count].copy_(rows)
+            expected_descriptors.append(
+                (
+                    rows.data_ptr(),
+                    host[i][dst].data_ptr(),
+                    rows.numel() * rows.element_size(),
+                )
+            )
 
-    for i, source_group in enumerate(group_indices):
-        expected = torch.full_like(host[i], -1)
-        for start, dst, count in zip(
-            source_starts[:, source_group], destinations, counts, strict=True
-        ):
-            page, offset = divmod(int(start), block_size)
-            expected[dst : dst + count] = resident[i][page, offset : offset + count]
-        torch.testing.assert_close(host[i], expected, rtol=0, atol=0)
+    actual_descriptors = list(
+        zip(
+            descriptors.src[:8].tolist(),
+            descriptors.dst[:8].tolist(),
+            descriptors.sizes[:8].tolist(),
+            strict=True,
+        )
+    )
+    assert actual_descriptors == expected_descriptors
+    for src, dst, size in actual_descriptors:
+        ctypes.memmove(dst, src, size)
+    for tensor, expected in zip(host, expected_host, strict=True):
+        torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("nested", [False, True])
