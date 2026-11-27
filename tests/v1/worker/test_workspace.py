@@ -110,6 +110,35 @@ def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     assert grown.numel() == 512
 
 
+def test_workspace_capacity_respects_lock_alignment_and_lane() -> None:
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    one_view = ((1,), torch.float32)
+    two_views = (one_view, one_view)
+    assert manager.can_allocate(*two_views)
+    (target,) = manager.get_simultaneous(one_view)
+    with workspace.use_workspace_lane(1):
+        draft = manager.get_simultaneous(*two_views)
+    manager.lock()
+
+    assert manager.can_allocate(one_view)
+    # Each four-byte view needs a separate 256-byte aligned span.
+    assert not manager.can_allocate(*two_views)
+    with workspace.use_workspace_lane(1):
+        assert manager.can_allocate(*two_views)
+        assert not manager.can_allocate(((513,), torch.uint8))
+        assert manager.get_simultaneous(*two_views)[0].data_ptr() == draft[0].data_ptr()
+    assert manager.get_simultaneous(one_view)[0].data_ptr() == target.data_ptr()
+    with (
+        workspace.use_workspace_lane(2),
+        pytest.raises(RuntimeError, match="is not configured"),
+    ):
+        manager.can_allocate(one_view)
+
+    manager.unlock()
+    assert manager.can_allocate(*two_views)
+    assert manager.get_simultaneous(one_view)[0].data_ptr() == target.data_ptr()
+
+
 def test_workspace_lane_validation(monkeypatch) -> None:
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)

@@ -195,6 +195,24 @@ class WorkspaceManager:
             )
         return workspace
 
+    def can_allocate(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> bool:
+        """Whether this slot can serve a scratch request under the current lock.
+
+        An unlocked workspace may grow. A locked workspace must already cover
+        every aligned view, using the same layout as `get_simultaneous`.
+        This check does not allocate or invalidate retained scratch.
+        """
+        workspace = self._current_workspaces[self._get_workspace_id()]
+        required_bytes = sum(
+            round_up(_compute_bytes(shape, dtype), _VIEW_ALIGNMENT)
+            for shape, dtype in shapes_and_dtypes
+        )
+        return not self._locked or required_bytes <= self._workspace_size_bytes(
+            workspace
+        )
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:

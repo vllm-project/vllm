@@ -10,6 +10,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
@@ -103,20 +104,28 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        ctx = vllm_config.compilation_config.static_forward_context
+        layers: list[MLAAttention] = []
+        for name in layer_names:
+            layer = ctx[name]
+            assert isinstance(layer, MLAAttention), (
+                f"Triton MLA layer {name!r} must be an MLAAttention, "
+                f"got {type(layer).__name__}."
+            )
+            layers.append(layer)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # DCP local sequence lengths are not advanced between draft steps.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
         # forward_mqa flattens each request's block to query_len decode rows,
         # and query_len is bounded by the reorder threshold. DCP all-gathers
         # the query heads before forward_mqa.
-        ctx = self.compilation_config.static_forward_context
         _reserve_attn_logits_workspace(
             max(
                 _attended_kv_len(
                     self.model_config.max_model_len,
-                    getattr(ctx[name], "sliding_window", None),
+                    layer.sliding_window,
                 )
-                for name in layer_names
+                for layer in layers
             ),
             vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
             self.num_heads * self.dcp_world_size,
@@ -381,15 +390,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
         attn_logits: torch.Tensor | None = None
         if is_workspace_manager_initialized():
-            try:
-                (attn_logits,) = current_workspace_manager().get_simultaneous(
+            manager = current_workspace_manager()
+            if current_workspace_lane() == 0 or manager.can_allocate(
+                (logits_shape, torch.float32)
+            ):
+                (attn_logits,) = manager.get_simultaneous(
                     (logits_shape, torch.float32),
                 )
-            except AssertionError:
-                # The DSpark draft lane is sized only by the draft's cudagraph
-                # captures: its builder reserves in the default lane.
-                if current_workspace_lane() == 0:
-                    raise
         if attn_logits is None:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q.device

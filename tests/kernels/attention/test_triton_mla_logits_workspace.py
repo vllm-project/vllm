@@ -18,10 +18,22 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import CPUSDPAMLAPrefillBackend
 from vllm.v1.attention.backends.mla.triton_mla import (
+    TritonMLABackend,
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
 )
@@ -56,6 +68,25 @@ def _logits_shape(num_kv_splits: int) -> tuple[int, ...]:
 
 
 def _vllm_config(layer_windows: dict[str, int | None]):
+    layer_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    with set_current_vllm_config(layer_config), torch.device("cpu"):
+        for name, window in layer_windows.items():
+            MLAAttention(
+                num_heads=NUM_HEADS,
+                scale=192**-0.5,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+                q_lora_rank=None,
+                kv_lora_rank=KV_LORA_RANK,
+                kv_b_proj=ColumnParallelLinear(
+                    KV_LORA_RANK, NUM_HEADS * 256, bias=False, disable_tp=True
+                ),
+                prefix=name,
+                attn_backend=TritonMLABackend,
+                sliding_window=window,
+                prefill_backend_cls=CPUSDPAMLAPrefillBackend,
+            )
     return SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=MAX_MODEL_LEN),
         scheduler_config=SimpleNamespace(max_num_seqs=MAX_NUM_SEQS),
@@ -65,12 +96,7 @@ def _vllm_config(layer_windows: dict[str, int | None]):
             max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
-        compilation_config=SimpleNamespace(
-            static_forward_context={
-                name: SimpleNamespace(sliding_window=window)
-                for name, window in layer_windows.items()
-            }
-        ),
+        compilation_config=layer_config.compilation_config,
     )
 
 
@@ -107,11 +133,10 @@ def _workspace_requests() -> Iterator[list[tuple[int, ...]]]:
         return tuple(torch.empty(0) for _ in shapes_and_dtypes)
 
     manager = SimpleNamespace(get_simultaneous=get_simultaneous)
-    platform = SimpleNamespace(num_compute_units=lambda: SM_COUNT)
     with (
         patch(f"{MODULE}.is_workspace_manager_initialized", return_value=True),
         patch(f"{MODULE}.current_workspace_manager", return_value=manager),
-        patch(f"{MODULE}.current_platform", platform),
+        patch(f"{MODULE}.current_platform.num_compute_units", return_value=SM_COUNT),
     ):
         yield requests
 
@@ -192,6 +217,29 @@ def test_undersized_draft_lane_allocates_the_logits():
     assert attn_logits.shape == _logits_shape(DRAFT_WINDOW_SPLITS)
 
 
+@pytest.fixture
+def layer_parallel_state(tmp_path):
+    if model_parallel_is_initialized():
+        yield
+        return
+    created_world = not torch.distributed.is_initialized()
+    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
+        try:
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{tmp_path / 'dist'}",
+                local_rank=0,
+                backend="gloo",
+            )
+            initialize_model_parallel(backend="gloo")
+            yield
+        finally:
+            destroy_model_parallel()
+            if created_world:
+                destroy_distributed_environment()
+
+
 @pytest.mark.parametrize(
     "layer_windows, num_kv_splits",
     [
@@ -200,7 +248,9 @@ def test_undersized_draft_lane_allocates_the_logits():
         ({"draft.0": DRAFT_WINDOW, "draft.1": None}, MAX_MODEL_LEN_SPLITS),
     ],
 )
-def test_builder_reserves_for_its_widest_layer(layer_windows, num_kv_splits):
+def test_builder_reserves_for_its_widest_layer(
+    layer_windows, num_kv_splits, layer_parallel_state
+):
     """Mixed finite windows use their maximum; full attention uses max_model_len."""
     with (
         _workspace_requests() as requests,
@@ -211,3 +261,10 @@ def test_builder_reserves_for_its_widest_layer(layer_windows, num_kv_splits):
         )
 
     assert requests == [_logits_shape(num_kv_splits)]
+
+
+def test_builder_rejects_non_mla_layer_before_reading_metadata():
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config.static_forward_context["not_mla"] = torch.nn.Identity()
+    with pytest.raises(AssertionError, match="not_mla.*MLAAttention.*Identity"):
+        TritonMLAMetadataBuilder(None, ["not_mla"], config, torch.device("cpu"))
