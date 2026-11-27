@@ -382,7 +382,7 @@ def test_decode_metadata_matches_torch_path(monkeypatch, cls, ratio, adaptive):
     monkeypatch.setattr(module, "rocm_mxfp4_decode_schedule_words", lambda *a: 4)
     monkeypatch.setattr(module, "build_rocm_mxfp4_decode_schedule", lambda *a: None)
     config = create_vllm_config(
-        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        model_name="vllm/tiny-random-LlamaForCausalLM",
         max_model_len=8192,
         max_num_seqs=64,
         max_num_batched_tokens=2048,

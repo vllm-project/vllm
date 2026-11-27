@@ -39,7 +39,7 @@ use self::types::{
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
+use crate::error::{ApiError, engine_error, server_error, text_request_error};
 use crate::routes::openai::utils::choices::{
     ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
 };
@@ -63,7 +63,8 @@ pub async fn generate(
     body: Result<Json<GenerateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(mut body) = body?;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context =
+        resolve_request_context(&headers, "generate-tokens-", body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mut media = MultimodalInput::default();
@@ -123,7 +124,7 @@ pub async fn generate(
     }
     .instrument(request_span.clone())
     .await
-    .map_err(|error| text_submit_error("failed to submit raw generate request", error))?;
+    .map_err(|error| text_request_error("failed to submit raw generate request", error))?;
 
     if stream {
         let chunk_streams = text_streams
@@ -162,12 +163,7 @@ pub async fn generate(
     )
     .instrument(request_span.clone())
     .await
-    .map_err(|error| {
-        server_error!(
-            "failed to collect raw generate response: {}",
-            error.to_report_string()
-        )
-    })?;
+    .map_err(|error| text_request_error("failed to collect raw generate response", error))?;
 
     // Inside the request span, so the logs it emits carry the request ID.
     let responses = request_span.in_scope(|| {
@@ -286,7 +282,7 @@ async fn generate_chunk_stream(
                     error = %error.as_report(),
                     "raw generate stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(text_request_error("raw generate stream failed", error));
             }
         };
         let SampledDelta {

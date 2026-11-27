@@ -123,11 +123,15 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
                 "omit speculative_config.kv_cache_dtype to inherit the target"
             )
         kv_transfer = vllm_config.kv_transfer_config
-        if (
-            kv_transfer is not None
-            and kv_transfer.kv_connector != "DecodeBenchConnector"
+        if kv_transfer is not None and kv_transfer.kv_connector not in (
+            "DecodeBenchConnector",
+            "NixlConnector",
+            "MooncakeConnector",
         ):
-            raise ValueError("DFly does not support PD disaggregation")
+            raise ValueError(
+                "DFly supports PD disaggregation only with NixlConnector or "
+                "MooncakeConnector"
+            )
         if (
             vllm_config.lora_config is not None
             or vllm_config.parallel_config.use_ubatching
