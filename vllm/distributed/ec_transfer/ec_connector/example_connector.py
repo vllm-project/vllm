@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import safetensors
 
 from vllm.config import VllmConfig
@@ -24,6 +26,12 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _uses_legacy_cache_path(identifier: str) -> bool:
+    return re.fullmatch(
+        r"[a-z0-9_-]{1,128}", identifier
+    ) is not None and not identifier.startswith("id-")
 
 
 @dataclass(slots=True)
@@ -99,7 +107,9 @@ class ECExampleConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            filename = self._generate_filename_debug(mm_data.mm_hash)
+            filename = self._generate_filename_debug(
+                mm_data.mm_hash, create_folder=False
+            )
             with gpu_sync_allowed():
                 ec_cache = safetensors.torch.load_file(filename, device=device)[
                     "ec_cache"
@@ -123,7 +133,11 @@ class ECExampleConnector(ECConnectorBase):
         # Return if it is PD Instance
         if not self.is_producer:
             return
-        filename = self._generate_filename_debug(mm_hash)
+        try:
+            filename = self._generate_filename_debug(mm_hash)
+        except ValueError:
+            logger.warning("Skipping encoder cache save for unsafe mm_hash %r", mm_hash)
+            return
         ec_cache = encoder_cache[mm_hash]
         with gpu_sync_allowed():
             tensors = {"ec_cache": ec_cache.detach().cpu()}
@@ -143,7 +157,13 @@ class ECExampleConnector(ECConnectorBase):
             Bool indicate that media exists in cache or not
 
         """
-        return self._found_match_for_mm_data(identifier)
+        try:
+            return self._found_match_for_mm_data(identifier)
+        except ValueError:
+            logger.warning(
+                "Skipping encoder cache lookup for unsafe mm_hash %r", identifier
+            )
+            return False
 
     def update_state_after_alloc(
         self,
@@ -214,7 +234,15 @@ class ECExampleConnector(ECConnectorBase):
         If `create_folder` is True (default) the directory is created
         recursively the first time it is needed.
         """
-        foldername = os.path.join(self._storage_path, mm_hash)
+        storage_root = os.path.realpath(self._storage_path)
+        if _uses_legacy_cache_path(mm_hash):
+            cache_key = mm_hash
+        else:
+            digest = hashlib.sha256(mm_hash.encode("utf-8", "surrogatepass"))
+            cache_key = "id-" + digest.hexdigest()
+        foldername = os.path.realpath(os.path.join(storage_root, cache_key))
+        if os.path.commonpath((storage_root, foldername)) != storage_root:
+            raise ValueError("Generated encoder-cache path escapes shared_storage_path")
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
         return foldername
@@ -228,4 +256,11 @@ class ECExampleConnector(ECConnectorBase):
         If `create_folder` is True (default) the parent directory is created.
         """
         foldername = self._generate_foldername_debug(mm_hash, create_folder)
-        return os.path.join(foldername, "encoder_cache.safetensors")
+        # Old servers could create encoder_cache.safetensors in any directory.
+        # Use a separate filename for the mapped namespace during upgrades.
+        filename = (
+            "encoder_cache.safetensors"
+            if _uses_legacy_cache_path(mm_hash)
+            else "encoder_cache.v2.safetensors"
+        )
+        return os.path.join(foldername, filename)

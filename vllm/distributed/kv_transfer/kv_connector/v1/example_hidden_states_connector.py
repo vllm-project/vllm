@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import fcntl
+import hashlib
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -498,9 +499,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Resolve save paths for new requests and tell the worker so it can
         # pre-create lock files before the client receives the output path.
         for new_req in scheduler_output.scheduled_new_reqs:
-            default_path = os.path.join(
-                self._storage_path, f"{new_req.req_id}.safetensors"
-            )
+            default_path = self._generate_default_hidden_states_path(new_req.req_id)
             kv_params = (
                 new_req.sampling_params.extra_args.get("kv_transfer_params")
                 if new_req.sampling_params and new_req.sampling_params.extra_args
@@ -520,6 +519,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             meta.new_req_filenames[new_req.req_id] = filename
 
         return meta
+
+    def _generate_default_hidden_states_path(self, req_id: str) -> str:
+        storage_root = os.path.realpath(self._storage_path)
+        file_id = hashlib.sha256(req_id.encode("utf-8", "surrogatepass")).hexdigest()
+        filename = os.path.realpath(
+            os.path.join(storage_root, f"{file_id}.safetensors")
+        )
+        if os.path.commonpath((storage_root, filename)) != storage_root:
+            raise ValueError("Generated hidden-state path escapes shared_storage_path")
+        return filename
 
     def request_finished(
         self,
