@@ -287,14 +287,14 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
                       : 0.0f;
   }
 
+  float2 const outputScale2 = make_float2(outputScale, outputScale);
+
   // Convert the input to float.
   float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    fp2Vals[i] = cast_to_float2(vec.elts[i]);
-    fp2Vals[i].x *= outputScale;
-    fp2Vals[i].y *= outputScale;
+    fp2Vals[i] = __fmul2_rn(cast_to_float2(vec.elts[i]), outputScale2);
   }
 
   // Convert to e2m1 values.
