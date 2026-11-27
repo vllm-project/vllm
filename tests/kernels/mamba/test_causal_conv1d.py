@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from tests.kernels.mamba.utils import record_triton_compiles
+from tests.utils import create_new_process_for_each_test
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -489,3 +491,53 @@ def _create_ragged_varlen_ref_outs(
             max_query_len=max_query_len,
         )
         yield out_ref
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton JIT on CUDA")
+@create_new_process_for_each_test("spawn")
+def test_conv1d_update_compiles_once_for_graph_and_eager_state_indices():
+    """CUDA-graph batches slice the builder's `(rows, 1 + num_spec)` state
+    index buffer, eager batches a one-slot block-table gather. An eager batch
+    must reuse the kernel a graph batch compiled, or the first one compiles
+    during inference. The conv states are views into padded cache pages, as the
+    mixer reads them. A fresh process keeps other tests' compiles out of the
+    JIT caches."""
+    set_random_seed(0)
+    dim, width, num_spec = 256, 4, 3
+    query_len, state_len = 1 + num_spec, width - 1 + num_spec
+    dtype = torch.bfloat16
+    pages = torch.randn(10, state_len * dim + 64, device=DEVICE, dtype=dtype)
+    conv_state = pages[:, : state_len * dim].view(10, state_len, dim).transpose(1, 2)
+    weight = torch.randn(dim, width, device=DEVICE, dtype=dtype)
+    bias = torch.randn(dim, device=DEVICE, dtype=dtype)
+
+    def decode(state_indices):
+        rows = state_indices.size(0)
+        causal_conv1d_update(
+            torch.randn(rows * query_len, dim, device=DEVICE, dtype=dtype),
+            conv_state,
+            weight,
+            bias,
+            "silu",
+            conv_state_indices=state_indices,
+            num_accepted_tokens=torch.ones(rows, device=DEVICE).int(),
+            query_start_loc=torch.arange(
+                0, rows * query_len + 1, query_len, device=DEVICE
+            ).int(),
+            max_query_len=query_len,
+        )
+
+    # Two decodes padded to four rows of the graph buffer.
+    graph_indices = torch.full(
+        (8, query_len), NULL_BLOCK_ID, dtype=torch.int32, device=DEVICE
+    )
+    graph_indices[:2, 0] = torch.tensor([5, 9], device=DEVICE)
+    decode(graph_indices[:4])
+    torch.accelerator.synchronize()
+
+    with record_triton_compiles() as compiled:
+        decode(torch.tensor([[3], [6]], device=DEVICE).int())
+        decode(torch.tensor([[3], [6], [7]], device=DEVICE).int())
+        torch.accelerator.synchronize()
+
+    assert not compiled, f"Triton compiled for an eager batch: {compiled}"
