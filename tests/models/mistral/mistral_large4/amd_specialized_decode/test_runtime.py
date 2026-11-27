@@ -71,12 +71,6 @@ def vllm_config(**overrides):
     return cfg
 
 
-@pytest.fixture(autouse=True)
-def a4w4(monkeypatch):
-    monkeypatch.setenv("VLLM_FP8_MOE_REQUANT", "mxfp4")
-    monkeypatch.setenv("VLLM_FP8_MOE_REQUANT_ACT", "a4w4")
-
-
 def test_off_by_default():
     assert specialized_decode_config(vllm_config(additional_config={})) is None
     assert specialized_decode_config(vllm_config(additional_config=None)) is None
@@ -92,8 +86,7 @@ def test_switches():
         )
 
 
-def test_refusal_lists_every_reason(monkeypatch):
-    monkeypatch.setenv("VLLM_FP8_MOE_REQUANT_ACT", "a8w4")
+def test_refusal_lists_every_reason():
     cfg = vllm_config(**{
         "parallel_config.tensor_parallel_size": 8,
         "cache_config.cache_dtype": "fp8_ds_mla",
@@ -104,7 +97,6 @@ def test_refusal_lists_every_reason(monkeypatch):
     msg = str(err.value)
     for part in (
         "tensor parallel size 4", "bf16 or fp8 (e4m3) KV cache", "speculative decoding",
-        "a4w4",
     ):  # fmt: skip
         assert part in msg, msg
 

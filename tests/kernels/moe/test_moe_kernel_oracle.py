@@ -10,6 +10,7 @@ No MoE kernel is launched and nothing is platform specific: kernel probing and
 prepare/finalize construction are stubbed out.
 """
 
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -18,8 +19,14 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.quantization.utils import quant_config_args
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.config.model import ModelConfig
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    QuantSpec,
+    layer_target_spec_scope,
+)
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -63,8 +70,12 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    _ALWAYS_BF16_BOUND,
     Mxfp4MoeBackend,
     Mxfp4MoEKernelOracle,
+    _filter_by_activation,
+    _serves_requested_activation,
+    _set_aiter_bf16_fp8_moe_bound,
     make_mxfp4_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
@@ -104,6 +115,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8Dynamic32Sym,
     kInt8DynamicTokenSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -865,6 +878,124 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     executed = HummingGroupedExperts.executed_activation_key
     assert executed(kInt4Static, kFp8DynamicTokenSym) == kFp8DynamicTokenSym
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
+
+
+_NO_ACTIVATION_BOUND = _ALWAYS_BF16_BOUND
+
+
+@pytest.fixture(autouse=True)
+def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
+    """The oracle sets AITER_BF16_FP8_MOE_BOUND, a process-wide variable, at backend
+    selection: start every test from AITER's default and restore it afterwards."""
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+
+
+_MXFP8_MOE = {"moe": {"weight": "mxfp4", "activation": "mxfp8"}}
+_NULL_MOE = {"moe": {"weight": "mxfp4", "activation": None}}
+
+
+@pytest.mark.parametrize(
+    "config, layer_spec, strict, expected_bound",
+    [
+        # From `quantization_config.moe`: MXFP8 -> always fp8, null -> always bf16.
+        pytest.param(_MXFP8_MOE, None, "0", "0", id="config-mxfp8"),
+        pytest.param(_NULL_MOE, None, "0", _NO_ACTIVATION_BOUND, id="config-null"),
+        # Other requests keep the previous behavior (MXFP8 activations), unless
+        # strict mode forbids adding activation quantization to them.
+        pytest.param({"moe": "mxfp4"}, None, "0", "0", id="config-unset"),
+        pytest.param(
+            {"moe": "mxfp4"}, None, "1", _NO_ACTIVATION_BOUND, id="config-unset-strict"
+        ),
+        pytest.param(_MXFP8_MOE, None, "1", "0", id="config-mxfp8-strict"),
+        # The layer's `targets` spec wins over the global `quantization_config.moe`,
+        # which a `targets` config leaves unset.
+        pytest.param(
+            {"targets": {"re:.*experts": "mxfp4"}},
+            QuantSpec(weight=kMxfp4Static, activation=kMxfp8Dynamic),
+            "0",
+            "0",
+            id="layer-mxfp8",
+        ),
+        pytest.param(
+            {"targets": {"re:.*experts": "mxfp4"}},
+            QuantSpec(weight=kMxfp4Static, activation=None),
+            "0",
+            _NO_ACTIVATION_BOUND,
+            id="layer-null",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
+    config, layer_spec, strict, expected_bound, default_vllm_config, monkeypatch
+) -> None:
+    """AITER computes with bf16 activations below AITER_BF16_FP8_MOE_BOUND tokens
+    and MXFP8 ones above it."""
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.model_config.quantization_config = quant_config_args(**config)
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
+    with layer_target_spec_scope(layer_spec):
+        _set_aiter_bf16_fp8_moe_bound()
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
+
+
+@pytest.mark.skip_global_cleanup
+def test_aiter_activation_bound_keeps_a_bf16_request(monkeypatch) -> None:
+    """The bound is process-wide: a layer with `activation: null` is not overridden
+    by a layer built later."""
+    for activation, expected_bound in (
+        (None, _NO_ACTIVATION_BOUND),
+        (kMxfp8Dynamic, _NO_ACTIVATION_BOUND),
+    ):
+        spec = QuantSpec(weight=kMxfp4Static, activation=activation)
+        with layer_target_spec_scope(spec):
+            _set_aiter_bf16_fp8_moe_bound()
+        assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
+
+
+@pytest.mark.parametrize(
+    "backend, expected_bound",
+    [
+        pytest.param(Mxfp4MoeBackend.AITER_MXFP4_BF16, "0", id="aiter_mxfp4_bf16"),
+        pytest.param(Mxfp4MoeBackend.TRITON, "256", id="other_backend"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v4_selection_sets_the_aiter_activation_bound(
+    backend, expected_bound, monkeypatch
+) -> None:
+    """The DeepSeek-V4 selector does not go through `select_mxfp4_moe_backend`: it
+    must set the AITER_MXFP4_BF16 activation bound itself."""
+    monkeypatch.setattr(
+        mxfp4_oracle,
+        "_select_deepseek_v4_mxfp4_moe_backend",
+        lambda config: (backend, None),
+    )
+    mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(None)
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+@pytest.mark.parametrize("gfx950", [True, False])
+@pytest.mark.parametrize("strict", ["0", "1"])
+def test_aiter_mxfp4_bf16_serves_mxfp8_only_on_gfx950(
+    gfx950, strict, default_vllm_config, monkeypatch
+) -> None:
+    """`AITER_MXFP4_BF16` runs MXFP8 activations on gfx950 only; elsewhere it is
+    a bf16 fallback, which VLLM_STRICT_QUANT_SCHEME forbids."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: gfx950)
+    backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    assert _serves_requested_activation(backend, kMxfp8Dynamic) is gfx950
+    assert not _serves_requested_activation(backend, kMxfp4Dynamic)
+    assert not _serves_requested_activation(backend, None)
+
+    candidates = [backend, Mxfp4MoeBackend.AITER_MXFP4_MXFP4]
+    selected = _filter_by_activation(candidates, kMxfp8Dynamic)
+    assert (backend in selected) is (gfx950 or strict == "0")
+    if gfx950:
+        # Served as requested: ahead of the non-matching backend.
+        assert selected[0] == backend
 
 
 def test_hpc_clamp_rejected_during_backend_selection():

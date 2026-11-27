@@ -167,6 +167,24 @@ def maybe_download_from_modelscope(
     return None
 
 
+def _deprecated_env_online_args(checkpoint_config: QuantizationConfig):
+    """`--quantization-config` equivalent of the deprecated
+    `VLLM_FP8_MOE_REQUANT` env vars (block-FP8 checkpoints on ROCm)."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    if (
+        isinstance(checkpoint_config, Fp8Config)
+        and checkpoint_config.weight_block_size is not None
+        and current_platform.is_rocm()
+    ):
+        from vllm.model_executor.layers.quantization.online.legacy_env import (
+            fp8_moe_requant_args,
+        )
+
+        return fp8_moe_requant_args()
+    return None
+
+
 # TODO(woosuk): Move this to other place.
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
@@ -195,7 +213,17 @@ def get_quant_config(
     def maybe_compose_online_quantization(
         checkpoint_config: QuantizationConfig,
     ) -> QuantizationConfig:
+        if online_args is not None and envs.VLLM_FP8_MOE_REQUANT == "mxfp4":
+            raise ValueError(
+                "VLLM_FP8_MOE_REQUANT (deprecated) and --quantization-config "
+                "cannot be used together. Remove VLLM_FP8_MOE_REQUANT."
+            )
         if online_args is None:
+            env_args = _deprecated_env_online_args(checkpoint_config)
+            if env_args is not None:
+                checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+                    env_args
+                )
             return checkpoint_config
         assert isinstance(online_args, QuantizationConfigArgs)
 

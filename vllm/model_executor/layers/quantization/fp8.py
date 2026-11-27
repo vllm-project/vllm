@@ -201,16 +201,6 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
-            if (
-                envs.VLLM_FP8_MOE_REQUANT == "mxfp4"
-                and self.weight_block_size is not None
-                and current_platform.is_rocm()
-            ):
-                from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
-                    Fp8BlockExpertsAsMxfp4FusedMoE,
-                )
-
-                return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)

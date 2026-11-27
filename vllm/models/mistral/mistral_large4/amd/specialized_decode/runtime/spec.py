@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 
 from vllm.config import CompilationMode, VllmConfig
@@ -88,15 +87,6 @@ class DecodeConfig:
         aux = config.aux_output_config
         if getattr(aux, "enable_return_routed_experts", False):
             reasons.append("does not support routed-expert capture")
-        quant = config.model_config.quantization
-        if quant == "fp8" and (
-            os.environ.get("VLLM_FP8_MOE_REQUANT", "").lower() != "mxfp4"
-            or os.environ.get("VLLM_FP8_MOE_REQUANT_ACT", "a8w4").lower() != "a4w4"
-        ):
-            reasons.append(
-                "requires MXFP4 a4w4 routed experts (VLLM_FP8_MOE_REQUANT=mxfp4 "
-                "VLLM_FP8_MOE_REQUANT_ACT=a4w4)"
-            )
         return reasons
 
 

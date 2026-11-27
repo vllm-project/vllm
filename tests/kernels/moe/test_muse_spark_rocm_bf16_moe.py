@@ -11,7 +11,6 @@ import torch
 
 import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
 from tests.kernels.moe.muse_spark_utils import run_moe
-from vllm import envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
@@ -41,6 +40,9 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
@@ -51,6 +53,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_processing,
 )
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
@@ -64,8 +69,6 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkTritonExperts,
     MuseSparkUnquantizedFusedMoE,
     MuseSparkUnquantizedMoEQuantConfig,
-    _online_mxfp4_applies,
-    _quantize_experts_to_mxfp4,
     validate_bf16_deployment,
     validate_fp8_deployment,
     validate_mxfp4_deployment,
@@ -1010,36 +1013,6 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     assert torch.count_nonzero(actual[3:]) == 0
 
 
-@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
-def test_online_mxfp4_quantizer_matches_the_quark_export_layout() -> None:
-    """Packed nibbles + E8M0 block scales, and a bounded rounding error."""
-    torch.manual_seed(0)
-    weight = torch.randn(5, 12, 64, device="cuda", dtype=torch.bfloat16) * 0.02
-    packed, scales = _quantize_experts_to_mxfp4(weight, experts_per_chunk=2)
-
-    assert packed.shape == (5, 12, 32) and packed.dtype == torch.uint8
-    assert scales.shape == (5, 12, 2) and scales.dtype == torch.uint8
-
-    # E2M1 value grid, low nibble first, scaled by 2**(e8m0 - 127) per block.
-    grid = torch.tensor(
-        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
-        device="cuda",
-    )
-    nibbles = torch.stack((packed & 0xF, packed >> 4), dim=-1).flatten(-2).long()
-    block_scale = torch.pow(2.0, scales.float() - 127).repeat_interleave(32, dim=-1)
-    dequantized = grid[nibbles] * block_scale
-    reference = weight.float()
-    error = (dequantized - reference).abs().max(dim=-1).values
-    # Rounding to the grid is off by at most half the widest step (2 * scale).
-    assert torch.all(error <= block_scale.amax(dim=-1) * 1.0 + 1e-6)
-    assert (
-        torch.nn.functional.cosine_similarity(
-            dequantized.flatten(), reference.flatten(), dim=0
-        )
-        > 0.98
-    )
-
-
 def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
     monkeypatch,
 ) -> None:
@@ -1051,14 +1024,30 @@ def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
     monkeypatch.setattr(amd_muse_moe_runner, "get_current_vllm_config", lambda: config)
     prefix = "model.layers.{}.feed_forward.experts"
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "")
-    assert not _online_mxfp4_applies(prefix.format(5))
+    def fake_init(self, *, moe, activation_quant_key):
+        self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
-    assert _online_mxfp4_applies(prefix.format(5))
-    assert not _online_mxfp4_applies(prefix.format(0))
-    assert not _online_mxfp4_applies(prefix.format(61))
-    assert issubclass(MuseSparkOnlineMXFP4FusedMoE, MuseSparkQuarkOCPMXFusedMoE)
+    monkeypatch.setattr(Mxfp4OnlineMoEMethod, "__init__", fake_init)
+    experts = object.__new__(MuseSparkRoutedExperts)
+    moe = _moe_config(parallel_config=_parallel_config(tp_size=8))
+    monkeypatch.delenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", raising=False)
+    assert type(experts._get_quant_method(prefix.format(5), None, moe)) is (
+        MuseSparkUnquantizedFusedMoE
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
+    for layer, expected in (
+        (0, MuseSparkUnquantizedFusedMoE),
+        (5, MuseSparkOnlineMXFP4FusedMoE),
+        (61, MuseSparkUnquantizedFusedMoE),
+    ):
+        assert type(experts._get_quant_method(prefix.format(layer), None, moe)) is (
+            expected
+        )
+
+    online = OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
+    with pytest.raises(ValueError, match="cannot be used together"):
+        experts._get_quant_method(prefix.format(5), online, moe)
 
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
@@ -1195,7 +1184,7 @@ def test_mxfp4_target_rounds_a_bf16_edge_layer(
     ]
     routed = runner.routed_experts
     assert len(list(routed.load_weights(checkpoint))) == len(checkpoint)
-    routed.quant_method.process_weights_after_loading(routed)
+    finalize_layerwise_processing(runner, muse_vllm_config.model_config)
     x = torch.randn(16, 256, dtype=torch.bfloat16, device="cuda")
     logits = torch.randn(16, 8, device="cuda")
     out = run_moe(runner, muse_vllm_config, x, logits)

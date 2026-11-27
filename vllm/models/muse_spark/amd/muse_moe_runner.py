@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm MoE implementation for Muse Spark checkpoints."""
 
-import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -49,23 +48,23 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.online.legacy_env import (
+    muse_moe_online_quant_args,
+    reject_muse_env_with_quantization_config,
+)
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
     QuarkW8A8Fp8MoEMethod,
-)
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    _ACTIVATION_QUANT_KEY_MAP,
-    _WEIGHT_QUANT_KEY_MAP,
-    OCP_MX_BLOCK_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
 from vllm.models.muse_spark.common.layers import MuseSparkRMSNorm
 from vllm.models.muse_spark.common.moe import (
@@ -688,117 +687,50 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> MuseSparkQuarkOCPMXMoEQuantConfig:
-        base_config = super().get_fused_moe_quant_config(layer)
-        if base_config is None:
-            raise RuntimeError("Muse Spark MXFP4 quant config is not initialized.")
-        post_expert_norm_fn = getattr(layer, "post_expert_norm_fn", None)
-        if post_expert_norm_fn is None:
-            raise RuntimeError("Muse Spark post-expert norm is not configured.")
-        return MuseSparkQuarkOCPMXMoEQuantConfig(
-            **{
-                f.name: getattr(base_config, f.name)
-                for f in fields(FusedMoEQuantConfig)
-                if f.init
-            },
-            post_expert_norm_fn=post_expert_norm_fn,
-        )
+        return _with_post_expert_norm(super().get_fused_moe_quant_config(layer), layer)
 
 
-def _quantize_experts_to_mxfp4(
-    weight: torch.Tensor, experts_per_chunk: int = 32
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round `[experts, rows, cols]` weights to packed OCP MXFP4."""
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-    num_experts, rows, cols = weight.shape
-    packed = torch.empty(
-        (num_experts, rows, cols // 2), dtype=torch.uint8, device=weight.device
+def _with_post_expert_norm(
+    base_config: FusedMoEQuantConfig | None, layer: RoutedExperts
+) -> MuseSparkQuarkOCPMXMoEQuantConfig:
+    if base_config is None:
+        raise RuntimeError("Muse Spark MXFP4 quant config is not initialized.")
+    post_expert_norm_fn = getattr(layer, "post_expert_norm_fn", None)
+    if post_expert_norm_fn is None:
+        raise RuntimeError("Muse Spark post-expert norm is not configured.")
+    return MuseSparkQuarkOCPMXMoEQuantConfig(
+        **{
+            f.name: getattr(base_config, f.name)
+            for f in fields(FusedMoEQuantConfig)
+            if f.init
+        },
+        post_expert_norm_fn=post_expert_norm_fn,
     )
-    scales = torch.empty(
-        (num_experts, rows, cols // OCP_MX_BLOCK_SIZE),
-        dtype=torch.uint8,
-        device=weight.device,
-    )
-    for start in range(0, num_experts, experts_per_chunk):
-        chunk = weight[start : start + experts_per_chunk]
-        chunk_packed, chunk_scales = dynamic_mxfp4_quant(chunk.reshape(-1, cols))
-        packed[start : start + chunk.shape[0]] = chunk_packed.view(
-            chunk.shape[0], rows, -1
-        )
-        scales[start : start + chunk.shape[0]] = chunk_scales.view(torch.uint8).view(
-            chunk.shape[0], rows, -1
-        )[..., : cols // OCP_MX_BLOCK_SIZE]
-    return packed, scales
 
 
-class MuseSparkOnlineMXFP4FusedMoE(MuseSparkQuarkOCPMXFusedMoE):
-    """Unquantized routed experts rounded to OCP MXFP4 (W4A4) after loading."""
+class MuseSparkOnlineMXFP4FusedMoE(Mxfp4OnlineMoEMethod):
+    """Unquantized routed experts rounded to OCP MXFP4 (W4A4) after loading, by the
+    online quantization infrastructure, on route-preserving stock AITER experts."""
 
     def __init__(
         self,
         moe: FusedMoEConfig,
-        online_config: OnlineQuantizationConfig | None = None,
+        activation_quant_key: QuantKey | None = kMxfp4Dynamic,
     ) -> None:
-        super().__init__(
-            moe, _WEIGHT_QUANT_KEY_MAP["mxfp4"], _ACTIVATION_QUANT_KEY_MAP["mxfp4"]
-        )
-        # Accumulates the rounding time into the online quantization summary.
-        self.online_config = online_config
-
-    def create_weights(
-        self,
-        layer: RoutedExperts,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ) -> None:
-        for name, shape in (
-            (
-                "w13_weight",
-                (
-                    num_experts,
-                    self.moe.w13_num_shards * intermediate_size_per_partition,
-                    hidden_size,
-                ),
-            ),
-            ("w2_weight", (num_experts, hidden_size, intermediate_size_per_partition)),
-        ):
-            param = torch.nn.Parameter(
-                torch.empty(shape, dtype=params_dtype), requires_grad=False
+        validate_mxfp4_deployment(moe)
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
+        if self.mxfp4_backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            raise NotImplementedError(
+                "Muse Spark MXFP4 on ROCm requires the "
+                "AITER_MXFP4_MXFP4 backend (dynamic MXFP4 activations); got "
+                f"{self.mxfp4_backend.value}."
             )
-            layer.register_parameter(name, param)
-            set_weight_attrs(param, extra_weight_attrs)
-        layer.w13_bias, layer.w2_bias = None, None
-        layer.w13_input_scale, layer.w2_input_scale = None, None
+        self.experts_cls = MuseSparkAiterExperts
 
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        start = time.perf_counter()
-        for name in ("w13_weight", "w2_weight"):
-            packed, scales = _quantize_experts_to_mxfp4(getattr(layer, name).data)
-            delattr(layer, name)
-            layer.register_parameter(
-                name, torch.nn.Parameter(packed, requires_grad=False)
-            )
-            layer.register_parameter(
-                f"{name}_scale", torch.nn.Parameter(scales, requires_grad=False)
-            )
-        torch.accelerator.empty_cache()
-        if self.online_config is not None:
-            self.online_config.online_quantization_time += time.perf_counter() - start
-        super().process_weights_after_loading(layer)
-
-
-def _online_mxfp4_applies(prefix: str) -> bool:
-    """Whether this layer's unquantized experts are rounded to MXFP4 on load.
-
-    The first and last decoder layers stay BF16, as in the Quark MXFP4 export.
-    """
-    if envs.VLLM_ROCM_MUSE_MOE_ONLINE_QUANT != "mxfp4":
-        return False
-    num_layers = get_current_vllm_config().model_config.hf_text_config.num_hidden_layers
-    return extract_layer_index(prefix) not in (0, num_layers - 1)
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> MuseSparkQuarkOCPMXMoEQuantConfig:
+        return _with_post_expert_norm(super().get_fused_moe_quant_config(layer), layer)
 
 
 _QUARK_EXPERT_PROJECTIONS = {
@@ -843,6 +775,15 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             if isinstance(quant_config, OnlineQuantizationConfig)
             else getattr(quant_config, "online_quantization_config", None)
         )
+        if online_config is not None:
+            reject_muse_env_with_quantization_config()
+        elif quant_config is None and envs.VLLM_ROCM_MUSE_MOE_ONLINE_QUANT == "mxfp4":
+            num_layers = (
+                get_current_vllm_config().model_config.hf_text_config.num_hidden_layers
+            )
+            args = muse_moe_online_quant_args(num_layers)
+            assert args is not None
+            self.quant_config = online_config = OnlineQuantizationConfig(args)
         if online_config is not None and (
             resolved := online_config.resolve_quant_method_cls(type(self), prefix)
         ):
@@ -850,9 +791,6 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
                 prefix, quant_config, online_config, resolved, moe_config
             )
         if not isinstance(quant_config, QuarkConfig):
-            # A BF16 checkpoint.
-            if _online_mxfp4_applies(prefix):
-                return MuseSparkOnlineMXFP4FusedMoE(moe_config)
             return MuseSparkUnquantizedFusedMoE(moe_config)
 
         quant_method = quant_config.get_quant_method(self, prefix)
@@ -909,14 +847,12 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             quant_key_str,
             target_pattern,
         )
-        return MuseSparkOnlineMXFP4FusedMoE(moe_config, online_config)
+        return MuseSparkOnlineMXFP4FusedMoE(moe_config, spec.activation)
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        if isinstance(
-            self.quant_method, MuseSparkOnlineMXFP4FusedMoE
-        ) or not isinstance(
+        if not isinstance(
             self.quant_method,
             (MuseSparkQuarkW8A8Fp8FusedMoE, MuseSparkQuarkOCPMXFusedMoE),
         ):

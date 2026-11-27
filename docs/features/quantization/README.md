@@ -60,7 +60,30 @@ MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUA
 
 Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
 
-Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
+Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel, with one exception.
+
+The interleaved AITER MXFP4 MoE kernels (`AITER_MXFP4_BF16`, ROCm gfx950) run either MXFP8 or BF16 activations, depending on the requested MoE activation:
+
+| `quantization_config.moe.activation` | Activations | Strict mode (`VLLM_STRICT_QUANT_SCHEME=1`) |
+| --- | --- | --- |
+| `mxfp8` | MXFP8 for any token count | selected on gfx950 only; elsewhere it is a BF16 fallback and is skipped |
+| `null` | BF16 for any token count | BF16 as requested |
+| not set (for example a checkpoint's own scheme) | MXFP8 for any token count | BF16, instead of adding MXFP8 activations to a weight-only request |
+
+The activation setting is process-wide for this backend. If any layer requests BF16, it takes precedence over MXFP8 requests in other layers.
+
+### Migrating from the ROCm MoE quantization environment variables
+
+`VLLM_FP8_MOE_REQUANT`, `VLLM_FP8_MOE_REQUANT_ACT`, and `VLLM_ROCM_MUSE_MOE_ONLINE_QUANT` are deprecated and will be removed in v0.35.0. Remove these variables before passing `--quantization-config`.
+
+| Previous setting | Replacement |
+| --- | --- |
+| FP8 requantization with `a4w4` | `--quantization-config.moe mxfp4` |
+| FP8 requantization with `a8w4` (default) | `--quantization-config.moe '{"weight":"mxfp4","activation":"mxfp8"}'` |
+| FP8 requantization with `a16w4` | `--quantization-config.moe '{"weight":"mxfp4","activation":null}'` |
+| Muse Spark BF16 with `VLLM_ROCM_MUSE_MOE_ONLINE_QUANT=mxfp4` | `--quantization-config '{"moe":"mxfp4","ignore":["*layers.0.*","*layers.<last>.*"]}'` (replace `<last>` with the last layer index) |
+
+For `a16w4`, pass `--moe-backend aiter_triton_mxfp4_bf16` if you need to keep the previous Triton backend.
 
 ## Supported Hardware
 

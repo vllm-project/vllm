@@ -1336,8 +1336,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
     ).lower(),
-    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
-    # and last layer stay BF16).
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
@@ -1360,15 +1359,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter moe ops.
-    # By default is enabled.
-    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
-    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
-    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
-    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_FP8_MOE_REQUANT": env_with_choices(
         "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
     ),
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
         "VLLM_FP8_MOE_REQUANT_ACT",
         "a8w4",
