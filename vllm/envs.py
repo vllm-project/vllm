@@ -285,6 +285,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_RELAY: str = ""
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1541,6 +1542,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # TP2 FlyDSL INT4 QuickReduce through a passive xGMI relay (AITER's
+    # FlyQuickAllReduce relay_devices): part of each direction's traffic goes
+    # through another GPU's links. "" or "0": off. "1": AITER's per-arch share
+    # and threshold. "num/den": that share of the blocks. The relays are the
+    # first two visible GPUs outside the TP group, so list the TP pair first
+    # in HIP_VISIBLE_DEVICES. Off by default: the relays may belong to other
+    # servers on the node, and vLLM cannot see that.
+    "VLLM_ROCM_QUICK_REDUCE_RELAY": lambda: os.getenv(
+        "VLLM_ROCM_QUICK_REDUCE_RELAY", ""
     ),
     # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
     # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.

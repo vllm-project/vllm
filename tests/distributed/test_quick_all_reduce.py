@@ -151,6 +151,111 @@ def test_close_closes_flydsl_int4():
     assert quick_reduce._flydsl_int4 is None
 
 
+class _FakeFlyQuickAllReduce:
+    """AITER's FlyQuickAllReduce constructor with the relay arguments."""
+
+    def __init__(
+        self,
+        *,
+        group,
+        device,
+        rank,
+        world_size,
+        algorithm,
+        min_bytes=None,
+        relay_devices=None,
+        relay_fraction=None,
+        relay_min_bytes=None,
+    ):
+        self.relay_devices = relay_devices
+        self.relay_fraction = (
+            None if relay_devices is None else relay_fraction or (3, 8)
+        )
+        self.relay_min_bytes = None if relay_devices is None else 480 * KB
+
+
+class _FakeQuickAllReduceInt4(_FakeFlyQuickAllReduce):
+    """AITER's vLLM alias, which forwards everything through **kwargs."""
+
+    def __init__(self, *, algorithm="mesh", min_bytes=0, **kwargs):
+        super().__init__(algorithm=algorithm, min_bytes=min_bytes, **kwargs)
+
+
+class _FakeQuickAllReduceInt4NoRelay:
+    def __init__(self, *, group, device, rank, world_size):
+        pass
+
+
+def _fake_tp_pair(monkeypatch, visible: int, tp_devices=(0, 1)) -> None:
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: visible)
+    monkeypatch.setattr(
+        aiter_ops.dist,
+        "all_gather_object",
+        lambda out, obj, group: out.__setitem__(slice(None), list(tp_devices)),
+    )
+
+
+def _build_flydsl_int4(monkeypatch, engine_cls, world_size: int = 2):
+    fake = types.ModuleType("aiter.ops.flydsl")
+    monkeypatch.setattr(fake, "QuickAllReduceInt4", engine_cls, raising=False)
+    monkeypatch.setitem(sys.modules, "aiter", types.ModuleType("aiter"))
+    monkeypatch.setitem(sys.modules, "aiter.ops", types.ModuleType("aiter.ops"))
+    monkeypatch.setitem(sys.modules, "aiter.ops.flydsl", fake)
+    return aiter_ops.rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
+        group=object(), device="cuda:0", rank=0, world_size=world_size
+    )
+
+
+@pytest.mark.parametrize("setting", ["", "0"])
+def test_flydsl_int4_relay_off(monkeypatch, setting):
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_RELAY", setting)
+    _fake_tp_pair(monkeypatch, visible=4)
+    engine = _build_flydsl_int4(monkeypatch, _FakeQuickAllReduceInt4)
+    assert engine.relay_devices is None
+
+
+@pytest.mark.parametrize(
+    "setting, tp_devices, relays, fraction",
+    [
+        ("1", (0, 1), (2, 3), (3, 8)),
+        ("1/2", (0, 1), (2, 3), (1, 2)),
+        # HIP_VISIBLE_DEVICES=2,3,0,1 on the other server puts the TP pair
+        # first; the relays are the first two visible GPUs outside it.
+        ("1", (0, 2), (1, 3), (3, 8)),
+    ],
+)
+def test_flydsl_int4_relay_picks_spare_gpus(
+    monkeypatch, setting, tp_devices, relays, fraction
+):
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_RELAY", setting)
+    _fake_tp_pair(monkeypatch, visible=4, tp_devices=tp_devices)
+    engine = _build_flydsl_int4(monkeypatch, _FakeQuickAllReduceInt4)
+    assert engine.relay_devices == relays
+    assert engine.relay_fraction == fraction
+
+
+def test_flydsl_int4_relay_is_tp2_only(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_RELAY", "1")
+    _fake_tp_pair(monkeypatch, visible=8, tp_devices=(0, 1, 2, 3))
+    engine = _build_flydsl_int4(monkeypatch, _FakeQuickAllReduceInt4, world_size=4)
+    assert engine.relay_devices is None
+
+
+@pytest.mark.parametrize(
+    "engine_cls, visible, setting, match",
+    [
+        (_FakeQuickAllReduceInt4NoRelay, 4, "1", "takes relay_devices"),
+        (_FakeQuickAllReduceInt4, 2, "1", "two visible GPUs"),
+        (_FakeQuickAllReduceInt4, 4, "half", "expected 0, 1 or num/den"),
+    ],
+)
+def test_flydsl_int4_relay_rejects(monkeypatch, engine_cls, visible, setting, match):
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_RELAY", setting)
+    _fake_tp_pair(monkeypatch, visible=visible)
+    with pytest.raises(ValueError, match=match):
+        _build_flydsl_int4(monkeypatch, engine_cls)
+
+
 def test_should_quick_allreduce_uses_builtin_min_size_when_unset():
     quick_reduce = _make_quick_allreduce_for_test(min_size_mb=None)
 
