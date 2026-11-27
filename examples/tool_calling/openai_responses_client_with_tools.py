@@ -45,6 +45,24 @@ input_messages = [
 ]
 
 
+def build_followup_input(input_messages, response_output):
+    """Keep every response item and its matching tool result in the next turn."""
+    tool_outputs = []
+    for out in response_output:
+        if out.type == "function_call":
+            print("Function call:", out.name, out.arguments)
+            args = json.loads(out.arguments)
+            result = get_weather(args["latitude"], args["longitude"])
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": out.call_id,
+                    "output": result,
+                }
+            )
+    return [*input_messages, *response_output, *tool_outputs]
+
+
 def main():
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
@@ -53,24 +71,9 @@ def main():
         model=model, input=input_messages, tools=tools, tool_choice="required"
     )
 
-    for out in response.output:
-        if out.type == "function_call":
-            print("Function call:", out.name, out.arguments)
-            tool_call = out
-    args = json.loads(tool_call.arguments)
-    result = get_weather(args["latitude"], args["longitude"])
-
-    input_messages.append(tool_call)  # append model's function call message
-    input_messages.append(
-        {  # append result message
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }
-    )
     response_2 = client.responses.create(
         model=model,
-        input=input_messages,
+        input=build_followup_input(input_messages, response.output),
         tools=tools,
     )
     print(response_2.output_text)

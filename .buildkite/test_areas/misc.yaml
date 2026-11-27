@@ -548,7 +548,10 @@ steps:
   - tests/examples/
   commands:
     - pip install --no-deps tensorizer # for tensorizer test
-    - pytest -v -s examples/test_offline_examples.py
+    - >-
+      pytest -v -s
+      examples/test_offline_examples.py
+      examples/test_responses_tool_client.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Examples"

@@ -240,7 +240,7 @@ The following extra parameters are supported:
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../../../examples/tool_calling/openai_responses_client_with_tools.py)
+For a multi-turn tool conversation, pass the response output items back in the next request and include one `function_call_output` per function call, using its `call_id`. See [examples/tool_calling/openai_responses_client_with_tools.py](../../../examples/tool_calling/openai_responses_client_with_tools.py)
 
 To get prompt token IDs before generation, use
 [`/v1/responses/render`](renderer.md#get-responses-prompt-token-ids). It preprocesses
