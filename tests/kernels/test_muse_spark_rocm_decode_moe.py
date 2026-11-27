@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark ROCm decode MoE kernels."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -9,7 +11,12 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
-from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterMxfp4Experts
+from vllm.models.muse_spark.amd.muse_moe_runner import (
+    MuseSparkAiterFp8Experts,
+    MuseSparkAiterMxfp4Experts,
+    MuseSparkQuarkFp8MoEQuantConfig,
+    MuseSparkQuarkOCPMXMoEQuantConfig,
+)
 from vllm.models.muse_spark.amd.ops import decode_moe as dmoe
 from vllm.models.muse_spark.amd.ops.compact_moe import MAX_TOKENS as COMPACT_MAX_TOKENS
 from vllm.platforms import current_platform
@@ -18,6 +25,8 @@ from .moe.test_muse_spark_rocm_bf16_moe import (
     _moe_config,
     _mxfp4_weights,
     _parallel_config,
+    _quant_config,
+    _rms_norm,
     _route_launcher,
 )
 
@@ -188,6 +197,41 @@ def _per_route_and_native(
         post_norm,
     )
     return per_route, native
+
+
+@pytest.mark.parametrize("quant", ["mxfp4", "fp8"])
+def test_decode_moe_takes_only_the_mxfp4_experts(
+    monkeypatch: pytest.MonkeyPatch, quant: str
+) -> None:
+    """The decode MoE runs the MXFP4 experts on native routes; the FP8 experts,
+    whose stages it has no kernels for, keep the per-route path."""
+    from vllm.models.muse_spark.amd import decode_moe
+
+    stages = object()
+    monkeypatch.setattr(decode_moe, "_stage_kernels", lambda *args: stages)
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=4),
+        num_experts=NUM_EXPERTS,
+        top_k=TOP_K,
+        hidden_size=HIDDEN,
+        intermediate_size=HIDDEN,
+    )
+    if quant == "mxfp4":
+        experts = MuseSparkAiterMxfp4Experts(
+            config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
+        )
+    else:
+        experts = MuseSparkAiterFp8Experts(
+            config, _quant_config(_rms_norm, MuseSparkQuarkFp8MoEQuantConfig)
+        )
+    routed = SimpleNamespace(
+        quant_method=SimpleNamespace(moe_kernel=SimpleNamespace(fused_experts=experts)),
+        w13_weight=torch.empty(NUM_EXPERTS // 4, 2 * HIDDEN, 0),
+        moe_config=config,
+    )
+    moe = SimpleNamespace(experts=SimpleNamespace(routed_experts=routed), top_k=TOP_K)
+    kernels = decode_moe.MuseSparkDecodeMoE().kernels(moe, 8)  # type: ignore[arg-type]
+    assert kernels is (stages if quant == "mxfp4" else None)
 
 
 @pytest.fixture
