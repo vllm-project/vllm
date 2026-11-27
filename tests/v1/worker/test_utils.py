@@ -1545,6 +1545,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
         self.cache_config = SimpleNamespace(enable_prefix_caching=True)
+        self.kv_cache = tuple(torch.tensor([]) for _ in range(5))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
