@@ -480,7 +480,7 @@ def _hash_state():
 
     with torch.device("cuda"):
         state = FlashNgramHashState(_engram_config())
-    # A short map: ids past it keep their own id, as for added tokens.
+    # A short map: ids past it hash as the pad id.
     state.load_lookup(torch.randint(0, 40, (_ENGRAM_VOCAB - 4,), dtype=torch.int32))
     state.visual_token_ids = (11, 12)
     return state
@@ -566,6 +566,20 @@ def test_engram_head_range_partitions_heads(sizes, tp):
     assert ranges[0][0] == 0 and ranges[-1][1] == len(sizes)
     assert all(lo < hi for lo, hi in ranges)
     assert all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
+
+
+def test_engram_lookup_hashes_ids_past_the_map_as_pad():
+    """Ids past the frozen map read as the pad id, as in the reference."""
+    from vllm.models.hy_v4_flash.common.engram import FlashEngramLayout
+
+    layout = FlashEngramLayout(_engram_config())
+    lookup = torch.arange(_ENGRAM_VOCAB - 4)
+    assert layout.load_lookup(lookup)
+
+    pad = layout.token_map[layout.pad_token_id]
+    assert layout.token_map == lookup.tolist() + [pad] * 4
+    bound = torch.iinfo(torch.int64).max
+    assert max(layout.token_map) * int(layout.multipliers.max()) <= bound
 
 
 def _engram_checkpoint(config, sizes, head_dim, fp8):
