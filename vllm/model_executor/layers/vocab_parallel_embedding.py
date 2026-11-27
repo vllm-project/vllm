@@ -3,6 +3,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import lcm
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.distributed import (
     GroupCoordinator,
     divide,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import PluggableLayer
@@ -31,6 +30,13 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
     maybe_use_skinny_gemm,
+)
+from vllm.model_executor.layers.vocab_parallel_plan import (
+    VocabParallelMode,
+    VocabRole,
+    forward_vocab_parallel_embedding,
+    register_vocab_embed_layer,
+    resolve_vocab_parallel_plan,
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import copy_weight_, set_weight_attrs
@@ -268,6 +274,7 @@ class VocabParallelEmbedding(PluggableLayer):
         reduce_results: bool = True,
         quant_method: QuantizeMethodBase | None = None,
         parallel_group: GroupCoordinator | None = None,
+        vocab_role: VocabRole = "auto",
     ):
         super().__init__()
 
@@ -275,19 +282,32 @@ class VocabParallelEmbedding(PluggableLayer):
         self.disable_tp = disable_tp
         self.parallel_group = parallel_group
         self.reduce_results = reduce_results
-        if disable_tp:
-            tp_rank, self.tp_size = 0, 1
-        elif parallel_group is not None:
-            tp_rank = parallel_group.rank_in_group
-            self.tp_size = parallel_group.world_size
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-            self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = tp_rank
         self.num_embeddings = num_embeddings
-        self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
         self.num_added_embeddings = num_embeddings - self.org_vocab_size
+
+        is_lm_head_cls = isinstance(self, ParallelLMHead)
+        self.vocab_parallel_plan = resolve_vocab_parallel_plan(
+            org_vocab_size=self.org_vocab_size,
+            prefix=prefix,
+            disable_tp=disable_tp,
+            reduce_results=reduce_results,
+            parallel_group=parallel_group,
+            is_lm_head_cls=is_lm_head_cls,
+            vocab_role=vocab_role,
+        )
+        tp_rank = self.vocab_parallel_plan.shard_rank
+        self.tp_rank = tp_rank
+        self.tp_size = self.vocab_parallel_plan.shard_world_size
+        if self.vocab_parallel_plan.mode is VocabParallelMode.EXTENDED:
+            if self.num_added_embeddings != 0:
+                raise ValueError(
+                    "Added vocabulary embeddings are not supported with "
+                    "extended vocabulary parallelism."
+                )
+            padding_size = lcm(padding_size, self.tp_size)
+
+        self.padding_size = padding_size
         self.org_vocab_size_padded = pad_vocab_size(
             self.org_vocab_size, self.padding_size
         )
@@ -339,10 +359,26 @@ class VocabParallelEmbedding(PluggableLayer):
             )
 
         self.quant_method: QuantizeMethodBase = quant_method
+        if (
+            self.vocab_parallel_plan.mode is VocabParallelMode.EXTENDED
+            and not isinstance(quant_method, UnquantizedEmbeddingMethod)
+        ):
+            from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+            if not isinstance(quant_method, UnquantizedLinearMethod):
+                raise ValueError(
+                    "Extended vocabulary parallelism requires unquantized "
+                    "vocabulary weights."
+                )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        self._exchange_op_key: str | None = (
+            register_vocab_embed_layer(self)
+            if self.vocab_parallel_plan.token_exchange_group is not None
+            else None
+        )
         assert (
             self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
         )
@@ -524,11 +560,9 @@ class VocabParallelEmbedding(PluggableLayer):
         copy_weight_(param[: loaded_weight.shape[0]].data, loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
-    def forward(self, input_):
-        """Look up IDs, optionally reducing contributions from vocabulary shards."""
-        if self.tp_size == 1:
-            return self.quant_method.embedding(self, input_.long())
-
+    def _lookup_local_shard(
+        self, input_: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.dtype]:
         if self.use_fused_embedding:
             output_parallel = ops.vocab_parallel_embedding(
                 input_ if input_.ndim == 1 else input_.reshape(-1),
@@ -560,6 +594,16 @@ class VocabParallelEmbedding(PluggableLayer):
             output_parallel = output_parallel.view(torch.int8)
         if not self.use_fused_embedding:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        return output_parallel, output_dtype
+
+    def forward(self, input_):
+        """Look up IDs, optionally reducing contributions from vocabulary shards."""
+        if self.tp_size == 1:
+            return self.quant_method.embedding(self, input_.long())
+        if self.vocab_parallel_plan.token_exchange_group is not None:
+            return forward_vocab_parallel_embedding(self, input_)
+
+        output_parallel, output_dtype = self._lookup_local_shard(input_)
         if self.reduce_results:
             output_parallel = (
                 self.parallel_group.all_reduce(output_parallel)
@@ -613,6 +657,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         *,
         disable_tp: bool = False,
         quant_method: QuantizeMethodBase | None = None,
+        vocab_role: VocabRole = "auto",
     ):
         self.has_bias = bias
         super().__init__(
@@ -625,6 +670,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             prefix,
             disable_tp=disable_tp,
             quant_method=quant_method,
+            vocab_role=vocab_role,
         )
         self.quant_config = quant_config
         if bias:
@@ -640,6 +686,12 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
+        if self.tp_rank != embed_tokens.tp_rank or self.tp_size != embed_tokens.tp_size:
+            raise ValueError(
+                "Cannot tie LM head and embedding weights with mismatched "
+                f"vocabulary shards: lm_head=({self.tp_rank}/{self.tp_size}), "
+                f"embed_tokens=({embed_tokens.tp_rank}/{embed_tokens.tp_size})."
+            )
         return self.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):

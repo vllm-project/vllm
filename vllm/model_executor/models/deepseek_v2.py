@@ -1298,13 +1298,15 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
+        input_is_sequence_parallel: bool | None = None,
     ) -> torch.Tensor:
         full_num_tokens = positions.shape[0]
-        input_is_sequence_parallel = (
-            self.use_sequence_parallel_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
-        )
+        if input_is_sequence_parallel is None:
+            input_is_sequence_parallel = (
+                self.use_sequence_parallel_moe
+                and residual is not None
+                and hidden_states.shape[0] != full_num_tokens
+            )
 
         # Self Attention
         if residual is None:
@@ -1486,32 +1488,38 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        # A one-token batch and its padded SP shard both have one row. Track
+        # layout explicitly instead of inferring it from the tensor shape.
+        is_sequence_parallel = False
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             # all gather if we need to use the whole states
-            if (
-                hidden_states.shape[0] != positions.shape[0]
-                and not layer.use_sequence_parallel_moe
-            ):
+            if is_sequence_parallel and not layer.use_sequence_parallel_moe:
                 combined_states = torch.cat([hidden_states, residual], dim=-1)
                 combined_states = tensor_model_parallel_all_gather(combined_states, 0)
                 combined_states = combined_states[: positions.shape[0]]
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
+                is_sequence_parallel = False
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
-                if aux_hidden_state.shape[0] != positions.shape[0]:
+                if is_sequence_parallel:
                     aux_hidden_state = tensor_model_parallel_all_gather(
                         aux_hidden_state, 0
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                input_is_sequence_parallel=is_sequence_parallel,
             )
+            is_sequence_parallel = layer.use_sequence_parallel_moe
 
         if not get_pp_group().is_last_rank:
             if self.layers[self.end_layer - 1].use_sequence_parallel_moe:
@@ -1526,7 +1534,7 @@ class DeepseekV2Model(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if hidden_states.shape[0] != positions.shape[0]:
+        if is_sequence_parallel:
             combined_states = torch.cat([hidden_states, residual], dim=-1)
             combined_states = tensor_model_parallel_all_gather(combined_states, 0)
             combined_states = combined_states[: positions.shape[0]]

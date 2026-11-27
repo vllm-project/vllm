@@ -2213,6 +2213,7 @@ class VllmConfig:
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
+        self._validate_fine_grained_tp_config()
         self._validate_adaptive_verification()
 
         # Re-compute compile ranges after platform-specific config updates
@@ -3532,6 +3533,60 @@ class VllmConfig:
             raise ValueError(
                 "Adaptive verification is not currently compatible "
                 "with pipeline parallelism"
+            )
+
+    def _validate_fine_grained_tp_config(self) -> None:
+        fg = self.parallel_config.fine_grained_tp_config
+        if not fg.enabled:
+            return
+        emb_dp, emb_pcp = self.parallel_config.embedding_dp_pcp_factors
+        lmhead_dp, lmhead_pcp = self.parallel_config.lmhead_dp_pcp_factors
+        uses_dp = emb_dp > 1 or lmhead_dp > 1
+        uses_pcp = emb_pcp > 1 or lmhead_pcp > 1
+        if not uses_dp and not uses_pcp:
+            return
+
+        blockers: list[str] = []
+        if self.model_config is not None:
+            if uses_dp and not self.model_config.is_moe:
+                blockers.append("cross-DP fine-grained TP requires a MoE model")
+            if self.model_config.supports_multimodal_inputs:
+                blockers.append("multimodal inputs")
+            if self.model_config.enable_prompt_embeds:
+                blockers.append("prompt embeddings")
+            if fg.lmhead_tp_size > 1 and self.model_config.runner_type == "pooling":
+                blockers.append("pooling runner with lmhead_tp_size > 1")
+            if (
+                getattr(self.model_config.hf_text_config, "tie_word_embeddings", False)
+                and fg.embedding_tp_size != fg.lmhead_tp_size
+            ):
+                blockers.append(
+                    "tied word embeddings with mismatched "
+                    f"embedding_tp_size ({fg.embedding_tp_size}) and "
+                    f"lmhead_tp_size ({fg.lmhead_tp_size})"
+                )
+        if self.speculative_config is not None:
+            blockers.append("speculative decoding")
+        if self.lora_config is not None:
+            blockers.append("LoRA")
+        if self.parallel_config.enable_batch_sharded_sampling:
+            blockers.append("batch-sharded sampling")
+        if self.parallel_config.use_ubatching:
+            blockers.append("microbatching")
+        if self.parallel_config.enable_elastic_ep:
+            blockers.append("elastic EP")
+        if (
+            lmhead_dp > 1
+            and self.parallel_config.pipeline_parallel_size > 1
+            and self.scheduler_config.async_scheduling
+        ):
+            blockers.append(
+                "pipeline parallelism with async scheduling and "
+                "cross-DP lm_head sharding"
+            )
+        if blockers:
+            raise ValueError(
+                "fine_grained_tp_config is incompatible with: " + ", ".join(blockers)
             )
 
     def _validate_batch_sharded_sampling(self) -> None:

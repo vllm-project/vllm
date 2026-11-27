@@ -491,7 +491,11 @@ def run_kv_cache_sizing_warmup(
     # Profiling skipped attention; measure it on the largest possible step,
     # split across requests when max_model_len < max_num_batched_tokens.
     max_logprobs = model_runner.model_config.max_logprobs
-    prompt_logprobs = max_logprobs if max_logprobs != 0 else None
+    prompt_logprobs = (
+        max_logprobs
+        if max_logprobs != 0 and model_runner.parallel_config.supports_prompt_logprobs
+        else None
+    )
     max_num_tokens = model_runner.scheduler_config.max_num_batched_tokens
     max_prompt_len = min(max_num_tokens, model_runner.max_model_len)
     # Prompt logprobs are computed for every token of a step that requests
@@ -652,6 +656,9 @@ def _warmup_kernels(
             if greedy
             else SamplingParams.for_sampler_warmup()
         )
+        if not model_runner.parallel_config.supports_prompt_logprobs:
+            sampling_params.prompt_logprobs = None
+            sampling_params.prompt_logprob_token_ids = None
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

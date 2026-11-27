@@ -2,6 +2,27 @@ group: Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (H100) Fine-Grained TP Sharding"
+  key: fine-grained-tp-sharding
+  device: h100
+  num_devices: 8
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/arg_utils.py
+  - vllm/model_executor/layers/
+  - vllm/model_executor/model_loader/base_loader.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/v1/engine/input_processor.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/warmup.py
+  - vllm/v1/worker/gpu_worker.py
+  - tests/distributed/test_fine_grained_tp.py
+  commands:
+  - pytest -v -s distributed/test_fine_grained_tp.py
+
 - label: ":nvidia: (L4) Distributed Comm Ops"
   key: distributed-comm-ops
   automatic_shard: true

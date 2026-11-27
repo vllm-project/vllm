@@ -60,6 +60,9 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
+from vllm.model_executor.layers.vocab_parallel_plan import (
+    lmhead_step_capacity_context,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
@@ -923,6 +926,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
         num_active_loras: int | None = None,
+        join_dp_sampling: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -1063,7 +1067,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
+        if join_dp_sampling and self.pooling_runner is None:
+            step_capacity = self._get_lmhead_dp_step_capacity(dp_sync_state)
+            if step_capacity is not None:
+                with lmhead_step_capacity_context(step_capacity):
+                    self.model_state.compute_sample_logits(sample_hidden_states[:0])
         return hidden_states, sample_hidden_states
+
+    def _get_lmhead_dp_step_capacity(
+        self, dp_sync_state: DPSyncState | None
+    ) -> int | None:
+        lmhead_dp, _ = self.parallel_config.lmhead_dp_pcp_factors
+        if lmhead_dp <= 1:
+            return None
+        max_capacity = max(1, self.max_num_reqs * self.decode_query_len)
+        if dp_sync_state is None:
+            return max_capacity
+        return min(max_capacity, max(1, dp_sync_state.num_reqs * self.decode_query_len))
 
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
@@ -2327,9 +2347,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
-        )
+        with lmhead_step_capacity_context(
+            self._get_lmhead_dp_step_capacity(dp_sync_state)
+        ):
+            sampler_output, num_sampled, num_rejected = self.sample(
+                hidden_states, input_batch, grammar_output
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).

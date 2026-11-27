@@ -244,6 +244,18 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def all_to_all_single(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_to_all_single_out_place(tensor, None, None)
+
+
+def all_to_all_single_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    return torch.empty_like(tensor)
+
+
 def patched_fused_scaled_matmul_reduce_scatter_fake(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -412,6 +424,12 @@ direct_register_custom_op(
     op_name="all_gather",
     op_func=all_gather,
     fake_impl=all_gather_fake,
+)
+
+direct_register_custom_op(
+    op_name="all_to_all_single",
+    op_func=all_to_all_single,
+    fake_impl=all_to_all_single_fake,
 )
 
 # TODO: Remove this once the pytorch fix
@@ -841,6 +859,36 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatter(input_, dim)
+
+    def all_to_all_single(
+        self,
+        input_: torch.Tensor,
+        output_split_sizes: list[int] | None = None,
+        input_split_sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
+        if (
+            self.use_custom_op_call
+            and output_split_sizes is None
+            and input_split_sizes is None
+        ):
+            return torch.ops.vllm.all_to_all_single(input_, group_name=self.unique_name)
+        return self._all_to_all_single_out_place(
+            input_, output_split_sizes, input_split_sizes
+        )
+
+    def _all_to_all_single_out_place(
+        self,
+        input_: torch.Tensor,
+        output_split_sizes: list[int] | None = None,
+        input_split_sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.all_to_all_single(
+            input_, output_split_sizes, input_split_sizes
+        )
 
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
@@ -1736,6 +1784,19 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+_EMBED_EXCHANGE: GroupCoordinator | None = None
+_LMHEAD_DP: GroupCoordinator | None = None
+_VOCAB_OWNED_GROUPS: list[GroupCoordinator] = []
+
+
+def get_embed_exchange_group() -> GroupCoordinator | None:
+    return _EMBED_EXCHANGE
+
+
+def get_lmhead_dp_group() -> GroupCoordinator | None:
+    return _LMHEAD_DP
+
+
 def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
     comm = getattr(group.device_communicator, "aiter_ar_comm", None)
     return comm is not None and comm.registers_graph_buffers
@@ -2458,6 +2519,54 @@ def initialize_model_parallel(
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
+    global _EMBED_EXCHANGE, _LMHEAD_DP
+    assert _EMBED_EXCHANGE is None, "embedding exchange group is already initialized"
+    assert _LMHEAD_DP is None, "LM head DP group is already initialized"
+    assert not _VOCAB_OWNED_GROUPS
+    fg_config = parallel_config.fine_grained_tp_config
+    if not enable_elastic_ep and fg_config.enabled:
+        emb_dp_size, emb_pcp_size = fg_config.resolve_dp_pcp_factors(
+            fg_config.embedding_tp_size,
+            data_parallel_size,
+            prefill_context_model_parallel_size,
+            "embedding_tp_size",
+        )
+        lmhead_dp_size, _ = fg_config.resolve_dp_pcp_factors(
+            fg_config.lmhead_tp_size,
+            data_parallel_size,
+            prefill_context_model_parallel_size,
+            "lmhead_tp_size",
+        )
+
+        if lmhead_dp_size > 1:
+            assert _DP is not None
+            _LMHEAD_DP = _DP
+
+        if emb_dp_size == 1 and emb_pcp_size > 1:
+            _EMBED_EXCHANGE = _PCP
+        elif emb_dp_size > 1 and emb_pcp_size == 1:
+            assert _DP is not None
+            _EMBED_EXCHANGE = _DP
+        elif emb_dp_size > 1 and emb_pcp_size > 1:
+            if tensor_model_parallel_size == 1 and _EP is not None:
+                _EMBED_EXCHANGE = _EP
+            else:
+                embed_ranks = (
+                    all_ranks.permute(0, 2, 4, 1, 3)
+                    .reshape(
+                        -1, data_parallel_size * prefill_context_model_parallel_size
+                    )
+                    .unbind(0)
+                )
+                pg = init_model_parallel_group(
+                    [x.tolist() for x in embed_ranks],
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="embed_exchange",
+                )
+                _EMBED_EXCHANGE = pg
+                _VOCAB_OWNED_GROUPS.append(pg)
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
@@ -2613,6 +2722,13 @@ def destroy_model_parallel():
     if _EPLB:
         _EPLB.destroy()
     _EPLB = None
+
+    global _EMBED_EXCHANGE, _LMHEAD_DP
+    for group in _VOCAB_OWNED_GROUPS:
+        group.destroy()
+    _VOCAB_OWNED_GROUPS.clear()
+    _EMBED_EXCHANGE = None
+    _LMHEAD_DP = None
 
 
 def destroy_distributed_environment():

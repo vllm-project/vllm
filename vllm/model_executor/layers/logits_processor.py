@@ -20,6 +20,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.layers.vocab_parallel_plan import (
+    VocabParallelMode,
+    compute_extended_lmhead_logits,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -189,6 +193,23 @@ class LogitsProcessor(PluggableLayer):
         skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
+        plan = lm_head.vocab_parallel_plan
+        if plan.mode is VocabParallelMode.EXTENDED:
+            if skip_gather:
+                if plan.dp_world_size > 1:
+                    raise ValueError(
+                        "skip_gather is not supported when lmhead_tp_size "
+                        "shards across data-parallel ranks."
+                    )
+                return self._apply_head(lm_head, hidden_states, embedding_bias)
+            return compute_extended_lmhead_logits(
+                hidden_states=hidden_states,
+                lm_head=lm_head,
+                apply_head_fn=lambda hs: self._apply_head(lm_head, hs, embedding_bias),
+                gather_tp_fn=self._gather_logits,
+                org_vocab_size=self.org_vocab_size,
+            )
+
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if skip_gather:
             return logits
@@ -235,6 +256,12 @@ class LogitsProcessor(PluggableLayer):
                 "non-positive logit scaling factors."
             )
         tp_size = lm_head.tp_size
+        plan = lm_head.vocab_parallel_plan
+        if plan.dp_world_size > 1:
+            raise ValueError(
+                "Local argmax reduction is not supported when lmhead_tp_size "
+                "shards across data-parallel ranks."
+            )
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         # In place, so that no second logits-sized tensor is live.
@@ -259,8 +286,14 @@ class LogitsProcessor(PluggableLayer):
         local_pair = torch.stack(
             [local_max_vals.float(), global_indices.float()], dim=-1
         )
-        # [batch, 2] -> [batch, 2 * tp_size]
-        gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
+        gathered = local_pair
+        if plan.pcp_gather_group is not None and plan.pcp_gather_group.world_size > 1:
+            gathered = plan.pcp_gather_group.all_gather(gathered.contiguous(), dim=-1)
+        if plan.tp_gather_group is not None and plan.tp_gather_group.world_size > 1:
+            gathered = tensor_model_parallel_all_gather(gathered, dim=-1)
+        elif plan.mode is not VocabParallelMode.EXTENDED:
+            # [batch, 2] -> [batch, 2 * tp_size]
+            gathered = tensor_model_parallel_all_gather(gathered, dim=-1)
         # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
         gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
         max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
@@ -294,6 +327,13 @@ class LogitsProcessor(PluggableLayer):
                 "non-positive logit scaling factors."
             )
 
+        plan = lm_head.vocab_parallel_plan
+        if plan.dp_world_size > 1:
+            raise ValueError(
+                "Local top-k reduction is not supported when lmhead_tp_size "
+                "shards across data-parallel ranks."
+            )
+
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if return_log_probs:
             if self.soft_cap is not None:
@@ -306,19 +346,38 @@ class LogitsProcessor(PluggableLayer):
         if return_log_probs:
             log_partition = torch.logsumexp(logits.float(), dim=-1, keepdim=True)
             if lm_head.tp_size > 1:
-                log_partition = torch.logsumexp(
-                    tensor_model_parallel_all_gather(log_partition, dim=-1),
-                    dim=-1,
-                    keepdim=True,
-                )
+                if (
+                    plan.pcp_gather_group is not None
+                    and plan.pcp_gather_group.world_size > 1
+                ):
+                    log_partition = plan.pcp_gather_group.all_gather(
+                        log_partition.contiguous(), dim=-1
+                    )
+                if (
+                    plan.tp_gather_group is not None
+                    and plan.tp_gather_group.world_size > 1
+                ) or plan.mode is not VocabParallelMode.EXTENDED:
+                    log_partition = tensor_model_parallel_all_gather(
+                        log_partition, dim=-1
+                    )
+                log_partition = torch.logsumexp(log_partition, dim=-1, keepdim=True)
 
         values, ids = _topk(logits, k)
         # Convert shard-local indices to global vocab indices.
         ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 
         if lm_head.tp_size > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+            if (
+                plan.pcp_gather_group is not None
+                and plan.pcp_gather_group.world_size > 1
+            ):
+                values = plan.pcp_gather_group.all_gather(values.contiguous(), dim=-1)
+                ids = plan.pcp_gather_group.all_gather(ids.contiguous(), dim=-1)
+            if (
+                plan.tp_gather_group is not None and plan.tp_gather_group.world_size > 1
+            ) or plan.mode is not VocabParallelMode.EXTENDED:
+                values = tensor_model_parallel_all_gather(values, dim=-1)
+                ids = tensor_model_parallel_all_gather(ids, dim=-1)
             values, selected = _topk(values, k)
             ids = ids.gather(-1, selected)
 

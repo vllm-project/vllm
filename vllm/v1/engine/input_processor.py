@@ -168,6 +168,15 @@ class InputProcessor:
         """
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
+            if not self.vllm_config.parallel_config.supports_prompt_logprobs and (
+                params.prompt_logprobs is not None
+                or params.prompt_logprob_token_ids is not None
+            ):
+                raise VLLMValidationError(
+                    "Prompt logprobs are not supported when "
+                    "fine_grained_tp_config.lmhead_tp_size shards across "
+                    "data-parallel ranks."
+                )
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]
