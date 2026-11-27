@@ -41,6 +41,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
@@ -840,7 +841,9 @@ class OnlineRenderer:
         if tok_params is None:
             tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
-        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+        if isinstance(
+            request, (ChatCompletionRequest, ResponsesRequest, TokenizeChatRequest)
+        ):
             build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
             default_template, default_template_content_format, **build_kwargs
