@@ -797,6 +797,14 @@ class LoRAModelManager:
         sharded MoE wrappers additionally require the dummy rank to be divisible
         by tensor parallel size because they shard W13 along the rank axis.
         """
+        max_rank = self.lora_config.max_lora_rank
+        expert_rank = self.lora_config.max_expert_lora_rank
+        if expert_rank is not None and any(
+            isinstance(module, FusedMoEWithLoRA) for module in self.modules.values()
+        ):
+            max_rank = expert_rank
+            default_rank = min(default_rank, max_rank)
+
         if not self.lora_config.fully_sharded_loras:
             return default_rank
 
@@ -812,13 +820,13 @@ class LoRAModelManager:
         adjusted_rank = (
             (default_rank + required_multiple - 1) // required_multiple
         ) * required_multiple
-        if adjusted_rank > self.lora_config.max_lora_rank:
+        if adjusted_rank > max_rank:
             raise ValueError(
                 "Unable to choose a dummy LoRA warmup rank compatible with "
                 "fully sharded MoE modules: "
                 f"default_rank={default_rank}, "
                 f"required_multiple={required_multiple}, "
-                f"max_lora_rank={self.lora_config.max_lora_rank}"
+                f"slot rank limit={max_rank}"
             )
         return adjusted_rank
 
@@ -954,6 +962,26 @@ class LoRAModelManager:
                     self._convert_3d_to_2d_moe_lora(lora_model, module, module_name)
                 else:
                     self._slice_moe_lora_ep(lora_model, module, module_name)
+
+            if (
+                self.lora_config.max_expert_lora_rank is not None
+                and isinstance(module, FusedMoEWithLoRA)
+            ):
+                weights = self._get_lora_layer_weights(lora_model, module_name)
+                if weights is None:
+                    continue
+                ranks = []
+                for factors, axis in ((weights.lora_a, -2), (weights.lora_b, -1)):
+                    tensors = factors if isinstance(factors, list) else [factors]
+                    ranks.extend(t.shape[axis] for t in tensors if t is not None)
+                adapter_rank = max(ranks, default=0)
+                slot_rank = module.expert_lora_slot_rank
+                if adapter_rank > slot_rank:
+                    raise ValueError(
+                        f"LoRA adapter {lora_model.id}: {module_name} has rank "
+                        f"{adapter_rank}, above the MoE expert LoRA slot rank "
+                        f"{slot_rank} (max_expert_lora_rank)."
+                    )
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None

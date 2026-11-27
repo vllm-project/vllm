@@ -183,9 +183,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (
                     max_loras,
                     self._w13_a_num_experts,
-                    lora_config.max_lora_rank
+                    self.expert_lora_slot_rank
                     if not self.fully_sharded
-                    else divide(lora_config.max_lora_rank, self.tp_size),
+                    else divide(self.expert_lora_slot_rank, self.tp_size),
                     self.hidden_size,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -198,7 +198,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (
                     max_loras,
                     self.local_num_experts,
-                    lora_config.max_lora_rank,
+                    self.expert_lora_slot_rank,
                     self.intermediate_size_per_partition,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -213,7 +213,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_loras,
                     self.local_num_experts,
                     self.intermediate_size_per_partition,
-                    lora_config.max_lora_rank,
+                    self.expert_lora_slot_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -228,7 +228,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.hidden_size
                     if not self.fully_sharded
                     else divide(self.hidden_size, self.tp_size),
-                    lora_config.max_lora_rank,
+                    self.expert_lora_slot_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -254,7 +254,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             assert not moe_config.moe_parallel_config.is_sequence_parallel
 
-    def _verify_ep_fs(self, lora_config: LoRAConfig):
+    def _init_lora_config(self, lora_config: LoRAConfig) -> None:
         # EP and fully_sharded LoRA both partition along the same TP group —
         # EP on the expert dim, fully_sharded on the LoRA rank dim — with
         # mutually contradictory assumptions about which rank holds which
@@ -263,6 +263,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             "Fused MoE LoRA does not support enable_expert_parallel=True "
             "together with fully_sharded_loras=True. Disable one of them."
         )
+        self.max_loras = lora_config.max_loras
+        self.fully_sharded = lora_config.fully_sharded_loras
+        rank = lora_config.max_expert_lora_rank
+        if rank is not None and self.fully_sharded and rank % self.tp_size != 0:
+            raise ValueError(
+                f"max_expert_lora_rank ({rank}) must be divisible by the MoE "
+                f"tensor parallel size ({self.tp_size}) with fully_sharded_loras."
+            )
+        self.expert_lora_slot_rank = rank or lora_config.max_lora_rank
 
     def create_lora_weights(
         self,
@@ -271,9 +280,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
-        self._verify_ep_fs(lora_config)
-        self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        self._init_lora_config(lora_config)
         self.enable_moe_shared_loras = lora_config.enable_moe_shared_loras
 
         self.adapter_enabled = torch.tensor(
@@ -508,7 +515,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
                     max_loras,
                     self.local_num_experts,
                     self.intermediate_size_per_partition * 2,
-                    lora_config.max_lora_rank,
+                    self.expert_lora_slot_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -523,7 +530,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
                     self.hidden_size
                     if not self.fully_sharded
                     else divide(self.hidden_size, self.tp_size),
-                    lora_config.max_lora_rank,
+                    self.expert_lora_slot_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -542,10 +549,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         architectures = model_config.architectures
         if not architectures:
             raise ValueError("model_config.architectures must be defined for MoE LoRA.")
-        self._verify_ep_fs(lora_config)
+        self._init_lora_config(lora_config)
         self._base_model = architectures[0]
-        self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device

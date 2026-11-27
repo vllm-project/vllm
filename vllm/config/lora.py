@@ -34,6 +34,10 @@ class LoRAConfig:
 
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
+    max_expert_lora_rank: int | None = Field(default=None, ge=1)
+    """Max LoRA slot rank for routed MoE experts. Defaults to `max_lora_rank`.
+    Must be at most `max_lora_rank`. Dense and attention layers use
+    `max_lora_rank`."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
     split_k_reduction: Literal["atomic", "kernel"] = "atomic"
@@ -131,6 +135,8 @@ class LoRAConfig:
             "default_mm_loras",
             "specialize_active_lora",
         }
+        if self.max_expert_lora_rank in (None, self.max_lora_rank):
+            ignored_factors.add("max_expert_lora_rank")
         factors = get_compile_factors(self, ignored_factors)
         if self.target_modules is not None:
             # Order is not semantic
@@ -139,6 +145,14 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        if (
+            self.max_expert_lora_rank is not None
+            and self.max_expert_lora_rank > self.max_lora_rank
+        ):
+            raise ValueError(
+                f"max_expert_lora_rank ({self.max_expert_lora_rank}) must be at most "
+                f"max_lora_rank ({self.max_lora_rank})."
+            )
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:

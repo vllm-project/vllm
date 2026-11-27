@@ -9,6 +9,7 @@ import pytest
 from vllm.config import (
     CacheConfig,
     FaultToleranceConfig,
+    LoRAConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -292,6 +293,22 @@ print(hash_factors(envs.compile_factors()))
         "compile_factors hash differs between fresh initializations - "
         "dynamic env vars may not be properly ignored"
     )
+
+
+def test_expert_lora_slot_rank_affects_compile_factors():
+    default = LoRAConfig(max_lora_rank=16)
+    same_shape = LoRAConfig(max_lora_rank=16, max_expert_lora_rank=16)
+    compact = LoRAConfig(max_lora_rank=16, max_expert_lora_rank=4)
+
+    assert same_shape.compile_factors() == default.compile_factors()
+    assert compact.compile_factors() != default.compile_factors()
+    assert compact.max_lora_rank == 16
+
+
+@pytest.mark.parametrize("rank", [0, 17])
+def test_expert_lora_slot_rank_must_fit_global_rank(rank):
+    with pytest.raises(ValueError, match="max_expert_lora_rank"):
+        LoRAConfig(max_lora_rank=16, max_expert_lora_rank=rank)
 
 
 def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
