@@ -86,7 +86,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
-        self.has_fixed_low_latency_layout = getattr(
+        self.supports_runtime_dispatch_capacity = getattr(
             buffer, "has_fixed_low_latency_layout", False
         )
         self.use_fp8_dispatch = use_fp8_dispatch
@@ -145,7 +145,10 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def _get_runtime_dispatch_capacity(self) -> int:
         """Use the synchronized execution slice, retaining the reservation limit."""
-        if not self.has_fixed_low_latency_layout or not is_forward_context_available():
+        if (
+            not self.supports_runtime_dispatch_capacity
+            or not is_forward_context_available()
+        ):
             return self.max_tokens_per_rank
         dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is None:

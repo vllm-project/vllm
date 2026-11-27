@@ -339,6 +339,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     described above for the Modular case.
     """
 
+    supports_runtime_dispatch_capacity: bool = False
+
     @abstractmethod
     def prepare(
         self,
@@ -1314,10 +1316,7 @@ class FusedMoEKernelModularImpl:
         # storage for workspace13.
         # Idle collective ranks still need the workspace manager initialized.
         max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
-        if (
-            self.fused_experts.activation_format()
-            == FusedMoEActivationFormat.BatchedExperts
-        ):
+        if self.prepare_finalize.supports_runtime_dispatch_capacity:
             assert M_full <= fused_out_shape[1]
             fused_out_shape = (fused_out_shape[0], M_full, fused_out_shape[2])
 
