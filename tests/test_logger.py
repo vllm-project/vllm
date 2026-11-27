@@ -16,6 +16,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+import torch
 
 import vllm.logger as vllm_logger
 from vllm.config import LoggingConfig
@@ -29,7 +30,7 @@ from vllm.logger import (
     enable_trace_function_call,
     init_logger,
 )
-from vllm.logging_utils import NewLineFormatter
+from vllm.logging_utils import NewLineFormatter, tensors_str_no_data
 from vllm.logging_utils.dump_input import prepare_object_to_dump
 from vllm.utils.system_utils import decorate_logs
 
@@ -524,3 +525,22 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
 
     assert "AAAA" in log_holder.text
     assert "BBBBB" in log_holder.text
+
+
+def test_tensors_str_no_data_omits_values():
+    args = (
+        torch.tensor(1234.5),
+        torch.tensor([1234]),
+        torch.full((3,), 1234, dtype=torch.int32),
+        [torch.full((2, 3), 1234.5)],
+        {"eps": 1e-6},
+    )
+    out = tensors_str_no_data(args)
+    assert "1234" not in out
+    assert out == (
+        "(Tensor(shape=(), dtype=torch.float32, device=cpu), "
+        "Tensor(shape=(1,), dtype=torch.int64, device=cpu), "
+        "Tensor(shape=(3,), dtype=torch.int32, device=cpu), "
+        "[Tensor(shape=(2, 3), dtype=torch.float32, device=cpu)], "
+        "{'eps': 1e-06})"
+    )

@@ -11,6 +11,7 @@ steps:
   source_file_dependencies:
     - vllm/ir
     - vllm/kernels
+    - vllm/logging_utils/torch_tensor.py
   commands:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
@@ -29,6 +30,7 @@ steps:
       - tests/kernels/ir/
       - vllm/ir
       - vllm/kernels
+      - vllm/logging_utils/torch_tensor.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 

@@ -1279,6 +1279,7 @@ steps:
   source_file_dependencies:
   - vllm/ir
   - vllm/kernels
+  - vllm/logging_utils/torch_tensor.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   - tests/ir/
