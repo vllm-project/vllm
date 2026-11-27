@@ -67,7 +67,7 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-        self.template_kwargs = None
+        self.template_kwargs = chat_template_config.default_chat_template_kwargs
         self.tool_dicts = None
 
         # Shared thread pool executor for preprocessing
