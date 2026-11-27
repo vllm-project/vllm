@@ -574,6 +574,20 @@ class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class OpenELMModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    # OpenELM uses layer-wise scaling, so `num_query_heads` and `num_kv_heads`
+    # are per-layer lists. Report the largest layer, like `from_layers` does;
+    # each attention layer still sizes its own KV cache.
+    def get_total_num_attention_heads(self) -> int:
+        return max(self.hf_text_config.num_query_heads)
+
+    def get_head_size(self) -> int:
+        return self.hf_text_config.head_dim
+
+    def get_total_num_kv_heads(self) -> int:
+        return max(self.hf_text_config.num_kv_heads)
+
+
 class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -879,6 +893,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "moss_audio": MossAudioModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
+    "openelm": OpenELMModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,

@@ -101,6 +101,23 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
+    "apple/OpenELM-270M-Instruct": {
+        "architectures": [
+            "OpenELMForCausalLM"
+        ],
+        "model_type": "openelm",
+        "text_model_type": "openelm",
+        "hidden_size": 1280,
+        "total_num_hidden_layers": 16,
+        "total_num_attention_heads": 20,
+        "head_size": 64,
+        "vocab_size": 32000,
+        "total_num_kv_heads": 5,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
     "vllm-project/deepseek_mtp_main_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
