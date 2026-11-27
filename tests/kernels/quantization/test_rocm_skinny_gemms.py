@@ -11,8 +11,9 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers import utils as layer_utils
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950, on_rdna4
+from vllm.platforms.rocm import on_gfx950, on_mi3xx, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -113,6 +114,14 @@ NKM_FACTORS_WVSPLITK = [
     # N = 5 past the YTILE 2 range: the YTILE 3 and 4 rows on MI3xx
     (5, 4096, 10240),
     (5, 4096, 16384),
+]
+
+# (N, K, M) whose wvSplitK tile differs between 64, 128 and 256 CUs on MI3xx.
+NKM_FACTORS_WVSPLITK_CU_COUNT = [
+    (5, 2048, 1024),
+    (2, 4096, 8192),
+    (4, 4096, 8192),
+    (3, 4096, 12288),
 ]
 
 # N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked
@@ -318,6 +327,38 @@ def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
+@pytest.mark.parametrize("cu_count,takes_wvsplitkrc", [(256, True), (128, False)])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_gemm_dispatch_wvsplitkrc_fits_reported_cus(
+    monkeypatch, cu_count, takes_wvsplitkrc
+):
+    """Measured on a real 128-CU partition, a full-device grid there is slower."""
+    torch.manual_seed(0)
+    # Needs 192 CUs: the full MI355X has 256, a DPX partition reports 128.
+    n, k, m = 16, 2048, 3072
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=torch.bfloat16, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=torch.bfloat16, device="cuda") * 2 - 1) * xavier
+
+    grids = []
+    wvsplitkrc = ops.wvSplitKrc
+
+    def spy(a, b, grid, bias):
+        grids.append(grid)
+        return wvsplitkrc(a, b, grid, bias)
+
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "1")
+    monkeypatch.setattr(ops, "wvSplitKrc", spy)
+    monkeypatch.setattr(layer_utils, "num_compute_units", lambda: cu_count)
+    out = layer_utils.rocm_unquantized_gemm_impl(A, B, None)
+
+    assert grids == ([cu_count] if takes_wvsplitkrc else [])
+    ref_out = torch.nn.functional.linear(A, B, None)
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
 @pytest.mark.parametrize("n_streams", [WVSPLITKRC_SLOTS, WVSPLITKRC_SLOTS + 4])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -428,6 +469,26 @@ def test_rocm_wvsplitk_kernel(
     # Accumulation error in fp16 GEMM scales with sqrt(K)
     atol = torch.finfo(dtype).eps * math.sqrt(k)
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_CU_COUNT)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_mi3xx(), reason="partitions exist on MI3xx only")
+def test_rocm_wvsplitk_same_bits_across_cu_counts(n, k, m, dtype):
+    """A partition reports fewer CUs; wvSplitK returns the same bits on it."""
+    torch.manual_seed(0)
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    full, half, quarter = (ops.wvSplitK(B, A, cu, None) for cu in (256, 128, 64))
+
+    ref_out = torch.nn.functional.linear(A, B, None)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(full, ref_out, atol=atol, rtol=1e-2)
+    assert torch.equal(half, full)
+    assert torch.equal(quarter, full)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_SWMMAC)
