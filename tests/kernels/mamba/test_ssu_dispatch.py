@@ -48,6 +48,8 @@ except ImportError:
     HAS_FLASHINFER = False
 
 DEVICE = current_platform.device_type
+# The ring trackers' state in a ReplaySSM page: (conv, ssm, x, B, dt, trackers).
+TRACKERS_IDX = 5
 requires_gpu = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="requires CUDA or XPU",
@@ -87,11 +89,14 @@ def _device_ints(values):
     return torch.tensor(values, dtype=torch.int32, device=DEVICE)
 
 
-def _replayssm_mixer(kv_cache, ring_start, committed, A):
+def _replayssm_mixer(kv_cache, A, ring_start=None, committed=None):
+    # The trackers page state holds each slot's (ring_start, num_committed).
+    if ring_start is not None:
+        kv_cache[TRACKERS_IDX][:, 0].copy_(ring_start)
+        kv_cache[TRACKERS_IDX][:, 1].copy_(committed)
     return SimpleNamespace(
         kv_cache=kv_cache,
-        _replayssm_ring_start=ring_start,
-        _replayssm_prev_num_accepted=committed,
+        prefix="mixer",
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
@@ -133,20 +138,22 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             (heads, dim),
             (heads, dim, dstate),
             (heads, ring_len, dim),
-            (heads, ring_len),
             (1, ring_len, dstate),
+            (heads, ring_len),
+            (2,),
         ),
         dtypes=(
             torch.bfloat16,
             ssm_dtype,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
+            torch.int32,
         ),
-        state_alignment=16,
         block_stride_alignment=16,
     )
-    spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
+    # Hybrid models pad the Mamba page to the attention page, a multiple of 16.
+    spec = replace(spec, page_size_padded=-(-spec.page_size_bytes // 16) * 16 + 128)
     vllm_config = SimpleNamespace(
         cache_config=CacheConfig(),
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -176,14 +183,13 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         layer = SimpleNamespace(
             get_state_shape=lambda: spec.shapes,
             get_state_dtype=lambda: spec.dtypes,
-            state_alignment=16,
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
-    rings = {name: states[2:] for name, states in caches.items()}
+    rings = {name: states[2:TRACKERS_IDX] for name, states in caches.items()}
     for name, states in caches.items():
         states[1].normal_(std=0.1)
-        x, dt, B = rings[name]
+        x, B, dt = rings[name]
         x.normal_()
         dt.fill_(0.01)
         B.normal_()
@@ -202,7 +208,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     ring_before = {
         name: [tensor.clone() for tensor in tensors] for name, tensors in rings.items()
     }
-    A = -torch.ones(heads, device="cuda")
+    A = -torch.ones(heads, device=DEVICE)
     null = NULL_BLOCK_ID
     block_tables = [
         [[null, 3], [null, 5], [4, 4], [null, null], [null, null]],
@@ -218,15 +224,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         }
         for offset in (0, 6, 12)
     ]
+    # Groups alias pages but own disjoint slots (the null slot agrees), so each
+    # group's history goes into every one of its layers' in-page trackers.
+    for states in caches.values():
+        states[TRACKERS_IDX].zero_()
     grouped = []
     for names, table, history in zip(layer_names, block_tables, histories, strict=True):
-        starts, committed = [0] * slots, [0] * slots
-        for slot, (start, count) in history.items():
-            starts[slot], committed[slot] = start, count
-        starts, committed = _device_ints(starts), _device_ints(committed)
-        mixers = [
-            _replayssm_mixer(caches[name], starts, committed, A) for name in names
-        ]
+        mixers = [_replayssm_mixer(caches[name], A) for name in names]
+        for mixer in mixers:
+            trackers = mixer.kv_cache[TRACKERS_IDX]
+            for slot, (start, count) in history.items():
+                trackers[slot] = torch.tensor([start, count])
         grouped.append((mixers, spec, _device_ints(table)))
     context = ReplaySSMModelContext.create(
         grouped, max_num_reqs=6, materialize_prefixes=True
@@ -236,6 +244,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     # Row 2 uses in-place replay; row 3 has null slots in every group.
     # Row 4 is a padded request, and row 5 is unused buffer capacity.
     mapping = _device_ints([2, 0, 1, 3, -1])
+    src_cols, dst_cols = [0, 1, 1, 1], [1, 0, 0, 0]
+    # The align pre-copy runs first: it copies a continuing source page,
+    # trackers included, to its new slot in every layer.
+    for (mixers, _, _), table in zip(grouped, block_tables, strict=True):
+        for batch_idx, req_idx in enumerate([2, 0, 1, 3]):
+            src = table[batch_idx][src_cols[req_idx]]
+            dst = table[batch_idx][dst_cols[req_idx]]
+            if null not in (src, dst) and src != dst:
+                for mixer in mixers:
+                    trackers = mixer.kv_cache[TRACKERS_IDX]
+                    trackers[dst] = trackers[src]
     # Groups use different slots but preserve equal logical replay histories.
     context.reset_new_slots(
         idx_mapping=mapping,
@@ -248,13 +267,15 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         {**histories[1], 8: histories[1][9], 11: (0, 0)},
         {**histories[2], 14: histories[2][15], 17: (0, 0)},
     ]
-    for (mixers, _, _), expected in zip(grouped, reset_histories, strict=True):
-        assert mixers[0]._replayssm_ring_start.tolist() == [
-            expected.get(slot, (0, 0))[0] for slot in range(slots)
-        ]
-        assert mixers[0]._replayssm_prev_num_accepted.tolist() == [
-            expected.get(slot, (0, 0))[1] for slot in range(slots)
-        ]
+    for (mixers, _, _), table, expected in zip(
+        grouped, block_tables, reset_histories, strict=True
+    ):
+        group_slots = {slot for row in table for slot in row} | set(expected)
+        for mixer in mixers:
+            for slot in group_slots:
+                assert mixer.kv_cache[TRACKERS_IDX][slot].tolist() == list(
+                    expected.get(slot, (0, 0))
+                ), (slot, mixer)
     metadata = dict(
         idx_mapping=mapping,
         query_metadata=_device_ints([0, 4, 8, 12, 16, 20])
@@ -266,7 +287,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         else _device_ints([14] * 4),
         num_computed_is_post_step=post_step,
         num_accepted_tokens=_device_ints([1, 3, 3, 3]),
-        is_prefilling=torch.zeros(5, dtype=torch.bool, device="cuda"),
+        is_prefilling=torch.zeros(5, dtype=torch.bool, device=DEVICE),
         live_cols=_device_ints([1] * 4),
         num_reqs=5,
     )
@@ -285,8 +306,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     for names, (mixers, _, _), table in zip(
         layer_names, grouped, block_tables, strict=True
     ):
-        starts = mixers[0]._replayssm_ring_start
-        committed = mixers[0]._replayssm_prev_num_accepted
+        starts = mixers[0].kv_cache[TRACKERS_IDX][:, 0]
+        committed = mixers[0].kv_cache[TRACKERS_IDX][:, 1]
         for row, (start, flush) in plans.items():
             dst, src = table[row]
             if dst == null:
@@ -296,7 +317,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                 continue
             for name in names:
                 destinations.setdefault(caches[name][1].data_ptr(), set()).add(dst)
-                x, dt, B = rings[name]
+                x, B, dt = rings[name]
                 expected = original[name][src].float().clone()
                 for offset in range(flush):
                     pos = (start + offset) % ring_len
@@ -341,14 +362,15 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     mixer = _replayssm_mixer(
         kv_cache=(
             torch.empty(0, device=DEVICE),
-            torch.empty(6, 1, 1, 1, device=DEVICE),
+            torch.empty(6, 1, 1, 4, device=DEVICE),
+            torch.empty(6, 1, 20, 1, device=DEVICE),
             torch.empty(6, 1, 20, 1, device=DEVICE),
             torch.empty(6, 1, 20, device=DEVICE),
-            torch.empty(6, 1, 20, 1, device=DEVICE),
+            torch.empty(6, 2, dtype=torch.int32, device=DEVICE),
         ),
+        A=torch.empty(1, device=DEVICE),
         ring_start=_device_ints([3] * 6),
         committed=_device_ints([2] * 6),
-        A=torch.empty(1, device=DEVICE),
     )
     spec = MambaSpec(
         block_size=16,
@@ -378,8 +400,9 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
         torch.tensor([True, False, True, True], device=DEVICE),
         _device_ints([0, 2, 1]),
         context.block_table_ptrs,
-        context.ring_start_ptrs,
-        context.num_committed_ptrs,
+        context.tracker_ptrs,
+        context.tracker_slot_strides,
+        context.layer_offsets,
         context.src_slots_ptrs,
         context.dst_slots_ptrs,
         context.plan_ring_start,
@@ -409,8 +432,8 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4
-    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 3, 0, 3]
-    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
+    assert mixer.kv_cache[TRACKERS_IDX][:, 0].tolist() == [3, 0, 0, 3, 0, 3]
+    assert mixer.kv_cache[TRACKERS_IDX][:, 1].tolist() == [2, 0, 0, 2, 0, 2]
 
 
 def test_default_backend_is_triton():
@@ -579,8 +602,9 @@ def test_replayssm_physical_ring_shape(
     assert shapes == (
         *base_shapes,
         (8, expected_ring_len, 4),
-        (8, expected_ring_len),
         (2, expected_ring_len, 16),
+        (8, expected_ring_len),
+        (2,),
     )
 
 
@@ -590,17 +614,22 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
     """Keep group histories equal across checkpoints without touching other slots."""
     ring_start = [_device_ints([11, 3, 7, 13]), _device_ints([11, 7, 3, 13])]
     committed = [_device_ints([9, 2, 9, 17]), _device_ints([9, 9, 2, 17])]
-    cache = (
-        torch.empty(4, 1, device=DEVICE),
-        torch.empty(4, 1, 1, 1, device=DEVICE),
-        torch.empty(4, 1, 20, 1, device=DEVICE),
-        torch.empty(4, 1, 20, device=DEVICE),
-        torch.empty(4, 1, 20, 1, device=DEVICE),
-    )
+    # One page set per group: each holds its group's in-page trackers.
+    caches = [
+        (
+            torch.empty(4, 1, device=DEVICE),
+            torch.empty(4, 1, 1, 4, device=DEVICE),
+            torch.empty(4, 1, 20, 1, device=DEVICE),
+            torch.empty(4, 1, 20, 1, device=DEVICE),
+            torch.empty(4, 1, 20, device=DEVICE),
+            torch.empty(4, 2, dtype=torch.int32, device=DEVICE),
+        )
+        for _ in range(2)
+    ]
     spec = MambaSpec(
         block_size=256,
-        shapes=tuple(tensor.shape[1:] for tensor in cache),
-        dtypes=tuple(tensor.dtype for tensor in cache),
+        shapes=tuple(tensor.shape[1:] for tensor in caches[0]),
+        dtypes=tuple(tensor.dtype for tensor in caches[0]),
     )
     # Neighboring request rows provide valid canary IDs, making erroneous
     # column reads deterministically corrupt another slot rather than crash.
@@ -611,15 +640,17 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
     for group_idx, table in enumerate(block_tables):
         table[0, 0] = group_idx + 1
         mixer = _replayssm_mixer(
-            cache,
+            caches[group_idx],
+            torch.empty(1, device=DEVICE),
             ring_start[group_idx],
             committed[group_idx],
-            torch.empty(1, device=DEVICE),
         )
         grouped.append(([mixer], spec, table))
     context = ReplaySSMModelContext.create(
         grouped, max_num_reqs=1, materialize_prefixes=False
     )
+    ring_start = [cache[5][:, 0] for cache in caches]
+    committed = [cache[5][:, 1] for cache in caches]
     computed = 50_000
     history_tokens = checkpoint_tokens = 0
     # Reset a later prefill chunk, then reject, partially accept, and fully accept.
@@ -705,16 +736,15 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.A = torch.empty(2)
     mixer.dt_bias = torch.empty(2)
     mixer.D = torch.empty(2)
-    mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
-    mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_rand_seed = None
     mixer._replayssm_rand_seeds = None
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
         torch.empty(3, 2, 20, 4),
-        torch.empty(3, 2, 20),
         torch.empty(3, 1, 20, 8),
+        torch.empty(3, 2, 20),
+        torch.zeros(3, 2, dtype=torch.int32),
     )
 
     num_decode_tokens = query_start_loc[-1]
@@ -784,4 +814,4 @@ def test_replayssm_ring_shape_extends_groups_for_head_shards():
         backend=MambaBackendEnum.TRITON,
     )
 
-    assert shapes == (*base_shapes, (2, 16, 64), (2, 16), (1, 16, 128))
+    assert shapes == (*base_shapes, (2, 16, 64), (1, 16, 128), (2, 16), (2,))

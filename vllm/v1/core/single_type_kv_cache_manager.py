@@ -1875,7 +1875,6 @@ class MambaManager(SingleTypeKVCacheManager):
         # Each state block holds one state, so every layer's page must match.
         return (
             len({spec.page_size_bytes for spec in mamba_specs}) == 1
-            and len({spec.state_alignment for spec in mamba_specs}) == 1
             and len({spec.tp_replicated for spec in mamba_specs}) == 1
         )
 

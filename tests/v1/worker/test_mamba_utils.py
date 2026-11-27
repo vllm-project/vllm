@@ -46,14 +46,14 @@ from vllm.v1.worker.mamba_utils import (
     get_mamba_groups,
     postprocess_mamba_fused_kernel,
 )
-from vllm.v1.worker.replayssm_utils import (
-    ReplaySSMModelContext,
-    initialize_replayssm_ring_trackers,
-)
+from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache_to_layers,
 )
+
+# The ring trackers' state in a ReplaySSM page: (conv, ssm, x, B, dt, trackers).
+TRACKERS_IDX = 5
 
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
 _DEFAULT_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
@@ -572,8 +572,8 @@ def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
     replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
 
     assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
-    assert replay.num_states == 5
-    assert replay.state_base_addrs.numel() == 5
+    assert replay.num_states == 6
+    assert replay.state_base_addrs.numel() == 6
     assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
 
 
@@ -589,7 +589,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
             block_size=16,
             shapes=mixer.get_state_shape(),
             dtypes=mixer.get_state_dtype(),
-            state_alignment=16,
             page_size_padded=128,
         )
         for mixer in mixers
@@ -641,18 +640,19 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
     spec = MambaSpec(
         block_size=16,
-        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4)),
+        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20, 4), (1, 20), (2,)),
         dtypes=(
             torch.bfloat16,
             torch.float32,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
+            torch.int32,
         ),
-        state_alignment=16,
         block_stride_alignment=16,
     )
-    spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
+    # Hybrid models pad the Mamba page to the attention page, a multiple of 16.
+    spec = replace(spec, page_size_padded=-(-spec.page_size_bytes // 16) * 16 + 128)
     config = SimpleNamespace(
         cache_config=CacheConfig(),
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -684,7 +684,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         mixer.A = -torch.ones(1, device=device)
         forward_context[name] = mixer
     bind_kv_cache_to_layers(pages, forward_context)
-    initialize_replayssm_ring_trackers(kv_config, forward_context)
     source_slot, destination_slot = previous_column + 1, destination_column + 1
     original = {}
     for name, mixer in forward_context.items():
@@ -696,10 +695,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
                 .add_(100 * state_index)
             )
         original[name] = [tensor.clone() for tensor in mixer.kv_cache]
-        mixer._replayssm_ring_start.fill_(2)
-        mixer._replayssm_prev_num_accepted.fill_(3)
-        mixer._replayssm_ring_start[source_slot] = 7
-        mixer._replayssm_prev_num_accepted[source_slot] = 9
     cfg = _TestConfig(num_layers=2, max_num_reqs=2)
     ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
     batch_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
@@ -735,18 +730,16 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     for name, mixer in forward_context.items():
         source = original[name]
         if not moved:
-            for actual, before in zip(mixer.kv_cache, source):
+            idx = TRACKERS_IDX
+            for actual, before in zip(mixer.kv_cache[:idx], source[:idx]):
                 torch.testing.assert_close(actual, before, rtol=0, atol=0)
-            expected_start, expected_committed = (
-                (0, 0) if previous_column < 0 else (7, 9)
+            # A fresh slot restarts with an empty ring; the same column keeps it.
+            expected_trackers = (
+                [0, 0]
+                if previous_column < 0
+                else source[idx][destination_slot].tolist()
             )
-            assert (
-                mixer._replayssm_ring_start[destination_slot].item() == expected_start
-            )
-            assert (
-                mixer._replayssm_prev_num_accepted[destination_slot].item()
-                == expected_committed
-            )
+            assert mixer.kv_cache[idx][destination_slot].tolist() == expected_trackers
             continue
         conv = mixer.kv_cache[0][destination_slot]
         if is_conv_state_dim_first():
@@ -763,11 +756,10 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
             )
             torch.testing.assert_close(tensor[4], source[index][4], rtol=0, atol=0)
             if index > 0:
+                # Including the in-page trackers (state 5).
                 torch.testing.assert_close(
                     tensor[destination_slot], source[index][source_slot], rtol=0, atol=0
                 )
-        assert mixer._replayssm_ring_start[destination_slot].item() == 7
-        assert mixer._replayssm_prev_num_accepted[destination_slot].item() == 9
 
 
 def test_mamba_groups_support_different_state_specs():
@@ -992,15 +984,14 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
     x_ring = torch.ones(3, heads, ring_len, dim, dtype=torch.bfloat16, device=device)
     B_ring = torch.ones(3, 1, ring_len, dstate, dtype=torch.bfloat16, device=device)
     dt_ring = torch.full((3, heads, ring_len), 0.05, device=device)
-    starts = torch.full((3,), 7, dtype=torch.int32, device=device)
-    committed = torch.full((3,), 3, dtype=torch.int32, device=device)
-    cache = (state, x_ring, B_ring, dt_ring, starts, committed)
+    trackers = torch.tensor([[7, 3]] * 3, dtype=torch.int32, device=device)
+    cache = (state, x_ring, B_ring, dt_ring, trackers)
     original_cache = tuple(tensor.clone() for tensor in cache)
     mixer = SimpleNamespace(
-        kv_cache=[torch.empty(3, 1, device=device), state, x_ring, dt_ring, B_ring],
+        kv_cache=[torch.empty(3, 1, device=device), *cache],
         A=-torch.ones(heads, device=device),
-        _replayssm_ring_start=starts,
-        _replayssm_prev_num_accepted=committed,
+        use_flashinfer_replayssm=False,
+        prefix="mixer",
         replayssm_buffer_len=16,
         mamba_config=MambaConfig(),
         cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
@@ -1023,8 +1014,9 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
         torch.ones(1, dtype=torch.bool, device=device),  # is_prefilling
         None,
         replay.block_table_ptrs,
-        replay.ring_start_ptrs,
-        replay.num_committed_ptrs,
+        replay.tracker_ptrs,
+        replay.tracker_slot_strides,
+        replay.layer_offsets,
         replay.src_slots_ptrs,
         replay.dst_slots_ptrs,
         replay.plan_ring_start,
@@ -1042,8 +1034,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
         MATERIALIZE_PREFIXES=enable_prefix_caching,
         LIVE_COL_IS_ZERO=True,
     )
-    assert starts.tolist() == [7, 0, 7]
-    assert committed.tolist() == [3, 0, 3]
+    assert trackers.tolist() == [[7, 3], [0, 0], [7, 3]]
     for actual, original in zip(cache[:4], original_cache[:4]):
         torch.testing.assert_close(actual, original, rtol=0, atol=0)
     for actual, original in zip(cache[4:], original_cache[4:]):

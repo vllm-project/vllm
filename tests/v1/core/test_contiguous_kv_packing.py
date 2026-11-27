@@ -19,6 +19,7 @@ import torch
 from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_layer
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -138,7 +139,6 @@ def _bind(config, layout: str):
 class _MambaLayer(MambaBase):
     def __init__(self, spec: MambaSpec):
         self.spec = spec
-        self.state_alignment = spec.state_alignment
 
     def get_state_shape(self):
         return self.spec.shapes
@@ -159,23 +159,22 @@ def _mamba_states(cache, spec):
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
 def test_replayssm_low_head_packed_alignment(layout):
-    # Two-head STP leaves a 136-byte dt ring before the B ring.
+    # Two-head STP has a 136-byte dt ring. It goes last, so the states before
+    # it stay 16-byte aligned without padding between states.
     spec = MambaSpec(
         block_size=16,
-        shapes=((3, 384), (2, 64, 128), (2, 17, 64), (2, 17), (1, 17, 128)),
+        shapes=((3, 384), (2, 64, 128), (2, 17, 64), (1, 17, 128), (2, 17)),
         dtypes=(
             torch.bfloat16,
             torch.float16,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
         ),
-        state_alignment=16,
         block_stride_alignment=16,
     )
-    with pytest.raises(AssertionError, match="page_size_padded must be aligned"):
-        replace(spec, page_size_padded=spec.state_content_size_bytes + 1)
-    padded_page_size = spec.state_content_size_bytes + 16
+    # Hybrid models pad the Mamba page to a multiple of the attention page.
+    padded_page_size = round_up(spec.state_content_size_bytes, 16) + 16
     spec = replace(spec, page_size_padded=padded_page_size)
     assert spec.page_size_bytes == padded_page_size
     # Block-outer packing must also align an overlay with a larger, odd page.

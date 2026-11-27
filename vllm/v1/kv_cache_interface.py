@@ -551,8 +551,6 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
-    state_alignment: int = 1
-    """Byte alignment of each state within a page."""
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     num_heads: int = 1
@@ -561,17 +559,10 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.page_size_padded is not None:
-            assert self.page_size_padded % self.state_alignment == 0, (
-                "page_size_padded must be aligned to state_alignment"
-            )
-
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
-            round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
+            prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
