@@ -961,23 +961,19 @@ def test_mamba_mid_block_resume_exports_into_resumed_block(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
-@pytest.mark.parametrize(
-    "model,enforce_eager",
-    [(MODEL, True), ("allenai/Olmo-Hybrid-7B", False)],
-)
 @create_new_process_for_each_test()
-def test_mamba_off_grid_hit_exports_inside_chunk(
-    monkeypatch: pytest.MonkeyPatch, model: str, enforce_eager: bool
-):
+def test_mamba_off_grid_hit_exports_inside_chunk(monkeypatch: pytest.MonkeyPatch):
     """With hits every 16 tokens, the Triton GDN prefill resumes at 784 and
     exports its checkpoint 464 tokens later (1248), 16 tokens into a 64-token
     kernel chunk, without splitting the prefill.
     """
+    # Not MODEL: the fresh references chunk the tokens differently, and with
+    # dummy weights its states drift past the tolerance from that alone.
     _check_mid_block_resume(
         monkeypatch,
-        model,
+        "allenai/Olmo-Hybrid-7B",
         "triton",
-        enforce_eager,
+        False,
         prefix_match_unit=16,
         produced=BLOCK_SIZE + 216,
         resumed_at=BLOCK_SIZE + 208,
