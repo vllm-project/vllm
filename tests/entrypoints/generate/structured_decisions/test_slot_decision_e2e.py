@@ -129,11 +129,20 @@ def test_decisions(server):
                     "instructions": "Which department should handle this?",
                     "choices": [{"value": "returns"}, {"value": "billing"}],
                 },
+                {
+                    "type": "score",
+                    "instructions": "Rate the damage.",
+                    "levels": [
+                        {"label": "damage", "description": "cosmetic"},
+                        {"label": "damage", "description": "unusable"},
+                    ],
+                },
             ],
         },
     )
     assert response.status_code == 200, response.text
-    predicate, choice = response.json()["answers"]
+    predicate, choice, score = response.json()["answers"]
     assert 0.0 <= predicate["probability"] <= 1.0
     probabilities = {p["value"]: p["probability"] for p in choice["probabilities"]}
     check_probabilities(probabilities, {"returns", "billing"})
+    assert [p["value"] for p in score["probabilities"]] == [0, 1]
