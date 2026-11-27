@@ -232,11 +232,17 @@ def _weight_pointers(layer: RoutedExperts) -> dict[str, int]:
 
 
 def _assert_backend(layer: RoutedExperts, backend: str) -> None:
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    method = layer.quant_method
+    assert isinstance(method, UnquantizedFusedMoEMethod)
     selected = str(
         getattr(
-            layer.quant_method.unquantized_backend,
+            method.unquantized_backend,
             "value",
-            layer.quant_method.unquantized_backend,
+            method.unquantized_backend,
         )
     )
     if backend == "aiter":
