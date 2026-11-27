@@ -411,10 +411,16 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         return True
 
+    def _clear_slot_rank_tracking(self, index: int) -> None:
+        for module in self.modules.values():
+            if hasattr(module, "clear_lora_ranks"):
+                module.clear_lora_ranks(index)
+
     def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
+            self._clear_slot_rank_tracking(index)
         except ValueError:
             pass
 
@@ -467,6 +473,8 @@ class LoRAModelManager:
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
+        for index in range(self.lora_slots):
+            self._clear_slot_rank_tracking(index)
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()

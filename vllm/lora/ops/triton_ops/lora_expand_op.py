@@ -13,6 +13,7 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_b_ptr,
     get_lora_op_configs,
+    resolve_lora_ranks,
     supports_pdl,
 )
 from vllm.platforms import current_platform
@@ -55,6 +56,7 @@ def _lora_expand_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     HAS_LORA_RANKS: tl.constexpr = False,
+    MAX_K: tl.constexpr = 0,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -147,6 +149,7 @@ def _lora_expand_kernel(
         ADD_INPUTS,
         USE_GDC,
         MASK_K_TAIL=HAS_LORA_RANKS,
+        SINGLE_K_ITER=(MAX_K <= BLOCK_K),
     )
 
 
@@ -165,6 +168,7 @@ def _lora_expand(
     offset_start: int = 0,
     add_inputs: bool = False,
     lora_ranks: torch.Tensor | None = None,
+    has_submax_ranks_cpu: torch.Tensor | None = None,
 ) -> None:
     """Args:
     inputs (torch.Tensor): input tensor
@@ -190,9 +194,13 @@ def _lora_expand(
     add_inputs (bool, optional): Whether to add the input tensor to the
         output tensor. Defaults to False.
     lora_ranks (torch.Tensor | None, optional): Optional contiguous int32
-        tensor of shape ``[num_lora_slots]`` or
-        ``[num_slices, num_lora_slots]`` giving each adapter's effective rank
+        tensor of shape `[num_lora_slots]` or
+        `[num_slices, num_lora_slots]` giving each adapter's effective rank
         for early-exiting padded K iterations. Defaults to None.
+    has_submax_ranks_cpu (torch.Tensor | None, optional): Optional 1-element
+        CPU bool tensor indicating whether any active slot has rank below
+        `max_lora_rank`. When False, skips rank-masking dynamically inside the
+        custom op without Dynamo trace specialization. Defaults to None.
 
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -231,29 +239,13 @@ def _lora_expand(
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
     num_lora_slots = lora_b_weights[0].size(0)
-
-    if lora_ranks is not None:
-        assert lora_ranks.dtype == torch.int32
-        assert lora_ranks.is_contiguous()
-        if lora_ranks.ndim == 1:
-            assert lora_ranks.size(0) == num_lora_slots
-            lora_ranks_d0_stride = 0
-        elif lora_ranks.ndim == 2:
-            assert (
-                lora_ranks.size(0) == NUM_SLICES
-                and lora_ranks.size(1) == num_lora_slots
-            )
-            lora_ranks_d0_stride = lora_ranks.stride(0)
-        else:
-            raise ValueError(
-                f"Expected 1D or 2D lora_ranks tensor, got {lora_ranks.ndim}D."
-            )
-        has_lora_ranks = True
-        lora_ranks_ptr = lora_ranks
-    else:
-        has_lora_ranks = False
-        lora_ranks_ptr = lora_ids
-        lora_ranks_d0_stride = 0
+    has_lora_ranks, lora_ranks_ptr, lora_ranks_d0_stride = resolve_lora_ranks(
+        lora_ranks,
+        lora_ids,
+        NUM_SLICES,
+        num_lora_slots,
+        has_submax_ranks_cpu,
+    )
 
     # Triton kernel configs.
     kernel_config = get_lora_op_configs(
@@ -336,6 +328,7 @@ def _lora_expand(
         num_stages=NUM_STAGES,
         launch_pdl=use_gdc,
         HAS_LORA_RANKS=has_lora_ranks,
+        MAX_K=K,
     )
 
     return

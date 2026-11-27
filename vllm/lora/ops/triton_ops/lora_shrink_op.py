@@ -14,6 +14,7 @@ from vllm.lora.ops.triton_ops.utils import (
     FIXED_SHRINK_SPLIT_K,
     _get_lora_a_ptr,
     get_lora_op_configs,
+    resolve_lora_ranks,
     supports_pdl,
     use_lora_kernel_reduction,
 )
@@ -263,6 +264,7 @@ def _lora_shrink(
     scaling: float,
     split_k_reduction: str = "atomic",
     lora_ranks: torch.Tensor | None = None,
+    has_submax_ranks_cpu: torch.Tensor | None = None,
 ) -> None:
     """Args:
     inputs (torch.Tensor): Input tensor
@@ -289,9 +291,13 @@ def _lora_shrink(
     scaling (float): Scaling factor.
     split_k_reduction (str): `atomic` or a separate `kernel` reduction.
     lora_ranks (torch.Tensor | None, optional): Optional contiguous int32
-        tensor of shape ``[num_lora_slots]`` or
-        ``[num_slices, num_lora_slots]`` giving each adapter's effective rank
+        tensor of shape `[num_lora_slots]` or
+        `[num_slices, num_lora_slots]` giving each adapter's effective rank
         for early-exiting padded N tiles. Defaults to None.
+    has_submax_ranks_cpu (torch.Tensor | None, optional): Optional 1-element
+        CPU bool tensor indicating whether any active slot has rank below
+        `max_lora_rank`. When False, skips rank-masking dynamically inside the
+        custom op without Dynamo trace specialization. Defaults to None.
 
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -341,29 +347,13 @@ def _lora_shrink(
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
     num_lora_slots = lora_a_weights[0].size(0)
-
-    if lora_ranks is not None:
-        assert lora_ranks.dtype == torch.int32
-        assert lora_ranks.is_contiguous()
-        if lora_ranks.ndim == 1:
-            assert lora_ranks.size(0) == num_lora_slots
-            lora_ranks_d0_stride = 0
-        elif lora_ranks.ndim == 2:
-            assert (
-                lora_ranks.size(0) == NUM_SLICES
-                and lora_ranks.size(1) == num_lora_slots
-            )
-            lora_ranks_d0_stride = lora_ranks.stride(0)
-        else:
-            raise ValueError(
-                f"Expected 1D or 2D lora_ranks tensor, got {lora_ranks.ndim}D."
-            )
-        has_lora_ranks = True
-        lora_ranks_ptr = lora_ranks
-    else:
-        has_lora_ranks = False
-        lora_ranks_ptr = lora_ids
-        lora_ranks_d0_stride = 0
+    has_lora_ranks, lora_ranks_ptr, lora_ranks_d0_stride = resolve_lora_ranks(
+        lora_ranks,
+        lora_ids,
+        NUM_SLICES,
+        num_lora_slots,
+        has_submax_ranks_cpu,
+    )
 
     # Triton kernel configs
     kernel_config = get_lora_op_configs(

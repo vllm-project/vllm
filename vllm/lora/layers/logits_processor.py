@@ -111,12 +111,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
 
-        self.lora_a_ranks = torch.zeros(
-            (1, max_loras), dtype=torch.int32, device=self.device
-        )
-        self.lora_b_ranks = torch.zeros(
-            (1, max_loras), dtype=torch.int32, device=self.device
-        )
+        self._init_lora_rank_buffers(1, max_loras, self.device)
 
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
@@ -128,8 +123,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
-        self.lora_a_ranks[:, index] = 0
-        self.lora_b_ranks[:, index] = 0
+        self._clear_lora_rank_slot(index)
 
     def set_lora(
         self,
@@ -146,8 +140,24 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
-        self.lora_a_ranks[0, index] = lora_a.shape[0]
-        self.lora_b_ranks[0, index] = lora_b.shape[1]
+        self._set_slot_rank(
+            self.lora_a_ranks,
+            self._a_submax_slots,
+            self._has_submax_a_ranks_cpu,
+            index,
+            0,
+            lora_a.shape[0],
+            self.lora_a_stacked.shape[2],
+        )
+        self._set_slot_rank(
+            self.lora_b_ranks,
+            self._b_submax_slots,
+            self._has_submax_b_ranks_cpu,
+            index,
+            0,
+            lora_b.shape[1],
+            self.lora_b_stacked.shape[3],
+        )
 
     def _get_logits(
         self,
@@ -208,6 +218,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             1.0,
             lora_a_ranks=self.lora_a_ranks,
             lora_b_ranks=self.lora_b_ranks,
+            lora_a_has_submax_cpu=self._has_submax_a_ranks_cpu,
+            lora_b_has_submax_cpu=self._has_submax_b_ranks_cpu,
         )
 
         if not current_platform.can_update_inplace():
