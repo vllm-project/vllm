@@ -308,6 +308,32 @@ def test_heterogeneous_mamba_layers_share_checkpoint_alignment(
 
 
 @pytest.mark.parametrize(
+    ("min_offsets", "prefix_match_unit", "expected_alignment"),
+    [
+        ((3, 9), 16, 1),
+        ((3, 9), None, 1),
+        # One layer keeps its offsets aligned, so every layer does.
+        ((3, None), 16, 64),
+        # A match unit shorter than a conv window.
+        ((3, 9), 8, 64),
+    ],
+)
+def test_checkpoint_alignment_with_unaligned_offsets(
+    min_offsets, prefix_match_unit, expected_alignment
+):
+    from vllm.model_executor.layers.mamba.abstract import (
+        get_kv_cache_checkpoint_alignment,
+    )
+
+    vllm_config = _align_qwen3_5_blocks(64, 1, prefix_match_unit=prefix_match_unit)
+    layers = vllm_config.compilation_config.static_forward_context
+    for i, offset in enumerate(min_offsets):
+        layers[f"mamba.{i}"].min_unaligned_checkpoint_offset = offset
+
+    assert get_kv_cache_checkpoint_alignment(vllm_config) == expected_alignment
+
+
+@pytest.mark.parametrize(
     ("attn_block_sizes", "mamba_block_size"), [((576,), 576), ((128, 768), 384)]
 )
 def test_mamba_blocks_divide_resized_attention_blocks(

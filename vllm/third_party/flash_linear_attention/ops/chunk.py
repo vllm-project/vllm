@@ -188,8 +188,8 @@ def chunk_gated_delta_rule(
             Contiguous buffer of shape `[N, H, V, K]`; row `n` receives the state of
             sequence `n` after `checkpoint_offsets[n]` tokens.
         checkpoint_offsets (Optional[torch.Tensor]):
-            Token offsets of shape `[N]`, `0` for none. Only multiples of the 64-token
-            chunk below the sequence length are stored.
+            Token offsets of shape `[N]`, `0` for none. Any offset below the sequence
+            length is stored.
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.

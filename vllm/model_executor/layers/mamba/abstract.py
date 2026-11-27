@@ -31,6 +31,9 @@ class MambaBase(AttentionLayerBase):
     use_replayssm_trackers: bool = False
     state_alignment: int = 1
     requires_grid_checkpoint_alignment: bool = False
+    # Shortest offset into a query at which the layer can export a prefill
+    # checkpoint off its alignment, or None if its offsets must keep it.
+    min_unaligned_checkpoint_offset: int | None = None
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
 
@@ -173,11 +176,24 @@ def get_mamba_prefill_checkpoint_grid(
 def get_kv_cache_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
     """Model-wide prefill checkpoint alignment shared by every Mamba KV cache
     group and metadata builder, or `None` if prefix caching is disabled or any
-    Mamba layer cannot export internal checkpoints.
+    Mamba layer cannot export internal checkpoints. 1 if every layer can export
+    off its alignment, so that a prefix hit ending off it still takes one.
     """
     alignment, requires_grid = _get_mamba_checkpoint_alignment_info(vllm_config)
     if alignment is None:
         return None
     if requires_grid:
         return get_mamba_prefill_checkpoint_grid(vllm_config, alignment)
+    # An offset is never shorter than a prefix match unit. Unset, the unit comes
+    # from block sizes, which are far wider than any conv window.
+    unit = vllm_config.cache_config.prefix_match_unit
+    if all(
+        (offset := layer.min_unaligned_checkpoint_offset) is not None
+        and (unit is None or offset <= unit)
+        for layer in get_layers_from_vllm_config(
+            vllm_config,
+            MambaBase,  # type: ignore[type-abstract]
+        ).values()
+    ):
+        return 1
     return alignment

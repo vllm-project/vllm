@@ -945,9 +945,64 @@ def test_mamba_mid_block_resume_exports_into_resumed_block(
 
     With B = 576 and hits every 64 tokens: a 776-token prompt caches its state
     at 768 (block 1); a 1252-token prompt sharing it resumes at 768 and runs to
-    1252 at once, exporting its checkpoint (1216) into block 1. Block 1 must
-    then hold the state a fresh 1216-token prefill ends with, block 2 the one
-    a fresh 1252-token prefill ends with, and the next turn must hit at 1216.
+    1252 at once, exporting its checkpoint (1216) into block 1.
+    """
+    _check_mid_block_resume(
+        monkeypatch,
+        model,
+        backend,
+        enforce_eager,
+        prefix_match_unit=64,
+        produced=BLOCK_SIZE + 200,
+        resumed_at=BLOCK_SIZE + 192,
+        checkpoint=2 * BLOCK_SIZE + 64,
+        prompt=2 * BLOCK_SIZE + 100,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+@pytest.mark.parametrize(
+    "model,enforce_eager",
+    [(MODEL, True), ("allenai/Olmo-Hybrid-7B", False)],
+)
+@create_new_process_for_each_test()
+def test_mamba_off_grid_hit_exports_inside_chunk(
+    monkeypatch: pytest.MonkeyPatch, model: str, enforce_eager: bool
+):
+    """With hits every 16 tokens, the Triton GDN prefill resumes at 784 and
+    exports its checkpoint 464 tokens later (1248), 16 tokens into a 64-token
+    kernel chunk, without splitting the prefill.
+    """
+    _check_mid_block_resume(
+        monkeypatch,
+        model,
+        "triton",
+        enforce_eager,
+        prefix_match_unit=16,
+        produced=BLOCK_SIZE + 216,
+        resumed_at=BLOCK_SIZE + 208,
+        checkpoint=2 * BLOCK_SIZE + 96,
+        prompt=2 * BLOCK_SIZE + 100,
+    )
+
+
+def _check_mid_block_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    backend: str,
+    enforce_eager: bool,
+    *,
+    prefix_match_unit: int,
+    produced: int,
+    resumed_at: int,
+    checkpoint: int,
+    prompt: int,
+):
+    """After a `produced`-token prompt, a `prompt`-token one sharing it resumes
+    at `resumed_at` and prefills in one step. Block 1 must then hold the state a
+    fresh `checkpoint`-token prefill ends with, block 2 the one a fresh
+    `prompt`-token prefill ends with, and the next turn must hit at
+    `checkpoint`.
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     envs.disable_envs_cache()
@@ -958,7 +1013,6 @@ def test_mamba_mid_block_resume_exports_into_resumed_block(
     )
 
     B = BLOCK_SIZE
-    produced, resumed_at, checkpoint, prompt = B + 200, B + 192, 2 * B + 64, 2 * B + 100
     # Distinct tokens make a shifted conv window visible.
     tokens = [(i * 7919) % 30000 + 1 for i in range(prompt + 64)]
     steps: list[tuple[int, int]] = []
@@ -1021,7 +1075,7 @@ def test_mamba_mid_block_resume_exports_into_resumed_block(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=B,
-        prefix_match_unit=64,
+        prefix_match_unit=prefix_match_unit,
         additional_config={"gdn_prefill_backend": backend},
         max_num_batched_tokens=3072,
         max_model_len=B * 4,
