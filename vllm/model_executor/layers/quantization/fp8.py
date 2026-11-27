@@ -98,6 +98,7 @@ class Fp8Config(QuantizationConfig):
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
         store_dtype: str | None = None,
+        ignored_layers_match_mode: Literal["exact", "substring", "suffix"] = "exact",
     ) -> None:
         super().__init__()
 
@@ -114,8 +115,14 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
+        if ignored_layers_match_mode not in ("exact", "substring", "suffix"):
+            raise ValueError(
+                "ignored_layers_match_mode must be one of "
+                "'exact', 'substring', 'suffix', got "
+                f"{ignored_layers_match_mode!r}"
+            )
         self.ignored_layers_match_mode: Literal["exact", "substring", "suffix"] = (
-            "exact"
+            ignored_layers_match_mode
         )
         self.store_dtype = store_dtype
         if weight_block_size is not None:
@@ -163,6 +170,12 @@ class Fp8Config(QuantizationConfig):
         store_dtype = cls.get_from_keys_or(
             config, ["store_dtype", "expert_dtype"], None
         )
+        # Checkpoints whose modules_to_not_convert entries are abbreviated module
+        # names or path suffixes (e.g. "q_proj", "layers.0.attn.q_proj", "mtp")
+        # need suffix/substring matching; "exact" only matches full module paths.
+        ignored_layers_match_mode = cls.get_from_keys_or(
+            config, ["ignored_layers_match_mode"], "exact"
+        )
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -173,6 +186,7 @@ class Fp8Config(QuantizationConfig):
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
             store_dtype=store_dtype,
+            ignored_layers_match_mode=ignored_layers_match_mode,
         )
 
     def get_quant_method(
