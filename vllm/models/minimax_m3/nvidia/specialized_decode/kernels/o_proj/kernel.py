@@ -288,24 +288,6 @@ def _p5_st_sys(addr, v, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def _p5_spin(addr, tag, *, loc=None, ip=None):
-    """Poll a Lamport word until its tag (high 16 bits) matches; returns the word."""
-    from cutlass._mlir.extras import types as _T
-
-    return cutlass.Int32(
-        _asm(
-            _T.i32(),
-            [cutlass.Int64(addr), cutlass.Int32(tag)],
-            "{\n\t.reg .b32 w, g;\n\t.reg .pred p;\n\tP5SPIN:\n\tld.volatile.global.b32 w, [$1];\n\t"
-            "shr.u32 g, w, 16;\n\tsetp.ne.u32 p, g, $2;\n\t@p bra P5SPIN;\n\tmov.b32 $0, w;\n\t}",
-            "=r,l,r",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
 def _p5_fix(addr, tag, w, active, *, loc=None, ip=None):
     """W was loaded from addr; while active and its tag is stale, re-poll (stragglers only)."""
     from cutlass._mlir.extras import types as _T
@@ -494,24 +476,6 @@ def _p5_rowsq_pub(addr, tag, x, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def _p5_rowsq_spin(addr, tag, *, loc=None, ip=None):
-    from cutlass._mlir.extras import types as _T
-
-    return cutlass.Float32(
-        _asm(
-            _T.f32(),
-            [cutlass.Int64(addr), cutlass.Int32(tag)],
-            "{\n\t.reg .b64 w;\n\t.reg .b32 lo, hi;\n\t.reg .pred p;\n\tP5RSQ:\n\t"
-            "ld.relaxed.gpu.global.b64 w, [$1];\n\tmov.b64 {lo, hi}, w;\n\t"
-            "setp.ne.u32 p, hi, $2;\n\t@p bra P5RSQ;\n\tmov.b32 $0, lo;\n\t}",
-            "=f,l,r",
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
 def _p5_e8m0(x, *, loc=None, ip=None):
     """UE8M0 of x, rounded up, satfinite (trtllm mxfp8_quantize scale rule)."""
     from cutlass._mlir.extras import types as _T
@@ -622,60 +586,6 @@ def _f4(out, loc=None, ip=None):
         cutlass.Float32(_llvm.extractvalue(_T.f32(), out, [i], loc=loc, ip=ip))
         for i in range(4)
     ]
-
-
-@dsl_user_op
-def _ra_ld4f_nc(addr, *, loc=None, ip=None):
-    from cutlass._mlir.dialects import llvm as _llvm
-    from cutlass._mlir.extras import types as _T
-
-    out = _asm(
-        _llvm.StructType.get_literal([_T.f32()] * 4),
-        [cutlass.Int64(addr)],
-        "ld.global.nc.v4.f32 {$0, $1, $2, $3}, [$4];",
-        "=f,=f,=f,=f,l",
-        loc=loc,
-        ip=ip,
-    )
-    return _f4(out, loc, ip)
-
-
-@dsl_user_op
-def _ra_ld4b_cg(addr, *, loc=None, ip=None):
-    """4 words at L2 (the decode's output: never an L1 copy)"""
-    from cutlass._mlir.dialects import llvm as _llvm
-    from cutlass._mlir.extras import types as _T
-
-    out = _asm(
-        _llvm.StructType.get_literal([_T.i32()] * 4),
-        [cutlass.Int64(addr)],
-        "ld.global.cg.v4.b32 {$0, $1, $2, $3}, [$4];",
-        "=r,=r,=r,=r,l",
-        loc=loc,
-        ip=ip,
-    )
-    return [
-        cutlass.Int32(_llvm.extractvalue(_T.i32(), out, [i], loc=loc, ip=ip))
-        for i in range(4)
-    ]
-
-
-@dsl_user_op
-def _ra_ld2bf_cg(addr, *, loc=None, ip=None):
-    """4 bf16 at addr (8 B) as 4 fp32"""
-    from cutlass._mlir.dialects import llvm as _llvm
-    from cutlass._mlir.extras import types as _T
-
-    out = _asm(
-        _llvm.StructType.get_literal([_T.f32()] * 4),
-        [cutlass.Int64(addr)],
-        "{\n\t.reg .b32 a, b, c, d;\n\tld.global.cg.v2.b32 {a, c}, [$4];\n\tshl.b32 $0, a, 16;\n\t"
-        "and.b32 $1, a, 0xFFFF0000;\n\tshl.b32 $2, c, 16;\n\tand.b32 $3, c, 0xFFFF0000;\n\t}",
-        "=f,=f,=f,=f,l",
-        loc=loc,
-        ip=ip,
-    )
-    return _f4(out, loc, ip)
 
 
 @dsl_user_op
@@ -848,53 +758,6 @@ def _ra_entry(tid, mb0, mb1, dst, src_a, src_r, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def _ra_load_a1(tid, mb1, dst, src_a, *, loc=None, ip=None):
-    """Thread 0, after the CTA barrier that ends the generic-proxy use of the region: the second W'' half on mb1"""
-    cp = "".join(
-        f"\t@p cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$2+{16384 * i}], "
-        f"[$3+{16384 * i}], 16384, [$1];\n"
-        for i in range(RA_A_BYTES // 2 // 16384)
-    )
-    _asm(
-        None,
-        [
-            cutlass.Int32(tid),
-            cutlass.Int32(mb1),
-            cutlass.Int32(dst),
-            cutlass.Int64(src_a),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.eq.u32 p, $0, 0;\n\t@p fence.proxy.async.shared::cta;\n\t"
-        f"@p mbarrier.arrive.expect_tx.shared::cta.b64 _, [$1], {RA_A_BYTES // 2};\n"
-        + cp
-        + "\t}",
-        "r,r,r,l,~{memory}",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def _ra_st_tag2(addr, tag, za, zr, on, *, loc=None, ip=None):
-    """Rx words (part 0 = a, part 1 = r) of one (token, src, expert): tag << 32 | fp32, relaxed sys (peer memory)"""
-    _asm(
-        None,
-        [
-            cutlass.Int64(addr),
-            cutlass.Int32(tag),
-            cutlass.Float32(za),
-            cutlass.Float32(zr),
-            cutlass.Int32(on),
-        ],
-        "{\n\t.reg .pred p;\n\t.reg .b32 f, g;\n\t.reg .b64 q, q1;\n\tsetp.ne.u32 p, $4, 0;\n\tmov.b32 f, $2;\n\t"
-        "mov.b32 g, $3;\n\tmov.b64 q, {f, $1};\n\tmov.b64 q1, {g, $1};\n\t"
-        f"@p st.relaxed.sys.global.b64 [$0], q;\n\t@p st.relaxed.sys.global.b64 [$0+{8 * 128}], q1;\n\t}}",
-        "l,r,f,f,r",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
 def _ra_st_tag1(addr, tag, z, on, *, loc=None, ip=None):
     """TP4: one rx word (part 0 = a + r) of one (token, src, expert): tag << 32 | fp32, relaxed sys"""
     _asm(
@@ -941,68 +804,11 @@ def _ra_exit(*, loc=None, ip=None):
 
 # ---- router CTAs hold W'' and W' in smem (one bulk burst at entry), one FMA pass each ----
 RA_R_OFF = RA_A_BYTES  # W' slice after the W'' slice
-RA_W_BYTES = RA_A_BYTES + RA_R_BYTES  # 229376: all router weights of one router CTA
 RA_RG = 2  # r-part experts per pass above 4 rows
 
 
 def _al(x: int, a: int) -> int:
     return (x + a - 1) // a * a
-
-
-def _ra_ext_bytes(
-    ring: int,
-    my_tiles: int,
-    x_tile_bytes: int,
-    split: int,
-    rows_per_rank: int,
-    mb_stride: int,
-) -> int:
-    # pad after the GEMV arrays (allocation order of the kernel) so the router's W'' | W' | 2 mbarriers fit from smem_a
-    off = ring * W_TILE_BYTES
-    off = _al(off, 1024) + my_tiles * x_tile_bytes
-    off = _al(off, 128) + ring * SF_ATOM_BYTES
-    off = _al(off, 128) + my_tiles * SF_ATOM_BYTES
-    off = _al(off, 8) + 8 * (2 * ring + 3)
-    off = _al(off, 4) + 4
-    off = _al(off, 16) + split * rows_per_rank * mb_stride * 4
-    return max(_al(RA_W_BYTES + 16 - _al(off, 16), 16), 16)
-
-
-@dsl_user_op
-def _ra3_entry(tid, dst, mb_r, mb_a, src_r, src_a, *, loc=None, ip=None):
-    """Thread 0: init both barriers, then W' (mb_r) and W'' (mb_a) by 16 KB bulk copies in one burst"""
-    cpr = "".join(
-        f"\t@p cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$1+{RA_R_OFF + 16384 * i}], "
-        f"[$4+{16384 * i}], 16384, [$2];\n"
-        for i in range(RA_R_BYTES // 16384)
-    )
-    cpa = "".join(
-        f"\t@p cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$1+{16384 * i}], "
-        f"[$5+{16384 * i}], 16384, [$3];\n"
-        for i in range(RA_A_BYTES // 16384)
-    )
-    _asm(
-        None,
-        [
-            cutlass.Int32(tid),
-            cutlass.Int32(dst),
-            cutlass.Int32(mb_r),
-            cutlass.Int32(mb_a),
-            cutlass.Int64(src_r),
-            cutlass.Int64(src_a),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.eq.u32 p, $0, 0;\n\t@p mbarrier.init.shared::cta.b64 [$2], 1;\n\t"
-        "@p mbarrier.init.shared::cta.b64 [$3], 1;\n\t@p fence.mbarrier_init.release.cluster;\n\t"
-        "@p fence.proxy.async.shared::cta;\n\t"
-        f"@p mbarrier.arrive.expect_tx.shared::cta.b64 _, [$2], {RA_R_BYTES};\n"
-        + cpr
-        + f"\t@p mbarrier.arrive.expect_tx.shared::cta.b64 _, [$3], {RA_A_BYTES};\n"
-        + cpa
-        + "\t}",
-        "r,r,r,r,l,l,~{memory}",
-        loc=loc,
-        ip=ip,
-    )
 
 
 RC_A0 = 8  # TP4: all 8 W'' experts loaded in the entry burst (beside W' in the ring); the rest after the r-part, over W'

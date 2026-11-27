@@ -67,23 +67,6 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "databricks/dbrx-instruct": {
-        "architectures": [
-            "DbrxForCausalLM"
-        ],
-        "model_type": "dbrx",
-        "text_model_type": "dbrx",
-        "hidden_size": 6144,
-        "total_num_hidden_layers": 40,
-        "total_num_attention_heads": 48,
-        "head_size": 128,
-        "vocab_size": 100352,
-        "total_num_kv_heads": 8,
-        "num_experts": 0,
-        "is_deepseek_mla": false,
-        "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
-    },
     "tiiuae/falcon-7b": {
         "architectures": [
             "FalconForCausalLM"
