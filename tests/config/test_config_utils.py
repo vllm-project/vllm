@@ -257,6 +257,19 @@ def test_get_attr_docs_includes_inherited_fields():
     assert docs["overridden"] == "derived override of overridden."
 
 
+def test_xla_recompilation_check_does_not_change_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm import envs
+
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
+    factors = envs.compile_factors()
+
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "1")
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is True
+    assert envs.compile_factors() == factors
+
+
 def test_envs_compile_factors_stable():
     """Test that envs.compile_factors() hash is stable across fresh initializations.
 

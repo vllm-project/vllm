@@ -517,7 +517,7 @@ def test_standalone_compile_correctness():
 
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """Test that compiling gpt2 twice results in a cache hit.
+    """Test AOT cache reuse after enabling XLA recompilation diagnostics.
 
     Counter values are read from the EngineCore subprocess via
     `LLM.collective_rpc` so the test works under default V1
@@ -534,20 +534,28 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
             compilation_counter.num_aot_artifacts_loaded,
         )
 
+    def make_llm() -> LLM:
+        return LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+            ),
+            max_model_len=256,
+            max_num_batched_tokens=256,
+            max_num_seqs=1,
+            # Keep KV cache shapes stable across the two engine starts.
+            num_gpu_blocks_override=32,
+        )
+
     # collective_rpc(callable) requires pickle-based serialization.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
         m.setenv("VLLM_CACHE_ROOT", tmpdirname)
         m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
         # First compilation - initialize model and generate
-        llm_model = LLM(
-            model="openai-community/gpt2",
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-            ),
-            max_model_len=256,
-        )
+        llm_model = make_llm()
 
         llm_model.generate("Hello, my name is")
         assert llm_model.collective_rpc(_snap)[0] == (1, 1, 0)
@@ -558,13 +566,8 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
 
         # Second compilation - should hit cache
         m.setenv("VLLM_FORCE_AOT_LOAD", "1")
-        llm_model = LLM(
-            model="openai-community/gpt2",
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-            ),
-            max_model_len=256,
-        )
+        m.setenv("VLLM_XLA_CHECK_RECOMPILATION", "1")
+        llm_model = make_llm()
         llm_model.generate("Hello, my name is")
         assert llm_model.collective_rpc(_snap)[0] == (0, 0, 1)
 
