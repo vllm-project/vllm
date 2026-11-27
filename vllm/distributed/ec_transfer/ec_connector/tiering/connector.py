@@ -29,6 +29,7 @@ class ECTieringConnector(ECCPUConnector):
     def bind_encoder_cache_query(
         self, query: Callable[[Request, int], int | None]
     ) -> None:
+        super().bind_encoder_cache_query(query)
         self._encoder_cache_query = query
 
     def ensure_cache_available(

@@ -550,6 +550,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
 
         previous_texts = [""] * num_choices
+        first_content_token_ts: float | None = None
 
         try:
             if self.parser_cls is not None:
@@ -733,6 +734,17 @@ class OpenAIServingChat(GenerateBaseServing):
                         res.prompt_token_ids,
                     )
 
+                    if (
+                        self.enable_per_request_metrics
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and delta_message is not None
+                        and delta_message.content
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
+
                     previous_texts[i] += delta_text
 
                     if parser is not None and self._include_reasoning_tokens_details:
@@ -909,7 +921,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, completion_tokens
+                            last_metrics,
+                            completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:

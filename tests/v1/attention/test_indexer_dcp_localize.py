@@ -265,6 +265,27 @@ def _merge_local_topks_global_with_fake_dcp(
         sparse_indexer.get_dcp_group = original_get_dcp_group
 
 
+@pytest.mark.parametrize("world", [1, 2, 4, 8])
+@pytest.mark.parametrize("interleave", [1, 16, 64])
+@pytest.mark.parametrize("max_model_len", [1, 127, 100_003])
+def test_decode_logits_width_covers_local_contexts(
+    world: int, interleave: int, max_model_len: int
+):
+    """The allocation covers every KV shard, including partial interleaves."""
+    width = sparse_indexer.dcp_decode_logits_width(max_model_len, world, interleave)
+    seq_lens = torch.arange(max_model_len + 1, dtype=torch.int32)
+    local_max = max(
+        int(get_dcp_local_seq_lens(seq_lens, world, rank, interleave).max())
+        for rank in range(world)
+    )
+    assert local_max <= width
+    assert width - local_max < interleave
+    if world == 1:
+        assert width == max_model_len
+    elif max_model_len >= world * interleave:
+        assert width < max_model_len
+
+
 @pytest.mark.parametrize("world", [1, 2, 4])
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_get_dcp_local_seq_lens_matches_naive(world: int, interleave: int):
@@ -662,6 +683,58 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
         want = sorted(expected[row].tolist())
         assert sorted(full[row].tolist()) == want
         assert sorted(compact[row].tolist()) == want
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_sparse_prefill_dcp_metadata_host_extents_without_sync(
+    world: int, interleave: int
+):
+    """The DCP chunk extents come from the CPU lengths, without a device sync,
+    and equal the device-side per-rank KV lengths."""
+    device = torch.device("cuda")
+    # (context, query) per request: no prefix, long prefix hits, page tails.
+    lens = [(0, 37), (200_000, 1), (4097, 599), (63, 64), (0, 1), (129_001, 300)]
+    for trial, (start, end) in enumerate([(0, 6), (1, 4), (5, 6)]):
+        context = torch.tensor([c for c, _ in lens])
+        query_lens = torch.tensor([q for _, q in lens])
+        seq_lens_cpu = (context + query_lens).to(torch.int32)
+        query_start_loc_cpu = torch.zeros(len(lens) + 1, dtype=torch.int32)
+        query_start_loc_cpu[1:] = torch.cumsum(query_lens, 0)
+        query_start_loc = query_start_loc_cpu.to(device)
+        seq_lens = seq_lens_cpu.to(device)
+        block_table = torch.zeros((len(lens), 1), dtype=torch.int32, device=device)
+        kwargs = dict(
+            start_idx=start,
+            end_idx=end,
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            uncompressed_seq_lens=seq_lens,
+            compressed_seq_lens=seq_lens,
+            compressed_seq_lens_cpu=seq_lens_cpu,
+            block_table=block_table,
+            compress_ratio=1,
+            dcp_world_size=world,
+            cp_kv_cache_interleave_size=interleave,
+        )
+
+        if trial == 0:
+            # JIT-compiles the metadata kernel outside the sync check.
+            build_prefill_chunk_metadata(dcp_rank=0, **kwargs)
+        for rank in range(world):
+            torch.accelerator.synchronize()
+            torch.cuda.set_sync_debug_mode("error")
+            try:
+                chunk = build_prefill_chunk_metadata(dcp_rank=rank, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(0)
+            assert chunk is not None
+            local = get_dcp_local_seq_lens(seq_lens[start:end], world, None, interleave)
+            assert chunk.local_total_seq_lens == int(local[:, rank].sum()), trial
+            assert chunk.max_local_total_seq_lens == int(local.sum(0).max()), trial
+            assert chunk.local_cu_seq_lens is not None
+            assert int(chunk.local_cu_seq_lens[-1]) == chunk.local_total_seq_lens
 
 
 @pytest.mark.skipif(

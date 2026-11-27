@@ -20,7 +20,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheConfig,
     KVCacheSpecKind,
     get_reusable_prefix_length,
@@ -96,7 +95,6 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
-        pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
@@ -129,7 +127,6 @@ class KVCacheCoordinator(ABC):
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
-                pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
                 retention_interval=kv_cache_config.prefix_cache_retention_interval,
@@ -389,7 +386,11 @@ class KVCacheCoordinator(ABC):
         pools = dict.fromkeys(
             manager.block_pool for manager in self.single_type_managers
         )
-        return all([pool.reset_prefix_cache() for pool in pools])
+        if not all([pool.reset_prefix_cache() for pool in pools]):
+            return False
+        for manager in self.single_type_managers:
+            manager.reset_prefix_cache()
+        return True
 
     def free(self, request: Request) -> None:
         """Free the blocks for the request.
@@ -490,7 +491,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         max_in_flight_tokens: int,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
-        pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
@@ -503,7 +503,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             False,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
@@ -537,7 +536,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
-        pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
@@ -550,7 +548,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
@@ -559,7 +556,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.group_block_size = self.kv_cache_config.kv_cache_groups[0].block_size
         self.manager_config = self.kv_cache_config.kv_cache_groups[0].manager_config
         self.dcp_world_size = self.single_type_managers[0].dcp_world_size
-        self.pcp_world_size = pcp_world_size
         self.block_size = self.single_type_managers[0].block_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
@@ -585,7 +581,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             manager_config=self.manager_config,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
-            pcp_world_size=self.pcp_world_size,
             num_request_tokens=num_request_tokens,
         )
         # Single group: nothing "uncached common" -- no other group to lag it.
@@ -605,7 +600,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
-        pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
@@ -619,7 +613,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
@@ -648,18 +641,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             f"hash_block_size. block_sizes={cacheable_block_sizes}, "
             f"hash_block_size={hash_block_size}"
         )
-        for g in kv_cache_config.kv_cache_groups:
-            replicated = not g.dcp_sharded
-            if pcp_world_size > 1:
+        if dcp_world_size > 1:
+            for g in kv_cache_config.kv_cache_groups:
                 assert issubclass(g.manager_cls, FullAttentionManager) or (
-                    replicated
-                    and all(
-                        isinstance(spec, AttentionSpec)
-                        for spec in g.kv_cache_specs.values()
-                    )
-                ), "PCP only supports full attention and replicated draft groups."
-            if dcp_world_size > 1:
-                assert issubclass(g.manager_cls, FullAttentionManager) or replicated, (
+                    not g.dcp_sharded
+                ), (
                     "DCP with hybrid KV cache layouts only supports "
                     "full-attention, Mamba, and replicated draft groups, got: "
                     f"{g.manager_cls.__name__}."
@@ -797,9 +783,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     dcp_world_size=self.single_type_managers[
                         first_group_id
                     ].dcp_world_size,
-                    pcp_world_size=self.single_type_managers[
-                        first_group_id
-                    ].pcp_world_size,
                     num_request_tokens=num_request_tokens,
                 )
                 curr_hit_length = _new_hit_length
@@ -867,7 +850,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 manager_config=manager_config,
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
-                pcp_world_size=manager.pcp_world_size,
                 num_request_tokens=num_request_tokens,
             )
             for gid, blks in zip(group_ids, blocks):
@@ -884,7 +866,6 @@ def get_kv_cache_coordinator(
     enable_caching: bool,
     enable_kv_cache_events: bool,
     dcp_world_size: int,
-    pcp_world_size: int,
     scheduler_block_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
@@ -898,7 +879,6 @@ def get_kv_cache_coordinator(
             max_in_flight_tokens,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
@@ -912,7 +892,6 @@ def get_kv_cache_coordinator(
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
@@ -925,7 +904,6 @@ def get_kv_cache_coordinator(
         enable_caching,
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
-        pcp_world_size=pcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,

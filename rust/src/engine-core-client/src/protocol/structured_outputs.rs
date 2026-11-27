@@ -28,7 +28,6 @@ pub enum StructuredOutputBackend {
     Xgrammar,
     Guidance,
     Outlines,
-    LmFormatEnforcer,
 }
 
 impl StructuredOutputBackend {
@@ -72,14 +71,6 @@ impl StructuredOutputBackend {
             ),
             (Outlines, StructuralTag(_)) => unsupported(
                 "Outlines structured outputs backend does not support structural_tag \
-                 specifications",
-            ),
-            (LmFormatEnforcer, Grammar(_)) => unsupported(
-                "LM Format Enforcer structured outputs backend does not support grammar \
-                 specifications",
-            ),
-            (LmFormatEnforcer, StructuralTag(_)) => unsupported(
-                "LM Format Enforcer structured outputs backend does not support structural_tag \
                  specifications",
             ),
             _ => Ok(()),
@@ -527,7 +518,7 @@ mod tests {
                 StructuredOutputsParams::json_object(),
                 Some("does not support json_object"),
             ),
-            (Outlines, grammar.clone(), Some("does not support grammar")),
+            (Outlines, grammar, Some("does not support grammar")),
             (
                 Outlines,
                 StructuredOutputsParams::structural_tag(&legacy_tag),
@@ -536,17 +527,6 @@ mod tests {
             (
                 Outlines,
                 StructuredOutputsParams::choice(vec!["a".into()]),
-                None,
-            ),
-            (LmFormatEnforcer, grammar, Some("does not support grammar")),
-            (
-                LmFormatEnforcer,
-                StructuredOutputsParams::structural_tag(&legacy_tag),
-                Some("does not support structural_tag"),
-            ),
-            (
-                LmFormatEnforcer,
-                StructuredOutputsParams::json_object(),
                 None,
             ),
         ];

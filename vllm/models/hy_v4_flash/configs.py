@@ -257,7 +257,6 @@ class HYV4FlashConfig(HYV4Config):
 
     def verify_parallel_config(self, parallel: "ParallelConfig") -> None:
         for name in (
-            "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
         ):
@@ -306,8 +305,8 @@ class HYV4FlashConfig(HYV4Config):
             raise ValueError("Flash DP requires linear expert placement")
         if self.n_routed_experts % ep:
             raise ValueError("Flash DP requires experts evenly divisible by DP * TP")
-        if parallel.all2all_backend != "allgather_reducescatter":
-            raise ValueError("Flash DP requires allgather_reducescatter")
+        if parallel.all2all_backend not in ("allgather_reducescatter", "passthrough"):
+            raise ValueError("Flash DP requires allgather_reducescatter or passthrough")
 
     def rope_for_layer(self, layer_idx: int) -> dict[str, Any]:
         rope = self.rope_parameters or {}

@@ -63,6 +63,8 @@ steps:
       - tests/models/registry.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - vllm/models/hy_v4/
+      - vllm/models/hy_v4_flash/
 
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
@@ -88,9 +90,13 @@ steps:
   - tests/models/test_muse_spark_nvidia_shared_rope.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
+  - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/models/test_muse_spark_fp32_rope.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
+  - tests/models/hy_v4/test_dfly_config.py
+  - tests/models/hy_v4/test_hy_v4_mrope.py
   commands:
     - >-
       pytest -v -s
@@ -110,9 +116,13 @@ steps:
       models/test_muse_spark_nvidia_shared_rope.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/test_muse_spark_rocm_fused_markov_sampling.py
       models/test_muse_spark_rocm_mono.py
+      models/test_muse_spark_fp32_rope.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
+      models/hy_v4/test_dfly_config.py
+      models/hy_v4/test_hy_v4_mrope.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -129,6 +139,8 @@ steps:
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
       - vllm/models/hy_v4/
+      - vllm/models/hy_v4_flash/
+      - vllm/v1/worker/gpu/spec_decode/dfly/
       - vllm/config/
       - tests/models/transformers/test_layer_registry_e2e.py
       - tests/models/test_deepseek_v41_replay_start.py
@@ -146,14 +158,41 @@ steps:
       - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
+      - tests/models/hy_v4/test_dfly_config.py
+      - tests/models/hy_v4/test_rocm_aiter_mla_sparse.py
+      - tests/models/hy_v4/test_hy_v4_mrope.py
+      - vllm/models/hy_v4_flash/
+      - tests/models/hy_v4_flash/
+      - vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
+      - vllm/_aiter_ops.py
+      - tests/kernels/test_hy_v4_flash_kernels.py
+      - tests/models/hy_v4/test_flash_decode_bench_config.py
+      - tests/models/hy_v4/test_flash_dp_config.py
       - vllm/models/muse_spark/
+      - vllm/model_executor/layers/quantization/online/fp8.py
+      - vllm/model_executor/layers/quantization/online/lm_head.py
+      - vllm/model_executor/kernels/linear/__init__.py
+      - vllm/model_executor/kernels/linear/scaled_mm/
+      - vllm/model_executor/layers/vocab_parallel_embedding.py
+      - vllm/model_executor/model_loader/utils.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/models/utils.py
       - vllm/v1/worker/gpu/spec_decode/dspark/
       - vllm/v1/worker/gpu/sample/gumbel.py
+      - vllm/v1/worker/gpu/spec_decode/eagle/utils.py
+      - vllm/v1/worker/gpu/spec_decode/draft_logits.py
+      - vllm/v1/worker/gpu/sample/greedy_argmax.py
+      - vllm/model_executor/layers/quantization/online/
+      - vllm/model_executor/layers/vocab_parallel_embedding.py
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
+      - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/models/test_muse_spark_fp32_rope.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
       - tests/models/test_muse_spark_rocm_drafter.py
+      - tests/models/test_muse_spark_rocm_draft_fp8.py
       commands:
       - >-
         pytest -v -s
@@ -177,12 +216,22 @@ steps:
         models/test_muse_spark_nvidia_shared_rope.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/test_muse_spark_rocm_fused_markov_sampling.py
         models/test_muse_spark_rocm_mono.py
+        models/test_muse_spark_fp32_rope.py
         kernels/models/amd/test_muse_spark_fused_markov.py
         models/test_muse_spark_rocm_drafter.py
+        models/test_muse_spark_rocm_draft_fp8.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
+      - pytest -v -s models/hy_v4/test_dfly_config.py
+      - pytest -v -s models/hy_v4/test_rocm_aiter_mla_sparse.py
+      - pytest -v -s models/hy_v4/test_hy_v4_mrope.py
+      - pytest -v -s models/hy_v4_flash/test_rocm_sparse_indices.py
+      - pytest -v -s models/hy_v4_flash/test_rocm_modules.py
+      - pytest -v -s models/hy_v4/test_flash_decode_bench_config.py
+      - pytest -v -s models/hy_v4/test_flash_dp_config.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
 - label: ":nvidia: (B200) Inkling"
@@ -464,13 +513,9 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - csrc/qwen4_exp/
-  - vllm/models/qwen4_exp/nvidia/hyperconnection.py
-  - vllm/models/qwen4_exp/nvidia/mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/models/qwen4_exp/common/
+  - vllm/models/qwen4_exp/nvidia/
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -673,6 +718,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
+  - tests/single_rank_group.py
   commands:
   # Swap-AB decode: the kernel tests need SM10x and a CuTe DSL built with
   # CUDA 13.2+; the dispatch and warmup-key tests run on the CPU.
@@ -687,6 +733,23 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
+
+- label: ":nvidia: (4xH100) GLM-5.3-Flash mHC Boundary"
+  key: glm5next-mhc-boundary-4xh100
+  optional: true
+  timeout_in_minutes: 15
+  device: h100
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/glm5next/nvidia/specialized_decode/all_reduce_mhc.py
+  - vllm/models/glm5next/nvidia/specialized_decode/runtime/
+  - vllm/models/glm5next/common/mtp.py
+  - vllm/models/glm5next/nvidia/specialized_decode/cutedsl/finalize_publish.py
+  - vllm/models/common/ops/moe_tail_fusion/primitives.py
+  - tests/models/glm5next/test_specialized_decode_ar_mhc.py
+  - tests/models/glm5next/tp4.py
+  commands:
+  - pytest -v -s models/glm5next/test_specialized_decode_ar_mhc.py
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
