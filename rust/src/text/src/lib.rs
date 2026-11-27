@@ -15,7 +15,7 @@ pub use backend::{
     DefaultMaxTokens, DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits,
     TextBackend,
 };
-pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
+pub use error::{Error, ErrorKind, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     EffectiveSampling, PreparedTextRequest, lower_sampling_params, lower_text_request,
@@ -26,7 +26,7 @@ pub use output::{
     DecodedText, DecodedTextEvent, DecodedTokenLogprob, Finished, SampledDelta, TextDecodeOptions,
     TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
-pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k, validate_cache_salt};
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
@@ -281,7 +281,7 @@ impl TextLlm {
     }
 
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
-    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    /// like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
         self.processor.backend.tokenizer_vocab_size()
     }
@@ -478,10 +478,7 @@ mod tests {
         ]
         .map(|result| {
             let error = result.unwrap_err();
-            (
-                error.is_request_validation_error(),
-                error.to_report_string(),
-            )
+            (error.kind().is_invalid_request(), error.to_report_string())
         });
         expect_test::expect![[r#"
             [
