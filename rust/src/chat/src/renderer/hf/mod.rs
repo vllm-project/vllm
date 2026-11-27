@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod developer;
+mod dropped_roles;
 mod error;
 mod format;
 mod generation;
@@ -281,26 +282,52 @@ impl HfChatRenderer {
 
         let effective_template_kwargs =
             effective_template_kwargs(&self.default_template_kwargs, request);
-        let prompt = effective_template
-            .apply(TemplateContext {
-                messages: &messages,
-                add_generation_prompt: request.chat_options.add_generation_prompt(),
-                continue_final_message: request.chat_options.continue_final_message(),
-                tools: tools.as_deref(),
-                documents: request.documents.as_deref(),
-                template_kwargs: Some(&effective_template_kwargs),
-                special_tokens: self.special_tokens.as_ref(),
-            })
-            .map_err(|error| Error::ChatTemplateRender {
+        // `apply` borrows the template kwargs, so it stays in this block and
+        // the owned map can still move into the rendered prompt below.
+        let prompt = {
+            // Read the source before `apply` borrows the template for the render.
+            let filters_by_role = effective_template.filters_by_role();
+            let add_generation_prompt = request.chat_options.add_generation_prompt();
+            let continue_final_message = request.chat_options.continue_final_message();
+            let apply = |msgs: &[TemplateMessage<'_>]| {
+                effective_template.apply(TemplateContext {
+                    messages: msgs,
+                    add_generation_prompt,
+                    continue_final_message,
+                    tools: tools.as_deref(),
+                    documents: request.documents.as_deref(),
+                    template_kwargs: Some(&effective_template_kwargs),
+                    special_tokens: self.special_tokens.as_ref(),
+                })
+            };
+            let prompt = apply(&messages).map_err(|error| Error::ChatTemplateRender {
                 message: (error.thrown_message().map(str::to_owned))
                     .unwrap_or_else(|| error.to_report_string()),
             })?;
 
-        let prompt = match &final_message_text {
-            Some(final_message_text) => {
-                truncate_prompt_at_continue_final_message_tag(prompt, final_message_text)?
+            let prompt = match &final_message_text {
+                Some(final_message_text) => {
+                    truncate_prompt_at_continue_final_message_tag(prompt, final_message_text)?
+                }
+                None => prompt,
+            };
+
+            // Same post-render check as the Python frontend: a non-empty custom
+            // role that the template never emits would otherwise vanish while the
+            // request still returns 200. Standard roles are left alone.
+            if filters_by_role {
+                let mut render_text = |probed: &[TemplateMessage<'_>]| {
+                    let rendered = apply(probed).ok()?;
+                    match &final_message_text {
+                        Some(text) => {
+                            truncate_prompt_at_continue_final_message_tag(rendered, text).ok()
+                        }
+                        None => Some(rendered),
+                    }
+                };
+                dropped_roles::reject_dropped_custom_roles(&messages, &prompt, &mut render_text)?;
             }
-            None => prompt,
+            prompt
         };
 
         trace!(
@@ -339,7 +366,7 @@ fn request_template_error(error: Error) -> Error {
 /// Chat message in the JSON shape expected by Jinja chat templates.
 // TODO: borrow more fields directly from the original `ChatMessage`.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TemplateMessage<'a> {
     role: &'a str,
     content: TemplateContent,
@@ -358,14 +385,14 @@ struct TemplateMessage<'a> {
 }
 
 /// Chat content in the two shapes HF templates commonly expect.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum TemplateContent {
     String(String),
     OpenAi(Vec<TemplateContentPart>),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TemplateContentPart {
     Text {
@@ -381,27 +408,27 @@ enum TemplateContentPart {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TemplateToolCall {
     id: String,
     r#type: &'static str, // always "function"
     function: TemplateToolFunction,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TemplateToolFunction {
     name: String,
     arguments: JsonValue,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct TemplateTool {
     #[serde(rename = "type")]
     tool_type: &'static str,
     function: TemplateToolDefinition,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
@@ -1549,6 +1576,132 @@ mod tests {
             );
             assert_eq!(error.kind(), ErrorKind::invalid_request(), "{error:?}");
         }
+    }
+
+    const ZEPHYR_TEMPLATE: &str = "\
+{% for message in messages %}\
+{% if message['role'] == 'user' %}\
+{{ '<|user|>\\n' + message['content'] }}\
+{% elif message['role'] == 'system' %}\
+{{ '<|system|>\\n' + message['content'] }}\
+{% elif message['role'] == 'assistant' %}\
+{{ '<|assistant|>\\n' + message['content'] }}\
+{% endif %}\
+{% if loop.last and add_generation_prompt %}\
+{{ '<|assistant|>' }}\
+{% endif %}\
+{% endfor %}";
+
+    fn assert_dropped_custom_role(template: &str, messages: Vec<ChatMessage>, role: &str) {
+        let error = render(Some(template), &sample_request(messages)).unwrap_err();
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            format!(
+                "Chat template produced no prompt content for non-empty message role '{role}'. \
+                 The template did not emit that content, so the turn would be dropped. \
+                 Custom roles are accepted when the template renders their content; \
+                 check for a typo in `role`."
+            )
+        );
+        assert_eq!(error.as_report().to_string(), message);
+        assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
+    }
+
+    #[test]
+    fn custom_role_dropped_by_zephyr_template_is_rejected() {
+        for content in [
+            ChatMessage::custom("my-custom-role", "what is 1+1?"),
+            ChatMessage::custom(
+                "my-custom-role",
+                vec![ChatContentPart::text("what is 1+1?")],
+            ),
+        ] {
+            assert_dropped_custom_role(ZEPHYR_TEMPLATE, vec![content], "my-custom-role");
+        }
+    }
+
+    #[test]
+    fn custom_role_the_template_renders_is_kept() {
+        let template = "{% for message in messages %}\
+            {% if message['role'] == 'user' or message['role'] == 'my-custom-role' %}\
+            {{ message.content }}{% endif %}{% endfor %}";
+        let rendered = render(
+            Some(template),
+            &sample_request(vec![ChatMessage::custom("my-custom-role", "what is 1+1?")]),
+        )
+        .unwrap();
+        assert!(rendered.contains("what is 1+1?"), "{rendered}");
+    }
+
+    #[test]
+    fn empty_custom_role_and_unfiltered_template_are_kept() {
+        // Nothing to drop, and a template that does not filter on role is not
+        // checked: Python treats that as "every role is emitted".
+        let whitespace = render(
+            Some(ZEPHYR_TEMPLATE),
+            &sample_request(vec![ChatMessage::custom("my-custom-role", "   ")]),
+        )
+        .unwrap();
+        assert!(!whitespace.contains("   "));
+
+        let length = render(
+            Some("{{ messages|length }}"),
+            &sample_request(vec![ChatMessage::custom("my-custom-role", "what is 1+1?")]),
+        )
+        .unwrap();
+        assert_eq!(length, "1");
+    }
+
+    #[test]
+    fn dropped_standard_role_is_not_rejected() {
+        let template = "{% for message in messages %}\
+            {% if message['role'] == 'user' %}{{ message.content }}{% endif %}{% endfor %}";
+        let rendered = render(
+            Some(template),
+            &sample_request(vec![
+                ChatMessage::system("policy"),
+                ChatMessage::user("hello"),
+            ]),
+        )
+        .unwrap();
+        assert!(rendered.contains("hello"), "{rendered}");
+        assert!(!rendered.contains("policy"));
+    }
+
+    #[test]
+    fn several_dropped_custom_roles_are_all_named() {
+        let request = sample_request(vec![
+            ChatMessage::custom("usr", "one"),
+            ChatMessage::user("kept"),
+            ChatMessage::custom("assistan", "two"),
+        ]);
+        let error = render(Some(ZEPHYR_TEMPLATE), &request).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Chat template produced no prompt content for non-empty message roles 'usr', \
+             'assistan'. The template did not emit that content, so the turn would be dropped. \
+             Custom roles are accepted when the template renders their content; \
+             check for a typo in `role`."
+        );
+        assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
+    }
+
+    #[test]
+    fn custom_role_image_the_template_skips_is_rejected() {
+        let template = "{%- for message in messages %}{%- if message.role == 'user' %}\
+            {%- if message.content is string %}{{ message.content }}{%- else %}\
+            {%- for part in message.content %}{%- if part.type == 'image' %}[IMG]\
+            {%- elif part.type == 'text' %}{{ part.text }}{%- endif %}{%- endfor %}\
+            {%- endif %}{%- endif %}{%- endfor %}";
+        let request = sample_request(vec![ChatMessage::custom(
+            "observer",
+            vec![ChatContentPart::image_url("data:image/png;base64,test")],
+        )]);
+        let error =
+            render_mm(template, &request, ChatTemplateContentFormatOption::Auto).unwrap_err();
+        assert!(error.to_string().contains("observer"), "{error}");
+        assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
     }
 
     #[test]

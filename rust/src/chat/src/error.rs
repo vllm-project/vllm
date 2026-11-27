@@ -48,6 +48,17 @@ pub enum Error {
     InvalidReasoningControl { message: String },
     #[error("chat role `{role}` is not supported by this chat renderer")]
     UnsupportedChatRole { role: String },
+    /// A non-empty custom role whose content the chat template did not emit.
+    ///
+    /// `roles` is the Python `repr` list (`'name'` or `'a', 'b'`). Standard
+    /// roles are not reported here.
+    #[error(
+        "Chat template produced no prompt content for non-empty message {noun} {roles}. \
+         The template did not emit that content, so the turn would be dropped. \
+         Custom roles are accepted when the template renders their content; \
+         check for a typo in `role`."
+    )]
+    DroppedChatRole { noun: &'static str, roles: String },
     #[error(
         "Chat template is passed with request, but --trust-request-chat-template is not set. \
          Refused request with untrusted chat template."
@@ -210,6 +221,7 @@ impl Error {
             Self::MediaAfterPreprocessed { source, .. } => source.kind(),
             Self::EmptyMessages
             | Self::UnsupportedChatRole { .. }
+            | Self::DroppedChatRole { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::InvalidMessages { .. } => ErrorKind::invalid_param("messages"),
             Self::UnsupportedContinueFinalMessage { .. }
