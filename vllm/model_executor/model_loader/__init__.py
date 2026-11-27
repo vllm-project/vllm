@@ -14,11 +14,15 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.model_loader.ipc_loader import IpcModelLoader
+from vllm.model_executor.model_loader.ipc_weight_cache_loader import (
+    IpcWeightCacheLoader,
+)
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
 )
-from vllm.model_executor.model_loader.peer_loader import PeerModelLoader
+from vllm.model_executor.model_loader.peer_weight_seed_loader import (
+    PeerWeightSeedLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -29,6 +33,10 @@ from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     get_model_cls,
 )
+
+# Keep the original package-level imports available to callers.
+IpcModelLoader = IpcWeightCacheLoader
+PeerModelLoader = PeerWeightSeedLoader
 
 logger = init_logger(__name__)
 
@@ -58,11 +66,11 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "instanttensor": DefaultModelLoader,
-    "ipc_cache": IpcModelLoader,
+    "ipc_cache": IpcWeightCacheLoader,
     "mistral": DefaultModelLoader,
     "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
-    "peer_cache": PeerModelLoader,
+    "peer_cache": PeerWeightSeedLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
     "runai_streamer_sharded": ShardedStateLoader,
@@ -168,7 +176,9 @@ __all__ = [
     "DefaultModelLoader",
     "DummyModelLoader",
     "IpcModelLoader",
+    "IpcWeightCacheLoader",
     "PeerModelLoader",
+    "PeerWeightSeedLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",

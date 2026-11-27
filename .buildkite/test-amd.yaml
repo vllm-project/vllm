@@ -2919,8 +2919,8 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/preload/
-  - vllm/model_executor/model_loader/ipc_loader.py
-  - vllm/model_executor/model_loader/peer_loader.py
+  - vllm/model_executor/model_loader/ipc_weight_cache_loader.py
+  - vllm/model_executor/model_loader/peer_weight_seed_loader.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   - vllm/platforms/rocm.py

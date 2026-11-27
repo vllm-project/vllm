@@ -55,8 +55,8 @@ _STARTUP_RETRY_INTERVAL_S = 0.5
 _T = TypeVar("_T")
 
 
-class IpcModelLoader(BaseModelLoader):
-    """Zero-copy loads a model using the weight cache daemon's sharing backend.
+class IpcWeightCacheLoader(BaseModelLoader):
+    """Map cached weights from the local preload daemon into an engine via IPC.
 
     The model is initialized on the meta device and receives the daemon's
     post-processed tensors. Post-load hooks can recreate process-local state
@@ -118,7 +118,7 @@ class IpcModelLoader(BaseModelLoader):
             # would load the draft with.
             draft_config = get_draft_load_config(vllm_config)
             if draft_config.load_format == "ipc_cache":
-                draft_loader = IpcModelLoader(draft_config)
+                draft_loader = IpcWeightCacheLoader(draft_config)
                 # An explicit draft_load_config without is_draft would resolve
                 # back to the target socket and double-count it.
                 if draft_loader.is_draft:

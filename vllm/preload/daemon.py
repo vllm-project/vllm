@@ -114,8 +114,7 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     destroy_fi_ar_workspace,
 )
 from vllm.logger import configure_logging, init_logger
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.peer_loader import PeerModelLoader
+from vllm.model_executor.model_loader import PeerWeightSeedLoader, get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.platforms import current_platform
 from vllm.preload.ipc_backends.base import StorageEntry
@@ -362,7 +361,7 @@ class WeightCacheDaemon:
         # Attention backends may take workspace at construction, like in the
         # engine's worker init.
         init_workspace_manager(target_device)
-        if isinstance(loader, PeerModelLoader):
+        if isinstance(loader, PeerWeightSeedLoader):
             # The daemon is both ends of the weights kind: it fetches this
             # rank's shard from its source over its own D2D endpoint, and
             # the loader installs the payload into a model.

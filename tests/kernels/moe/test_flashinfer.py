@@ -645,7 +645,7 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
 
 
 def _check_flashinfer_ipc_weights(entries, expected, device_index):
-    from vllm.model_executor.model_loader.ipc_loader import IpcModelLoader
+    from vllm.model_executor.model_loader import IpcWeightCacheLoader
     from vllm.model_executor.model_loader.utils import _register_processed_tensors
     from vllm.model_executor.utils import weights_already_processed
     from vllm.preload.protocol import WeightCacheState
@@ -655,7 +655,7 @@ def _check_flashinfer_ipc_weights(entries, expected, device_index):
         method, layer = _make_unquantized_flashinfer_test_layer(
             monkeypatch, 192, is_gated=True, device="meta"
         )
-        loader = object.__new__(IpcModelLoader)
+        loader = object.__new__(IpcWeightCacheLoader)
         storages, manifest = entries
         records = [entry.rebuild(device_index) for entry in storages]
         tensors = loader._rebuild_storages(WeightCacheState(manifest, records, {}, {}))

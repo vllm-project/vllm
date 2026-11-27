@@ -24,8 +24,8 @@ from vllm.tracing import instrument
 logger = init_logger(__name__)
 
 
-class PeerModelLoader(BaseModelLoader):
-    """Loads a daemon's model from a source replica's weight cache daemon."""
+class PeerWeightSeedLoader(BaseModelLoader):
+    """Seed a preload daemon with a copy of its peer's post-processed weights."""
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)

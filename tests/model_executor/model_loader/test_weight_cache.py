@@ -1505,7 +1505,7 @@ def test_ipc_rope_matching(
     from transformers import DeepseekV2Config, Qwen3VLConfig
 
     from vllm.config import LoadConfig, ModelConfig
-    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.model_executor.model_loader import ipc_weight_cache_loader
     from vllm.preload import daemon
     from vllm.preload.protocol import CacheConfigMismatchError, WeightCacheKey
 
@@ -1544,10 +1544,12 @@ def test_ipc_rope_matching(
     server.state, server.backend = _state_for_model(server.model, "torch_ipc")
     server.backend_name = "torch_ipc"
     server.role, server.global_rank = "target", 0
-    for module in (daemon, ipc_loader):
+    for module in (daemon, ipc_weight_cache_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader = ipc_weight_cache_loader.IpcWeightCacheLoader(
+        LoadConfig(load_format="ipc_cache")
+    )
     loader.fallback = fallback
     loader.state_timeout_s = 5
     client, connection = socket.socketpair()
@@ -1568,7 +1570,7 @@ def test_ipc_rope_matching(
 
 
 def _serve_one(handler):
-    """Fake `IpcModelLoader._connect`: serve each request on a thread and
+    """Fake `IpcWeightCacheLoader._connect`: serve each request on a thread and
     close the accepted connection afterwards, like `serve_forever`.
 
     Returns the fake and the list of server threads it started.
@@ -1598,7 +1600,7 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     import socket
 
     from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.model_executor.model_loader import ipc_weight_cache_loader
     from vllm.preload import daemon
 
     server = object.__new__(daemon.WeightCacheDaemon)
@@ -1608,7 +1610,9 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
         load_format="ipc_cache",
         model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
     )
-    loaders = [ipc_loader.IpcModelLoader(load_config) for _ in range(2)]
+    loaders = [
+        ipc_weight_cache_loader.IpcWeightCacheLoader(load_config) for _ in range(2)
+    ]
     threads = []
     for loader in loaders:
         monkeypatch.setattr(loader, "_connect", connect)
@@ -1752,7 +1756,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
         LoadConfig,
         ParallelConfig,
     )
-    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.model_executor.model_loader import ipc_weight_cache_loader
     from vllm.preload import daemon
     from vllm.preload.protocol import WeightCacheKey, WeightCacheState
 
@@ -1782,7 +1786,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.cache_config = CacheConfig(
         cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=skip_layers
     )
-    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader = ipc_weight_cache_loader.IpcWeightCacheLoader(
+        LoadConfig(load_format="ipc_cache")
+    )
     requested_keys: list[WeightCacheKey] = []
 
     def request_state(key):
@@ -1796,7 +1802,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     monkeypatch.setattr(loader, "_request_state", request_state)
     monkeypatch.setattr(
-        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+        ipc_weight_cache_loader,
+        "check_weight_cache_loader_support",
+        lambda *a, **k: None,
     )
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
@@ -1839,7 +1847,7 @@ def test_ipc_cache_key_tracks_kernel_backends(
         LoadConfig,
         ParallelConfig,
     )
-    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.model_executor.model_loader import ipc_weight_cache_loader
     from vllm.preload import daemon
     from vllm.preload.protocol import WeightCacheKey, WeightCacheState
 
@@ -1866,7 +1874,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.kernel_config = KernelConfig(**engine_kernel_config)
     monkeypatch.setattr(
-        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+        ipc_weight_cache_loader,
+        "check_weight_cache_loader_support",
+        lambda *a, **k: None,
     )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
@@ -1880,7 +1890,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
             attrs={},
         )
 
-    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader = ipc_weight_cache_loader.IpcWeightCacheLoader(
+        LoadConfig(load_format="ipc_cache")
+    )
     monkeypatch.setattr(loader, "_request_state", request_state)
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     loader.load_model(config, model_config)

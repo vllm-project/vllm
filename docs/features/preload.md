@@ -257,11 +257,10 @@ already loaded, instead of reading the checkpoint again. A mirror daemon is
 an ordinary weight cache daemon: it forms its own world group and rendezvous
 like any preload (the multi-node `--weight-cache-master-port` requirements
 apply unchanged) and builds the model itself, so the model's config files
-must be present locally — only the safetensors are never read. What changes
-is where the weights come from: the daemon's loader pulls the
-post-processed, TP-sharded weights directly from its rank-matched source
-daemon. The FlashInfer autotune table does not travel with the weights;
-instead each mirror daemon adopts it from the same source through the
+must be present locally — only the safetensors are never read. The daemon's
+`PeerWeightSeedLoader` pulls the post-processed, TP-sharded weights directly
+from its rank-matched source daemon. Each mirror daemon fetches the FlashInfer
+autotune table separately from the same source through the
 ordinary [warmup-cache seeding](#seeding-warmup-caches-between-daemons-d2d)
 path — with `--weight-cache-seed` set and no explicit `--seed-source-*`,
 each daemon automatically seeds its warmup caches from its weights source,
@@ -395,11 +394,11 @@ daemons at a trusted deployment.
    their storage records through the selected sharing backend (CUDA IPC by
    default). It drops the model and startup runtime resources before accepting
    engine connections.
-2. An engine started with `--load-format ipc_cache` builds its model on the
-   meta device (no storage) and requests the storage entries and state metadata
-   from the daemon on its GPU. It rebuilds each entry into a `StorageRecord`,
-   constructs `WeightCacheState`, then uses the manifest to recreate all tensor
-   views.
+2. With `--load-format ipc_cache`, the engine uses `IpcWeightCacheLoader` to
+   build its model on the meta device (no storage) and request the storage
+   entries and state metadata from the daemon on its GPU. It rebuilds each
+   entry into a `StorageRecord`, constructs `WeightCacheState`, then uses the
+   manifest to recreate all tensor views.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
