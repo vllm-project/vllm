@@ -1315,6 +1315,32 @@ def _store_full_history(worker, store):
     return hs
 
 
+@pytest.mark.parametrize("earlier_state", [False, True])
+def test_exact_end_hit_keeps_attention_page_for_earlier_state(earlier_state):
+    """Storing the Mamba state at the prompt end must not hide an earlier
+    state whose attention is stored only under the end page's hash."""
+    store = _DictStore()
+    worker = _full_plus_mamba_worker(store, partial_hash_hits=True)
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    for key in _store_keys(worker, 0, hs[-1]):
+        store._data[key] = b"x"
+    if earlier_state:
+        for key in _store_keys(worker, 1, hs[1]):
+            store._data[key] = b"x"
+    before = worker.lookup(16, hs)
+    for key in _store_keys(worker, 1, hs[-1]):
+        store._data[key] = b"x"
+    after = worker.lookup(16, hs)
+
+    assert before == after
+    assert after.hit_length == (8 if earlier_state else 0)
+    if earlier_state:
+        assert [(b.group_id, b.num_tokens) for b in after.tail_key_boundaries] == [
+            (0, 16),
+            (1, 8),
+        ]
+
+
 def test_lookup_leases_every_probed_key_by_default():
     """Without the flag, the lookup leases every candidate it finds, including
     the Mamba states at earlier block boundaries."""

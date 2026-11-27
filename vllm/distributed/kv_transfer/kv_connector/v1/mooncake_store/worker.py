@@ -2660,6 +2660,15 @@ class MooncakeStoreWorker:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:
                 return MooncakeLookupResult(0), ()
+            if self.coord.enable_partial_hash_hits and self.coord.mamba_group_ids:
+                # Mamba must resume from an exact earlier state. Attention may
+                # load its containing page under the original end hash.
+                end_hash = bytes(block_hashes[num_tokens // self.hash_block_size - 1])
+                end_states = {(g, end_hash) for g in self.coord.mamba_group_ids}
+                cached_block_pool = ExternalCachedBlockPool(
+                    self.hash_block_size, exists_set - end_states
+                )
+                usable_length = token_len
             load_masks, hit_length = self.coord.find_longest_cache_hit(
                 block_hashes,
                 usable_length,
