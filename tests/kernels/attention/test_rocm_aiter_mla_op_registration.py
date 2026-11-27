@@ -125,3 +125,77 @@ def test_mla_decode_fwd_lse_op_schema() -> None:
             "kv_scale": None,
         },
     )
+
+
+def test_sparse_attn_indexer_registers_without_aiter(monkeypatch) -> None:
+    """`rocm_aiter_sparse_attn_indexer` registers on ROCm even without AITER."""
+    import vllm._aiter_ops as aiter_ops_mod
+
+    registered: list[str] = []
+
+    def fake_register(*, op_name, **kwargs):
+        registered.append(op_name)
+
+    monkeypatch.setattr(aiter_ops_mod, "_OPS_REGISTERED", False)
+    monkeypatch.setattr(aiter_ops_mod, "is_aiter_found_and_supported", lambda: False)
+    monkeypatch.setattr(
+        aiter_ops_mod, "is_aiter_found_and_supported_on_rdna", lambda: False
+    )
+    monkeypatch.setattr(aiter_ops_mod, "direct_register_custom_op", fake_register)
+
+    aiter_ops_mod.rocm_aiter_ops.register_ops_once()
+    assert registered == ["rocm_aiter_sparse_attn_indexer"]
+
+
+def test_sparse_attn_indexer_forward_hip_dispatches_without_aiter(monkeypatch) -> None:
+    """`SparseAttnIndexer.forward_hip` dispatches on non-AITER ROCm GPUs."""
+    from types import SimpleNamespace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+
+    expected = torch.empty((2, 4), dtype=torch.int32)
+    captured: dict[str, object] = {}
+
+    def fake_indexer_op(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: False)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_aiter_enabled", lambda: False)
+    monkeypatch.setattr(
+        torch.ops.vllm, "rocm_aiter_sparse_attn_indexer", fake_indexer_op, raising=False
+    )
+
+    indexer = object.__new__(SparseAttnIndexer)
+    indexer.use_fp4_cache = False
+    indexer.k_cache = SimpleNamespace(prefix="layer.0.indexer", kv_cache=torch.empty(1))
+    indexer.quant_block_size = 128
+    indexer.scale_fmt = "ue8m0"
+    indexer.topk_tokens = 4
+    indexer.head_dim = 128
+    indexer.max_model_len = 1024
+    indexer.max_total_seq_len = 1024
+    indexer.topk_indices_buffer = expected
+    indexer.skip_k_cache_insert = False
+    indexer.compress_ratio = 1
+    indexer.candidate_blocks = None
+    indexer.candidate_block_size = 0
+    indexer.candidate_write = False
+    indexer.use_pcp = False
+    indexer.pcp_shard_decode_requests = False
+    indexer.cache_layout = None
+    indexer.dcp_rank = 0
+    indexer.dcp_world_size = 1
+    indexer._parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+
+    hidden = torch.empty((2, 8))
+    q_quant = torch.empty((2, 4, 128))
+    k = torch.empty((2, 128))
+    weights = torch.empty((2, 4))
+
+    out = SparseAttnIndexer.forward_hip(indexer, hidden, q_quant, k, weights)
+    assert out is expected
+    assert captured["args"][0] is hidden
+    assert captured["args"][8] == 4
