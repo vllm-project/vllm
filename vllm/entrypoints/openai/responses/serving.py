@@ -1367,7 +1367,6 @@ class OpenAIServingResponses(GenerateBaseServing):
 
                 elif completed_message := segment.completed_message:
                     done_items: list[ResponseOutputItem] = []
-                    # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message,
                         state,
