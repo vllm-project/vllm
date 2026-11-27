@@ -277,6 +277,15 @@ def test_usage_is_taken_from_the_terminal_event():
     assert output.output_tokens == 4
 
 
+def test_zero_input_tokens_keeps_client_estimate():
+    """A placeholder `input_tokens: 0` keeps the locally computed prompt length."""
+    output = run([PREAMBLE, text_delta("blue"), usage_event(0, 4)])
+
+    assert output.success, output.error
+    assert output.prompt_len == 5
+    assert output.output_tokens == 4
+
+
 def tool_delta(delta: str, event_type: str = "response.function_call_arguments.delta"):
     return sse(event_type, {"output_index": 0, "item_id": "fc_1", "delta": delta})
 

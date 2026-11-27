@@ -437,6 +437,29 @@ def test_prompt_len_comes_from_server_usage(
     STREAMING_ENDPOINTS,
     ids=[e[0] for e in STREAMING_ENDPOINTS],
 )
+def test_zero_prompt_tokens_keeps_client_estimate(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Some OpenAI-compatible servers send `prompt_tokens: 0` as a placeholder.
+
+    vllm-bench keeps the client estimate in that case, and so does this client.
+    """
+    n_tokens = 3
+    chunks = _build_stream(n_tokens, chat=chat)
+    chunks[-2] = (0.0, _usage_chunk(n_tokens, prompt_tokens=0))
+    output = _run(request_func, api_url, endpoint_id, chunks, n_tokens)
+
+    assert output.prompt_len == 7
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
 def test_decode_span_identity_holds_with_real_clock(
     endpoint_id: str,
     request_func,

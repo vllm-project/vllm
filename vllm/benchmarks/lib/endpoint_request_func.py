@@ -301,7 +301,7 @@ async def async_request_openai_completions(
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
-                                if (pt := usage.get("prompt_tokens")) is not None:
+                                if pt := usage.get("prompt_tokens"):
                                     output.prompt_len = pt
                 if stream_error is not None:
                     output.success = False
@@ -502,7 +502,7 @@ async def async_request_openai_chat_completions(
                                 most_recent_timestamp = timestamp
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
-                                if (pt := usage.get("prompt_tokens")) is not None:
+                                if pt := usage.get("prompt_tokens"):
                                     output.prompt_len = pt
 
                 output.generated_text = generated_text
@@ -671,7 +671,7 @@ async def async_request_openai_responses(
                             usage = (data.get("response") or {}).get("usage") or {}
                             if (n_output := usage.get("output_tokens")) is not None:
                                 output.output_tokens = n_output
-                            if (n_input := usage.get("input_tokens")) is not None:
+                            if n_input := usage.get("input_tokens"):
                                 output.prompt_len = n_input
                         elif event_type in _RESPONSES_ERROR_EVENTS or data.get("error"):
                             stream_error = json.dumps(data.get("error") or data)
@@ -818,7 +818,7 @@ async def async_request_openai_audio(
                                     )
                                     # The dataset counts a text prompt that is
                                     # never sent; the server counts the audio.
-                                    if (pt := usage.get("prompt_tokens")) is not None:
+                                    if pt := usage.get("prompt_tokens"):
                                         output.prompt_len = pt
 
                     output.generated_text = generated_text
