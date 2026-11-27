@@ -138,6 +138,50 @@ def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
+def test_single_row_topp_takes_sort_path_before_sm80(monkeypatch):
+    """Pre-SM80 GPUs use the sort path for a standalone top-p mask on one row.
+
+    The split-row Triton pipeline is launch-bound there; every other case
+    keeps the Triton kernel.
+    """
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    calls: list[str] = []
+
+    def fake_pytorch(logits, k, p, allow_cpu_sync=False):
+        calls.append("pytorch")
+        return logits
+
+    def fake_triton(logits, k, p, **kwargs):
+        calls.append("triton")
+        return logits
+
+    monkeypatch.setattr(topk_topp_sampler, "apply_top_k_top_p_pytorch", fake_pytorch)
+    monkeypatch.setattr(topk_topp_sampler, "apply_top_k_top_p_triton", fake_triton)
+
+    def dispatch(batch_size: int, k, p, capability):
+        monkeypatch.setattr(
+            topk_topp_sampler.current_platform,
+            "get_device_capability",
+            lambda *args, **kwargs: capability,
+        )
+        calls.clear()
+        topk_topp_sampler.apply_top_k_top_p(torch.zeros(batch_size, 8), k, p)
+        return calls[-1]
+
+    p = torch.full((1,), 0.9)
+    k = torch.ones(1, dtype=torch.int32)
+    assert dispatch(1, None, p, DeviceCapability(7, 0)) == "pytorch"
+    assert dispatch(1, None, p, DeviceCapability(7, 5)) == "pytorch"
+    assert dispatch(2, None, p, DeviceCapability(7, 0)) == "triton"
+    assert dispatch(1, k, p, DeviceCapability(7, 0)) == "triton"
+    assert dispatch(1, k, None, DeviceCapability(7, 0)) == "triton"
+    assert dispatch(1, None, p, DeviceCapability(8, 0)) == "triton"
+    assert dispatch(1, None, p, None) == "triton"
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
