@@ -90,6 +90,29 @@ _MAX_DUMMY_SIDE = 10_000
 _MIN_DUMMY_SIDE = 224
 
 
+def _get_num_multimodal_tokens(processor: Any, **kwargs: object) -> Any:
+    """Call HF `processor._get_num_multimodal_tokens` without leaking mutations.
+
+    TODO: remove once transformers >= 5.25.0 (huggingface/transformers#50671):
+    earlier `Idefics3Processor._get_num_multimodal_tokens` mutates
+    `Idefics3ProcessorKwargs._defaults["images_kwargs"]` in-place via `.update()`.
+    """
+    defaults = getattr(
+        getattr(processor, "valid_processor_kwargs", None), "_defaults", None
+    )
+    images_defaults = (
+        defaults.get("images_kwargs") if isinstance(defaults, dict) else None
+    )
+    if not isinstance(images_defaults, dict):
+        return processor._get_num_multimodal_tokens(**kwargs)
+    saved = images_defaults.copy()
+    try:
+        return processor._get_num_multimodal_tokens(**kwargs)
+    finally:
+        images_defaults.clear()
+        images_defaults.update(saved)
+
+
 def _get_embed_token_id(
     replacement_ids: torch.Tensor, placeholder_id: int | None = None
 ) -> int:
@@ -332,7 +355,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.get_multimodal_config()
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
-        return processor._get_num_multimodal_tokens(**sizes, **mm_processor_kwargs)
+        return _get_num_multimodal_tokens(processor, **sizes, **mm_processor_kwargs)
 
     def get_max_image_tokens(self) -> int:
         size = self.get_image_size_with_most_features()
@@ -928,6 +951,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
         num_images: int,
+        hf_kwargs: Mapping[str, object],
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
 
@@ -936,7 +960,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
-        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
+        elif (
+            counts := self._get_num_patches_per_image(mm_data, hf_kwargs)
+        ) is not None:
             num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
@@ -957,7 +983,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return num_patches
 
     def _get_num_patches_per_image(
-        self, mm_data: Mapping[str, object]
+        self,
+        mm_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
@@ -965,10 +993,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             return None
         try:
             sizes = [(image.height, image.width) for image in images]
-            mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+            mm_tokens = _get_num_multimodal_tokens(
+                self.info.get_hf_processor(),
+                image_sizes=sizes,
+                **self.info.ctx.get_merged_mm_kwargs(hf_kwargs),
             )
-            return list(mm_tokens["num_image_patches"])
+            # Some processors (e.g. Idefics3/SmolVLM) report 0 patches when an image is
+            # not tiled, even though the unsplit global image still produces 1 row.
+            return [max(n, 1) for n in mm_tokens["num_image_patches"]]
         except (AttributeError, KeyError, TypeError):
             return None
 
@@ -977,6 +1009,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
+        mm_kwargs = hf_kwargs
         hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
@@ -1101,7 +1134,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, hf_data, len(seqs)
+                    hf_inputs, hf_data, len(seqs), mm_kwargs
                 )
             elif modality == "audio":
                 hf_inputs["num_audio_tokens"] = _count_embed_tokens(

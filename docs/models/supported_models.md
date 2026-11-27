@@ -586,7 +586,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
 | `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | |
 | `HYV4VLForConditionalGeneration` | HY4 | T + I<sup>+</sup> + V<sup>+</sup> | `tencent/Hy4`, `tencent/Hy4-FP8` | | ✅︎ |
-| `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
 | `Inkling2ForConditionalGeneration` | Inkling 2 Small | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Small`, `thinkingmachines/Inkling-2-Small-MXFP8` | ✅︎ | |
 | `Inkling2LoopForConditionalGeneration` | Inkling 2 Mini | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Mini` | | |
@@ -658,7 +657,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | T + A<sup>+</sup> | `Qwen/Qwen3-ASR-1.7B` | ✅︎ | ✅︎ |
 | `RForConditionalGeneration` | R-VL-4B | T + I<sup>E+</sup> | `YannQi/R-4B` | | ✅︎ |
 | `SkyworkR1VChatModel` | Skywork-R1V-38B | T + I | `Skywork/Skywork-R1V-38B` | | ✅︎ |
-| `SmolVLMForConditionalGeneration` | SmolVLM2 | T + I | `SmolVLM2-2.2B-Instruct` | ✅︎ | |
 | `Step3VLForConditionalGeneration` | Step3-VL | T + I<sup>+</sup> | `stepfun-ai/step3` | | ✅︎ |
 | `StepVLForConditionalGeneration` | Step3-VL-10B | T + I<sup>+</sup> | `stepfun-ai/Step3-VL-10B` | | ✅︎ |
 | `Step3p7ForConditionalGeneration` | Step-3.7-Flash | T + I<sup>+</sup> | `stepfun-ai/Step-3.7-Flash` | | ✅︎ |
@@ -699,6 +697,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
 | `GraniteDoclingForConditionalGeneration` | Granite Docling | T + I<sup>+</sup> | `ibm-granite/granite-for-docling-2b`, etc. | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
+| `Idefics3ForConditionalGeneration` | Idefics3 | T + I<sup>E+</sup> | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | ✅︎ |
+| `SmolVLMForConditionalGeneration` | SmolVLM2 | T + I<sup>E+</sup> | `SmolVLM2-2.2B-Instruct` | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.</br>

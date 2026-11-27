@@ -468,10 +468,6 @@ _MULTIMODAL_MODELS = {
         "interns2_preview",
         "InternS2PreviewForConditionalGeneration",
     ),
-    "Idefics3ForConditionalGeneration": (
-        "idefics3",
-        "Idefics3ForConditionalGeneration",
-    ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
@@ -645,7 +641,6 @@ _MULTIMODAL_MODELS = {
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
-    "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
@@ -844,9 +839,17 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
+    "Idefics3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
     "OmniASRForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForTranscription",
+    ),
+    "SmolVLMForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
     ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",

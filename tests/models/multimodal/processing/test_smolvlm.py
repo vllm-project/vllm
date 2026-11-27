@@ -5,11 +5,17 @@
 import pytest
 from transformers import SmolVLMConfig
 
-from vllm.model_executor.models.smolvlm import SmolVLMProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
+
+
+@pytest.fixture(autouse=True)
+def check_transformers_version():
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("SmolVLMForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
 
 
 @pytest.mark.parametrize("model_id", ["HuggingFaceTB/SmolVLM2-2.2B-Instruct"])
@@ -31,7 +37,7 @@ def test_processor_override(
     num_imgs: int,
     kwargs_on_init: bool,
 ):
-    """Ensure Idefics3MultiModalProcessor handles num_crops properly."""
+    """Ensure SmolVLM multimodal processor handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
     # the partial when calling the custom input processor.
@@ -41,7 +47,6 @@ def test_processor_override(
         limit_mm_per_prompt={"image": num_imgs},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    assert isinstance(processor.info, SmolVLMProcessingInfo)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass
@@ -66,14 +71,6 @@ def test_processor_override(
 
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    num_patches = processor.info.get_num_patches(
-        image_width=dummy_image.width,
-        image_height=dummy_image.height,
-        processor=hf_processor,
-        mm_kwargs=hf_processor_mm_kwargs,
-    )
-    assert num_patches == expected_toks_per_img // hf_processor.image_seq_len
-
     hf_processed_inputs = hf_processor(
         text=prompt,
         images=mm_data["image"],
