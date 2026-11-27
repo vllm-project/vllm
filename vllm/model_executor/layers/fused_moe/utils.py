@@ -45,6 +45,7 @@ from vllm.utils.flashinfer import (
     nvfp4_block_scale_interleave as block_scale_interleave,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import lazy_torch_compile
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -749,7 +750,7 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     return max(moe_config.max_num_tokens * dp_size, 8192)
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _swiglu_limit_torch(
     output: torch.Tensor,
     input: torch.Tensor,  # first half is gate, second half is up

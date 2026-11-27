@@ -103,6 +103,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     aux_stream,
     direct_register_custom_op,
+    lazy_torch_compile,
 )
 from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
@@ -1225,7 +1226,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value, z, b, a
 
-    @torch.compile(fullgraph=True)
+    @lazy_torch_compile(fullgraph=True)
     def prepare_gdn_attention_core_inputs(
         self,
         mixed_qkvz: torch.Tensor,

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import lazy_torch_compile
 
 
 def fused_grouped_topk(
@@ -84,7 +85,7 @@ def fused_grouped_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(
+@lazy_torch_compile(
     dynamic=True,
     backend=current_platform.simple_compile_backend,
     options=maybe_disable_graph_partition(current_platform.simple_compile_backend),

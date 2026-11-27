@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import lazy_torch_compile
 
 if TYPE_CHECKING:
     from vllm.config import KernelConfig
@@ -1122,7 +1123,7 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def per_block_cast_to_fp8(
     x: torch.Tensor, block_size: list[int] = DEFAULT_BLOCK_SIZE, use_ue8m0: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:

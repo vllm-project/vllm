@@ -5,6 +5,7 @@
 
 import torch
 
+from vllm.utils.torch_utils import lazy_torch_compile
 from vllm.v1.watermarking.prfs.base import WatermarkPRF, uint32_to_uniform
 
 _UINT32_MASK = 2**32 - 1
@@ -125,7 +126,9 @@ def _philox_uniform(
     return uint32_to_uniform(output)
 
 
-_compiled_philox_uniform = torch.compile(_philox_uniform, fullgraph=True, dynamic=True)
+_compiled_philox_uniform = lazy_torch_compile(
+    _philox_uniform, fullgraph=True, dynamic=True
+)
 
 
 class PhiloxPRF(WatermarkPRF):
