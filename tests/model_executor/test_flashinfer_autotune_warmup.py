@@ -178,6 +178,8 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
 
 def _make_runner(modules, *, max_tokens: int = 8192):
     """Create a runner carrying only the state used by FlashInfer warmup."""
+    mock_dummy_run = Mock(return_value=(Mock(), Mock()))
+    
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
@@ -193,7 +195,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
         ),
-        _dummy_run=Mock(),
+        _dummy_run=mock_dummy_run,
         speculator=None,
     )
 
@@ -233,9 +235,11 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
     runner = _make_runner([])
     dummy_run_signature = signature(GPUModelRunner._dummy_run)
-    runner._dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
-        None, **kwargs
-    )
+    def side_effect_fn(**kwargs):
+        # Bind for signature checking / assertions if needed, but return a valid 2-tuple
+        dummy_run_signature.bind(None, **kwargs)
+        return (Mock(), Mock())
+    runner._dummy_run.side_effect = side_effect_fn
     max_buckets = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 8192)
     deferred_buckets = (1, 2, 4, 8, 16, 32, 64, 128)
 

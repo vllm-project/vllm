@@ -1063,6 +1063,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
+
+        # Guard against pooling models where self.pooling_runner is not None 
+        # and self.sampler is None, and ensure unit test mock compatibility.
+        if (
+            self.is_last_pp_rank 
+            and self.pooling_runner is None 
+            and self.sampler is not None 
+            and sample_hidden_states is not None
+        ):
+            # Correct single-argument signature: _dummy_sampler_run takes only sample_hidden_states
+            # (which internally calls compute_logits with a single hidden_states tensor).
+            self._dummy_sampler_run(sample_hidden_states)
+
         return hidden_states, sample_hidden_states
 
     @torch.inference_mode()
