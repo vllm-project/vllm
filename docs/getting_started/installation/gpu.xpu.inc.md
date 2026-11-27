@@ -112,6 +112,45 @@ checkout and default working directory.
         vllm/vllm-openai-xpu:<tag>
     ```
 
+### Serve with vLLM Recipes
+
+The XPU image can use the [vLLM Recipes](https://recipes.vllm.ai/)
+deployment tool to retrieve a published configuration for a model and
+hardware target. The recipe is retrieved at runtime, so a new recipe does
+not require rebuilding the image.
+
+Choose a model and **Intel Arc Pro B70** in the Recipes hardware picker.
+The hardware key in the page URL (`?hardware=arc_pro_b70`) corresponds to
+`--hardware arc_pro_b70`.
+
+Keep the default image entrypoint for regular serving. To serve from a recipe,
+override it with `tools/recipes/serve_with_recipe.sh`:
+
+```bash
+docker run --rm \
+    --network=host \
+    --device /dev/dri:/dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    --ipc=host \
+    --privileged \
+    --entrypoint tools/recipes/serve_with_recipe.sh \
+    vllm/vllm-openai-xpu:nightly \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --hardware arc_pro_b70
+```
+
+Use an XPU image that includes the Recipes tool (for example, a nightly image
+built after this feature is merged). The wrapper enables process-visible XPU
+hardware detection, generates `config.yml` and `env.sh`, and starts `vllm
+serve`. It checks that enough devices are visible for the recipe's parallel
+layout, but model and KV-cache memory fit must still be verified at startup.
+
+For supported recipe variants, converter options, and optional GPU-aware
+TP/DP, concurrency, and scheduler sweeps, see the
+[Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md).
+
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
 

@@ -6,6 +6,21 @@
 | -------- |
 | [Intel® Arc™ Pro B-Series Graphics](https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/workstations/b-series/overview.html) |
 
+## Deploy from a vLLM Recipe
+
+Browse [vLLM Recipes for Intel Arc Pro B70](https://recipes.vllm.ai/browse?hw=arc_pro_b70)
+to find published model configurations, or open a model's recipe directly,
+for example [Llama-3.1-8B-Instruct on B70](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct?hardware=arc_pro_b70).
+The Recipes catalog and the supported-model tables below serve different
+purposes: a model listed here does not necessarily have a published B70 recipe.
+
+For one-step serving with an XPU container that includes the Recipes tool, see
+[Serve with vLLM Recipes](../../getting_started/installation/gpu.md#serve-with-vllm-recipes).
+The tool selects the published configuration, checks visible XPU devices,
+and starts `vllm serve`. It can also generate optional GPU-aware sweeps for
+parallel layout, concurrency, and scheduler settings. See the
+[Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md) for details.
+
 ## Recommended Models
 
 ### Text-only Language Models

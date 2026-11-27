@@ -77,7 +77,7 @@ def _load_stage_records(stage_dir: Path) -> list[dict[str, Any]]:
 
 def _has_numeric_metric(records: list[dict[str, Any]], key: str) -> bool:
     return any(
-        isinstance(record.get(key), (int, float))
+        isinstance(record.get(key), int | float)
         and not isinstance(record.get(key), bool)
         for record in records
     )

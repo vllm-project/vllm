@@ -37,7 +37,8 @@ Release images for ROCm and XPU are also published as `vllm/vllm-rocm` and
 
 [vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
 and `env.sh`. See the
-[Recipes conversion tool README](../../tools/recipes/README.md) for usage.
+[Recipes conversion tool README](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md)
+for usage.
 
 For Docker, mount both files and source `env.sh` inside the container before
 starting vLLM:

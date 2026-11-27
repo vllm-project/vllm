@@ -52,6 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from core.validation import RecipeSkipError, write_validation_result
+
 try:
     import yaml
 except ImportError as exc:
@@ -138,9 +140,19 @@ def parse_args() -> argparse.Namespace:
         help="Output vLLM YAML config (default: config.yml)",
     )
     p.add_argument(
+        "--validation-result-out",
+        help="Write machine-readable READY/SKIP/ERROR JSON for validation automation.",
+    )
+    p.add_argument(
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    p.add_argument(
+        "--max-model-len",
+        type=int,
+        help="Explicit context-length override for generated serving config.",
     )
 
     tuning = p.add_argument_group(
@@ -148,16 +160,23 @@ def parse_args() -> argparse.Namespace:
         (
             "Refine the recipe baseline only when additional information is supplied. "
             "Runtime tuning is enabled only for recipe hardware with a registered "
-            "policy (currently: xeon6)."
+            "policy (currently: xeon6 and arc_pro_b70)."
         ),
     )
     tuning.add_argument(
         "--detect-hardware",
         action="store_true",
         help=(
-            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "Detect resources through the selected hardware backend and allow the "
             "recipe-hardware policy to override recipe runtime arguments."
         ),
+    )
+    tuning.add_argument(
+        "--auto-fit-parallelism",
+        "--auto-fit-xpu-parallelism",
+        dest="auto_fit_parallelism",
+        action="store_true",
+        help="Opt in to conservative GPU TP/DP fallback (currently B70 only).",
     )
     tuning.add_argument(
         "--input-tokens",
@@ -754,9 +773,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
     # Current Recipes API's single-node rendering exposes `argv`.
     if isinstance(recipe.get("argv"), list):
         if deploy_type not in (None, "single_node"):
-            raise ValueError(
+            raise RecipeSkipError(
+                "UNSUPPORTED_DEPLOYMENT",
                 f"Recipe deploy_type={deploy_type!r} is not a single-node deployment. "
-                "A single config.yml would not fully represent this deployment."
+                "A single config.yml would not fully represent this deployment.",
+                deploy_type=deploy_type,
             )
         return recipe["argv"]
 
@@ -774,9 +795,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
         if k in recipe
     ]
     if multi_process_fields:
-        raise ValueError(
+        raise RecipeSkipError(
+            "UNSUPPORTED_DEPLOYMENT",
             "This recipe is a multi-process deployment and cannot be represented "
-            "by one config.yml. Found fields: " + ", ".join(multi_process_fields)
+            "by one config.yml. Found fields: " + ", ".join(multi_process_fields),
+            fields=multi_process_fields,
         )
 
     raise ValueError("Recipe JSON does not contain an `argv` field")
@@ -892,7 +915,13 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+        if args.max_model_len is not None:
+            if args.max_model_len <= 0:
+                raise ValueError("--max-model-len must be positive")
+            config["max-model-len"] = args.max_model_len
 
+        if args.auto_fit_parallelism and not args.detect_hardware:
+            raise ValueError("--auto-fit-parallelism requires --detect-hardware")
         tuning_requested = (
             args.detect_hardware
             or args.tune_scheduler
@@ -911,14 +940,17 @@ def main() -> int:
         )
 
         tuning = None
+        parallelism_adjustment = None
         sweep_config = None
         workload = None
         sweep_writer = None
         hardware = None
+        backend = None
         env_overrides: dict[str, object] = {}
         if tuning_requested:
             # Keep plain Recipes conversion lightweight. vLLM-specific modules
             # are imported only for optional runtime tuning or sweep generation.
+            from hardware.registry import get_hardware_backend
             from sweep.runtime_tuning import (
                 WorkloadHints,
                 finetune_runtime_config,
@@ -945,6 +977,7 @@ def main() -> int:
                 sweep_writer = write_sweep_files
 
             recipe_hardware = recipe.get("hardware")
+            backend = get_hardware_backend(recipe_hardware)
             scheduler_tuning_requested = bool(
                 args.tune_scheduler
                 or args.generate_sweep
@@ -956,9 +989,27 @@ def main() -> int:
             )
 
             if args.detect_hardware:
-                from hardware_detection import detect_hardware
+                hardware = backend.detect()
 
-                hardware = detect_hardware()
+            if args.auto_fit_parallelism:
+                if hardware is None:
+                    raise ValueError(
+                        "Automatic parallelism fallback requires detection"
+                    )
+                parallelism_adjustment = backend.fit_parallelism(config, hardware)
+                if parallelism_adjustment["changed"]:
+                    config["tensor-parallel-size"] = parallelism_adjustment[
+                        "effective"
+                    ]["tp"]
+                    config["data-parallel-size"] = parallelism_adjustment["effective"][
+                        "dp"
+                    ]
+                    print(
+                        f"{backend.label} parallelism downgrade "
+                        "(estimated, startup not verified):"
+                    )
+                    print(f"  recipe: {parallelism_adjustment['recipe']}")
+                    print(f"  effective: {parallelism_adjustment['effective']}")
 
             tuning = finetune_runtime_config(
                 config,
@@ -985,6 +1036,7 @@ def main() -> int:
             if not args.detect_hardware or hardware is None:
                 raise ValueError("--generate-full-sweep requires --detect-hardware.")
             assert workload is not None
+            assert backend is not None
             from sweep.sweep_generation import write_full_sweep_files
 
             sweep_files = write_full_sweep_files(
@@ -993,7 +1045,7 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **backend.sweep_kwargs(hardware),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_parallel_layout_sweep:
@@ -1002,6 +1054,7 @@ def main() -> int:
                     "--generate-parallel-layout-sweep requires --detect-hardware."
                 )
             assert workload is not None
+            assert backend is not None
             from sweep.sweep_generation import write_parallel_layout_sweep_files
 
             sweep_files = write_parallel_layout_sweep_files(
@@ -1010,7 +1063,7 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **backend.sweep_kwargs(hardware),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_concurrency_sweep:
@@ -1051,10 +1104,35 @@ def main() -> int:
                     print(f"  {key}: {value}")
             for note in tuning.notes:
                 print(f"  tuning: {note}")
+    except RecipeSkipError as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "SKIP",
+            reason_code=exc.reason_code,
+            reason=str(exc),
+            **exc.details,
+        )
+        print(f"SKIP [{exc.reason_code}]: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "ERROR",
+            reason_code="CONVERSION_ERROR",
+            reason=str(exc),
+        )
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    write_validation_result(
+        args.validation_result_out,
+        "READY",
+        **(
+            {"parallelism_adjustment": parallelism_adjustment}
+            if parallelism_adjustment
+            else {}
+        ),
+    )
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
     if sweep_files:

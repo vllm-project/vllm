@@ -33,7 +33,7 @@ vllm serve --config config.yaml
 
 [vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
 and `env.sh`. See the
-[Recipes conversion tool README](../../tools/recipes/README.md) for usage.
+[Recipes conversion tool README](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md) for usage.
 
 Source the generated environment before starting vLLM:
 

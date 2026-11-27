@@ -22,7 +22,7 @@ DEFAULT_OUTPUT_JSON = "concurrency-recommendation.json"
 
 
 def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
 
