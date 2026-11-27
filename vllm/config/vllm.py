@@ -2391,7 +2391,7 @@ class VllmConfig:
                         "Turning off hybrid kv cache manager because "
                         "`--kv-transfer-config` selects a KV connector that "
                         "does not support it. Impact: hybrid SSM models "
-                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "(e.g. Zamba2, NemotronH) require HMA and will fail at "
                         "startup without it; models with sliding window "
                         "attention will run with reduced performance. "
                         "To add HMA support to a KV connector, subclass "
