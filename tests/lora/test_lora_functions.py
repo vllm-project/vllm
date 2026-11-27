@@ -20,7 +20,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.worker.worker_base import WorkerBase
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
-LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
+LORA_MODULE_PATH = "vllm/self_cognition_Alice"
 LORA_RANK = 8
 
 

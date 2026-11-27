@@ -394,7 +394,6 @@ th {
 | `ChatGLMModel`, `ChatGLMForConditionalGeneration` | ChatGLM | `zai-org/chatglm2-6b`, `zai-org/chatglm3-6b`, `thu-coai/ShieldLM-6B-chatglm3`, etc. | ✅︎ | ✅︎ |
 | `CohereForCausalLM`, `Cohere2ForCausalLM` | Command-R, Command-A | `CohereLabs/c4ai-command-r-v01`, `CohereLabs/c4ai-command-r7b-12-2024`, `CohereLabs/c4ai-command-a-03-2025`, `CohereLabs/command-a-reasoning-08-2025`, etc. | ✅︎ | ✅︎ |
 | `Cohere2MoeForCausalLM` | North-Mini-Code | `CohereLabs/North-Mini-Code`, etc. | ✅︎ | ✅︎ |
-| `DbrxForCausalLM` | DBRX | `databricks/dbrx-base`, `databricks/dbrx-instruct`, etc. | | ✅︎ |
 | `DeciLMForCausalLM` | DeciLM | `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, etc. | ✅︎ | ✅︎ |
 | `DeepseekForCausalLM` | DeepSeek | `deepseek-ai/deepseek-llm-67b-base`, `deepseek-ai/deepseek-llm-7b-chat`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV2ForCausalLM` | DeepSeek-V2 | `deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat`, etc. | ✅︎ | ✅︎ |
@@ -585,7 +584,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | T + A | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
 | `HCXVisionV2ForCausalLM` | HyperCLOVAX-SEED-Think-32B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Think-32B` | | |
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
-| `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | |
+| `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | ✅︎ |
 | `HYV4VLForConditionalGeneration` | HY4 | T + I<sup>+</sup> + V<sup>+</sup> | `tencent/Hy4`, `tencent/Hy4-FP8` | | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
@@ -676,12 +675,13 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     and `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
     decode kernel reads the wrong KV rows once a layer's KV cache exceeds
     4 GiB (ROCm/aiter#6277), and vLLM warns when the Triton kernel is not
-    selected. HY4 Flash on ROCm also requires BF16 KV storage
-    (`--kv-cache-dtype auto` or `bfloat16`) and OCP FP8.
+    selected. HY4 Flash on ROCm also requires `--kv-cache-dtype` `auto`,
+    `bfloat16` or `fp8_ds_mla`, and OCP FP8.
 
-    HY4 Flash does not support LoRA or pipeline parallelism. Published HY4
-    Flash checkpoints use `HYV4FlashForConditionalGeneration`, which vLLM maps
-    to `HYV4FlashVLForConditionalGeneration`.
+    HY4 Flash does not support LoRA, and supports pipeline parallelism on
+    NVIDIA CUDA only. Published HY4 Flash checkpoints use
+    `HYV4FlashForConditionalGeneration`, which vLLM maps to
+    `HYV4FlashVLForConditionalGeneration`.
 
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
@@ -736,6 +736,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     For `Gemma4ForConditionalGeneration`:
+    - Gemma 4 and Gemma 4 Unified use the checkpoint's resize settings by default. For requests that supply pre-resized images with `do_resize=False`, each dimension must be divisible by the pooled patch size (normally 48 pixels), and the image must fit `max_soft_tokens`. Unresized video frames have a fixed limit of 70 soft tokens per frame.
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma
