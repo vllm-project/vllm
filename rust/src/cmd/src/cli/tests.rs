@@ -302,6 +302,16 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2540,6 +2550,16 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3506,6 +3526,84 @@ fn strict_tool_calling_cannot_be_turned_off() {
     expect!["invalid JSON arguments: enforce_strict_tool_calling (VLLM_ENFORCE_STRICT_TOOL_CALLING): only on is implemented in Rust frontend, not off at line 1 column 67"].assert_eq(&json(false).unwrap_err());
 }
 
+/// The Rust frontend fetches and decodes media with its own settings, so a
+/// media setting fails startup on both paths unless the Rust frontend does
+/// what its value asks for.
+#[test]
+fn media_settings_fail_startup_unless_rust_matches_them() {
+    let serve = |flags: &[&str]| {
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    for flags in [
+        ["--media-fetch-max-retries", "1"],
+        ["--media-fetch-max-retries", "0"],
+        ["--media-url-allow-redirects", "1"],
+        ["--video-loader-backend", "opencv"],
+        ["--media-connector", "http"],
+        // Python's off value.
+        ["--media-cache", ""],
+    ] {
+        serve(&flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+    }
+    for flags in [
+        ["--media-cache", "/tmp/media"],
+        // Python's defaults are refused too when set explicitly: the Rust
+        // frontend does not honor them.
+        ["--media-fetch-max-retries", "3"],
+        ["--media-url-allow-redirects", "0"],
+        ["--max-image-pixels", "178956970"],
+        ["--max-audio-decode-duration-s", "600"],
+        ["--max-audio-decode-bytes", "0"],
+        ["--video-loader-backend", "opencv_dynamic"],
+        ["--media-connector", "custom"],
+    ] {
+        let error = serve(&flags).unwrap_err();
+        assert!(error.contains(flags[0]), "{flags:?}: {error}");
+    }
+    // Even with no media to fetch.
+    serve(&["--media-cache", "/tmp/media", "--language-model-only"]).unwrap_err();
+
+    let json = |fields: serde_json::Value| {
+        let mut args = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B" });
+        args.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        parse_runtime_args_json(&args.to_string()).map(drop)
+    };
+    json(serde_json::json!({
+        "media_fetch_max_retries": 1,
+        "media_url_allow_redirects": true,
+        "video_loader_backend": "opencv",
+        "media_connector": "http",
+    }))
+    .unwrap();
+    expect!["invalid JSON arguments: media_cache (VLLM_MEDIA_CACHE): a media cache is not implemented in Rust frontend; only an empty value is"]
+        .assert_eq(&json(serde_json::json!({ "media_cache": "/tmp/media" })).unwrap_err());
+    expect!["invalid JSON arguments: media_fetch_max_retries (VLLM_MEDIA_FETCH_MAX_RETRIES): only values up to 1 are implemented in Rust frontend, not 3"]
+        .assert_eq(&json(serde_json::json!({ "media_fetch_max_retries": 3 })).unwrap_err());
+    expect![
+        "invalid JSON arguments: video_loader_backend (VLLM_VIDEO_LOADER_BACKEND): unknown variant `identity`, expected `opencv`"
+    ]
+    .assert_eq(&json(serde_json::json!({ "video_loader_backend": "identity" })).unwrap_err());
+    expect!["invalid JSON arguments: max_image_pixels (VLLM_MAX_IMAGE_PIXELS): argument is not implemented in Rust frontend yet"].assert_eq(&json(serde_json::json!({ "max_image_pixels": 1 })).unwrap_err());
+
+    // The render server fetches media too, and reads the same variables.
+    let render = |flags: &[&str]| {
+        Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    render(&["--media-connector", "http", "--media-cache", ""]).unwrap();
+    for flags in [
+        ["--media-connector", "custom"],
+        ["--media-cache", "/tmp/media"],
+        ["--max-image-pixels", "1"],
+    ] {
+        let error = render(&flags).unwrap_err();
+        assert!(error.contains(flags[0]), "{flags:?}: {error}");
+    }
+}
+
 #[test]
 fn frontend_args_json_rejects_malformed_json() {
     let error = Cli::try_parse_from([
@@ -3785,6 +3883,16 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,

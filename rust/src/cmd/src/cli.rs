@@ -8,6 +8,7 @@
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
 mod logging;
+mod media;
 mod model;
 mod ssl;
 mod unsupported;
@@ -51,6 +52,7 @@ use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
+use crate::cli::media::MediaArgs;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::{Fixed, UnsupportedArgs};
@@ -267,6 +269,10 @@ pub struct RenderArgs {
     /// checkpoint configuration before its processor is constructed.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
     mm_processor_kwargs: HashMap<String, Value>,
+    /// Python's media fetching and decoding settings, each set only through
+    /// its environment variable; the render server fetches media too.
+    #[command(flatten)]
+    pub media: MediaArgs,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -539,6 +545,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub mm_processor_kwargs: HashMap<String, Value>,
+
+    /// Python's media fetching and decoding settings, each set only through
+    /// its environment variable.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub media: MediaArgs,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.

@@ -72,6 +72,34 @@ impl<'de, const ON: bool> Deserialize<'de> for Fixed<ON> {
     }
 }
 
+/// Marker type for a Python integer setting that the Rust frontend implements
+/// only up to `MAX`, such as one fetch attempt per media URL. Parsing a larger
+/// value fails, on the CLI and in JSON args alike.
+///
+/// Its CLI value parser is the setting's Python parser mapped through
+/// `try_from`, such as `parse_int.try_map(AtMost::<1>::try_from)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtMost<const MAX: i64>;
+
+impl<const MAX: i64> TryFrom<i64> for AtMost<MAX> {
+    type Error = String;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        (value <= MAX).then_some(Self).ok_or_else(|| {
+            format!("only values up to {MAX} are implemented in Rust frontend, not {value}")
+        })
+    }
+}
+
+impl<'de, const MAX: i64> Deserialize<'de> for AtMost<MAX> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Marker type for no-op arguments that are accepted by the Rust frontend but
 /// have no effect.
 ///
