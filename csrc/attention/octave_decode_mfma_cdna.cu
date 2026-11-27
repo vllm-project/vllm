@@ -17,8 +17,11 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
+
+#include "../torch_utils.h"
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
 
 #if defined(USE_ROCM)
   #include <hip/hip_runtime.h>
@@ -609,28 +612,27 @@ __global__ __launch_bounds__(1024) void reduce_mfma(
 }  // namespace octave_mfma
 
 // Split combine on gfx942; false when the shape is not covered.
-bool octave_reduce_mfma(torch::Tensor out, torch::Tensor mid_o,
-                        torch::Tensor v_signs, int num_splits,
+bool octave_reduce_mfma(torch::stable::Tensor out, torch::stable::Tensor mid_o,
+                        torch::stable::Tensor v_signs, int num_splits,
                         cudaStream_t stream) {
   using namespace octave_mfma;
   // 1024 threads per (query, head) pay off while those blocks alone cannot
   // fill the GPU; big batches keep the 256-thread kernel.
-  static const int max_blocks =
-      2 * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  static const int max_blocks = 2 * get_device_prop()->multiProcessorCount;
   if (num_splits > 1024 || out.size(0) * out.size(1) > max_blocks ||
       out.size(2) != D || out.stride(2) != 1 || mid_o.stride(3) != 1)
     return false;
   dim3 grid(out.size(0), out.size(1));
-  if (out.dtype() == at::kBFloat16)
+  if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16)
     reduce_mfma<__hip_bfloat16><<<grid, 1024, 0, stream>>>(
-        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
-        v_signs.data_ptr<int>(), num_splits, mid_o.stride(0), mid_o.stride(1),
-        mid_o.stride(2), out.stride(0), out.stride(1));
+        mid_o.const_data_ptr<float>(), (__hip_bfloat16*)out.mutable_data_ptr(),
+        v_signs.const_data_ptr<int>(), num_splits, mid_o.stride(0),
+        mid_o.stride(1), mid_o.stride(2), out.stride(0), out.stride(1));
   else
     reduce_mfma<half><<<grid, 1024, 0, stream>>>(
-        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
-        num_splits, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
-        out.stride(0), out.stride(1));
+        mid_o.const_data_ptr<float>(), (half*)out.mutable_data_ptr(),
+        v_signs.const_data_ptr<int>(), num_splits, mid_o.stride(0),
+        mid_o.stride(1), mid_o.stride(2), out.stride(0), out.stride(1));
   return true;
 }
 
@@ -640,10 +642,12 @@ constexpr int kMfmaNw = 4;
 
 // Launches the MFMA decode when the shape is covered; returns the number of
 // splits it wrote, or 0 when the caller must use its own kernel. Dense only.
-int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
+int octave_decode_mfma(torch::stable::Tensor query, torch::stable::Tensor cache,
+                       torch::stable::Tensor block_table,
+                       torch::stable::Tensor q_to_req,
+                       torch::stable::Tensor q_to_klen,
+                       torch::stable::Tensor mid_o,
+                       torch::stable::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt,
                        int64_t query_group) {
   using namespace octave_mfma;
@@ -661,28 +665,28 @@ int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
       cache.stride(2) % (fmt & octave::kCompactFlag ? 4 : 8) == 0 &&
       cache.stride(2) == slot && cache.stride(1) % 16 == 0 &&
       cache.stride(0) % 16 == 0 &&
-      reinterpret_cast<uintptr_t>(cache.data_ptr()) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(cache.const_data_ptr()) % 16 == 0 &&
       num_kv_splits >= 1;
   if (!eligible) return 0;
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   // Enough splits for ~two resident waves per SIMD, no more: every extra
   // split is another partial for the reduction to read.
-  static const int target_waves =
-      8 * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  static const int target_waves = 8 * get_device_prop()->multiProcessorCount;
   const int groups = std::max(1, (num_q + QG - 1) / QG) * num_kv_heads * nrt;
   const int ns =
       std::min<int>({kMfmaSplits, (int)num_kv_splits,
                      std::max(1, (target_waves + groups - 1) / groups)});
   if (num_q == 0) return ns;
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto stream = get_current_cuda_stream(query.get_device_index());
   const int spb = kMfmaNw / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
   #define SQM_G(B, KC, G, T)                                                   \
     decode_mfma<B, KC, kMfmaNw, G, T><<<grid, 64 * kMfmaNw, 0, stream>>>(      \
-        (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),          \
-        block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),                 \
-        q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),                    \
-        k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,          \
+        (const T*)query.const_data_ptr(),                                      \
+        (const uint8_t*)cache.const_data_ptr(),                                \
+        block_table.const_data_ptr<int>(), q_to_req.const_data_ptr<int>(),     \
+        q_to_klen.const_data_ptr<int>(), mid_o.mutable_data_ptr<float>(),      \
+        k_signs.const_data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,    \
         num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
         cache.size(0), ns, kMfmaMinTps, nrt, query.stride(0), query.stride(1), \
         cache.stride(0), cache.stride(1), cache.stride(2), mid_o.stride(0),    \
@@ -694,7 +698,8 @@ int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
       else                  \
         SQM_G(B, KC, 1, T); \
     } while (0)
-  const bool bf = query.dtype() == at::kBFloat16;
+  const bool bf =
+      query.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   if (fmt == 4) {
     if (bf)
       SQM(4, false, __hip_bfloat16);

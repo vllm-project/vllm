@@ -17,9 +17,15 @@
 // The query is rotated like K while it is staged into LDS; the output stays
 // rotated and octave_reduce rotates it back.
 
+#include <algorithm>
 #include <cstdint>
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <optional>
+#include <string>
+
+#include "../torch_utils.h"
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
 
 #if defined(USE_ROCM)
   #include <hip/hip_runtime.h>
@@ -586,10 +592,12 @@ constexpr int kSqWmmaSplits = 192;
 constexpr int kSqWmmaMinTps = 64;
 constexpr int kSqWmmaNsb = 2;
 
-int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
+int octave_decode_mfma(torch::stable::Tensor query, torch::stable::Tensor cache,
+                       torch::stable::Tensor block_table,
+                       torch::stable::Tensor q_to_req,
+                       torch::stable::Tensor q_to_klen,
+                       torch::stable::Tensor mid_o,
+                       torch::stable::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt, int64_t query_group);
 
 // Launches the WMMA decode when the shape is covered; returns the number of
@@ -597,20 +605,21 @@ int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
 // kernel.
 // With `indices` ([num_q, topk] int32 logical positions) the sparse variant
 // runs and q_to_klen is ignored.
-int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
+int octave_decode_wmma(torch::stable::Tensor query, torch::stable::Tensor cache,
+                       torch::stable::Tensor block_table,
+                       torch::stable::Tensor q_to_req,
+                       torch::stable::Tensor q_to_klen,
+                       torch::stable::Tensor mid_o,
+                       torch::stable::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt,
-                       const std::optional<torch::Tensor>& indices,
+                       const std::optional<torch::stable::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
                        const int* stags, int smask, int64_t query_group) {
   using namespace octave_wmma;
   // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
   // only).
   static const int arch = [] {
-    const std::string name =
-        at::cuda::getCurrentDeviceProperties()->gcnArchName;
+    const std::string name = get_device_prop()->gcnArchName;
     if (name.rfind("gfx1100", 0) == 0) return 0;
     if (name.rfind("gfx942", 0) == 0) return 1;
     return -1;
@@ -634,26 +643,27 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   if (!eligible) return 0;
   const int ns = std::min<int>(kSqWmmaSplits, (int)num_kv_splits);
   if (num_q == 0) return ns;
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto stream = get_current_cuda_stream(query.get_device_index());
   const bool sp = indices.has_value();
-  const int* idx = sp ? indices->data_ptr<int>() : nullptr;
+  const int* idx = sp ? indices->const_data_ptr<int>() : nullptr;
   const int64_t sidx = sp ? indices->stride(0) : 0;
   const int topk = sp ? (int)indices->size(1) : 0;
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW_SP(B, KC, T, SP)                                              \
-    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                   \
-        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                             \
-            (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),   \
-            block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),          \
-            q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),             \
-            k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,   \
-            num_kv_heads, cache.size(2), block_table.size(1),               \
-            block_table.size(0), cache.size(0), ns, kSqWmmaMinTps, nrt,     \
-            query.stride(0), query.stride(1), cache.stride(0),              \
-            cache.stride(1), cache.stride(2), mid_o.stride(0),              \
-            mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
+  #define SQW_SP(B, KC, T, SP)                                                 \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                      \
+        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                                \
+            (const T*)query.const_data_ptr(),                                  \
+            (const uint8_t*)cache.const_data_ptr(),                            \
+            block_table.const_data_ptr<int>(), q_to_req.const_data_ptr<int>(), \
+            q_to_klen.const_data_ptr<int>(), mid_o.mutable_data_ptr<float>(),  \
+            k_signs.const_data_ptr<int>(), (float)sm_scale, num_q,             \
+            num_q_heads, num_kv_heads, cache.size(2), block_table.size(1),     \
+            block_table.size(0), cache.size(0), ns, kSqWmmaMinTps, nrt,        \
+            query.stride(0), query.stride(1), cache.stride(0),                 \
+            cache.stride(1), cache.stride(2), mid_o.stride(0),                 \
+            mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags,    \
             wmask, stags, smask)
   #define SQW(B, KC, T)          \
     do {                         \
@@ -662,7 +672,8 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
       else                       \
         SQW_SP(B, KC, T, false); \
     } while (0)
-  const bool bf = query.dtype() == at::kBFloat16;
+  const bool bf =
+      query.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   if (fmt == 4) {
     if (bf)
       SQW(4, false, __hip_bfloat16);

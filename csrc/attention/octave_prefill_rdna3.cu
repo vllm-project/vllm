@@ -22,13 +22,18 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "../torch_utils.h"
+
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 
 #if defined(USE_ROCM)
   #include <hip/hip_runtime.h>
@@ -698,68 +703,82 @@ __global__ void __launch_bounds__(D)
 
 // Partials of phase 1, kept alive for the process: a graph that captured a
 // pointer must keep finding it valid. Grows geometrically, so it settles.
-float* workspace(int64_t need, const at::TensorOptions& opts) {
+float* workspace(int64_t need, const torch::stable::Tensor& like) {
   static std::mutex mtx;
-  static std::unordered_map<int, std::vector<at::Tensor>> kept;
+  static std::unordered_map<int, std::vector<torch::stable::Tensor>> kept;
   std::lock_guard<std::mutex> lock(mtx);
-  std::vector<at::Tensor>& bufs = kept[opts.device().index()];
+  std::vector<torch::stable::Tensor>& bufs = kept[like.get_device_index()];
   if (bufs.empty() || bufs.back().numel() < need) {
     int64_t n = 8 << 20;
     while (n < need) n *= 2;
-    bufs.push_back(at::empty({n}, opts));
+    bufs.push_back(torch::stable::new_empty(
+        like, {n}, torch::headeronly::ScalarType::Float));
   }
-  return (float*)bufs.back().data_ptr();
+  return bufs.back().mutable_data_ptr<float>();
 }
 
 }  // namespace octave_pf
 
 int octave_slot_bytes(int64_t fmt);
-void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                         torch::Tensor v, torch::Tensor cache,
-                         torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                         torch::Tensor seq_lens, int64_t max_query_len,
+void octave_prefill_cdna(torch::stable::Tensor out, torch::stable::Tensor q,
+                         torch::stable::Tensor k, torch::stable::Tensor v,
+                         torch::stable::Tensor cache,
+                         torch::stable::Tensor block_table,
+                         torch::stable::Tensor cu_seqlens_q,
+                         torch::stable::Tensor seq_lens, int64_t max_query_len,
                          double sm_scale, int64_t fmt, float* ws,
                          int num_splits);
 
-void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                    torch::Tensor v, torch::Tensor cache,
-                    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                    torch::Tensor seq_lens, int64_t max_query_len,
+void octave_prefill(torch::stable::Tensor out, torch::stable::Tensor q,
+                    torch::stable::Tensor k, torch::stable::Tensor v,
+                    torch::stable::Tensor cache,
+                    torch::stable::Tensor block_table,
+                    torch::stable::Tensor cu_seqlens_q,
+                    torch::stable::Tensor seq_lens, int64_t max_query_len,
                     double sm_scale, int64_t fmt) {
   using namespace octave_pf;
-  TORCH_CHECK(q.dtype() == at::kHalf && k.dtype() == at::kHalf &&
-                  v.dtype() == at::kHalf && out.dtype() == at::kHalf,
-              "octave_prefill: fp16 only");
-  TORCH_CHECK(q.size(2) == D && q.stride(2) == 1 && k.stride(2) == 1 &&
-              v.stride(2) == 1 && out.stride(2) == 1);
-  TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4 &&
-              cache.stride(3) == 1);
-  TORCH_CHECK(cache.size(3) == octave_slot_bytes(fmt),
-              "octave_prefill: slot size mismatch");
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(q.scalar_type() == ScalarType::Half &&
+                      k.scalar_type() == ScalarType::Half &&
+                      v.scalar_type() == ScalarType::Half &&
+                      out.scalar_type() == ScalarType::Half,
+                  "octave_prefill: fp16 only");
+  STD_TORCH_CHECK(q.size(2) == D && q.stride(2) == 1 && k.stride(2) == 1 &&
+                      v.stride(2) == 1 && out.stride(2) == 1,
+                  "octave_prefill: head_size must be 256 with contiguous "
+                  "last dim");
+  STD_TORCH_CHECK(cache.scalar_type() == ScalarType::Byte && cache.dim() == 4 &&
+                      cache.stride(3) == 1,
+                  "octave_prefill: cache must be uint8 [blocks, heads, "
+                  "block_size, slot] with contiguous slots");
+  STD_TORCH_CHECK(cache.size(3) == octave_slot_bytes(fmt),
+                  "octave_prefill: slot size mismatch");
   const int align = fmt & octave::kCompactFlag ? 4 : 8;
-  TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
-                  cache.stride(0) % align == 0,
-              "octave_prefill: misaligned slots");
+  STD_TORCH_CHECK(cache.stride(2) % align == 0 &&
+                      cache.stride(1) % align == 0 &&
+                      cache.stride(0) % align == 0,
+                  "octave_prefill: misaligned slots");
   // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
   static const int arch = [] {
-    const std::string name =
-        at::cuda::getCurrentDeviceProperties()->gcnArchName;
+    const std::string name = get_device_prop()->gcnArchName;
     if (name.rfind("gfx1100", 0) == 0) return 0;
     if (name.rfind("gfx942", 0) == 0) return 1;
     return -1;
   }();
-  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
+  STD_TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
-  const at::cuda::OptionalCUDAGuard guard(device_of(q));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const torch::stable::accelerator::DeviceGuard guard(q.get_device_index());
+  auto stream = get_current_cuda_stream(q.get_device_index());
   const int hq = q.size(1), hkv = cache.size(1);
-  TORCH_CHECK(hq % hkv == 0);
+  STD_TORCH_CHECK(hq % hkv == 0, "octave_prefill: ", hq,
+                  " query heads are not a multiple of ", hkv, " KV heads");
   const int hpk = hq / hkv;
   const int block_size = cache.size(2);
   const int max_blocks = block_table.size(1);
-  TORCH_CHECK(block_table.stride(1) == 1 && block_table.stride(0) == max_blocks,
-              "octave_prefill: block_table rows must be contiguous");
+  STD_TORCH_CHECK(
+      block_table.stride(1) == 1 && block_table.stride(0) == max_blocks,
+      "octave_prefill: block_table rows must be contiguous");
   const int total_q = q.size(0);
 
   const int rowtiles = (int)((max_query_len * hpk + 127) / 128);
@@ -767,8 +786,7 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   // Blocks whose split has no keys exit at once, so ask for plenty.
   const int num_splits =
       std::min(16, std::max(1, (1024 + base_blocks - 1) / base_blocks));
-  float* ws = workspace((int64_t)num_splits * total_q * hq * (D + 2),
-                        q.options().dtype(at::kFloat));
+  float* ws = workspace((int64_t)num_splits * total_q * hq * (D + 2), q);
   if (arch == 1) {
     octave_prefill_cdna(out, q, k, v, cache, block_table, cu_seqlens_q,
                         seq_lens, max_query_len, sm_scale, fmt, ws, num_splits);
@@ -776,12 +794,12 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   }
 
   dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
-  #define PREFIX(B, KC)                                                     \
-    prefix_attn<B, KC><<<grid1, NTHREADS, 0, stream>>>(                     \
-        (const __half*)q.data_ptr(), cache.data_ptr<uint8_t>(),             \
-        block_table.data_ptr<int>(), cu_seqlens_q.data_ptr<int>(),          \
-        seq_lens.data_ptr<int>(), ws, (float)sm_scale, hq, hkv, block_size, \
-        max_blocks, num_splits, total_q, q.stride(0), q.stride(1),          \
+  #define PREFIX(B, KC)                                                        \
+    prefix_attn<B, KC><<<grid1, NTHREADS, 0, stream>>>(                        \
+        (const __half*)q.const_data_ptr(), cache.const_data_ptr<uint8_t>(),    \
+        block_table.const_data_ptr<int>(), cu_seqlens_q.const_data_ptr<int>(), \
+        seq_lens.const_data_ptr<int>(), ws, (float)sm_scale, hq, hkv,          \
+        block_size, max_blocks, num_splits, total_q, q.stride(0), q.stride(1), \
         cache.stride(0), cache.stride(1), cache.stride(2))
   if (fmt == 4)
     PREFIX(4, false);
@@ -792,18 +810,20 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   #undef PREFIX
   dim3 grid2(num_seqs, hq, (max_query_len + CM - 1) / CM);
   chunk_attn<<<grid2, D, 0, stream>>>(
-      (__half*)out.data_ptr(), ws, (const __half*)q.data_ptr(),
-      (const __half*)k.data_ptr(), (const __half*)v.data_ptr(),
-      cu_seqlens_q.data_ptr<int>(), seq_lens.data_ptr<int>(), hq, hkv,
-      max_blocks * block_size, (float)sm_scale, num_splits, total_q,
+      (__half*)out.mutable_data_ptr(), ws, (const __half*)q.const_data_ptr(),
+      (const __half*)k.const_data_ptr(), (const __half*)v.const_data_ptr(),
+      cu_seqlens_q.const_data_ptr<int>(), seq_lens.const_data_ptr<int>(), hq,
+      hkv, max_blocks * block_size, (float)sm_scale, num_splits, total_q,
       q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0),
       v.stride(1), out.stride(0), out.stride(1));
 }
 
 #else
-void octave_prefill(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    int64_t, double, int64_t) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_prefill(torch::stable::Tensor, torch::stable::Tensor,
+                    torch::stable::Tensor, torch::stable::Tensor,
+                    torch::stable::Tensor, torch::stable::Tensor,
+                    torch::stable::Tensor, torch::stable::Tensor, int64_t,
+                    double, int64_t) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
 #endif
