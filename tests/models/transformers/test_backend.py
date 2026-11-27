@@ -133,7 +133,7 @@ def check_implementation(
     "model,model_impl,num_fused,trust_remote_code",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers", None, False),
-        ("vllm-project/Ilama-3.2-1B", "auto", None, True),
+        ("vllm/Ilama-3.2-1B", "auto", None, True),
         ("allenai/OLMoE-1B-7B-0924", "transformers", {"QKVFuser": 1}, False),  # MoE
     ],
 )
@@ -239,7 +239,7 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         vllm_runner,
         vllm_runner,
         prompts,
-        model="vllm-project/tiny-random-Gemma2ForCausalLM",
+        model="vllm/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
     )
@@ -302,7 +302,7 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
-    model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
+    model = "vllm/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
@@ -357,7 +357,7 @@ def test_distributed(
 @pytest.mark.parametrize(
     "model, quantization_kwargs",
     [
-        ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+        ("vllm/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )
