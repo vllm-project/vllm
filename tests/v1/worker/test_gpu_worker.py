@@ -579,13 +579,12 @@ def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
     monkeypatch.setattr(
         gpu_worker, "maybe_save_startup_plan", lambda _w, kv: saved_plans.append(kv)
     )
-    monkeypatch.setattr(
-        gpu_worker,
-        "measure_kv_cache_blocks",
-        lambda *_a, extra_reserve_bytes=0, **_kw: (
-            captured_reserves.append(extra_reserve_bytes) or 10
-        ),
-    )
+
+    def _measure_kv_cache_blocks(*_a, extra_reserve_bytes=0, **_kw):
+        captured_reserves.append(extra_reserve_bytes)
+        return 10
+
+    monkeypatch.setattr(gpu_worker, "measure_kv_cache_blocks", _measure_kv_cache_blocks)
     monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda n: n)
 
     available = gpu_worker.Worker.determine_available_memory(worker)

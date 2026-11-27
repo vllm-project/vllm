@@ -698,6 +698,14 @@ class InterpolatedPosEmbedCache:
         if self._cached_bytes + new_pos_embed.nbytes <= self._max_bytes:
             self._entries[key] = (new_pos_embed, ptr, version)
             self._cached_bytes += new_pos_embed.nbytes
+        elif new_pos_embed.nbytes > self._max_bytes:
+            logger.warning_once(
+                "Interpolated positional embedding for size %s (%d bytes) "
+                "exceeds cache limit (%d bytes); skipping cache.",
+                tgt_size,
+                new_pos_embed.nbytes,
+                self._max_bytes,
+            )
         return new_pos_embed
 
     def refresh(
