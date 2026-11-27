@@ -926,12 +926,18 @@ def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
         )
         return resp, prompt, calls
 
-    bad_kwargs_cases: tuple[dict[str, Any], ...] = (
-        {"tools": None},
-        {"tools": []},
-        {"tools": [evil_tool]},
-        {"tools": [{}]},
-    )
+    reserved_cases: list[tuple[str, Any]] = [
+        ("tools", None),
+        ("tools", []),
+        ("tools", [evil_tool]),
+        ("tools", [{}]),
+        ("conversation", None),
+        ("conversation", []),
+        ("messages", None),
+        ("messages", []),
+    ]
+    if tokenizer_mode == "deepseek_v41":
+        reserved_cases.extend([("image_order", None), ("image_order", [])])
     for endpoint in ("/v1/chat/completions", "/tokenize"):
         for tool_choice in ("none", "auto"):
             resp, prompt, calls = post(
@@ -962,19 +968,15 @@ def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
         assert 400 <= resp.status_code < 500, resp.text
         assert calls == 0
 
-        for bad_kwargs in bad_kwargs_cases:
-            resp, _, calls = post(
-                endpoint,
-                {
-                    "tools": [real_tool],
-                    "tool_choice": "none",
-                    "chat_template_kwargs": bad_kwargs,
-                },
-            )
+        for key, value in reserved_cases:
+            case_payload: dict[str, Any] = {"chat_template_kwargs": {key: value}}
+            if key == "tools":
+                case_payload.update({"tools": [real_tool], "tool_choice": "none"})
+            resp, _, calls = post(endpoint, case_payload)
             assert resp.status_code == 400, resp.text
             error = resp.json()["error"]
             assert error["param"] == "chat_template_kwargs"
-            assert "tools" in error["message"]
+            assert key in error["message"]
             assert calls == 0
 
 
