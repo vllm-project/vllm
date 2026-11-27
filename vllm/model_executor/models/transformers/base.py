@@ -203,6 +203,8 @@ class PreTrainedModelClasses(NamedTuple):
     decoder: type["PreTrainedModel"]
     encoders: dict[str, type["PreTrainedModel"]]
     """Modality -> encoder class, for each modality that has one."""
+    encoder_blocks: list[type[nn.Module]]
+    """The outermost classes in the encoders which batch inputs by `cu_seqlens`."""
 
 
 class Base(
@@ -385,17 +387,29 @@ class Base(
         """
         return {}
 
+    def _find_encoder_block_classes(
+        self, model: "PreTrainedModel"
+    ) -> list[type[nn.Module]]:
+        """Find the classes in the encoders of `model` which batch inputs by
+        `cu_seqlens`.
+
+        Text models have none. Multi-modal ones override this.
+        """
+        return []
+
     @cached_property
     def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
-        """The decoder class and the encoder class of each modality that has one.
+        """The decoder class, the encoder class of each modality that has one and the
+        encoder block classes.
 
-        Both come from a single throwaway model, since building one is not cheap.
+        All come from a single throwaway model, since building one is not cheap.
         """
         with torch.device("meta"):
             model: PreTrainedModel = AutoModel.from_config(**self._from_config_kwargs)
         model_classes = PreTrainedModelClasses(
             decoder=type(model.get_decoder()),
             encoders=self._find_encoder_classes(model),
+            encoder_blocks=self._find_encoder_block_classes(model),
         )
         del model
 
@@ -404,7 +418,7 @@ class Base(
 
     def _decorate_cls_for_torch_compile(
         self,
-        cls: type["PreTrainedModel"],
+        cls: type[nn.Module],
         dynamic_arg_dims: DynamicArgDims | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
@@ -412,7 +426,7 @@ class Base(
         """Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
-            cls: The PreTrainedModel class to decorate.
+            cls: The class to decorate.
             dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
                 of the argument. If None, default dynamic arg dims will be used. See
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]

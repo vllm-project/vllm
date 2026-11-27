@@ -397,7 +397,9 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
 
 
 def _is_tensor_type(annotation: object) -> bool:
-    """Match `torch.Tensor` and legacy types like `torch.BoolTensor`."""
+    """Match `torch.Tensor`, legacy types like `torch.BoolTensor` and tuples of them."""
+    if get_origin(annotation) is tuple:
+        return all(map(_is_tensor_type, get_args(annotation)))
     return (
         isinstance(annotation, type)
         and annotation.__module__ == "torch"

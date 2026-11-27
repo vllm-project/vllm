@@ -22,6 +22,9 @@ if TYPE_CHECKING:
 
 VLLM_ATTN_IMPL = "vllm"
 VLLM_MLA_ATTN_IMPL = "vllm_mla"
+# Must contain "flash": Transformers picks the `cu_seqlens` branch by that substring
+# TODO: remove once Transformers' attention functions split packed sequences themselves
+VLLM_MM_ENCODER_ATTN_IMPL = "vllm_flash_mm_encoder"
 
 
 def _is_interface_lookup(node: ast.expr | None) -> bool:
