@@ -13,20 +13,26 @@ namespace hist4096 = vllm::topk_histogram_4096;
 
 #ifndef USE_ROCM
 template <uint32_t TopK, uint32_t CS, typename InT>
-void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK, InT>& params,
-                                size_t smem, cudaStream_t stream) {
-  auto kernel = []() {
+void launch_cooperative_cluster(
+    ct::CooperativeTopKParams<TopK, InT>& params, size_t smem,
+    cudaStream_t stream,
+    void (*kernel)(ct::CooperativeTopKParams<TopK, InT>) = nullptr,
+    uint32_t num_clusters = 0, bool pdl = false) {
+  if (kernel == nullptr) {
     if constexpr (CS == 2) {
-      return &ct::cooperative_topk_cs2<TopK, InT>;
+      kernel = &ct::cooperative_topk_cs2<TopK, InT>;
     } else if constexpr (CS == 16) {
-      return &ct::cooperative_topk_cs16<TopK, InT>;
+      kernel = &ct::cooperative_topk_cs16<TopK, InT>;
     } else if constexpr (CS == 8) {
-      return &ct::cooperative_topk_cs8<TopK, InT>;
+      kernel = &ct::cooperative_topk_cs8<TopK, InT>;
     } else {
       static_assert(CS == 4, "unsupported cooperative_topk cluster size");
-      return &ct::cooperative_topk_cs4<TopK, InT>;
+      kernel = &ct::cooperative_topk_cs4<TopK, InT>;
     }
-  }();
+  }
+  if (num_clusters == 0) {
+    num_clusters = params.num_rows;
+  }
   if constexpr (CS > 8) {
     cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed,
                          1);
@@ -35,18 +41,102 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK, InT>& params,
                        smem);
 
   cudaLaunchConfig_t cfg = {};
-  cfg.gridDim = dim3(params.num_rows, CS);
+  cfg.gridDim = dim3(num_clusters, CS);
   cfg.blockDim = dim3(hist4096::kBlockSize);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = stream;
-  cudaLaunchAttribute attrs[1];
+  cudaLaunchAttribute attrs[2];
   attrs[0].id = cudaLaunchAttributeClusterDimension;
   attrs[0].val.clusterDim = {1, CS, 1};
-  cfg.numAttrs = 1;
+  // pdl: may start before the previous kernel on the stream completes (that
+  // kernel releases it with griddepcontrol.launch_dependents).
+  attrs[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[1].val.programmaticStreamSerializationAllowed = 1;
+  cfg.numAttrs = pdl ? 2 : 1;
   cfg.attrs = attrs;
   cudaError_t err = cudaLaunchKernelEx(&cfg, kernel, params);
   STD_TORCH_CHECK(err == cudaSuccess,
                   "cooperative_topk launch failed: ", cudaGetErrorString(err));
+}
+
+// Resident CTAs per SM and resident clusters of `kernel`, queried once.
+struct MultiOccupancy {
+  int ctas_per_sm = 0;
+  int clusters = 0;
+};
+
+template <typename Kernel>
+MultiOccupancy query_multi_occupancy(Kernel kernel, uint32_t cs, size_t smem) {
+  MultiOccupancy occ;
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem);
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &occ.ctas_per_sm, kernel, hist4096::kBlockSize, smem);
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(1, cs);
+  cfg.blockDim = dim3(hist4096::kBlockSize);
+  cfg.dynamicSmemBytes = smem;
+  cudaLaunchAttribute attrs[1];
+  attrs[0].id = cudaLaunchAttributeClusterDimension;
+  attrs[0].val.clusterDim = {1, cs, 1};
+  cfg.numAttrs = 1;
+  cfg.attrs = attrs;
+  cudaOccupancyMaxActiveClusters(&occ.clusters, kernel, &cfg);
+  return occ;
+}
+
+// Batches above 64 rows. Three launches over the same rows; the row lengths
+// (read on the device, so the launch shapes depend on the row count only)
+// select each launch's work:
+//  - rows of at most kHist4096MaxLen scores: one CTA each, two per SM;
+//  - few long rows (1..G4-1 rows, G4 = resident 4-CTA clusters): one launch
+//    wave of 4-CTA clusters, a long row per cluster;
+//  - otherwise the long rows take a 2-CTA cluster each, in a launch of one
+//    cluster per row (the hardware starts further clusters as running ones
+//    finish, so rows of uneven cost balance).
+// The tie workspace is indexed by SM, see kTieWsBySm.
+template <uint32_t TopK, typename InT>
+void launch_cooperative_multi(ct::CooperativeTopKParams<TopK, InT>& params,
+                              int64_t workspace_bytes, cudaStream_t stream) {
+  constexpr size_t smem = ct::kSmemSize4<InT>;
+  static const MultiOccupancy occ4 = query_multi_occupancy(
+      &ct::cooperative_topk_multi_cs4<TopK, InT>, 4, smem);
+  static const MultiOccupancy occ2 = query_multi_occupancy(
+      &ct::cooperative_topk_multi_cs2<TopK, InT>, 2, smem);
+  STD_TORCH_CHECK(occ4.ctas_per_sm == 1 && occ2.ctas_per_sm == 1,
+                  "cooperative_topk >64 rows needs exactly one resident CTA "
+                  "per SM, got ",
+                  occ4.ctas_per_sm, " / ", occ2.ctas_per_sm);
+  STD_TORCH_CHECK(occ4.clusters >= 2 && occ2.clusters >= 1,
+                  "cooperative_topk >64 rows: no resident cluster");
+  const int64_t num_sms = get_device_prop()->multiProcessorCount;
+  const int64_t needed = num_sms * static_cast<int64_t>(ct::kCoarseTieCapacity *
+                                                         sizeof(hist4096::Tie));
+  STD_TORCH_CHECK(workspace_bytes >= needed,
+                  "cooperative_topk with >64 rows needs a workspace of at "
+                  "least ",
+                  needed, " bytes (16 KiB per SM), got ", workspace_bytes);
+
+  const uint32_t g4 = std::min<uint32_t>(occ4.clusters, params.num_rows);
+  params.few_long_max = g4 - 1;
+  // Short rows: one CTA each, two CTAs per SM.
+  constexpr auto short_kernel = &ct::cooperative_topk_short<TopK, InT>;
+  constexpr size_t short_smem = ct::kSmemShort<TopK>;
+  cudaFuncSetAttribute(short_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, short_smem);
+  short_kernel<<<params.num_rows, hist4096::kBlockSize, short_smem, stream>>>(
+      params);
+  cudaError_t err = cudaGetLastError();
+  STD_TORCH_CHECK(err == cudaSuccess, "cooperative_topk launch failed: ",
+                  cudaGetErrorString(err));
+  // Both long-row launches overlap the short rows (PDL, see
+  // pdl_launch_dependents in cooperative_topk.cuh).
+  launch_cooperative_cluster<TopK, 4>(params, smem, stream,
+                                      &ct::cooperative_topk_multi_cs4<TopK, InT>,
+                                      g4, /*pdl=*/true);
+  launch_cooperative_cluster<TopK, 2>(params, smem, stream,
+                                      &ct::cooperative_topk_multi_cs2<TopK, InT>,
+                                      params.num_rows, /*pdl=*/true);
 }
 
 template <uint32_t TopK, typename InT>
@@ -60,10 +150,6 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   const cudaStream_t stream = get_current_cuda_stream();
 
   const uint32_t stride = static_cast<uint32_t>(logits.stride(0));
-  STD_TORCH_CHECK(
-      num_rows <= 64,
-      "cooperative_topk supports <=64 rows; use persistent_topk for "
-      "larger batches");
 
   STD_TORCH_CHECK(stride % ct::kTmaAlign<InT> == 0,
                   "cooperative_topk: stride must be multiple of ",
@@ -83,6 +169,11 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   params.stride = stride;
   params.tie_ws =
       reinterpret_cast<hist4096::Tie*>(workspace.mutable_data_ptr<uint8_t>());
+
+  if (num_rows > 64) {
+    launch_cooperative_multi<TopK, InT>(params, workspace.size(0), stream);
+    return;
+  }
 
   constexpr uint32_t kTieWsPerRow = ct::kCoarseTieCapacity;
   STD_TORCH_CHECK(

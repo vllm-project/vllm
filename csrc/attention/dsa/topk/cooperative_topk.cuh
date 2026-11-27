@@ -62,6 +62,9 @@ struct CooperativeTopKParams {
   hist4096::Tie* __restrict__ tie_ws;  // per-row tie workspace, see
                                        // kTieWsPerRow
   uint32_t num_rows, stride;
+  // Multi launch: when 1 <= long rows <= few_long_max, the long rows run on
+  // the CS4 launch (one cluster each) instead of the CS2 launch.
+  uint32_t few_long_max = 0;
 };
 
 // ============================================================================
@@ -86,13 +89,48 @@ __device__ __forceinline__ uint32_t extract_coarse_bin(float x) {
   return hist4096::extract_coarse_bin_N<kHistBits>(x);
 }
 
+// Coarse bins of two FP32 scores from one packed FP16 conversion; equal to
+// extract_coarse_bin_N of each (same round-to-nearest conversion).
+template <uint32_t kBits>
+__device__ __forceinline__ uint2 extract_coarse_bins_f32x2(float a, float b) {
+  const __half2 h = __floats2half2_rn(a, b);
+  const uint32_t bits = *reinterpret_cast<const uint32_t*>(&h);
+  const uint32_t sign = bits & 0x80008000u;
+  const uint32_t key = bits ^ ((sign - (sign >> 15)) | 0x80008000u);
+  return make_uint2((key & 0xFFFFu) >> (16 - kBits), key >> (32 - kBits));
+}
+
 // Visit a staged chunk's scores as (index in chunk, coarse bin, score). BF16
-// is read two scores per 32-bit load.
+// is read two scores per 32-bit load. A full FP32 stage takes a branch-free
+// path: four 16-byte loads per thread, bins from packed FP16 conversions, so
+// the per-score work of a thread is independent and overlaps.
 template <uint32_t kBits, typename InT, typename Visit>
 __device__ __forceinline__ void for_each_staged_score(const InT* buf,
                                                       uint32_t sz,
                                                       Visit visit) {
   const auto tx = threadIdx.x;
+  if constexpr (std::is_same_v<InT, float>) {
+    if (sz == kSizePerStage) {
+      constexpr uint32_t kVecs = kElemPerStage / 4;
+      const auto* b4 = reinterpret_cast<const float4*>(buf);
+      float4 v[kVecs];
+#pragma unroll
+      for (uint32_t j = 0; j < kVecs; j++) {
+        v[j] = b4[tx + j * hist4096::kBlockSize];
+      }
+#pragma unroll
+      for (uint32_t j = 0; j < kVecs; j++) {
+        const uint2 b01 = extract_coarse_bins_f32x2<kBits>(v[j].x, v[j].y);
+        const uint2 b23 = extract_coarse_bins_f32x2<kBits>(v[j].z, v[j].w);
+        const uint32_t li = 4 * (tx + j * hist4096::kBlockSize);
+        visit(li, b01.x, v[j].x);
+        visit(li + 1, b01.y, v[j].y);
+        visit(li + 2, b23.x, v[j].z);
+        visit(li + 3, b23.y, v[j].w);
+      }
+      return;
+    }
+  }
   if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
     const auto* words = reinterpret_cast<const uint32_t*>(buf);
 #pragma unroll
@@ -362,29 +400,10 @@ __device__ void large_topk(const InT* __restrict__ row_input,
       }
       phases[iter]++;
       __syncwarp();
-      if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
-        for_each_staged_score<kHistBits>(smem->score_buffer[iter], sz,
-                                         [&](uint32_t, uint32_t bin, float) {
-                                           atomicAdd(&smem->histogram[bin], 1);
-                                         });
-      } else {
-#pragma unroll
-        for (uint32_t i = 0; i < kElemPerStage; i += 2) {
-          const auto li0 = tx + i * hist4096::kBlockSize;
-          const auto li1 = tx + (i + 1) * hist4096::kBlockSize;
-          if (li0 >= sz) {
-            break;
-          }
-          const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
-          if (li1 < sz) {
-            const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
-            atomicAdd(&smem->histogram[b0], 1);
-            atomicAdd(&smem->histogram[b1], 1);
-          } else {
-            atomicAdd(&smem->histogram[b0], 1);
-          }
-        }
-      }
+      for_each_staged_score<kHistBits>(smem->score_buffer[iter], sz,
+                                       [&](uint32_t, uint32_t bin, float) {
+                                         atomicAdd(&smem->histogram[bin], 1);
+                                       });
     }
   } else {
     // Twopass: init then stream histogram pass
@@ -546,12 +565,110 @@ __device__ void large_topk(const InT* __restrict__ row_input,
 // (python/sglang/jit_kernel/include/sgl_kernel/deepseek_v4/topk/)
 // ============================================================================
 
-template <uint32_t TopK, uint32_t CS, typename InT>
+
+// Row-length scans for the multi launch (kTieWsBySm). Block-uniform results.
+__device__ __forceinline__ bool is_short_row(const int32_t* lengths,
+                                             uint32_t i) {
+  return lengths[i] <= static_cast<int32_t>(hist4096::kHist4096MaxLen);
+}
+
+// The n-th (n >= 1) row at index >= `first` whose shortness equals kShort,
+// or -1.
+template <bool kShort>
+__device__ __forceinline__ int32_t nth_row_from(const int32_t* lengths,
+                                                uint32_t num_rows,
+                                                uint32_t first, uint32_t n) {
+  __shared__ uint32_t s_wsum[hist4096::kNumWarps];
+  __shared__ int32_t s_found;
+  const uint32_t tx = threadIdx.x, lane = tx % hist4096::kWarpSize,
+                 wi = tx / hist4096::kWarpSize;
+  if (tx == 0) s_found = -1;
+  for (uint32_t base = first; base < num_rows; base += hist4096::kBlockSize) {
+    const uint32_t i = base + tx;
+    const bool f = i < num_rows && is_short_row(lengths, i) == kShort;
+    const uint32_t b = __ballot_sync(0xFFFFFFFFu, f);
+    if (lane == 0) s_wsum[wi] = __popc(b);
+    __syncthreads();
+    uint32_t before = 0, total = 0;
+#pragma unroll 4
+    for (uint32_t w = 0; w < hist4096::kNumWarps; ++w) {
+      const uint32_t c = s_wsum[w];
+      before += w < wi ? c : 0;
+      total += c;
+    }
+    const uint32_t excl = before + __popc(b & ((1u << lane) - 1u));
+    if (f && excl == n - 1) s_found = static_cast<int32_t>(i);
+    __syncthreads();
+    if (s_found >= 0 || total >= n) break;
+    n -= total;
+    __syncthreads();  // s_wsum reuse
+  }
+  return s_found;
+}
+
+// A row of at most kHist4096MaxLen scores on this CTA alone.
+template <uint32_t TopK, typename InT>
+__device__ __forceinline__ void run_short_row(
+    const CooperativeTopKParams<TopK, InT>& params, uint32_t r) {
+  const uint32_t tx = threadIdx.x;
+  const int32_t rl = params.lengths[r] > 0 ? params.lengths[r] : 0;
+  int32_t* rout = params.output + static_cast<size_t>(r) * TopK;
+  if (rl <= static_cast<int32_t>(TopK)) {
+    for (uint32_t i = tx; i < TopK; i += hist4096::kBlockSize) {
+      rout[i] = (i < static_cast<uint32_t>(rl)) ? static_cast<int32_t>(i) : -1;
+    }
+  } else {
+    extern __shared__ __align__(128) uint8_t sr_short[];
+    hist4096::histogram_4096_topk<TopK, 12, hist4096::kHist4096VecsPerThread,
+                                  false, hist4096::OverflowRecovery::kFp32Rescan,
+                                  InT>(
+        params.input + static_cast<size_t>(r) * params.stride, rout, rl,
+        sr_short);
+  }
+}
+
+__device__ __forceinline__ uint32_t sm_id() {
+  uint32_t id;
+  asm volatile("mov.u32 %0, %%smid;" : "=r"(id));
+  return id;
+}
+
+// kTieWsBySm: the tie workspace slot is the SM of the cluster's rank 0 instead
+// of the row, so a launch of any number of rows needs one slot per SM (one
+// CTA per SM is resident; the host checks it).
+template <uint32_t TopK, uint32_t CS, typename InT, bool kTieWsBySm = false>
 __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
-  const auto rank = blockIdx.y, row = blockIdx.x, tx = threadIdx.x;
+  const auto rank = blockIdx.y, tx = threadIdx.x;
+  uint32_t row = blockIdx.x;
   // Clamp at 0: `sl` is compared signed here but cast to uint32 below, so a
   // negative length would otherwise emit indices 0..TopK-1 as valid instead
   // of the -1 padding.
+  if constexpr (kTieWsBySm) {
+    // Multi launch: short rows run on cooperative_topk_short; this launch
+    // takes long rows only.
+    if (is_short_row(params.lengths, row) && CS == 2) {
+      return;
+    }
+    uint32_t n_long = 0;
+    for (uint32_t base = 0; base < params.num_rows;
+         base += hist4096::kBlockSize) {
+      const uint32_t i = base + tx;
+      n_long += __syncthreads_count(i < params.num_rows &&
+                                    !is_short_row(params.lengths, i));
+    }
+    // Few long rows: each runs on a 4-CTA cluster of the CS4 launch (one
+    // wave of few_long_max + 1 clusters); otherwise on the CS2 launch.
+    const bool few = n_long >= 1 && n_long <= params.few_long_max;
+    if constexpr (CS == 4) {
+      if (!few || row >= n_long) {
+        return;
+      }
+      row = static_cast<uint32_t>(
+          nth_row_from<false>(params.lengths, params.num_rows, 0, row + 1));
+    } else if (few) {
+      return;
+    }
+  }
   const int32_t sl = params.lengths[row] > 0 ? params.lengths[row] : 0;
   int32_t* out = params.output + row * TopK;
   const InT* in = params.input + row * params.stride;
@@ -602,7 +719,17 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
   extern __shared__ __align__(128) uint8_t sr[];
 
   constexpr uint32_t kTieWsPerRow = kCoarseTieCapacity;
-  hist4096::Tie* row_tie_ws = params.tie_ws + row * kTieWsPerRow;
+  uint32_t ws_slot = row;
+  if constexpr (kTieWsBySm) {
+    __shared__ uint32_t s_smid;
+    if (tx == 0) {
+      s_smid = sm_id();
+    }
+    auto cluster = cooperative_groups::this_cluster();
+    cluster.sync();
+    ws_slot = *cluster.map_shared_rank(&s_smid, 0);
+  }
+  hist4096::Tie* row_tie_ws = params.tie_ws + ws_slot * kTieWsPerRow;
 
   if (use_singlepass) {
     auto* smem = reinterpret_cast<FusedSmem*>(sr);
@@ -658,6 +785,58 @@ __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
         cooperative_topk_cs16(CooperativeTopKParams<TopK, InT> params) {
   cooperative_topk_body<TopK, 16, InT>(params);
 }
+
+// Programmatic dependent launch between the three launches of a > 64-row
+// call (short -> CS4 -> CS2). The short and CS4 kernels release their
+// dependent at entry, so the long-row launches start while the short rows
+// run; they share no data (disjoint rows; tie workspace slots are per SM and
+// a 208 KiB CTA never shares its SM with another CTA of the call). CS4 and
+// CS2 wait for their predecessor before exiting, so the call is complete
+// when CS2 is.
+__device__ __forceinline__ void pdl_launch_dependents() {
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+}
+__device__ __forceinline__ void pdl_wait() {
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+}
+
+// Any number of rows in one launch (rows beyond one wave wait for a free
+// cluster); tie workspace indexed by SM.
+template <uint32_t TopK, typename InT>
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 2, 1)
+        cooperative_topk_multi_cs2(CooperativeTopKParams<TopK, InT> params) {
+  cooperative_topk_body<TopK, 2, InT, true>(params);
+  pdl_wait();
+}
+
+template <uint32_t TopK, typename InT>
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 4, 1)
+        cooperative_topk_multi_cs4(CooperativeTopKParams<TopK, InT> params) {
+  pdl_launch_dependents();
+  cooperative_topk_body<TopK, 4, InT, true>(params);
+  pdl_wait();
+}
+
+// Short rows (<= kHist4096MaxLen, incl. trivial) of a multi launch, one CTA
+// per row; long rows exit. Small smem: two CTAs per SM.
+template <uint32_t TopK, typename InT>
+__global__ void __launch_bounds__(hist4096::kBlockSize, 2)
+    cooperative_topk_short(CooperativeTopKParams<TopK, InT> params) {
+  pdl_launch_dependents();
+  const uint32_t row = blockIdx.x;
+  if (!is_short_row(params.lengths, row)) {
+    return;
+  }
+  run_short_row<TopK, InT>(params, row);
+}
+
+// The register path's histogram/tie state, and its overflow recovery's
+// candidates staged past kExactCandidateOffset (16 KiB); two CTAs per SM.
+template <uint32_t TopK>
+constexpr size_t kSmemShort = 48 * 1024;
+static_assert(sizeof(hist4096::Histogram4096Smem<kMaxTopK, 12>) <= 48 * 1024);
 
 template <typename InT>
 constexpr size_t kSmemSize4 = (sizeof(Smem4<InT>) > sizeof(SmemSinglePass<InT>)
