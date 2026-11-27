@@ -20,8 +20,10 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.draft_topk_cache import SparseDraftCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
+    rejection_sample_topk,
 )
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
@@ -263,7 +265,7 @@ class RejectionSampler:
     def _verify(
         self,
         logits: torch.Tensor,
-        draft_logits: DraftLogitsCache | None,
+        draft_logits: DraftLogitsCache | SparseDraftCache | None,
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
         cu_num_logits: torch.Tensor,
@@ -283,31 +285,50 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
-        sampled, num_sampled = rejection_sample(
-            processed_logits,
-            draft_logits,
-            draft_sampled,
-            cu_num_logits,
-            pos,
-            idx_mapping,
-            expanded_idx_mapping,
-            expanded_local_pos,
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
-            self.num_speculative_steps,
-            self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
-            use_block_verification=self.use_block_verification,
-            fly_window_size=self.fly_window_size,
-            fly_entropy_threshold=self.fly_entropy_threshold,
-            fly_entropy_top_k=self.fly_entropy_top_k,
-            skip_masked_vocab_blocks=bool(
-                np.any(self.sampler.may_mask_logits[idx_mapping_np])
-            ),
-            **self._watermarking_kwargs(
-                draft_sampled, expanded_idx_mapping, expanded_local_pos
-            ),
-        )
+        if isinstance(draft_logits, SparseDraftCache):
+            sampled, num_sampled = rejection_sample_topk(
+                processed_logits,
+                draft_logits,
+                draft_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping,
+                expanded_idx_mapping,
+                expanded_local_pos,
+                self.sampler.sampling_states.temperature.gpu,
+                self.sampler.sampling_states.seeds.gpu,
+                self.num_speculative_steps,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                skip_masked_vocab_blocks=bool(
+                    np.any(self.sampler.may_mask_logits[idx_mapping_np])
+                ),
+            )
+        else:
+            sampled, num_sampled = rejection_sample(
+                processed_logits,
+                draft_logits,
+                draft_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping,
+                expanded_idx_mapping,
+                expanded_local_pos,
+                self.sampler.sampling_states.temperature.gpu,
+                self.sampler.sampling_states.seeds.gpu,
+                self.num_speculative_steps,
+                self.synthetic_conditional_rates,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                use_block_verification=self.use_block_verification,
+                fly_window_size=self.fly_window_size,
+                fly_entropy_threshold=self.fly_entropy_threshold,
+                fly_entropy_top_k=self.fly_entropy_top_k,
+                skip_masked_vocab_blocks=bool(
+                    np.any(self.sampler.may_mask_logits[idx_mapping_np])
+                ),
+                **self._watermarking_kwargs(
+                    draft_sampled, expanded_idx_mapping, expanded_local_pos
+                ),
+            )
         if self.sampler.trace_replay_state is not None:
             self.sampler.trace_replay_state.apply_trace_to_verified(
                 sampled, num_sampled, draft_sampled, cu_num_logits, idx_mapping
@@ -318,7 +339,7 @@ class RejectionSampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
-        draft_logits: DraftLogitsCache | None,
+        draft_logits: DraftLogitsCache | SparseDraftCache | None,
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
         max_chunk_logits: int,
@@ -433,7 +454,7 @@ class RejectionSampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
-        draft_logits: DraftLogitsCache | None = None,
+        draft_logits: DraftLogitsCache | SparseDraftCache | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.

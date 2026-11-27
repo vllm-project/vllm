@@ -8,6 +8,8 @@ class MultiModuleMTPSpeculatorConfig(MTPSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator."
         "MultiModuleMTPSpeculator"
     )
+    # Each MTP module has its own LM head; draft_top_k uses a single head.
+    supported_options = MTPSpeculatorConfig.supported_options - {"draft_top_k"}
     supports_pcp = False
     # Each draft step runs its own MTP module.
     one_token_draft_decodes = False

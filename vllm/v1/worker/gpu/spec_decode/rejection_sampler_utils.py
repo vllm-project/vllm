@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_topk_cache import SparseDraftCache
 from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
 
 
@@ -1463,6 +1464,491 @@ def rejection_sample(
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
         # The kernel reads and updates num_sampled in place. Multiple warps can
         # observe the increment before loading the original resampling index.
+        num_warps=1,
+    )
+    return sampled, num_sampled
+
+
+@triton.jit
+def _topk_draft_logprob(
+    cache_ids_ptr,
+    cache_ids_stride_0,
+    cache_ids_stride_1,
+    cache_logq_ptr,
+    cache_logq_stride_0,
+    cache_logq_stride_1,
+    req_state_idx,
+    draft_step,
+    token,
+    top_k,
+    BLOCK_K: tl.constexpr,
+):
+    """Return log q'(token) from a SparseDraftCache slot, or -inf if `token`
+    is not among that slot's cached top-K ids."""
+    offs = tl.arange(0, BLOCK_K)
+    mask = offs < top_k
+    ids = tl.load(
+        cache_ids_ptr
+        + req_state_idx * cache_ids_stride_0
+        + draft_step * cache_ids_stride_1
+        + offs,
+        mask=mask,
+        other=-1,
+    )
+    logq = tl.load(
+        cache_logq_ptr
+        + req_state_idx * cache_logq_stride_0
+        + draft_step * cache_logq_stride_1
+        + offs,
+        mask=mask,
+        other=float("-inf"),
+    )
+    return tl.max(tl.where(mask & (ids == token), logq, float("-inf")), axis=0)
+
+
+@triton.jit
+def _topk_rejection_kernel(
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_ptr,
+    sampled_stride,
+    # [num_reqs]
+    rejected_steps_ptr,
+    # [num_reqs]
+    target_rejected_logsumexp_ptr,
+    # [num_logits, V]
+    target_logits_ptr,
+    target_logits_stride,
+    # [num_logits, num_blocks]
+    target_local_argmax_ptr,
+    target_local_argmax_stride,
+    target_local_max_ptr,
+    target_local_max_stride,
+    target_local_sumexp_ptr,
+    target_local_sumexp_stride,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [max_num_reqs + 1, num_speculative_steps, K]
+    cache_ids_ptr,
+    cache_ids_stride_0,
+    cache_ids_stride_1,
+    cache_logq_ptr,
+    cache_logq_stride_0,
+    cache_logq_stride_1,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_reqs]
+    idx_mapping_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    seed_ptr,
+    # [num_logits]
+    pos_ptr,
+    top_k,
+    vocab_num_blocks,
+    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """`_rejection_kernel`'s standard (non-block, non-FLy, non-synthetic)
+    branch, with q'(x) read from the sparse top-K cache instead of the dense
+    draft logits. Uses the same accept draw (`tl_rand32(seed, pos)`) as the
+    dense path, so both make the same decision on equivalent proposals."""
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_draft_tokens = end_idx - start_idx - 1
+    seed = tl.load(seed_ptr + req_state_idx)
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_greedy = temp == 0.0
+
+    accepted_length = tl.zeros((), tl.int64)
+    target_lse = 0.0
+    verifying = True
+    for i in range(num_draft_tokens):
+        logit_idx = start_idx + i
+        draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        # -1 is used for placeholder draft token ids that should be rejected.
+        is_valid_draft = draft_sampled >= 0
+        draft_sampled = tl.maximum(0, draft_sampled)
+        if not is_greedy:
+            verifying &= is_valid_draft
+        if verifying:
+            target_argmax = tl.full((), 0, tl.int64)
+            accepted = False
+            pos = tl.load(pos_ptr + logit_idx)
+            u = tl_rand32(seed, pos, includes_zero=False)
+            if is_greedy:
+                target_argmax = _compute_global_target_argmax(
+                    target_local_max_ptr,
+                    target_local_max_stride,
+                    target_local_argmax_ptr,
+                    target_local_argmax_stride,
+                    logit_idx,
+                    vocab_num_blocks,
+                    PADDED_VOCAB_NUM_BLOCKS,
+                )
+                accepted = (target_argmax == draft_sampled) & is_valid_draft
+            else:
+                step_target_lse = _compute_global_logsumexp(
+                    target_local_max_ptr,
+                    target_local_max_stride,
+                    target_local_sumexp_ptr,
+                    target_local_sumexp_stride,
+                    logit_idx,
+                    vocab_num_blocks,
+                    PADDED_VOCAB_NUM_BLOCKS,
+                )
+                target_logprob = (
+                    tl.load(
+                        target_logits_ptr
+                        + logit_idx * target_logits_stride
+                        + draft_sampled
+                    ).to(tl.float32)
+                    - step_target_lse
+                )
+                draft_logprob = _topk_draft_logprob(
+                    cache_ids_ptr,
+                    cache_ids_stride_0,
+                    cache_ids_stride_1,
+                    cache_logq_ptr,
+                    cache_logq_stride_0,
+                    cache_logq_stride_1,
+                    req_state_idx,
+                    i,
+                    draft_sampled,
+                    top_k,
+                    BLOCK_K,
+                )
+                target_lse = step_target_lse
+                # Probability ratio test: p(x) > u * q'(x). A draft token
+                # outside its slot's cached top-K (q'(x) = 0) cannot have been
+                # proposed from q', so it is rejected rather than accepted.
+                accepted = (draft_logprob > float("-inf")) & (
+                    target_logprob > tl.log(u) + draft_logprob
+                )
+            verifying = accepted
+            accepted_length += accepted
+            tl.store(
+                sampled_ptr + req_idx * sampled_stride + i,
+                target_argmax if is_greedy and not accepted else draft_sampled,
+            )
+    tl.store(rejected_steps_ptr + req_idx, accepted_length)
+    tl.store(target_rejected_logsumexp_ptr + req_idx, target_lse)
+
+
+@triton.jit
+def _topk_resample_kernel(
+    # [num_reqs, num_blocks]
+    resampled_local_argmax_ptr,
+    resampled_local_argmax_stride,
+    resampled_local_max_ptr,
+    resampled_local_max_stride,
+    # [num_logits, V]
+    target_logits_ptr,
+    target_logits_stride,
+    # [num_reqs]
+    target_rejected_logsumexp_ptr,
+    # [max_num_reqs + 1, num_speculative_steps, K]
+    cache_ids_ptr,
+    cache_ids_stride_0,
+    cache_ids_stride_1,
+    cache_logq_ptr,
+    cache_logq_stride_0,
+    cache_logq_stride_1,
+    # [num_reqs]
+    rejected_step_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    draft_sampled_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    seed_ptr,
+    # [num_logits]
+    pos_ptr,
+    top_k,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    SKIP_MASKED_BLOCKS: tl.constexpr,
+):
+    """`_resample_kernel` for the sparse top-K proposal. The residual
+    max(p - q', 0) equals p everywhere except the K cached tokens, so each
+    vocab block starts from the target log-probs and only patches the cached
+    tokens that fall inside it (a scalar range check per cached token, no
+    dense copy of q'). The Gumbel draw is `_seeded_resample_argmax`, as in
+    the dense path."""
+    req_idx = tl.program_id(0)
+    resample_idx = tl.load(rejected_step_ptr + req_idx)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    resample_token_idx = start_idx + resample_idx
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
+
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_bonus = resample_token_idx == end_idx - 1
+    if temp == 0.0 and not is_bonus:
+        # Greedy + non-bonus token. The target argmax is already in `sampled`.
+        return
+
+    rejected_draft_token = tl.load(
+        draft_sampled_ptr + resample_token_idx + 1,
+        mask=not is_bonus,
+        other=0,
+    )
+    is_valid_rejected_draft = rejected_draft_token >= 0
+
+    block_idx = tl.program_id(1)
+    block_start = block_idx * BLOCK_SIZE
+    block = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    target_logits = tl.load(
+        target_logits_ptr + resample_token_idx * target_logits_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+
+    if SKIP_MASKED_BLOCKS and tl.max(target_logits, axis=0) == float("-inf"):
+        # No target token survives in this block, so neither does the residual.
+        tl.store(
+            resampled_local_argmax_ptr
+            + req_idx * resampled_local_argmax_stride
+            + block_idx,
+            block_start,
+        )
+        tl.store(
+            resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+            float("-inf"),
+        )
+        return
+
+    if is_bonus or not is_valid_rejected_draft:
+        # Bonus token or -1 placeholder: sample directly from the target.
+        residual_logits = target_logits
+    else:
+        target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
+        residual_logits = target_logits - target_lse
+        ids_base = (
+            cache_ids_ptr
+            + req_state_idx * cache_ids_stride_0
+            + resample_idx * cache_ids_stride_1
+        )
+        logq_base = (
+            cache_logq_ptr
+            + req_state_idx * cache_logq_stride_0
+            + resample_idx * cache_logq_stride_1
+        )
+        for j in range(top_k):
+            token = tl.load(ids_base + j)
+            if (token >= block_start) & (token < block_start + BLOCK_SIZE):
+                log_q = tl.load(logq_base + j)
+                log_p = (
+                    tl.load(
+                        target_logits_ptr
+                        + resample_token_idx * target_logits_stride
+                        + token
+                    ).to(tl.float32)
+                    - target_lse
+                )
+                # log(max(p - q', 0)) = log_p + log1p(-q'/p), as in the dense path.
+                ratio = tl.exp(log_q - log_p)
+                residual = tl.where(
+                    ratio < 1.0, log_p + tldevice.log1p(-ratio), float("-inf")
+                )
+                residual_logits = tl.where(block == token, residual, residual_logits)
+
+    value, idx = _seeded_resample_argmax(
+        residual_logits,
+        block,
+        mask,
+        resample_token_idx,
+        expanded_idx_mapping_ptr,
+        temp_ptr,
+        seed_ptr,
+        pos_ptr,
+        vocab_size,
+        USE_FP64=USE_FP64,
+    )
+    tl.store(
+        resampled_local_argmax_ptr
+        + req_idx * resampled_local_argmax_stride
+        + block_idx,
+        block_start + idx,
+    )
+    tl.store(
+        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+        value,
+    )
+
+
+def rejection_sample_topk(
+    # [num_logits, V]
+    target_logits: torch.Tensor,
+    draft_topk_cache: SparseDraftCache,
+    # [num_logits]
+    draft_sampled: torch.Tensor,
+    # [num_reqs + 1]
+    cu_num_logits: torch.Tensor,
+    # [num_logits]
+    pos: torch.Tensor,
+    # [num_reqs]
+    idx_mapping: torch.Tensor,
+    # [num_logits]
+    expanded_idx_mapping: torch.Tensor,
+    # [num_logits]
+    expanded_local_pos: torch.Tensor,
+    # [max_num_reqs]
+    temperature: torch.Tensor,
+    # [max_num_reqs]
+    seed: torch.Tensor,
+    num_speculative_steps: int,
+    use_fp64: bool = False,
+    skip_masked_vocab_blocks: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Standard speculative sampling against a `SparseDraftCache`. Same
+    outputs and launch sequence as `rejection_sample` (target stats, accept,
+    resample, insert), with q' read from the sparse cache. Kept separate from
+    `_rejection_kernel` / `_resample_kernel` so their block, FLy, synthetic and
+    watermarking modes are unchanged."""
+    assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    num_reqs = cu_num_logits.shape[0] - 1
+    num_logits, vocab_size = target_logits.shape
+    top_k = draft_topk_cache.top_k
+    block_k = triton.next_power_of_2(top_k)
+    cache_ids, cache_logq = draft_topk_cache.ids, draft_topk_cache.logq
+
+    # Target max/argmax/sum-exp per vocab block, as in the dense path.
+    VOCAB_BLOCK_SIZE = 8192
+    vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
+    padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
+    target_local_argmax = target_logits.new_empty(
+        num_logits, vocab_num_blocks, dtype=torch.int64
+    )
+    target_local_max = target_logits.new_empty(
+        num_logits, vocab_num_blocks, dtype=torch.float32
+    )
+    target_local_sumexp = target_logits.new_empty(
+        num_logits, vocab_num_blocks, dtype=torch.float32
+    )
+    _compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
+        target_local_argmax,
+        target_local_argmax.stride(0),
+        target_local_max,
+        target_local_max.stride(0),
+        target_local_sumexp,
+        target_local_sumexp.stride(0),
+        # The draft stats are not computed (HAS_DRAFT_LOGITS=False); these
+        # placeholders are never read or written.
+        target_local_max,
+        target_local_max.stride(0),
+        target_local_sumexp,
+        target_local_sumexp.stride(0),
+        target_logits,
+        target_logits.stride(0),
+        None,
+        0,
+        0,
+        None,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        num_logits,
+        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+        HAS_DRAFT_LOGITS=False,
+    )
+
+    sampled = draft_sampled.new_empty(
+        num_reqs, num_speculative_steps + 1, dtype=torch.int64
+    )
+    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    _topk_rejection_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        target_rejected_logsumexp,
+        target_logits,
+        target_logits.stride(0),
+        target_local_argmax,
+        target_local_argmax.stride(0),
+        target_local_max,
+        target_local_max.stride(0),
+        target_local_sumexp,
+        target_local_sumexp.stride(0),
+        draft_sampled,
+        cache_ids,
+        cache_ids.stride(0),
+        cache_ids.stride(1),
+        cache_logq,
+        cache_logq.stride(0),
+        cache_logq.stride(1),
+        cu_num_logits,
+        idx_mapping,
+        temperature,
+        seed,
+        pos,
+        top_k,
+        vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+        BLOCK_K=block_k,
+        num_warps=1,
+    )
+
+    RESAMPLE_BLOCK_SIZE = 1024
+    resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
+    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
+    resampled_local_argmax = target_logits.new_empty(
+        num_reqs, resample_num_blocks, dtype=torch.int64
+    )
+    resampled_local_max = target_logits.new_empty(
+        num_reqs,
+        resample_num_blocks,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+    )
+    _topk_resample_kernel[(num_reqs, resample_num_blocks)](
+        resampled_local_argmax,
+        resampled_local_argmax.stride(0),
+        resampled_local_max,
+        resampled_local_max.stride(0),
+        target_logits,
+        target_logits.stride(0),
+        target_rejected_logsumexp,
+        cache_ids,
+        cache_ids.stride(0),
+        cache_ids.stride(1),
+        cache_logq,
+        cache_logq.stride(0),
+        cache_logq.stride(1),
+        num_sampled,
+        cu_num_logits,
+        expanded_idx_mapping,
+        draft_sampled,
+        temperature,
+        seed,
+        pos,
+        top_k,
+        vocab_size,
+        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
+        USE_FP64=use_fp64,
+        SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
+    )
+
+    _insert_resampled_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        resampled_local_argmax,
+        resampled_local_argmax.stride(0),
+        resampled_local_max,
+        resampled_local_max.stride(0),
+        resample_num_blocks,
+        cu_num_logits,
+        expanded_idx_mapping,
+        temperature,
+        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        # The kernel reads and updates num_sampled in place.
         num_warps=1,
     )
     return sampled, num_sampled

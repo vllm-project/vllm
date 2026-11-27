@@ -125,6 +125,7 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
+    "draft_top_k",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
@@ -541,6 +542,11 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+    draft_top_k: int | None = Field(default=None, ge=1)
+    """With draft_sample_method="probabilistic", propose from and verify against
+    the drafter's top `draft_top_k` tokens only. The output distribution is
+    unchanged; the dense draft-logits cache is replaced by a draft_top_k-entry
+    sparse cache, freeing memory for the KV cache."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -737,6 +743,7 @@ class SpeculativeConfig:
             "index_share_for_mtp_iteration",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
+            "draft_top_k",
             "prompt_lookup_max",
             "prompt_lookup_min",
             "parallel_drafting",
@@ -1562,6 +1569,27 @@ class SpeculativeConfig:
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
             )
+
+        if self.draft_top_k is not None:
+            if self.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "draft_top_k requires draft_sample_method='probabilistic' "
+                    f"(got {self.draft_sample_method!r})."
+                )
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "draft_top_k cannot be combined with use_local_argmax_reduction."
+                )
+            if self.enable_adaptive_verification:
+                raise ValueError(
+                    "draft_top_k is not yet compatible with "
+                    "enable_adaptive_verification."
+                )
+            if self.rejection_sample_method != "standard":
+                raise ValueError(
+                    "draft_top_k requires rejection_sample_method='standard' "
+                    f"(got {self.rejection_sample_method!r})."
+                )
 
         return self
 

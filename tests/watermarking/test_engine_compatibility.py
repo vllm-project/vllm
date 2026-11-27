@@ -199,3 +199,27 @@ def test_mixed_watermarked_batch(watermarked_llm: LLM):
 
     assert batched[0].outputs[0].token_ids == marked_alone.outputs[0].token_ids
     assert batched[1].outputs[0].token_ids == ordinary_alone.outputs[0].token_ids
+
+
+def test_watermarking_rejects_draft_top_k(vllm_runner):
+    """The sparse draft_top_k verify path does not apply the target's keyed
+    draw, so the combination is rejected before the engine starts."""
+    with (
+        pytest.raises(ValueError, match="not yet compatible with draft_top_k"),
+        vllm_runner(
+            "Qwen/Qwen3-4B",
+            speculative_config={
+                "method": "dflash",
+                "model": "z-lab/Qwen3-4B-DFlash-b16",
+                "num_speculative_tokens": 3,
+                "draft_sample_method": "probabilistic",
+                "draft_top_k": 64,
+            },
+            watermark_config={
+                "algorithm": "gumbel",
+                "key": 42,
+                "allow_target_only_watermarking": True,
+            },
+        ),
+    ):
+        pass

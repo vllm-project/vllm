@@ -45,6 +45,10 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.draft_topk_cache import (
+    SparseDraftCache,
+    sample_draft_topk_fused,
+)
 from vllm.v1.worker.utils import (
     AttentionGroup,
     clear_layer_kv_caches,
@@ -87,6 +91,8 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
+    # Sparse (id, log q') cache for `draft_top_k`, used instead of `draft_logits`.
+    draft_topk_cache: SparseDraftCache | None = None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -215,6 +221,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.use_local_argmax_reduction = (
             self.speculative_config.use_local_argmax_reduction
         )
+        self.draft_top_k = self.speculative_config.draft_top_k
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -261,6 +268,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_logits: DraftLogitsCache | None = None
         self.use_draft_logits = (
             self.speculative_config.draft_sample_method == "probabilistic"
+            and self.draft_top_k is None
         )
 
         self.draft_watermarker: DraftWatermarker | None = None
@@ -307,8 +315,11 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
+        self._validate_draft_top_k()
         if self.use_draft_logits:
             self._init_draft_logits(target_model)
+        if self.draft_top_k is not None:
+            self._init_draft_topk_cache()
 
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
@@ -347,6 +358,23 @@ class DraftModelSpeculator(BaseSpeculator):
         """Free the draft weights this instance never reads. The model runner
         calls this after `load_model` (and its overrides) and EPLB setup."""
         return
+
+    def _init_draft_topk_cache(self) -> None:
+        assert self.draft_top_k is not None
+        if self.vllm_config.parallel_config.prefill_context_parallel_size != 1:
+            raise ValueError(
+                "draft_top_k is not yet compatible with prefill context parallelism."
+            )
+        if self.vllm_config.parallel_config.enable_batch_sharded_sampling:
+            raise ValueError(
+                "draft_top_k is not yet compatible with batch-sharded sampling."
+            )
+        self.draft_topk_cache = SparseDraftCache(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.draft_top_k,
+            device=self.device,
+        )
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors
@@ -597,6 +625,22 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
+    def _validate_draft_top_k(self) -> None:
+        if self.draft_top_k is None:
+            return
+        if not hasattr(self.model, "get_top_k_tokens"):
+            raise ValueError(
+                "draft_top_k is enabled but draft model "
+                f"{self.model.__class__.__name__} does not implement "
+                "get_top_k_tokens()."
+            )
+        logger.info(
+            "Using a top-%d sparse proposal cache for draft token generation "
+            "(communication: O(2*%d*tp_size) vs O(vocab_size)).",
+            self.draft_top_k,
+            self.draft_top_k,
+        )
+
     def compute_draft_logits(
         self, hidden_states: torch.Tensor, spec_step_idx: int
     ) -> torch.Tensor:
@@ -606,6 +650,42 @@ class DraftModelSpeculator(BaseSpeculator):
         self, hidden_states: torch.Tensor, spec_step_idx: int
     ) -> torch.Tensor:
         return self.model.get_top_tokens(hidden_states)
+
+    def get_draft_top_k_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model.get_top_k_tokens(hidden_states, self.draft_top_k)
+
+    def _sample_draft_topk(
+        self,
+        hidden_states: torch.Tensor,
+        sample_src_positions: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_step: torch.Tensor,
+        spec_step_idx: int,
+    ) -> torch.Tensor:
+        """Sample from the drafter's top-K distribution q' and cache the K
+        (id, log q') pairs for verification."""
+        cache = self.draft_topk_cache
+        assert cache is not None
+        ids, logits = self.get_draft_top_k_tokens(hidden_states, spec_step_idx)
+        # Autoregressive drafters pass one scalar step for the whole batch; the
+        # kernel reads it through a zero stride.
+        if draft_step.dim() == 0:
+            draft_step = draft_step.expand_as(idx_mapping)
+        return sample_draft_topk_fused(
+            cache,
+            ids,
+            logits,
+            idx_mapping,
+            temperature,
+            seeds,
+            sample_src_positions,
+            draft_step,
+            use_fp64=self.use_fp64_gumbel,
+        )
 
     def sample_draft(
         self,
@@ -621,6 +701,16 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
+        if self.draft_topk_cache is not None:
+            return self._sample_draft_topk(
+                hidden_states,
+                sample_src_positions,
+                idx_mapping,
+                temperature,
+                seeds,
+                draft_step,
+                spec_step_idx,
+            )
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None and self.draft_watermarker is not None:

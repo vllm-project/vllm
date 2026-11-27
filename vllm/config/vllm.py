@@ -1455,6 +1455,9 @@ class VllmConfig:
                     "Speculative decoding with watermarking requires "
                     "rejection_sample_method='standard'."
                 )
+            # The sparse verify path does not apply the target's keyed draw.
+            if getattr(speculative_config, "draft_top_k", None) is not None:
+                raise ValueError("Watermarking is not yet compatible with draft_top_k.")
             if not speculative_config.speculator_config.supports_watermarking:
                 raise ValueError(
                     "Watermarking supports only dflash, dspark, eagle, eagle3 and "

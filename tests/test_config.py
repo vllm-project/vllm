@@ -5315,6 +5315,22 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
 
 
+def test_watermarking_rejects_draft_top_k():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        key=42, allow_target_only_watermarking=True
+    )
+    config.speculative_config = fake_speculative_config(
+        method="dflash",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        draft_top_k=64,
+    )
+
+    with pytest.raises(ValueError, match="not yet compatible with draft_top_k"):
+        config._check_supports_watermarking()
+
+
 def test_speculative_watermarking_without_context_dedup_does_not_warn(
     caplog_vllm, disable_log_dedup
 ):
