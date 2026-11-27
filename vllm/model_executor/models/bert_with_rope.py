@@ -584,11 +584,22 @@ class BertWithRope(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class NomicBertModel(BertWithRope):
+class NomicBertModel(BertWithRope, SupportsLoRA):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
 
+    # Adapters from the native Transformers model target the split q/k/v_proj;
+    # remote-code adapters target the fused Wqkv, which LoRA splits on load.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"layers.": "encoder.layers."},
         orig_to_new_substr={
+            # Native Transformers module names (LoRA adapters only)
+            ".self_attn.o_proj": ".attn.out_proj",
+            ".self_attn.": ".attn.",
             "emb_ln": "embeddings.LayerNorm",
             "attn.Wqkv": "attn.qkv_proj",
             "norm1": "attn_ln",
@@ -601,7 +612,7 @@ class NomicBertModel(BertWithRope):
             "experts.mlp.": "",
             "experts.": "",
             "router.layer": "router",
-        }
+        },
     )
 
 

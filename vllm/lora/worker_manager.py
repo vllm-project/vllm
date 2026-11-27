@@ -111,6 +111,8 @@ class WorkerLoRAManager:
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_lst.extend(packed_modules_mapping[module])
+                    # A LoRA on the fused module is split into its slices.
+                    expected_lora_lst.append(module)
                 else:
                     expected_lora_lst.append(module)
                 if module == "experts":
