@@ -681,6 +681,7 @@ class EngineArgs:
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
+    lora_split_k_reduction: Literal["atomic", "kernel"] = LoRAConfig.split_k_reduction
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
@@ -1617,6 +1618,9 @@ class EngineArgs:
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
+        lora_group.add_argument(
+            "--lora-split-k-reduction", **lora_kwargs["split_k_reduction"]
+        )
         lora_group.add_argument(
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
@@ -2732,6 +2736,7 @@ class EngineArgs:
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
+                split_k_reduction=self.lora_split_k_reduction,
                 lora_dtype=self.lora_dtype,
                 target_modules=self.lora_target_modules,
                 enable_embedding_modules=self.enable_lora_embedding_modules,
