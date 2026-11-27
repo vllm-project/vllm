@@ -126,11 +126,9 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         arch = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         ).gcnArchName.split(":")[0]
-        if arch not in ("gfx1200", "gfx1201"):
-            raise NotImplementedError(f"ROCM_OCTAVE (RDNA4) requires gfx1200/1: {arch}")
         self.engine = _engine(head_size, rope_dim, arch)
         self._sign_words: torch.Tensor | None = None
-        logger.info_once(
+        logger.debug_once(
             "ROCM_OCTAVE (RDNA4): native HIP %s, D=%d RoPE=%d, Q=%d KV=%d, %s",
             arch,
             head_size,
@@ -226,7 +224,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         signs = self._signs(query.device)
         args = (cache, table, mapping, lengths, signs, self.kv_cache_dtype)
         if path == "streamed":
-            logger.info_once("ROCM_OCTAVE (RDNA4) prefill reads packed prefix tiles")
+            logger.debug_once("ROCM_OCTAVE (RDNA4) prefill reads packed prefix tiles")
             self.engine.prefill_streamed(
                 query,
                 key,
@@ -237,7 +235,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 scale=self.scale,
             )
         elif path == "expanded":
-            logger.info_once("ROCM_OCTAVE (RDNA4) prefill uses native FP16 WMMA")
+            logger.debug_once("ROCM_OCTAVE (RDNA4) prefill uses native FP16 WMMA")
             self.engine.prefill_expanded(
                 query,
                 key,
