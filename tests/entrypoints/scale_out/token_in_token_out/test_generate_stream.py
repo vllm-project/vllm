@@ -354,9 +354,9 @@ async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
         ),
     )
 
-    response = await serving.serve_tokens(request)
+    with pytest.raises(ValueError, match="Invalid SHM handle signature"):
+        await serving.serve_tokens(request)
 
-    assert isinstance(response, ErrorResponse)
     cache.validate_input_item.assert_called_once()
     validated_item, validated_hash = cache.validate_input_item.call_args.args
     assert validated_hash == "image_A"

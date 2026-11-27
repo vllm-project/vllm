@@ -548,6 +548,7 @@ class InputProcessor:
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
+            skip_mm_cache = bool(decoder_input.get("skip_mm_cache", False))
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -566,9 +567,14 @@ class InputProcessor:
             mm_features = []
             for modality, idx in sorted_mm_idxs:
                 base_mm_hash = decoder_mm_hashes[modality][idx]
+                mm_item = decoder_mm_inputs[modality][idx]
+                item_skip_mm_cache = skip_mm_cache or (
+                    mm_item is not None
+                    and any(elem.skip_mm_cache for elem in mm_item.values())
+                )
                 mm_features.append(
                     MultiModalFeatureSpec(
-                        data=decoder_mm_inputs[modality][idx],
+                        data=mm_item,
                         modality=modality,
                         identifier=self._get_mm_identifier(
                             base_mm_hash,
@@ -576,6 +582,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        skip_mm_cache=item_skip_mm_cache,
                     )
                 )
 
