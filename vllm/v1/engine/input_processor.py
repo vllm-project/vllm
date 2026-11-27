@@ -38,6 +38,19 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 logger = init_logger(__name__)
 
 
+def _has_multimodal_data(prompt: object) -> bool:
+    """Whether a raw prompt (or either side of an encoder-decoder prompt)
+    carries `multi_modal_data`."""
+    if not isinstance(prompt, dict):
+        return False
+    if prompt.get("multi_modal_data") is not None:
+        return True
+    return any(
+        _has_multimodal_data(prompt.get(key))
+        for key in ("encoder_prompt", "decoder_prompt")
+    )
+
+
 class InputProcessor:
     def __init__(
         self,
@@ -76,12 +89,26 @@ class InputProcessor:
             )
             mm_budget.reset_cache()  # Not used anymore
 
-        # Raw-prompt preprocessing (tokenization and multimodal processing)
-        # is blocking, so async callers should run it on the renderer's
-        # thread pool to keep their event loop responsive.
-        self.process_inputs_async = make_async(
+        self._process_text_inputs_async = make_async(
             self.process_inputs, executor=self.renderer._executor
         )
+        self._process_mm_inputs_async = make_async(
+            self.process_inputs, executor=self.renderer._mm_executor
+        )
+
+    async def process_inputs_async(
+        self,
+        request_id: str,
+        prompt: PromptType | EngineInput,
+        *args: Any,
+        **kwargs: Any,
+    ) -> EngineCoreRequest:
+        """Run `process_inputs` off the event loop."""
+        if _has_multimodal_data(prompt):
+            fn = self._process_mm_inputs_async
+        else:
+            fn = self._process_text_inputs_async
+        return await fn(request_id, prompt, *args, **kwargs)
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -399,6 +426,9 @@ class InputProcessor:
 
             engine_input: EngineInput = prompt  # type: ignore[assignment]
         else:
+            if self.lora_config is not None and isinstance(params, SamplingParams):
+                self.lora_config.validate_prompt_logprobs(params)
+
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
                 "and will be removed in the future. You should instead pass "
@@ -421,10 +451,23 @@ class InputProcessor:
                 tok_params,
             )
 
-        current_platform.validate_request(engine_input, params)
-
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        try:
+            current_platform.validate_request(engine_input, params)
+            self._validate_model_inputs(encoder_input, decoder_input)
+        except Exception:
+            # Rendering recorded the multimodal items as sent to the engine,
+            # which a rejected request never does: resend them next time.
+            self.renderer.queue_mm_cache_invalidations(
+                [
+                    mm_hash
+                    for singleton in (encoder_input, decoder_input)
+                    if singleton is not None and singleton["type"] == "multimodal"
+                    for mm_hashes in singleton["mm_hashes"].values()
+                    for mm_hash in mm_hashes
+                ]
+            )
+            raise
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -630,9 +673,14 @@ class InputProcessor:
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
+            mm_hashes = prompt_input["mm_hashes"]
+            num_embeds_by_hash: dict[str, int] = {}
             for modality, mm_positions in decoder_mm_positions.items():
-                for mm_position in mm_positions:
+                for mm_hash, mm_position in zip(
+                    mm_hashes[modality], mm_positions, strict=True
+                ):
                     num_embeds = mm_position.get_num_embeds()
+                    num_embeds_by_hash[mm_hash] = num_embeds
                     if num_embeds > self.mm_encoder_cache_size:
                         raise VLLMValidationError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
@@ -642,6 +690,22 @@ class InputProcessor:
                             f"size or increase the encoder cache size "
                             f"by setting --limit-mm-per-prompt at startup."
                         )
+
+            # Without chunked prefill, the scheduler encodes all of a prompt's
+            # items in one step, so they must fit in the encoder cache together.
+            total_num_embeds = sum(num_embeds_by_hash.values())
+            if (
+                prompt_type == "decoder"
+                and not self.scheduler_config.enable_chunked_prefill
+                and not self.vllm_config.is_mm_encoder_only
+                and total_num_embeds > self.mm_encoder_cache_size
+            ):
+                raise VLLMValidationError(
+                    f"The prompt's multimodal items need {total_num_embeds} "
+                    "encoder cache tokens, more than the encoder cache size of "
+                    f"{self.mm_encoder_cache_size}. They must fit together when "
+                    "chunked prefill is disabled."
+                )
 
         # Shared by generate, embedding and pooling requests.
         if prompt_ids:

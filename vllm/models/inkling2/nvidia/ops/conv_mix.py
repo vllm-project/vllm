@@ -5,6 +5,10 @@ sublayer, for large batches of an already reduced input (CUDA)."""
 
 import torch
 
+from vllm.platforms import current_platform
+
+from .attn_res import attn_res
+from .sconv import short_conv
 from .seq_parallel import SeqParallel
 
 
@@ -25,7 +29,7 @@ def conv_mix(
     stack: torch.Tensor,
     last: torch.Tensor | None,
     queries: torch.Tensor,
-    norm_weight: torch.Tensor,
+    norm_weight: torch.Tensor | None,
     norm_eps: float,
     eps: float = 1e-6,
     sp: SeqParallel | None = None,
@@ -35,7 +39,8 @@ def conv_mix(
     """`short_conv` the reduced bf16 `x` into `conv_out` (with the
     optional `(residual + addend) + y` update), then `attn_res` over
     `[*stack, (last +) conv_out]` with each query. Returns the `(Q, T, D)`
-    bf16 mix outputs.
+    bf16 mix outputs, or without `norm_weight` the fp32 mixes before the
+    RMSNorm (not with `sp`).
 
     With `sp`, the tokens are this rank's shard of the batch, `x` starts
     with the `halo` rows before it (or is `(world, halo + T, D)`, the
@@ -55,7 +60,8 @@ def conv_mix(
     assert residual is None or addend is not None
     assert stack.stride(1) == d and stack.stride(2) == 1
     assert queries.dtype == torch.float32 and queries.is_contiguous()
-    assert norm_weight.shape == queries.shape and norm_weight.is_contiguous()
+    if norm_weight is not None:
+        assert norm_weight.shape == queries.shape and norm_weight.is_contiguous()
     assert conv_weight.shape == (d, 4) and conv_weight.is_contiguous()
     assert d == cache.shape[1] * stream_width and cache.stride(3) == 1
     assert positions.dtype == slot_mapping.dtype == torch.int64
@@ -83,9 +89,41 @@ def conv_mix(
     )
     if sp is None:
         assert halo == 0 and positions.shape[0] == num_tokens and x.dim() == 2
-        out = conv_out.new_empty((queries.shape[0], num_tokens, d))
+        if not any(current_platform.is_device_capability_family(f) for f in (90, 100)):
+            # Native conv/mix kernels require Hopper or SM10x. Keep the
+            # loop executor's cache writes and residual rounding elsewhere.
+            short_conv(
+                x,
+                conv_weight,
+                cache,
+                positions,
+                block_table,
+                seq_idx,
+                slot_mapping,
+                query_start,
+                stream_offset,
+                stream_width,
+                addend,
+                residual,
+                conv_out,
+            )
+            return attn_res(
+                stack,
+                conv_out if last is None else last,
+                None if last is None else conv_out,
+                queries,
+                norm_weight,
+                norm_eps,
+                True,
+                eps,
+            )
+        out = conv_out.new_empty(
+            (queries.shape[0], num_tokens, d),
+            dtype=torch.float32 if norm_weight is None else conv_out.dtype,
+        )
         torch.ops._C.inkling2_conv_mix(*args, out)
         return out
+    assert norm_weight is not None
     batch_tokens = positions.shape[0]
     token_base, end, _ = sp.shard(batch_tokens)
     assert end - token_base == num_tokens

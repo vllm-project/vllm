@@ -6,12 +6,14 @@ For each token, sources `x_n` (stored blocks, then the partial block plus an
 optional addend, all in fp32) are scored as `(q . x_n) * rsqrt(mean(x_n^2) +
 eps)` per pseudo-query `q`; the output is `sum_n softmax_n * x_n`, with
 `x_n` RMS-normalized when `normalize_values` is set. The fp32 mix then
-goes through the following sublayer's RMSNorm in the same kernel.
+goes through the following sublayer's RMSNorm in the same kernel, or is
+returned as is (fp32) without a norm weight.
 """
 
 import torch
 
 from vllm.models.inkling2.nvidia.ops.norm import rsqrt
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 
 
@@ -69,10 +71,13 @@ def _attn_res_kernel(
     N_STACK: tl.constexpr,
     HAS_ADDEND: tl.constexpr,
     NORMALIZE: tl.constexpr,
+    APPLY_NORM: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     # One program per (token, query).
     t = tl.program_id(1).to(tl.int64)
     q_off = tl.program_id(0) * D
@@ -114,28 +119,30 @@ def _attn_res_kernel(
         probs = probs * inv_rms
 
     # Pass 2: RMS of the probability-weighted sum; pass 3: normalized sum.
-    sum_sq = 0.0
-    for d0 in tl.range(0, D, BLOCK_D):
-        offs = d0 + d_idx
-        acc = (
-            _mix(
-                Stack,
-                stride_s,
-                Last,
-                Addend,
-                row_off,
-                offs,
-                offs < D,
-                probs,
-                n_idx,
-                N_STACK,
-                HAS_ADDEND,
-                BLOCK_D,
+    out_rstd = 1.0
+    if APPLY_NORM:
+        sum_sq = 0.0
+        for d0 in tl.range(0, D, BLOCK_D):
+            offs = d0 + d_idx
+            acc = (
+                _mix(
+                    Stack,
+                    stride_s,
+                    Last,
+                    Addend,
+                    row_off,
+                    offs,
+                    offs < D,
+                    probs,
+                    n_idx,
+                    N_STACK,
+                    HAS_ADDEND,
+                    BLOCK_D,
+                )
+                * inv_sum
             )
-            * inv_sum
-        )
-        sum_sq += tl.sum(acc * acc)
-    out_rstd = rsqrt(tl.div_rn(sum_sq, D) + norm_eps)
+            sum_sq += tl.sum(acc * acc)
+        out_rstd = rsqrt(tl.div_rn(sum_sq, D) + norm_eps)
     out = Out + tl.program_id(0).to(tl.int64) * T * D + row_off
     for d0 in tl.range(0, D, BLOCK_D):
         offs = d0 + d_idx
@@ -157,8 +164,9 @@ def _attn_res_kernel(
             )
             * inv_sum
         )
-        w = tl.load(NormW + q_off + offs, mask, other=0).to(tl.float32)
-        acc = acc * out_rstd * w
+        if APPLY_NORM:
+            w = tl.load(NormW + q_off + offs, mask, other=0).to(tl.float32)
+            acc = acc * out_rstd * w
         tl.store(out + offs, acc.to(Out.dtype.element_ty), mask)
 
 
@@ -178,11 +186,14 @@ def _attn_res_row_kernel(
     N_STACK: tl.constexpr,
     HAS_ADDEND: tl.constexpr,
     NORMALIZE: tl.constexpr,
+    APPLY_NORM: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_A: tl.constexpr,
     BLOCK_B: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     # Small batches: one program per (token, query) holds the row in registers
     # as a power-of-2 head [0, BLOCK_A) and a masked tail [BLOCK_A, D), so the
     # sources are read twice instead of three times.
@@ -223,13 +234,16 @@ def _attn_res_row_kernel(
         acc_b = tl.fma(p, xb, acc_b)
     acc_a = acc_a * inv_sum
     acc_b = acc_b * inv_sum
-    sum_sq = tl.sum(acc_a * acc_a) + tl.sum(acc_b * acc_b)
-    out_rstd = rsqrt(tl.div_rn(sum_sq, D) + norm_eps)
     out = Out + tl.program_id(0).to(tl.int64) * T * D + row_off
-    wa = tl.load(NormW + q_off + da, mask_a, other=0).to(tl.float32)
-    wb = tl.load(NormW + q_off + db, mask_b, other=0).to(tl.float32)
-    tl.store(out + da, (acc_a * out_rstd * wa).to(Out.dtype.element_ty), mask_a)
-    tl.store(out + db, (acc_b * out_rstd * wb).to(Out.dtype.element_ty), mask_b)
+    if APPLY_NORM:
+        sum_sq = tl.sum(acc_a * acc_a) + tl.sum(acc_b * acc_b)
+        out_rstd = rsqrt(tl.div_rn(sum_sq, D) + norm_eps)
+        wa = tl.load(NormW + q_off + da, mask_a, other=0).to(tl.float32)
+        wb = tl.load(NormW + q_off + db, mask_b, other=0).to(tl.float32)
+        acc_a = acc_a * out_rstd * wa
+        acc_b = acc_b * out_rstd * wb
+    tl.store(out + da, acc_a.to(Out.dtype.element_ty), mask_a)
+    tl.store(out + db, acc_b.to(Out.dtype.element_ty), mask_b)
 
 
 def attn_res(
@@ -237,7 +251,7 @@ def attn_res(
     last: torch.Tensor,
     addend: torch.Tensor | None,
     queries: torch.Tensor,
-    norm_weight: torch.Tensor,
+    norm_weight: torch.Tensor | None,
     norm_eps: float,
     normalize_values: bool,
     eps: float = 1e-6,
@@ -246,7 +260,7 @@ def attn_res(
 
     `queries` are fp32 `(Q, D)`, already scaled by `D**-0.5`; each fp32
     mix is RMS-normalized with its row of `norm_weight` `(Q, D)`. Returns
-    `(Q, T, D)` in `last.dtype`.
+    `(Q, T, D)` in `last.dtype`, or the fp32 mixes without `norm_weight`.
     """
     num_tokens, d = last.shape
     num_stack = stack.shape[0]
@@ -256,8 +270,12 @@ def attn_res(
     assert stack.stride(1) == d and stack.stride(2) == 1
     if addend is not None:
         assert addend.is_contiguous() and addend.shape == last.shape
+    apply_norm = norm_weight is not None
+    if norm_weight is None:
+        norm_weight = queries  # unread
     assert norm_weight.shape == queries.shape and norm_weight.is_contiguous()
-    out = torch.empty((num_q, num_tokens, d), dtype=last.dtype, device=last.device)
+    out_dtype = last.dtype if apply_norm else torch.float32
+    out = torch.empty((num_q, num_tokens, d), dtype=out_dtype, device=last.device)
     args = (
         stack,
         last,
@@ -275,9 +293,10 @@ def attn_res(
         N_STACK=num_stack,
         HAS_ADDEND=addend is not None,
         NORMALIZE=normalize_values,
+        APPLY_NORM=apply_norm,
         BLOCK_N=triton.next_power_of_2(num_stack + 1),
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     # The queries of a token run back to back and share its sources in L2.
     grid = (num_q, num_tokens)
