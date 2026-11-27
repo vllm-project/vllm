@@ -261,13 +261,7 @@ def main(args: argparse.Namespace):
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code
     )
-    if config.architectures[0] == "DbrxForCausalLM":
-        E = config.ffn_config.moe_num_experts
-        topk = config.ffn_config.moe_top_k
-    elif config.architectures[0] == "JambaForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-    elif (
+    if (
         config.architectures[0] == "DeepseekV3ForCausalLM"
         or config.architectures[0] == "DeepseekV2ForCausalLM"
         or config.architectures[0] == "Glm4MoeForCausalLM"

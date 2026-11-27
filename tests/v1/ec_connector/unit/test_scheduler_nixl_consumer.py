@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalSharedField,
 )
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
 _N, _BS, _HID, _ES = 16, 64, 32, 2
 
@@ -43,6 +44,9 @@ class _Request:
         self.mm_features = features
         self.request_id = req_id
         self.ec_transfer_params = params
+
+    def get_num_encoder_embeds(self, input_id):
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
 
 class _FakeResults:
@@ -182,6 +186,57 @@ def test_no_remote_announcement_is_ready(monkeypatch, params):
     assert s.ensure_cache_available(_Request([_Feature("x")], params=params), 0)
     assert s.take_unavailable_requests() == set()
     s.shutdown()
+
+
+@pytest.mark.parametrize("missing_remote_item", [False, True])
+@pytest.mark.parametrize("cpu_ready", [False, True])
+@pytest.mark.cpu_test
+def test_runner_cache_hit_skips_remote_read(
+    monkeypatch, missing_remote_item, cpu_ready
+):
+    """Only a remotely sourced hit with no ready CPU copy needs readmission."""
+    s = _consumer_sched(monkeypatch)
+    started = []
+
+    def fail_start(mm_hash, *args):
+        started.append(mm_hash)
+        raise RuntimeError("producer unavailable")
+
+    monkeypatch.setattr(s, "_start_xfer", fail_start)
+    data = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(
+                torch.tensor([1, 2, 2]), MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
+    features = [_Feature("cached", data=data), _Feature("local", data=data)]
+    params = _params("cached", 1)
+    if missing_remote_item:
+        features.append(_Feature("missing", data=data))
+        params.update(_params("missing", 1))
+    req = _Request(features, params=params)
+    runner_cache = EncoderCacheManager(cache_size=2)
+    runner_cache.allocate(req, 0)
+    runner_cache.allocate(req, 1)
+    runner_cache.free(req)
+    s.bind_encoder_cache_query(runner_cache.get_cached_num_encoder_embeds)
+
+    try:
+        assert s._cache.alloc("cached", 1, (1, _HID)) is not None
+        s._cache.mark_ready("cached")
+        if not cpu_ready:
+            assert s._cache.alloc("replacement", _N) is not None
+            assert s._cache.get("cached") is None
+        assert s.ensure_cache_available(req, 0) is (not missing_remote_item)
+        assert started == (["missing"] if missing_remote_item else [])
+        assert s.take_unavailable_requests() == (
+            {req.request_id} if missing_remote_item else set()
+        )
+        assert s.requires_encoder_cache_readmission(req, 0) is (not cpu_ready)
+        assert not s.requires_encoder_cache_readmission(req, 1)
+    finally:
+        s.shutdown()
 
 
 @pytest.mark.parametrize("payload", [None, "metadata", "pixels", "embeds", "shm"])
