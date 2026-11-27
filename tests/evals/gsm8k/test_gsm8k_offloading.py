@@ -290,7 +290,7 @@ MODELS = [
             # rarely fill a block, so 12 shots are used as for Nemotron-H.
             # The model needs the chat template with thinking off; in
             # completions mode it scores 0.
-            # Scores 0.985-0.990 on 4x MI350X.
+            # Scores 0.980-0.990 on 4x MI350X.
             num_shots=12,
             accuracy_threshold=0.90,
             assert_reload=True,
@@ -300,7 +300,6 @@ MODELS = [
             extra_server_args=["--tensor-parallel-size", "4"],
             env_dict={
                 "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_MOE": "0",
             },
             cpu_offload_gib=16,
             startup_timeout=2400,
