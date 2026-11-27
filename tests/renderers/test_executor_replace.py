@@ -103,7 +103,7 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
     old_inner = executor._inner
 
     async def _run():
-        assert await renderer._tokenize_prompt_async(
+        assert await renderer._tokenize_text_prompt_async(
             {"prompt": "ab"},
             TokenizeParams(max_total_tokens=100),
         )
@@ -114,7 +114,7 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             old_inner.submit(lambda: None)
 
-        tokenized = await renderer._tokenize_prompt_async(
+        tokenized, _ = await renderer._tokenize_text_prompt_async(
             {"prompt": "abc"},
             TokenizeParams(max_total_tokens=100),
         )

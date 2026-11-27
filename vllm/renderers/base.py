@@ -183,13 +183,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_executor = ThreadPoolExecutor(max_workers=1)
         self._resources.callback(self._mm_executor.shutdown, wait=False)
 
-        # Offload tokenization to the thread pool. The sync
-        # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
-        # path and char-offset extraction, so the async variant is just it
-        # offloaded (mirrors ``_process_multimodal_async`` below).
-        self._tokenize_prompt_async = make_async(
-            self._tokenize_prompt, executor=self._executor
-        )
+        # Offload text tokenization, including the truncation probe of
+        # `_tokenize_text_prompt`, to the thread pool in one call (mirrors
+        # `_process_multimodal_async` below).
         self._tokenize_text_prompt_async = make_async(
             self._tokenize_text_prompt, executor=self._executor
         )
