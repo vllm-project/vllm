@@ -20,6 +20,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.processing.inputs import ProcessorInputs
+
 PROXY_REL = "examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py"
 
 
@@ -943,6 +946,7 @@ def test_fanout_preserves_scoped_precedence(proxy, scoped_value):
 def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, short):
     """Without opt-in, even image children keep the original kwargs."""
     seen: list = []
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
     monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
     values = [16] if short else [16, 32]
     kwargs: dict[str, Any] = {"num_frames": values}
@@ -957,6 +961,31 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
     assert len(seen) == 3
     assert all(child["mm_processor_kwargs"] == kwargs for _, child in seen)
     assert body == original
+
+    def hashes(uuids, options):
+        inputs = ProcessorInputs(
+            prompt=[],
+            mm_data_items=MultiModalDataItems(
+                {"video": VideoProcessorItems([None] * len(uuids))}
+            ),
+            mm_uuid_items={"video": uuids},
+            hf_processor_mm_kwargs=options,
+        )
+        return inputs.get_mm_hashes("base-hash-model", "sha256")["video"]
+
+    videos = [_vid("a"), _vid("b")]
+    uuids = [proxy.content_uuid(video) for video in videos]
+    parent_hashes = hashes(uuids, kwargs)
+    for _, child in seen:
+        item = child["messages"][0]["content"][0]
+        if item["type"] != "video_url":
+            continue
+        index = uuids.index(item["uuid"])
+        child_hash = hashes([item["uuid"]], child["mm_processor_kwargs"])[0]
+        assert child_hash == parent_hashes[index]
+        if not short:
+            sliced = proxy._slice_mm_processor_kwargs(kwargs, [index], 2)
+            assert hashes([item["uuid"]], sliced)[0] != parent_hashes[index]
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1030,10 @@ async def test_per_video_kwargs_http_validation(
             ("decode", "d_urls"),
         ):
             monkeypatch.setattr(
-                proxy.app.state, field, [str(server.make_url(f"/{stage}"))], raising=False
+                proxy.app.state,
+                field,
+                [str(server.make_url(f"/{stage}"))],
+                raising=False,
             )
         monkeypatch.setattr(proxy.app.state, "d_ec_urls", [], raising=False)
         monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
@@ -1024,7 +1056,9 @@ async def test_per_video_kwargs_http_validation(
         await proxy.on_startup()
         try:
             async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=target_app, raise_app_exceptions=False),
+                transport=httpx.ASGITransport(
+                    app=target_app, raise_app_exceptions=False
+                ),
                 base_url="http://proxy",
             ) as client:
                 if dynamic:
