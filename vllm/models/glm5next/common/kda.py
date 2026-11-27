@@ -413,7 +413,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     conv_size: int
     kda_prefill_conv: str
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
