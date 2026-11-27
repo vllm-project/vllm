@@ -1967,26 +1967,27 @@ class MooncakeConnectorWorker:
                 else MooncakeXferResponseStatus.FINISH
             )
             ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            for task in done:
-                d_req_id, send_meta = task.result()
-                del pending_reqs[d_req_id]
-                # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
-                    # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
-                    if not send_meta.need_send:
-                        self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
-                        )
-                    ready_reqs.append((d_req_id, send_meta))
-                else:
-                    # Otherwise (expired, very unlikely), just forget it.
-                    logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
-                    )
-
-            sending_reqs = list(ready_reqs)
+            sending_reqs: list[tuple[ReqId, SendBlockMeta]] = []
             try:
+                for task in done:
+                    d_req_id, send_meta = task.result()
+                    del pending_reqs[d_req_id]
+                    # Do we still in reqs_need_send (not expired)?
+                    if send_meta.transfer_id in self.reqs_need_send:
+                        # Mark it sending to avoid expiration.
+                        send_meta.sending += 1
+                        sending_reqs.append((d_req_id, send_meta))
+                        if not send_meta.need_send:
+                            self.resolve_need_send(
+                                send_meta, remote_tp_ranks, meta.remote_pp_size
+                            )
+                        ready_reqs.append((d_req_id, send_meta))
+                    else:
+                        # Otherwise (expired, very unlikely), just forget it.
+                        logger.warning(
+                            "Request %s expired before sending on P side.", d_req_id
+                        )
+
                 (
                     src_ptrs,
                     dst_ptrs,
@@ -2042,6 +2043,10 @@ class MooncakeConnectorWorker:
                         is not None
                     ):
                         self.finished_sending_reqs.add(send_meta.p_req_id)
+            except BaseException:
+                for task in wait_tasks:
+                    task.cancel()
+                raise
             finally:
                 for _, send_meta in sending_reqs:
                     send_meta.sending -= 1

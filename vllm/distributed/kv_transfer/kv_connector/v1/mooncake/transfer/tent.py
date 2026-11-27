@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 import importlib.util
+import inspect
 import json
+import math
 import os
 import socket
 import sys
@@ -68,9 +70,18 @@ class TentTransferBackend(TransferBackend):
         enable_sleep_mode: bool = False,
         overrides: Mapping[str, Any] | None = None,
     ) -> None:
-        if transfer_timeout_s < 0:
-            raise RuntimeError("The TENT transfer timeout must not be negative.")
-        self._timeout_ms = int(transfer_timeout_s * 1000)
+        if (
+            isinstance(transfer_timeout_s, bool)
+            or not math.isfinite(transfer_timeout_s)
+            or transfer_timeout_s < 0
+        ):
+            raise RuntimeError(
+                "The TENT transfer timeout must be a finite non-negative number."
+            )
+        self._timeout_s = float(transfer_timeout_s)
+        self._timeout_ms = (
+            math.ceil(self._timeout_s * 1000) if self._timeout_s > 0 else 0
+        )
         self._tent = _import_tent_module()
         config = build_tent_config(
             hostname=hostname,
@@ -124,15 +135,28 @@ class TentTransferBackend(TransferBackend):
                 f"{_TENT_BUILD_HINT}"
             )
         self._pending = int(self._tent.TransferStatusEnum.PENDING)
-        self._timeout_s = float(transfer_timeout_s)
         # Newer builds submit and wait in one call, which keeps the Python side
         # out of the per-range loop below.
-        self._sync_arrays = getattr(self._engine, "transfer_sync_arrays", None)
-        self._sync_arrays_timed = bool(
-            self._sync_arrays is not None
-            and "timeout_ms" in (getattr(self._sync_arrays, "__doc__", "") or "")
+        sync_arrays = getattr(self._engine, "transfer_sync_arrays", None)
+        self._sync_arrays = sync_arrays if callable(sync_arrays) else None
+        self._sync_arrays_timed = (
+            _supports_timeout_ms(self._sync_arrays)
+            if self._sync_arrays is not None
+            else False
         )
-        self._wait_transfer = getattr(self._engine, "wait_transfer", None)
+        self._use_sync_arrays = self._sync_arrays is not None and (
+            self._sync_arrays_timed or self._timeout_ms == 0
+        )
+        if self._sync_arrays is not None and not self._use_sync_arrays:
+            logger.warning(
+                "This Mooncake build exposes transfer_sync_arrays without "
+                "timeout_ms; using batch submission so transfer_timeout_s=%.3gs "
+                "remains enforced. Set transfer_timeout_s=0 or build Mooncake "
+                "with kvcache-ai/Mooncake#5882 to use the array binding.",
+                self._timeout_s,
+            )
+        wait_transfer = getattr(self._engine, "wait_transfer", None)
+        self._wait_transfer = wait_transfer if callable(wait_transfer) else None
         self._segment_lock = threading.Lock()
         self._segments: dict[str, Any] = {}
         self._open_locks: dict[str, threading.Lock] = {}
@@ -218,15 +242,24 @@ class TentTransferBackend(TransferBackend):
         remote_addrs: NDArray[np.uint64],
         lengths: NDArray[np.uint64],
     ) -> BatchTransferResult:
-        num_ranges = int(local_addrs.size)
+        for column in (local_addrs, remote_addrs, lengths):
+            if (
+                column.ndim != 1
+                or column.dtype != np.uint64
+                or not column.flags.c_contiguous
+            ):
+                raise ValueError(
+                    "Transfer columns must be contiguous 1D native uint64."
+                )
+        num_ranges = len(local_addrs)
+        if len(remote_addrs) != num_ranges or len(lengths) != num_ranges:
+            raise ValueError(
+                "TENT needs one local address, one remote address and one length "
+                f"per range, got {num_ranges}, {len(remote_addrs)} and "
+                f"{len(lengths)}."
+            )
         if num_ranges == 0:
             return BatchTransferResult(num_ranges=0, state=TransferState.COMPLETED)
-        if remote_addrs.size != num_ranges or lengths.size != num_ranges:
-            raise RuntimeError(
-                "TENT needs one local address, one remote address and one length "
-                f"per range, got {num_ranges}, {remote_addrs.size} and "
-                f"{lengths.size}."
-            )
         states = self._submit(peer, op, local_addrs, remote_addrs, lengths)
         if int(states.size) != num_ranges:
             return BatchTransferResult(
@@ -261,13 +294,15 @@ class TentTransferBackend(TransferBackend):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning(
-                        "TENT still has %d transfers running at shutdown.",
+                        "TENT still has %d transfers running at shutdown; "
+                        "skipping segment teardown to avoid closing active handles.",
                         self._inflight,
                     )
-                    break
+                    return
                 self._drain.wait(remaining)
         with self._segment_lock:
             peers = list(self._segments)
+            self._open_locks.clear()
         for peer in peers:
             self._close_segment(peer)
 
@@ -281,7 +316,7 @@ class TentTransferBackend(TransferBackend):
     ) -> NDArray[np.uint8]:
         self._begin_transfer()
         try:
-            if self._sync_arrays is not None:
+            if self._use_sync_arrays:
                 return self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
             return self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
         finally:
@@ -295,10 +330,11 @@ class TentTransferBackend(TransferBackend):
         remote_addrs: NDArray[np.uint64],
         lengths: NDArray[np.uint64],
     ) -> NDArray[np.uint8]:
+        assert self._sync_arrays is not None
         segment = self._segment(peer)
         opcode = self._opcodes[op]
         if self._sync_arrays_timed:
-            states = self._engine.transfer_sync_arrays(
+            states = self._sync_arrays(
                 local_addrs,
                 remote_addrs,
                 lengths,
@@ -307,7 +343,7 @@ class TentTransferBackend(TransferBackend):
                 self._timeout_ms,
             )
         else:
-            states = self._engine.transfer_sync_arrays(
+            states = self._sync_arrays(
                 local_addrs, remote_addrs, lengths, segment, opcode
             )
         return np.asarray(states, dtype=np.uint8)
@@ -325,17 +361,17 @@ class TentTransferBackend(TransferBackend):
         batch = self._engine.allocate_transfer_batch(count)
         if batch <= 0:
             raise RuntimeError("TENT could not allocate a transfer batch")
-        requests = [
-            self._tent.Request(
-                self._opcodes[op],
-                int(local_addrs[index]),
-                segment,
-                int(remote_addrs[index]),
-                int(lengths[index]),
-            )
-            for index in range(count)
-        ]
         try:
+            requests = [
+                self._tent.Request(
+                    self._opcodes[op],
+                    int(local_addrs[index]),
+                    segment,
+                    int(remote_addrs[index]),
+                    int(lengths[index]),
+                )
+                for index in range(count)
+            ]
             self._engine.submit_transfer(batch, requests)
             if self._wait_transfer is not None:
                 statuses = self._wait_transfer(batch, self._timeout_ms)
@@ -383,6 +419,7 @@ class TentTransferBackend(TransferBackend):
                 segment = self._engine.open_segment(peer)
                 with self._segment_lock:
                     self._segments[peer] = segment
+                    self._open_locks.pop(peer, None)
             return segment
 
     def _close_segment(self, peer: str) -> None:
@@ -397,6 +434,15 @@ class TentTransferBackend(TransferBackend):
 
     def _state_name(self, code: int) -> str:
         return self._state_names.get(code, str(code))
+
+
+def _supports_timeout_ms(fn: Any) -> bool:
+    try:
+        if "timeout_ms" in inspect.signature(fn).parameters:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return "timeout_ms" in (getattr(fn, "__doc__", "") or "")
 
 
 def _format_peer_address(hostname: str, port: int) -> str:

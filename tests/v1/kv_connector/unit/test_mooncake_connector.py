@@ -3725,3 +3725,65 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+async def test_send_kv_to_decode_releases_sending_on_transfer_error():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.use_mla = True
+    worker.opaque_packed_storages = set()
+    worker._expired_transfer_ids = {}
+    worker.finished_sending_reqs = set()
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.handshake_target_ranks.return_value = [0]
+    worker._producer_cache_is_replicated = lambda: False
+    worker._prepare_transfer_regions = lambda _meta: ([], [], None)
+    worker._build_transfer_params = AsyncMock(
+        return_value=(
+            np.asarray([0x1000], dtype=np.uint64),
+            np.asarray([0x2000], dtype=np.uint64),
+            np.asarray([64], dtype=np.uint64),
+            [],
+            None,
+        )
+    )
+    worker.sender_loop = asyncio.get_running_loop()
+    worker._sender_executor = None
+    worker._send_blocks = MagicMock(side_effect=RuntimeError("engine error"))
+
+    ready_meta = SendBlockMeta(
+        p_req_id="p-ready",
+        transfer_id="t-ready",
+        local_block_ids=[[1]],
+        ready=asyncio.Event(),
+    )
+    ready_meta.ready.set()
+    pending_meta = SendBlockMeta(
+        p_req_id="p-pending",
+        transfer_id="t-pending",
+        local_block_ids=[[2]],
+        ready=asyncio.Event(),
+    )
+    worker.reqs_need_send = {"t-ready": ready_meta, "t-pending": pending_meta}
+
+    meta = _xfer_meta(
+        [_region(0x2000, row_offset=-1, layer_name="layer.0", layer_index=0)],
+        {"d-ready": ("t-ready", [[1]]), "d-pending": ("t-pending", [[2]])},
+        remote_hostname="consumer",
+        remote_port=1234,
+        remote_tp_size=1,
+        remote_pp_size=1,
+    )
+    sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+
+    with pytest.raises(RuntimeError, match="engine error"):
+        await worker.send_kv_to_decode(b"consumer", sock, meta)
+
+    assert ready_meta.sending == 0
+    assert pending_meta.sending == 0
+    await asyncio.sleep(0)
+    other_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert other_tasks == []
