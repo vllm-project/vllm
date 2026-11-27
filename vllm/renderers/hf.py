@@ -61,7 +61,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .base import BaseRenderer
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS, BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
@@ -1070,12 +1070,12 @@ def tokenize_prompt(
     """Tokenize text, preserving an optional mask for truncation and echoes."""
     # With an explicit side, `TokenizeParams` truncates the prompt instead of
     # the tokenizer and keeps the tokens that the mask marks as added, so the
-    # mask is needed only if the tokenizer adds special tokens. The echo also
-    # uses it to identify truncated text inputs, even when no tokens were added.
-    want_special_tokens_mask = (
-        params.truncate_prompt_tokens is not None
-        and params.truncation_side is not None
-        and (params.add_special_tokens or params.needs_detokenization)
+    # mask is needed only if the tokenizer adds special tokens. Echoes use it
+    # with or without a side: it identifies truncated text inputs even when no
+    # tokens were added.
+    want_special_tokens_mask = params.truncate_prompt_tokens is not None and (
+        params.needs_detokenization
+        or (params.truncation_side is not None and params.add_special_tokens)
     )
     kwargs = params.get_encode_kwargs()
     if want_offsets:
@@ -1160,6 +1160,8 @@ class BaseHfRenderer(BaseRenderer[_T]):
 
 
 class HfRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,

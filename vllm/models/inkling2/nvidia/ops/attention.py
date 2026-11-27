@@ -16,6 +16,7 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _num_warps_bucket,
     bucket_max_seqlen_q,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import gl, gluon, tl, tldevice, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -284,8 +285,10 @@ def _gate_sink_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = col < H * D
@@ -333,7 +336,7 @@ def gate_sink(
         width // num_heads,
         512,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 
@@ -455,6 +458,7 @@ def _rel_decode_combine_kernel(
     BLOCK_S: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GATED: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """Merge the split partials, then apply the output gate and attention sink
     if `GATED`."""
@@ -466,7 +470,8 @@ def _rel_decode_combine_kernel(
         # gate and sink are ready.
         gate = tl.load(Gate + row * stride_gate + head * D + offs_d).to(tl.float32)
         sink = tl.load(Sink + row * stride_sink + head).to(tl.float32)
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     y_ptrs = Y + row * H * D + head * D + offs_d
     if row >= num_actual_tokens:
         tl.store(y_ptrs, tl.zeros([BLOCK_D], tl.float32))
@@ -1295,7 +1300,7 @@ def _decode_attention(
         BLOCK_D=block_d,
         GATED=not draft,
         num_warps=num_warps,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 

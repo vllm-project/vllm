@@ -100,8 +100,9 @@ def test_hyv4_dfly_gfx950_gate_is_rocm_only(monkeypatch, config_cls):
 
 
 @CONFIG_CLASSES
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "fp8"])
-def test_hyv4_dfly_rocm_rejects_fp8_kv(monkeypatch, config_cls, kv_cache_dtype):
+def test_hyv4_dfly_rocm_kv_cache_dtypes(monkeypatch, config_cls):
+    """ROCm gfx950 DFly takes fp8_ds_mla KV but not per-tensor fp8."""
     _set_platform(monkeypatch, rocm=True, gfx950=True)
-    with pytest.raises(ValueError, match="requires a BF16 KV cache"):
-        config_cls.apply_options(_spec(kv_cache_dtype=kv_cache_dtype))
+    config_cls.apply_options(_spec(kv_cache_dtype="fp8_ds_mla"))
+    with pytest.raises(ValueError, match="BF16 or fp8_ds_mla"):
+        config_cls.apply_options(_spec(kv_cache_dtype="fp8"))

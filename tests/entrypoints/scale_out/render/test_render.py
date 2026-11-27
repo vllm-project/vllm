@@ -176,7 +176,9 @@ async def test_scale_out_reuses_token_counting_effort_probe():
         openai_serving_models=MagicMock(),
         tool_server=None,
     )
-    init_scale_out_state(state, MagicMock(), MagicMock(), None)
+    init_scale_out_state(
+        state, MagicMock(mm_tensor_refs_config=None), MagicMock(), None
+    )
     # Exercise conversion through both handlers without sampling or generation.
     state.serving_render.render_chat_request = renderer.render_chat
     fields = dict(
@@ -430,6 +432,50 @@ def server():
 
     with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+def test_cohere_request_template_rejected_with_server_template():
+    pytest.importorskip("cohere_melody")
+    model = "facebook/opt-125m"
+    args = [
+        "--tokenizer-mode",
+        "cohere",
+        "--served-model-name",
+        model,
+        "--trust-request-chat-template",
+        "--chat-template",
+        "{{ 'Configured template' }}",
+        "--chat-template-content-format",
+        "openai",
+    ]
+    with RemoteLaunchRenderServer(model, args) as cohere_server:
+        chat = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        for endpoint in ("v1/chat/completions/render", "tokenize"):
+            url = cohere_server.url_for(endpoint)
+            valid = httpx.post(url, json=chat, timeout=10)
+            assert valid.status_code == 200
+            invalid = httpx.post(
+                url,
+                json={**chat, "chat_template": "{{ 'Request template' }}"},
+                timeout=10,
+            )
+            assert invalid.status_code == 400
+            assert invalid.json()["error"]["param"] == "chat_template"
+
+        invalid_responses = httpx.post(
+            cohere_server.url_for("v1/responses/render"),
+            json={
+                "model": model,
+                "input": "Hello",
+                "chat_template_kwargs": {"chat_template": "{{ 'Request template' }}"},
+            },
+            timeout=10,
+        )
+        assert invalid_responses.status_code == 400
+        assert invalid_responses.json()["error"]["param"] == "chat_template"
 
 
 @pytest_asyncio.fixture

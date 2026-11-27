@@ -92,6 +92,7 @@ steps:
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/models/test_muse_spark_fp32_rope.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
   - tests/models/hy_v4/test_dfly_config.py
@@ -117,6 +118,7 @@ steps:
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_fused_markov_sampling.py
       models/test_muse_spark_rocm_mono.py
+      models/test_muse_spark_fp32_rope.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
       models/hy_v4/test_dfly_config.py
@@ -187,6 +189,7 @@ steps:
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/models/test_muse_spark_fp32_rope.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
       - tests/models/test_muse_spark_rocm_drafter.py
       - tests/models/test_muse_spark_rocm_draft_fp8.py
@@ -215,6 +218,7 @@ steps:
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_fused_markov_sampling.py
         models/test_muse_spark_rocm_mono.py
+        models/test_muse_spark_fp32_rope.py
         kernels/models/amd/test_muse_spark_fused_markov.py
         models/test_muse_spark_rocm_drafter.py
         models/test_muse_spark_rocm_draft_fp8.py
@@ -509,13 +513,9 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - csrc/qwen4_exp/
-  - vllm/models/qwen4_exp/nvidia/hyperconnection.py
-  - vllm/models/qwen4_exp/nvidia/mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/models/qwen4_exp/common/
+  - vllm/models/qwen4_exp/nvidia/
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -718,6 +718,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
+  - tests/single_rank_group.py
   commands:
   # Swap-AB decode: the kernel tests need SM10x and a CuTe DSL built with
   # CUDA 13.2+; the dispatch and warmup-key tests run on the CPU.
