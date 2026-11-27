@@ -113,6 +113,10 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
+When using `--enable-per-video-kwargs-slicing` with audio extracted from video,
+put per-video `fps` or `num_frames` lists inside
+`mm_processor_kwargs.videos_kwargs` so the audio cache keys match across stages.
+
 ### Dynamic registration
 
 Alternatively, let the external launcher register ready instances over HTTP.

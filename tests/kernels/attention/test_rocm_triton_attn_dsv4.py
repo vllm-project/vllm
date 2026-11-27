@@ -3208,6 +3208,7 @@ def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
     metadata = SimpleNamespace(
         num_actual_tokens=num_q,
         topk_tokens=topk,
+        topk_start=0,
         req_id_per_token=torch.zeros(num_q, dtype=torch.int32, device=device),
         block_table=torch.arange(num_units, dtype=torch.int32, device=device)[None],
         paged_kv_indptr=indptr,

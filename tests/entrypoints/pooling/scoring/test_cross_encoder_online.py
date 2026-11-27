@@ -231,7 +231,17 @@ async def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_rerank_api_texts(server: RemoteOpenAIServer):
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"return_documents": True},
+        {"return_documents": False},
+        {"return_documents": None},
+    ],
+    ids=["default", "include-documents", "omit-documents", "null"],
+)
+async def test_rerank_api_texts(server: RemoteOpenAIServer, options):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -244,6 +254,7 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "query": query,
             "documents": documents,
+            **options,
         },
     )
     rerank_response.raise_for_status()
@@ -254,6 +265,11 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
     assert len(rerank.results) == 2
     assert rerank.results[0].relevance_score >= 0.9
     assert rerank.results[1].relevance_score <= 0.01
+    for result in rerank_response.json()["results"]:
+        if options.get("return_documents") is False:
+            assert "document" not in result
+        else:
+            assert result["document"]["text"] == documents[result["index"]]
 
 
 @pytest.mark.asyncio

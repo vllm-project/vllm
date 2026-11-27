@@ -284,26 +284,42 @@ class TestStreamedToolArguments:
     def test_closed_pairs_are_parsed_once(self, mock_request, monkeypatch):
         """Streaming cost must not grow with the closed pairs already seen."""
         mock_request.tools = [WRITE_TOOL]
-        arg_re = glm47_moe._ARG_RE
+        closed_args = glm47_moe._closed_args
         matches = 0
 
-        class CountingPattern:
-            def __getattr__(self, name):
-                return getattr(arg_re, name)
+        def counting_closed_args(*args):
+            nonlocal matches
+            for arg in closed_args(*args):
+                matches += 1
+                yield arg
 
-            def finditer(self, *args):
-                nonlocal matches
-                for match in arg_re.finditer(*args):
-                    matches += 1
-                    yield match
-
-        monkeypatch.setattr(glm47_moe, "_ARG_RE", CountingPattern())
+        monkeypatch.setattr(glm47_moe, "_closed_args", counting_closed_args)
         text = LOOP_HEAD + LOOP_PAIRS * 200 + TOOL_CALL_END
         _stream_arguments(
             Glm47MoeParser(make_mock_tokenizer(VOCAB)), mock_request, _pieces(text, 4)
         )
 
-        assert matches == len(arg_re.findall(text))
+        assert matches == len(list(closed_args(text, 0)))
+
+    def test_single_pass_converts_each_call_once(self, mock_request):
+        """A non-streaming parse must not convert the arguments per chunk."""
+        mock_request.tools = [WRITE_TOOL]
+        parser = Glm47MoeParser(make_mock_tokenizer(VOCAB))
+        converter = parser._arg_converter
+        assert converter is not None
+        conversions = 0
+
+        def counting_converter(*args):
+            nonlocal conversions
+            conversions += 1
+            return converter(*args)
+
+        parser._arg_converter = counting_converter
+        text = LOOP_HEAD + LOOP_PAIRS * 200 + TOOL_CALL_END
+        _, _, tool_calls = parser.parse(text, mock_request, enable_auto_tools=True)
+
+        assert tool_calls is not None and len(tool_calls) == 1
+        assert conversions == 1
 
     def test_value_extender_stops_at_split_value_end(self):
         extend = _glm47_arg_value_extender("<arg_key>k</arg_key><arg_value>x")
