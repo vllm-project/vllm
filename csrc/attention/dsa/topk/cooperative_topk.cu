@@ -28,11 +28,17 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK, InT>& params,
     }
   }();
   if constexpr (CS > 8) {
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed,
-                         1);
+    cudaError_t cluster_err = cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+    STD_TORCH_CHECK(cluster_err == cudaSuccess,
+                    "cooperative_topk: failed to enable non-portable cluster size: ",
+                    cudaGetErrorString(cluster_err));
   }
-  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem);
+  cudaError_t smem_err = cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+  STD_TORCH_CHECK(smem_err == cudaSuccess,
+                  "cooperative_topk: failed to set dynamic shared memory (",
+                  smem, " bytes): ", cudaGetErrorString(smem_err));
 
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(params.num_rows, CS);
@@ -127,6 +133,18 @@ void cooperative_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   STD_TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   STD_TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
+
+  // SM12x (consumer Blackwell) has ~99KB opt-in dynamic SMEM per block;
+  // cooperative_topk cluster paths need more. Route callers to persistent_topk.
+
+  const auto* props = get_device_prop();
+  STD_TORCH_CHECK(
+      props->major != 12,
+      "cooperative_topk is not supported on SM12x (device ",
+      props->name, ", CC ", props->major, ".", props->minor,
+      ", sharedMemPerBlockOptin=", props->sharedMemPerBlockOptin,
+      " bytes); use persistent_topk instead");
+
   STD_TORCH_CHECK(
       logits.scalar_type() == torch::headeronly::ScalarType::Float ||
           logits.scalar_type() == torch::headeronly::ScalarType::BFloat16,
