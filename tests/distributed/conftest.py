@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import os
 import random
+import socket
 
 import msgspec
 import msgspec.msgpack
@@ -15,11 +17,32 @@ from .test_events import SampleBatch
 
 DP_RANK = 0
 
+# Offsets from the base port that the tests bind: the DP ranks of the
+# endpoint, of the replay endpoint (+100) and of the EC stream (+1000).
+PORT_OFFSETS = [start + rank for start in (0, 100, 1000) for rank in range(4)]
+
 
 @pytest.fixture
 def random_port():
-    """Generate a random port number for testing."""
-    return random.randint(10000, 59900)
+    """A random base port whose `PORT_OFFSETS` are held until teardown.
+
+    The held sockets set `SO_REUSEADDR` and never listen, so the kernel skips
+    their ports for ephemeral allocation while libzmq, which also sets
+    `SO_REUSEADDR`, can still bind them.
+    """
+    for _ in range(100):
+        base = random.randint(10000, 59900)
+        with contextlib.ExitStack() as stack:
+            try:
+                for offset in PORT_OFFSETS:
+                    sock = stack.enter_context(socket.socket())
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(("", base + offset))
+            except OSError:
+                continue
+            yield base
+            return
+    raise RuntimeError("no free port block for the event publisher tests")
 
 
 @pytest.fixture
