@@ -45,7 +45,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flydsl import (
     maybe_fused_gelu_mlp_mx,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
-from vllm.model_executor.layers.fusion import gemma4_norm_chain
+from vllm.model_executor.layers.fusion import gemma4_norm_chain, gemma4_ple_mlp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -798,6 +798,22 @@ class Gemma4DecoderLayer(nn.Module):
             and gemma4_norm_chain.supports_hidden_size(self.hidden_size)
         )
 
+    def can_fuse_ple_mlp(self, x: torch.Tensor, per_layer_input: torch.Tensor) -> bool:
+        assert self.per_layer_input_gate is not None
+        assert self.per_layer_projection is not None
+        gate_w = self.per_layer_input_gate.weight
+        proj_w = self.per_layer_projection.weight
+        return (
+            envs.VLLM_ROCM_GEMMA4_FUSED_PLE
+            and x.dtype == torch.bfloat16
+            and gate_w.dtype == torch.bfloat16
+            and proj_w.dtype == torch.bfloat16
+            and gate_w.is_contiguous()
+            and proj_w.is_contiguous()
+            and per_layer_input.stride(-1) == 1
+            and gemma4_ple_mlp.supports(gate_w.shape[1], gate_w.shape[0])
+        )
+
     def _forward_fused_chain(
         self,
         positions: torch.Tensor,
@@ -830,9 +846,17 @@ class Gemma4DecoderLayer(nn.Module):
         residual = torch.ops.vllm.gemma4_post_ff_norm_add(
             mlp_out, residual, self.post_feedforward_layernorm.weight, eps
         )
-        gate = self.per_layer_input_gate(residual)
-        gate = torch.nn.functional.gelu(gate, approximate="tanh")
-        per_layer_contribution = self.per_layer_projection(gate * per_layer_input)
+        if self.can_fuse_ple_mlp(residual, per_layer_input):
+            gated = torch.ops.vllm.gemma4_ple_gate_act(
+                residual, self.per_layer_input_gate.weight, per_layer_input
+            )
+            per_layer_contribution = torch.ops.vllm.gemma4_ple_proj(
+                gated, self.per_layer_projection.weight
+            )
+        else:
+            gate = self.per_layer_input_gate(residual)
+            gate = torch.nn.functional.gelu(gate, approximate="tanh")
+            per_layer_contribution = self.per_layer_projection(gate * per_layer_input)
         has_next = next_input_norm_weight is not None
         hidden_states, next_normed = torch.ops.vllm.gemma4_ple_norm_add_scale(
             per_layer_contribution,

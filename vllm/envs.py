@@ -370,6 +370,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
     VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS: int = 136
     VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN: bool = True
+    VLLM_ROCM_GEMMA4_FUSED_PLE: bool = True
 
 
 def get_default_cache_root():
@@ -2495,6 +2496,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # in three row-wise Triton kernels
     "VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN": lambda: bool(
         int(os.getenv("VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN", "1"))
+    ),
+    # Gemma4 per-layer-input branch: gelu*mul in the epilogue of the gate GEMM (Triton) and a
+    # Triton projection GEMM at small token counts
+    "VLLM_ROCM_GEMMA4_FUSED_PLE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_GEMMA4_FUSED_PLE", "1"))
     ),
 }
 
