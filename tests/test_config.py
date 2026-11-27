@@ -2313,6 +2313,25 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+def test_engram_host_prefetch_rejects_dp_sharded_tables():
+    """Reject before model load: private DP tables and peer groups are sharded."""
+    parallel = ParallelConfig(data_parallel_size=2, distributed_executor_backend="mp")
+    EngramConfig(host_prefetch_threads=8, dp_shared_memory=True).verify_parallel_config(
+        parallel
+    )
+    with pytest.raises(ValueError, match="host_prefetch_threads"):
+        EngramConfig(
+            host_prefetch_threads=8, dp_shared_memory=False
+        ).verify_parallel_config(parallel)
+    with pytest.raises(ValueError, match="host_prefetch_threads.*peer_group_size"):
+        EngramConfig(
+            host_prefetch_threads=8,
+            cpu_offload=True,
+            peer_group_size=4,
+            peer_group_store="/shared/peers",
+        )
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",

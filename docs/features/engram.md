@@ -112,6 +112,36 @@ step's rows to the GPU before the forward, as
 [disk offload](#disk-offload-qwen4exp) does. Each DP replica then keeps its
 own table, even with `dp_shared_memory`.
 
+### Host row prefetch (DeepSeek V4.1)
+
+Set `--engram-config.host_prefetch_threads 8` to hash prompt tokens and gather
+CPU table rows in a background worker using eight Numba threads. The default
+is `0` (disabled). This requires CUDA, `cpu_offload`, tensor, pipeline and
+prefill context parallel sizes of 1, no `peer_group_size`, and, with data
+parallelism, `dp_shared_memory`. Other topologies are rejected at startup.
+
+Prefetch targets GPUs that read host memory over PCIe, where scattered row
+reads are slow and a bulk copy of gathered rows is much faster. Leave it
+disabled on NVLink-C2C systems such as GH200 and GB200: their GPUs already
+read host rows at far higher bandwidth, so prefetch would mostly add CPU
+gather work and host memory traffic.
+
+Prefetch applies to prompt-only steps larger than the maximum prefill CUDA
+graph capture size. Steps containing image markers or unknown token history
+use the regular lookup. The GPU reads a staged row only when its step marker
+and hash match; otherwise it reads the host table without waiting for the
+worker. When both staging slots are busy, that step also uses the regular
+lookup. CPU gather failures are logged and use the regular lookup for
+unpublished layers. CUDA errors are surfaced on the runner thread.
+
+Each rank reserves two slots in both pinned host memory and GPU memory.
+Per memory type, this costs approximately
+`2 × max_num_batched_tokens × sum_over_layers(hash_columns × (row_bytes + head_dim / 32 + 4))`
+bytes (`row_bytes` is `head_dim` for FP8 and `head_dim / 2` for MXFP4). With
+two FP8 layers, 24 columns, 256-byte rows, and 16,384 tokens, this is 402 MiB
+in each memory type. Gains depend on available CPU and host memory bandwidth;
+choose the thread count to leave capacity for the serving process.
+
 ## Disk offload (Qwen4Exp)
 
 `disk_offload` keeps Qwen4Exp PLE tables in the checkpoint files: no table

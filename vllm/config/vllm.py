@@ -1588,6 +1588,8 @@ class VllmConfig:
                 raise ValueError(
                     "Qwen4Exp Engram pool does not support weight transfer"
                 )
+        if self.engram_config.host_prefetch_threads and not current_platform.is_cuda():
+            raise ValueError("host_prefetch_threads requires CUDA")
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
