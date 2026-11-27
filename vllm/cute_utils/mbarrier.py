@@ -1,55 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from cutlass import cute
-from cutlass._mlir.dialects import nvvm
+from cutlass import Int32
+from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import dsl_user_op
 
-_SCOPE_MAP = {
-    "cta": nvvm.MemScopeKind.CTA,
-    "cluster": nvvm.MemScopeKind.CLUSTER,
-}
-
-_RELAXED_MAP = {
-    "relaxed": True,
-    "release": False,
-}
+_VALID_SPACES = ("cta", "cluster")
+_VALID_ORDERS = ("relaxed", "release")
 
 
-def _resolve_scope(space: str):
-    if space not in _SCOPE_MAP:
+def _validate(space: str, order: str) -> None:
+    if space not in _VALID_SPACES:
         raise ValueError(f"Unsupported mbarrier space: {space!r}")
-    return _SCOPE_MAP[space]
-
-
-def _resolve_relaxed(order: str) -> bool:
-    if order not in _RELAXED_MAP:
+    if order not in _VALID_ORDERS:
         raise ValueError(f"Unsupported mbarrier memory order: {order!r}")
-    return _RELAXED_MAP[order]
-
-
-def _to_mbar_ptr(mbar, space: str, *, loc=None, ip=None):
-    # Upstream NVVM mbarrier ops select .shared::cta vs .shared::cluster from
-    # the pointer address space (smem vs dsmem). Preserve cluster addressing
-    # when callers pass remote CTA pointers constructed in AddressSpace.smem.
-    if space == "cluster" and mbar.memspace != cute.AddressSpace.dsmem:
-        return cute.make_ptr(
-            mbar.dtype,
-            mbar.toint(loc=loc, ip=ip),
-            cute.AddressSpace.dsmem,
-            assumed_align=8,
-            loc=loc,
-            ip=ip,
-        )
-    return mbar
 
 
 @dsl_user_op
 def arrive(mbar, space: str = "cta", order: str = "relaxed", *, loc=None, ip=None):
-    cute.arch.mbarrier_arrive(
-        _to_mbar_ptr(mbar, space, loc=loc, ip=ip),
-        relaxed=_resolve_relaxed(order),
-        scope=_resolve_scope(space),
+    _validate(space, order)
+    clobber = ",~{memory}" if order != "relaxed" else ""
+    llvm.inline_asm(
+        None,
+        [Int32(mbar.toint(loc=loc, ip=ip)).ir_value(loc=loc, ip=ip)],
+        f"mbarrier.arrive.{order}.{space}.shared::{space}.b64 _, [$0];",
+        f"r{clobber}",
+        has_side_effects=True,
+        is_align_stack=False,
         loc=loc,
         ip=ip,
     )
@@ -59,11 +36,18 @@ def arrive(mbar, space: str = "cta", order: str = "relaxed", *, loc=None, ip=Non
 def arrive_expect_tx(
     mbar, size, space: str = "cta", order: str = "relaxed", *, loc=None, ip=None
 ):
-    cute.arch.mbarrier_arrive_and_expect_tx(
-        _to_mbar_ptr(mbar, space, loc=loc, ip=ip),
-        size,
-        relaxed=_resolve_relaxed(order),
-        scope=_resolve_scope(space),
+    _validate(space, order)
+    clobber = ",~{memory}" if order != "relaxed" else ""
+    llvm.inline_asm(
+        None,
+        [
+            Int32(mbar.toint(loc=loc, ip=ip)).ir_value(loc=loc, ip=ip),
+            Int32(size).ir_value(loc=loc, ip=ip),
+        ],
+        f"mbarrier.arrive.expect_tx.{order}.{space}.shared::{space}.b64 _, [$0], $1;",
+        f"r,r{clobber}",
+        has_side_effects=True,
+        is_align_stack=False,
         loc=loc,
         ip=ip,
     )
