@@ -32,7 +32,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -43,6 +43,10 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
+from vllm.v1.worker.gpu.sample.logits_processor import (
+    LogitsProcessor as LogitsProcessorV2,
+)
 from vllm.v1.worker.gpu.sample.logprob import (
     compute_topk_scores,
     concat_logprob_stashes,
@@ -55,6 +59,40 @@ from vllm.v1.worker.gpu.states import RequestState
 from .interfaces import SupportsPP, SupportsQuant
 
 logger = init_logger(__name__)
+
+
+class NemotronBidirectionalReadValidator(LogitsProcessorV2):
+    """Admits only single-token requests for bidirectional reads.
+
+    With `is_causal=False` in AR mode, the prompt is read in one bidirectional
+    forward without a KV cache, so later decode steps would not see it. The
+    model config registers this processor for that mode; it only checks
+    requests at admission and leaves logits unchanged.
+    """
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        if sampling_params.max_tokens != 1:
+            raise ValueError(
+                "Nemotron with is_causal=False scores the last prompt position "
+                "in one bidirectional forward and keeps no KV cache; set "
+                "max_tokens=1."
+            )
+        # Each prompt position attends to the tokens after it.
+        if (
+            sampling_params.prompt_logprobs is not None
+            or sampling_params.prompt_logprob_token_ids is not None
+        ):
+            raise ValueError(
+                "Nemotron with is_causal=False reads only the last prompt "
+                "position; prompt logprobs are not supported."
+            )
+
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        return False
+
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        return logits
 
 
 def _hf_yarn_get_mscale(scale: float, mscale: float = 1.0) -> float:
@@ -167,6 +205,13 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
 
     def get_model_state_cls(self):
         if self.ar_mode:
+            if not getattr(self.config, "is_causal", True):
+                # Bidirectional reads: encoder-only attention, no KV cache.
+                from vllm.v1.worker.gpu.model_states.encoder_only import (
+                    EncoderOnlyModelState,
+                )
+
+                return EncoderOnlyModelState
             from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
             return DefaultModelState
