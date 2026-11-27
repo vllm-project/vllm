@@ -847,6 +847,7 @@ class Worker(WorkerBase):
         pos_embed_cache_reserve = get_unallocated_pos_embed_cache_bytes(
             getattr(self.model_runner, "model", None)
         )
+        self.pos_embed_cache_reserve = pos_embed_cache_reserve
 
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
@@ -1205,6 +1206,7 @@ class Worker(WorkerBase):
                 self.total_consumed
                 + self.peak_activation_memory
                 + cuda_graph_memory_bytes
+                + getattr(self, "pos_embed_cache_reserve", 0)
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory

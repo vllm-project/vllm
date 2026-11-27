@@ -484,6 +484,94 @@ def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
     assert worker.cache_config.kv_cache_memory_bytes is None
 
 
+def test_pos_embed_cache_reserve_applied_to_kv_and_startup_plan(monkeypatch):
+    """Unallocated pos-embed cache reserve is subtracted from both the profiled
+    KV budget and the persisted startup-plan recommendation."""
+    from vllm.config import CompilationMode
+    from vllm.model_executor.models.vision import InterpolatedPosEmbedCache
+
+    reserve_bytes = 16 * (1 << 20)
+
+    class _ModelWithCache(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._abs_pos_cache = InterpolatedPosEmbedCache(max_bytes=reserve_bytes)
+
+    saved_plans: list[int] = []
+    compilation_config = SimpleNamespace(
+        mode=CompilationMode.NONE,
+        backend="",
+        cudagraph_mode=None,
+        compilation_time=0.0,
+        encoder_compilation_time=0.0,
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            kernel_config=SimpleNamespace(enable_jit_warmup=False),
+            compilation_config=compilation_config,
+        ),
+        compilation_config=compilation_config,
+        randomize_dummy_inputs=False,
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.9,
+            resolved_gpu_memory_utilization=0.9,
+            enable_extensible_kv_cache=False,
+        ),
+        model_config=SimpleNamespace(
+            multimodal_config=None,
+            enforce_eager=True,
+            is_attention_free=False,
+            seed=0,
+        ),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        model_runner=SimpleNamespace(
+            model=_ModelWithCache(),
+            profile_run=lambda **kwargs: None,
+            model_memory_usage=0,
+            lora_config=None,
+            maybe_remove_all_loras=lambda _cfg: None,
+            is_pooling_model=True,
+            capture_model=lambda: 0,
+        ),
+        init_snapshot=SimpleNamespace(
+            free_memory=80 * GiB_bytes, total_memory=80 * GiB_bytes
+        ),
+        requested_memory=72 * GiB_bytes,
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _maybe_activate_jit_monitor=lambda: None,
+    )
+    profile_result = SimpleNamespace(
+        after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
+        total_consumed=20 * GiB_bytes,
+        non_kv_cache_memory=20 * GiB_bytes,
+        transient_peak_headroom=0,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker,
+        "memory_profiling",
+        lambda *args, **kwargs: nullcontext(profile_result),
+    )
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker, "kernel_warmup", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "maybe_save_startup_plan", lambda _w, kv: saved_plans.append(kv)
+    )
+    monkeypatch.setattr(gpu_worker, "set_random_seed", lambda *_args: None)
+    monkeypatch.setattr(gpu_worker, "freeze_gc_heap", lambda: None)
+    monkeypatch.setattr(gpu_worker, "maybe_attach_gc_debug_callback", lambda: None)
+    monkeypatch.setattr(gpu_worker, "enable_gpu_sync_check", lambda: None)
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+    assert available == 52 * GiB_bytes - reserve_bytes
+
+    gpu_worker.Worker._compile_or_warm_up_model(worker)
+    redundancy_buffer = 150 * (1 << 20)
+    assert saved_plans == [52 * GiB_bytes - reserve_bytes - redundancy_buffer]
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch
