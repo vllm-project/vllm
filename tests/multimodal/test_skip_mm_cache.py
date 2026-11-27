@@ -228,7 +228,9 @@ class TestBuildEngineInputSkipMmCache:
             )
 
         serving._mm_tensor_refs.reader.validate.assert_called_once()
-        assert engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache
+        referenced_item = engine_input["mm_kwargs"]["image"][0]
+        assert referenced_item is not None
+        assert referenced_item["pixel_values"].skip_mm_cache
 
     @pytest.mark.asyncio
     async def test_completion_returns_single_engine_input(self):
