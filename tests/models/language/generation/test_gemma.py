@@ -206,6 +206,44 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
             assert np.allclose(normalizers, config.hidden_size**0.5, rtol=2e-3)
 
 
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("arch", "expected"),
+    [("Gemma4ForCausalLM", False), ("Gemma4ForConditionalGeneration", True)],
+)
+def test_gemma4_mm_prefix_follows_architecture(
+    vllm_runner, monkeypatch, arch: str, expected: bool
+) -> None:
+    """A text-only class cannot take multimodal inputs, so its attention
+    layers must not ask for mm_prefix support (#67161)."""
+    from vllm.model_executor.layers.attention.attention import Attention
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        with vllm_runner(
+            "google/gemma-4-E2B-it",
+            load_format="dummy",
+            max_model_len=1024,
+            enforce_eager=True,
+            # E2B's text config lacks the value the larger sizes ship.
+            hf_overrides={
+                "architectures": [arch],
+                "text_config": {"use_bidirectional_attention": "vision"},
+            },
+        ) as llm:
+            flags = llm.apply_model(
+                lambda model: sorted(
+                    {
+                        layer.use_mm_prefix
+                        for layer in model.modules()
+                        if isinstance(layer, Attention)
+                    }
+                )
+            )
+    assert flags == [[expected]]
+
+
 @multi_gpu_test(num_gpus=2)
 def test_gemma4_per_layer_embeddings_pipeline_parallel(
     vllm_runner, example_prompts, monkeypatch
