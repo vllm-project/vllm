@@ -530,6 +530,7 @@ class CudaGraphManager:
                         get_offloader().sync_prev_onload()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
+                            torch.accelerator.empty_cache()
                             free_before = torch.accelerator.get_memory_info()[0]
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
