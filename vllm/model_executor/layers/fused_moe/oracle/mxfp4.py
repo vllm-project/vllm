@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kInt4Static32,
     kMxfp4Dynamic,
@@ -542,7 +543,12 @@ def _resolve_activation_key(
     return user_override
 
 
-def _humming_input_schema(model_activation_key: QuantKey | None):
+def _humming_input_schema(
+    model_activation_key: QuantKey | None,
+    *,
+    hidden_size: int,
+    intermediate_size: int,
+):
     """Humming input schema for the checkpoint activation combined with the
     user override, or None to keep Humming's default (BF16 or the
     VLLM_HUMMING_INPUT_QUANT_CONFIG env override, which wins)."""
@@ -554,13 +560,20 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
         and _user_moe_activation_override() is None
         and current_platform.is_device_capability_family(90)
     ):
-        # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
-        # run a checkpoint's MXFP8 that way. An explicit request is honored.
-        logger.info_once(
-            "Running checkpoint MXFP8 MoE activations as block FP8 "
-            "(group 128) on Hopper."
-        )
-        activation_key = kFp8Dynamic128Sym
+        # SM90 WGMMA requires float32 activation scales. Use block FP8 only
+        # when both local GEMM inputs contain whole groups.
+        if hidden_size % 128 == 0 and intermediate_size % 128 == 0:
+            activation_key = kFp8Dynamic128Sym
+            logger.info_once(
+                "Running checkpoint MXFP8 MoE activations as block FP8 "
+                "(group 128) on Hopper."
+            )
+        else:
+            activation_key = kFp8DynamicTokenSym
+            logger.info_once(
+                "Running checkpoint MXFP8 MoE activations as per-token FP8 "
+                "on Hopper because local GEMM inputs are not group-128 aligned."
+            )
     from vllm.model_executor.layers.quantization.utils.humming import (
         quant_key_to_input_schema,
     )
@@ -1011,7 +1024,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "gpt_oss_mxfp4"},
-            input_schema=_humming_input_schema(None),
+            input_schema=_humming_input_schema(
+                None, hidden_size=hidden_size, intermediate_size=intermediate_size
+            ),
             allow_input_schema_fallback=False,
         )
         return (
@@ -1668,7 +1683,11 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
-            input_schema=_humming_input_schema(activation_key),
+            input_schema=_humming_input_schema(
+                activation_key,
+                hidden_size=w13_weight.shape[2] * 2,
+                intermediate_size=w13_weight.shape[1] // 2,
+            ),
             allow_input_schema_fallback=False,
         )
         return (
