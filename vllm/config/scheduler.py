@@ -348,6 +348,7 @@ class SchedulerConfig:
             "max_num_scheduled_tokens",
             "max_num_active_seqs",
             "max_num_inflight_kv_loads",
+            "max_async_kv_loads_per_step",
             "long_prefill_token_threshold",
             "long_prefill_token_threshold_adaptive",
             "pp_microbatch_min_tokens",
@@ -364,6 +365,8 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "cache_aware_admission_window",
+            "cache_aware_admission_threshold",
             "async_scheduling",
             "stream_interval",
         }
