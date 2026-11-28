@@ -1319,6 +1319,17 @@ class EngineCore:
                 warn_watermarking_override()
             params.watermarking = True
 
+        request_cache_salt = getattr(
+            self.vllm_config.model_config.hf_config, "request_cache_salt", None
+        )
+        if request_cache_salt is not None:
+            salt = request_cache_salt(
+                params.extra_args if params is not None else None, request.cache_salt
+            )
+            if salt != request.cache_salt:
+                request.cache_salt = salt
+                # Frontends may hash before applying model-specific semantics.
+                request.block_hashes = None
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes

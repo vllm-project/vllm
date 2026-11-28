@@ -234,6 +234,34 @@ steps:
       - pytest -v -s models/hy_v4/test_flash_dp_config.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
+- label: ":nvidia: (H100) Dory1.5 inference"
+  key: dory1-5-inference
+  timeout_in_minutes: 60
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/models/dory1_5.py
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/kernels/linear/mxfp8/marlin.py
+  - vllm/model_executor/kernels/linear/nvfp4/marlin.py
+  - vllm/transformers_utils/configs/dory1_5.py
+  - vllm/model_executor/layers/mamba/
+  - tests/models/test_dory1_5.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
+  - vllm/v1/worker/gpu/cudagraph_utils.py
+  - vllm/v1/worker/gpu/model_states/interface.py
+  - vllm/v1/attention/backends/gdn_attn.py
+  commands:
+    - pytest -v -s models/test_dory1_5.py -m "not slow_test"
+
+- label: ":nvidia: (H100) [Nightly] Dory1.5 inference"
+  key: dory1-5-inference-nightly
+  optional: true
+  timeout_in_minutes: 60
+  device: h100
+  commands:
+    - pytest -v -s models/test_dory1_5.py
+
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
   automatic_shard: true
@@ -649,6 +677,8 @@ steps:
   - tests/models/test_qwen3_5_mtp_config.py
   - tests/models/test_qwen3_5.py
   - tests/models/test_dory.py
+  - tests/models/test_dory1_5.py
+  - tests/transformers_utils/test_dory1_5_config.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
@@ -686,6 +716,8 @@ steps:
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
       models/test_dory.py
+      models/test_dory1_5.py::test_loop_table_reload_preserves_captured_storage
+      transformers_utils/test_dory1_5_config.py
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py

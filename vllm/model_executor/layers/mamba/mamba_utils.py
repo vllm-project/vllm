@@ -295,6 +295,34 @@ class MambaStateShapeCalculator:
         )
 
     @classmethod
+    def gated_delta_product_state_shape(
+        cls,
+        tp_world_size: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        num_householder: int,
+        conv_kernel_size: int,
+    ):
+        """Like the gated delta net state, but the conv covers `num_householder`
+        copies of the keys and values (plus one query)."""
+        conv_dim = (
+            num_householder * head_v_dim * num_v_heads
+            + (num_householder + 1) * head_k_dim * num_k_heads
+        )
+        conv_state_shape = cls._orient_conv_shape(
+            divide(conv_dim, tp_world_size),
+            conv_kernel_size - 1,
+        )
+        temporal_state_shape = (
+            divide(num_v_heads, tp_world_size),
+            head_v_dim,
+            head_k_dim,
+        )
+        return conv_state_shape, temporal_state_shape
+
+    @classmethod
     def kda_state_shape(
         cls,
         tp_world_size: int,

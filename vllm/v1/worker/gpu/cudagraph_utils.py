@@ -660,10 +660,21 @@ class ModelCudaGraphManager(CudaGraphManager):
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
         )
+        self.model_state: ModelState
+        self.variant_graphs: dict[
+            Hashable, dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph]
+        ] = {}
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+
+    def init_breakable_cg_runner(
+        self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
+    ) -> None:
+        super().init_breakable_cg_runner(
+            model, key_fn or (lambda *_, **__: self.model_state.cudagraph_variant)
+        )
 
     def capture(
         self,
@@ -680,6 +691,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
+        self.model_state = model_state
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
@@ -868,12 +880,22 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        for variant in model_state.cudagraph_variants():
+            model_state.cudagraph_variant = variant
+            self.graphs = self.variant_graphs.setdefault(variant, {})
+            super().capture(create_forward_fn, progress_bar_desc)
+
+    def release_graphs(self) -> None:
+        super().release_graphs()
+        for graphs in self.variant_graphs.values():
+            graphs.clear()
+        self.variant_graphs.clear()
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
+        self.graphs = self.variant_graphs[self.model_state.cudagraph_variant]
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
@@ -1096,6 +1118,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # they share the global pool at runtime, so the overlap is not
             # double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
+            num_full_graphs *= len(runner.model_state.cudagraph_variants())
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
             return max(measured - sum(mem_samples) + full_estimate, 0)
         finally:

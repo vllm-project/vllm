@@ -191,6 +191,12 @@ class InputProcessor:
                 )
 
             self.validate_logits_processors_params(params)
+            request_cache_salt = getattr(
+                self.model_config.hf_config, "request_cache_salt", None
+            )
+            if request_cache_salt is not None:
+                # Validate here for a useful frontend error; the engine salts once.
+                request_cache_salt(params.extra_args, None)
 
             if self.model_config.is_diffusion:
                 # Without --diffusion-config the served canvas is unknown here;

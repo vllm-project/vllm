@@ -127,6 +127,9 @@ class GDNAttentionMetadata:
         None  # shape: [batch - num_spec_decodes + 1,]
     )
 
+    # Host query starts are valid for prefills; decode-only tensors may be padded.
+    non_spec_query_start_loc_cpu: torch.Tensor | None = None
+
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
     non_spec_state_indices_tensor: torch.Tensor | None = (
         None  # shape: [batch - num_spec_decodes,]
@@ -784,6 +787,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_query_start_loc_cpu=(
+                non_spec_query_start_loc_cpu if num_prefills else None
+            ),
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,
