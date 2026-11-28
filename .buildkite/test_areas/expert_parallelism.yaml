@@ -13,6 +13,7 @@ steps:
   - tests/distributed/test_eplb_algo.py
   - tests/distributed/test_eplb_migration_scheduler.py
   - tests/distributed/test_eplb_utils.py
+  - vllm/v1/worker/sentinel/eplb_redistribute.py
   - tests/distributed/test_eplb_extension_hooks.py
   - vllm/config/parallel.py
   - vllm/platforms/interface.py
@@ -34,6 +35,7 @@ steps:
       - vllm/distributed/eplb
       - tests/distributed/test_eplb_algo.py
       - tests/distributed/test_eplb_utils.py
+      - vllm/v1/worker/sentinel/eplb_redistribute.py
       - tests/distributed/test_eplb_extension_hooks.py
       - vllm/config/parallel.py
       - vllm/platforms/interface.py
