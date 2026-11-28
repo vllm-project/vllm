@@ -3,6 +3,7 @@
 
 
 import itertools
+from collections.abc import Hashable, Sequence
 
 import torch
 from torch import nn
@@ -267,6 +268,48 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
+# Output slices of the Mamba2 input projection, in row order.
+MAMBA2_IN_PROJ_SLICES = ("z", "x", "B", "C", "dt")
+
+
+def mamba2_in_proj_group_name(group: Sequence[str]) -> str:
+    """`in_proj` for all slices, else e.g. `x_proj` or `z_B_C_dt_proj`."""
+    if len(group) == len(MAMBA2_IN_PROJ_SLICES):
+        return "in_proj"
+    return "_".join(group) + "_proj"
+
+
+def mamba2_in_proj_groups(
+    quant_config: QuantizationConfig | None, prefix: str
+) -> list[tuple[str, ...]]:
+    """Groups the in_proj slices by weight format, so each format runs as one
+    GEMM. Slices only differ in checkpoints that store them as separate tensors
+    (`z_proj`, `x_proj`, ...); otherwise there is one group, the usual in_proj."""
+    groups: dict[Hashable, list[str]] = {}
+    for name in MAMBA2_IN_PROJ_SLICES:
+        key = None
+        if quant_config is not None:
+            key = quant_config.get_linear_format(f"{prefix}.{name}_proj")
+        groups.setdefault(key, []).append(name)
+    return [tuple(group) for group in groups.values()]
+
+
+def mamba2_in_proj_stacked_mapping(
+    groups: Sequence[Sequence[str]], mixer_name: str = "mixer"
+) -> dict[str, tuple[str, int]]:
+    """`WeightsMapper.orig_to_new_stacked` entries that load per-slice tensors into
+    their group, e.g. `.mixer.C_proj.` -> (`.mixer.B_C_dt_proj.`, 1)."""
+    return {
+        f".{mixer_name}.{name}_proj.": (
+            f".{mixer_name}.{mamba2_in_proj_group_name(group)}.",
+            index,
+        )
+        for group in groups
+        if len(group) > 1
+        for index, name in enumerate(group)
+    }
+
+
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
 @PluggableLayer.register("mamba_mixer2")
@@ -353,6 +396,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
+        self.in_proj_groups = mamba2_in_proj_groups(quant_config, prefix)
+        if len(self.in_proj_groups) > 1 and n_groups % self.tp_size != 0:
+            raise ValueError(
+                "Mamba2 in_proj slices with different weight formats require the "
+                "tensor parallel size to divide n_groups."
+            )
+
         if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
                 input_size=conv_kernel_size,
@@ -366,19 +416,30 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.conv1d",
             )
 
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
-                    intermediate_size,
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                    self.num_heads,
-                ],
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
+            slice_sizes = dict(
+                zip(
+                    MAMBA2_IN_PROJ_SLICES,
+                    (
+                        intermediate_size,
+                        intermediate_size,
+                        self.groups_ssm_state_size,
+                        self.groups_ssm_state_size,
+                        self.num_heads,
+                    ),
+                )
             )
+            self._in_proj_local_sizes = {
+                name: size // self.tp_size for name, size in slice_sizes.items()
+            }
+            for group in self.in_proj_groups:
+                self._make_group(
+                    group,
+                    hidden_size,
+                    [slice_sizes[name] for name in group],
+                    use_bias,
+                    quant_config,
+                    prefix,
+                )
         else:
             # This is the n_groups == 1 case,
             # where we need to duplicate groups if TP>1.
@@ -605,13 +666,50 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
+    def _make_group(self, group, input_size, output_sizes, bias, quant_config, prefix):
+        name = mamba2_in_proj_group_name(group)
+        if len(group) == 1:
+            layer = ColumnParallelLinear(
+                input_size,
+                output_sizes[0],
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{name}",
+            )
+        else:
+            # The quant config resolves the group through its slices, unless it
+            # gives the group's own name the slices' format (a fused checkpoint).
+            if quant_config is not None and quant_config.get_linear_format(
+                f"{prefix}.{name}"
+            ) != quant_config.get_linear_format(f"{prefix}.{group[0]}_proj"):
+                quant_config.packed_modules_mapping[name] = [f"{s}_proj" for s in group]
+            layer = MergedColumnParallelLinear(
+                input_size=input_size,
+                output_sizes=output_sizes,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{name}",
+            )
+        setattr(self, name, layer)
+
+    def _project_in(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if len(self.in_proj_groups) == 1:
+            return self.in_proj(hidden_states)[0]
+        # Cut each group's output into its slices and restore row order.
+        slices: dict[str, torch.Tensor] = {}
+        for group in self.in_proj_groups:
+            output, _ = getattr(self, mamba2_in_proj_group_name(group))(hidden_states)
+            sizes = [self._in_proj_local_sizes[name] for name in group]
+            slices.update(zip(group, output.split(sizes, dim=-1)))
+        return torch.cat([slices[name] for name in MAMBA2_IN_PROJ_SLICES], dim=-1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
         # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
+        projected_states = self._project_in(hidden_states)
         if mup_vector is not None:
             projected_states = projected_states * mup_vector
 
