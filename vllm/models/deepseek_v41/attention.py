@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from vllm.models.deepseek_v41.nvidia.ops.candidate_indexer import (
         CandidateIndexer,
     )
+    from vllm.models.deepseek_v41.nvidia.ops.o_proj import HopperWoBGemmRs
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -506,7 +507,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
         # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
-        self.gemm_rs: GemmRsAr | None = None
+        self.gemm_rs: GemmRsAr | HopperWoBGemmRs | None = None
         # Set by the NVIDIA decoder layer from _shard_fused_wqa_wkv.
         self.shard_fused_wqa_wkv = False
 
@@ -845,7 +846,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     latent, cache_positions, self.indexer_rotary_emb
                 )
 
-    def bind_gemm_rs(self) -> None:
+    def bind_gemm_rs(self, gemm_rs: "GemmRsAr | HopperWoBGemmRs") -> None:
         """Fuse `wo_b` with the sequence-parallel TP reduce-scatter.
 
         The decoder layer calls this after the model initialized the
@@ -853,13 +854,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         eligibility check inspects the projection's linear kernel and weight
         shape, which online quantization may later re-layout.
         """
-        from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
-            get_gemm_rs_ar,
-        )
-
         # The layer owns the reduction under sequence parallel.
         assert not self.wo_b.reduce_results
-        gemm_rs = get_gemm_rs_ar()
         if gemm_rs.can_run(self.wo_b):
             self.gemm_rs = gemm_rs
         else:

@@ -140,9 +140,7 @@ class DSparkDeepseekV4Model(nn.Module):
         current_vllm_config = get_current_vllm_config()
         # The target model already holds the GEMM-RS workspace (same hidden
         # size, same TP group); this only re-checks and binds the draft layers.
-        run_gemm_rs = maybe_init_gemm_rs(
-            current_vllm_config, self.use_sequence_parallel
-        )
+        gemm_rs = maybe_init_gemm_rs(current_vllm_config, self.use_sequence_parallel)
         # SM80 and SM90 compute the draft layers' mHC coefficients on a side
         # stream too, as the target's.
         mhc_stream = (
@@ -165,7 +163,7 @@ class DSparkDeepseekV4Model(nn.Module):
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
-                    run_gemm_rs=run_gemm_rs,
+                    gemm_rs=gemm_rs,
                     mhc_stream=mhc_stream,
                     fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
                 )
