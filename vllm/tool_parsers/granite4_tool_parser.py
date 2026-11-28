@@ -80,13 +80,15 @@ class Granite4ToolParser(ToolParser):
         tool_calls = []
         for tc in tool_calls_json:
             assert isinstance(tc, dict)
-            self.prev_tool_call_arr.append(tc)
+            tc.setdefault("arguments", {})
             tool_calls.append(
                 cls(
                     name=tc["name"],
                     arguments=dump_args(tc["arguments"]),
                 )
             )
+        # Record the batch only once every call in it parsed.
+        self.prev_tool_call_arr.extend(tool_calls_json)
         return "".join(text_segments), tool_calls
 
     def extract_tool_calls(
