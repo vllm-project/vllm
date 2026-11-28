@@ -5,7 +5,7 @@
 Tests all fusion paths in _FUSED_ACT_QUANT:
 - kFp8StaticTensorSym: all platforms
 - kFp8Dynamic128Sym: CUDA only
-- kNvfp4Dynamic: CUDA SM100+ only
+- kNvfp4Dynamic: CUDA SM100+ only, SiluAndMul and GeluAndMul(approximate="tanh")
 """
 
 import pytest
@@ -26,7 +26,7 @@ from vllm.model_executor.kernels.linear import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     _FUSED_ACT_QUANT,
     maybe_fused_act_quant,
@@ -278,6 +278,7 @@ def test_manual_fusion_fp8_dynamic_128_with_cutlass_block_linear(
 # kernel launch grid.y > 1 (num_packed_cols = hidden_size / 16 > 512).
 @pytest.mark.parametrize("num_tokens", [1, 127, 128])
 @pytest.mark.parametrize("hidden_size", [256, 14336])
+@pytest.mark.parametrize("act_name", ["silu", "gelu_tanh"])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
@@ -286,15 +287,16 @@ def test_manual_fusion_fp8_dynamic_128_with_cutlass_block_linear(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
 def test_manual_fusion_nvfp4_dynamic(
-    dtype: torch.dtype, num_tokens: int, hidden_size: int
+    dtype: torch.dtype, num_tokens: int, hidden_size: int, act_name: str
 ):
     """Test kNvfp4Dynamic fusion path.
 
-    Compares fused (silu_and_mul_nvfp4_quant) vs unfused (silu_and_mul)
+    Compares fused (<act>_and_mul_nvfp4_quant) vs unfused (<act>_and_mul)
     by dequantizing the fused result and comparing with unfused.
     """
-    if (SiluAndMul, kNvfp4Dynamic) not in _FUSED_ACT_QUANT:
-        pytest.skip("kNvfp4Dynamic fusion not available")
+    act_types = {"silu": SiluAndMul, "gelu_tanh": GeluAndMul}
+    if (act_types[act_name], kNvfp4Dynamic) not in _FUSED_ACT_QUANT:
+        pytest.skip(f"kNvfp4Dynamic fusion not available for {act_name}")
 
     from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
 
@@ -314,20 +316,20 @@ def test_manual_fusion_nvfp4_dynamic(
     )
 
     with set_current_vllm_config(config):
-        silu_and_mul = SiluAndMul()
+        act_fn = SiluAndMul() if act_name == "silu" else GeluAndMul(approximate="tanh")
 
-        # Unfused path: just apply silu_and_mul
+        # Unfused path: just apply the activation
         mock_linear_no_key = torch.nn.Linear(hidden_size, hidden_size)
-        result_unfused = maybe_fused_act_quant(silu_and_mul, x, mock_linear_no_key)
+        result_unfused = maybe_fused_act_quant(act_fn, x, mock_linear_no_key)
         assert isinstance(result_unfused, torch.Tensor)
 
-        # Fused path: apply silu_and_mul + NVFP4 quantization
+        # Fused path: apply the activation + NVFP4 quantization
         mock_linear_with_key = MockLinearForFusion(
             kNvfp4Dynamic,
             input_global_scale=input_global_scale,
             input_global_scale_inv=input_global_scale_inv,
         )
-        result_fused = maybe_fused_act_quant(silu_and_mul, x, mock_linear_with_key)
+        result_fused = maybe_fused_act_quant(act_fn, x, mock_linear_with_key)
 
         # Verify fused result structure
         assert isinstance(result_fused, QuantizedActivation)
@@ -368,6 +370,50 @@ def test_manual_fusion_nvfp4_dynamic(
             atol=3e-1,
             rtol=3e-1,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
+)
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
+)
+def test_manual_fusion_nvfp4_exact_gelu_falls_back():
+    """GeluAndMul(approximate="none") has no fused NVFP4 kernel: the registry
+    row is keyed on the GeluAndMul type, so the support predicate must send the
+    exact GELU (and inputs the kernel cannot read, e.g. non-contiguous) down
+    the unfused path."""
+    if (GeluAndMul, kNvfp4Dynamic) not in _FUSED_ACT_QUANT:
+        pytest.skip("kNvfp4Dynamic fusion not available for gelu_tanh")
+
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(torch.bfloat16)
+    x = torch.rand(8, 512)
+    input_global_scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none"]),
+    )
+    with set_current_vllm_config(config):
+        mock_linear = MockLinearForFusion(
+            kNvfp4Dynamic,
+            input_global_scale=input_global_scale,
+            input_global_scale_inv=1.0 / input_global_scale,
+        )
+        result = maybe_fused_act_quant(GeluAndMul(approximate="none"), x, mock_linear)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (8, 256)
+
+        fused = maybe_fused_act_quant(GeluAndMul(approximate="tanh"), x, mock_linear)
+        assert isinstance(fused, QuantizedActivation)
+
+        x_strided = torch.rand(8, 1024)[:, :512]
+        result = maybe_fused_act_quant(
+            GeluAndMul(approximate="tanh"), x_strided, mock_linear
+        )
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (8, 256)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
