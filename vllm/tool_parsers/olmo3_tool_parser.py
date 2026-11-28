@@ -57,6 +57,9 @@ class Olmo3PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        # Leading prefix of <function_calls> withheld from the client.
+        # Released by finish_streaming if generation ends on that prefix.
+        self._held_prefix: str | None = None
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -140,7 +143,9 @@ class Olmo3PythonicToolParser(ToolParser):
         # But since this is streaming, we may have seen only part of the tag.
         start_tag = "<function_calls>"
         if start_tag.startswith(current_text):
+            self._held_prefix = current_text or None
             return None
+        self._held_prefix = None
         if not current_text.startswith(start_tag):
             # Release text withheld while it could still have been the tag.
             if start_tag.startswith(previous_text):
@@ -231,3 +236,10 @@ class Olmo3PythonicToolParser(ToolParser):
                 "Skipping chunk as a result of tool streaming extraction error"
             )
             return None
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        held = self._held_prefix
+        self._held_prefix = None
+        if not held:
+            return None
+        return DeltaMessage(content=held)

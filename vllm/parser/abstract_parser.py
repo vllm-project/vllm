@@ -1018,10 +1018,15 @@ class DelegatingParser(Parser):
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None
     ) -> DeltaMessage | None:
-        """Flush buffered state from engine-based parsers at stream end."""
+        """Flush buffered parser state at stream end.
+
+        Engine-based parsers buffer partial tags. Non-engine parsers can
+        too (olmo3 holds a prefix of ``<function_calls>``), so call
+        ``finish_streaming`` whenever the parser defines it.
+        """
         reasoning_ended = self._stream_state.reasoning_ended
         for parser in (self._reasoning_parser, self._tool_parser):
-            if not getattr(parser, "engine_based_streaming", False):
+            if parser is None:
                 continue
             # When reasoning has ended and we transitioned to the tool
             # phase, the reasoning parser's engine may still have buffered
