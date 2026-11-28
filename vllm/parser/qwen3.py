@@ -119,15 +119,18 @@ def _qwen3_parse_params(
 def _qwen3_arg_converter(
     raw_args: str, partial: bool, closed: _ClosedParams | None = None
 ) -> str:
-    params, open_param = _qwen3_parse_params(raw_args, partial, closed)
+    call_closed = raw_args.endswith(FUNC_END)
+    params, open_param = _qwen3_parse_params(
+        raw_args.removesuffix(FUNC_END), partial or call_closed, closed
+    )
     if open_param is not None and open_param.group(1):
         params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
 
     return json.dumps(params, ensure_ascii=False)
 
 
-# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
-_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=")
+# What ends an open value: a closing tag, the next opener or ``</function>``.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=|</function>")
 
 
 def _param_value_end_window(text: str) -> str:
@@ -292,7 +295,7 @@ def qwen3_config(
             ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                (EventType.TOOL_CALL_END,),
+                (EventType.ARG_VALUE_CHUNK, EventType.TOOL_CALL_END),
             ),
             # regression issue 58227
             # <function=abc>...<function=
