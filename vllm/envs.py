@@ -364,6 +364,11 @@ if TYPE_CHECKING:
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
+    VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT: bool = True
+    VLLM_ROCM_USE_FLYDSL_PTPC_GEMM: bool = True
+    VLLM_ROCM_FLYDSL_MX_MLP: bool = True
+    VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
+    VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS: int = 136
 
 
 def get_default_cache_root():
@@ -2459,6 +2464,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
         "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
     ).upper(),
+    # Fuse GeluAndMul(tanh) with the per-token FP8 quantization of the input of
+    # the FP8 down_proj that follows it (ROCm, Gemma-style MLPs)
+    "VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT", "1"))
+    ),
+    # FlyDSL per-token x per-channel FP8 GEMMs for the token counts where
+    # row-wise torch._scaled_mm is slow (ROCm gfx950, tuned shapes only)
+    "VLLM_ROCM_USE_FLYDSL_PTPC_GEMM": lambda: bool(
+        int(os.getenv("VLLM_ROCM_USE_FLYDSL_PTPC_GEMM", "1"))
+    ),
+    # Prefill-size FP8 gated MLP (gate_up GEMM with a fused GeLU*up + MX quant
+    # epilogue, then an MX down GEMM) through AITER's FlyDSL 8-wave kernels.
+    "VLLM_ROCM_FLYDSL_MX_MLP": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FLYDSL_MX_MLP", "1"))
+    ),
+    # Smallest token count that takes the fused MX MLP path.
+    "VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS", "1024")
+    ),
+    # Smallest token count (up to 256) that takes the decode-size fused MX MLP (128 x 160-hidden
+    # gate_up tiles with the GeLU*up + MX quant epilogue, MX down); 0 disables it and its extra
+    # weight copy.
+    "VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS", "136")
+    ),
 }
 
 
