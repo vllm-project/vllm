@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -754,19 +754,14 @@ class ResponsesRequest(OpenAIBaseModel):
         validate_cache_salt(data.get("cache_salt"))
         return data
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_background(cls, data):
-        if not isinstance(data, dict):
-            return data
-        if not data.get("background"):
-            return data
-        if not data.get("store", True):
+    @model_validator(mode="after")
+    def validate_background(self) -> Self:
+        if self.background and not self.store:
             raise VLLMValidationError(
                 "background can only be used when `store` is true",
                 parameter="background",
             )
-        return data
+        return self
 
     @model_validator(mode="before")
     @classmethod

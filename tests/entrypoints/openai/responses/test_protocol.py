@@ -17,6 +17,25 @@ from vllm.exceptions import VLLMValidationError
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def test_foreground_request_can_disable_storage_after_normalization() -> None:
+    request = ResponsesRequest.model_validate(
+        {"input": "hello", "background": "false", "store": False}
+    )
+
+    assert request.background is False
+    assert request.store is False
+
+
+@pytest.mark.parametrize("store", [False, None])
+def test_background_request_requires_storage(store: bool | None) -> None:
+    with pytest.raises(
+        VLLMValidationError, match="background can only be used when `store` is true"
+    ) as exc_info:
+        ResponsesRequest(input="hello", background=True, store=store)
+
+    assert exc_info.value.parameter == "background"
+
+
 def test_serialize_message() -> None:
     dict_value = {"a": 1, "b": "2"}
     assert serialize_message(dict_value) == dict_value

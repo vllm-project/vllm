@@ -16,12 +16,14 @@ async def test_store(client: openai.AsyncOpenAI):
     response = await client.responses.retrieve(response.id)
     assert response.status == "completed"
 
-    # Test store=False.
+    # The server normalizes the background flag before validating it.
     response = await client.responses.create(
         input="Hello!",
         store=False,
+        extra_body={"background": "false"},
     )
     assert response.status == "completed"
+    assert response.background is False
 
     # The response should not be found.
     with pytest.raises(openai.NotFoundError, match="Response with id .* not found."):
