@@ -117,6 +117,15 @@ def _reshape_cache_int4_kernel(
     k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
     k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
 
+    # V is loaded before K is stored so that both loads are in flight together.
+    half_v = head_size_v // 2
+    even_v_mask = even_offs < head_size_v
+    odd_v_mask = odd_offs < head_size_v
+    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
+
+    v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
+    v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
+
     k_min = tl.minimum(
         tl.min(tl.where(even_k_mask, k_even, float("inf"))),
         tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
@@ -125,38 +134,17 @@ def _reshape_cache_int4_kernel(
         tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
         tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
     )
+    # The 4-bit zero-point only fits ranges that contain zero.
+    k_min = tl.minimum(k_min, 0.0)
+    k_max = tl.maximum(k_max, 0.0)
     k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
-    k_zp_f = tl.clamp(
-        tl.where(
-            -k_min / k_scale >= 0,
-            (-k_min / k_scale + 0.5).to(tl.int32),
-            (-k_min / k_scale - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    k_zp_f = tl.clamp((-k_min / k_scale + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     inv_k = 1.0 / k_scale
     k_even_s = k_even * inv_k + k_zp_f
     k_odd_s = k_odd * inv_k + k_zp_f
-    k_even_q = tl.clamp(
-        tl.where(
-            k_even_s >= 0,
-            (k_even_s + 0.5).to(tl.int32),
-            (k_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_odd_q = tl.clamp(
-        tl.where(
-            k_odd_s >= 0,
-            (k_odd_s + 0.5).to(tl.int32),
-            (k_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    k_even_q = tl.clamp((k_even_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
+    k_odd_q = tl.clamp((k_odd_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     k_zp_int = k_zp_f.to(tl.int32)
     k_scale_bits = k_scale.to(tl.int32, bitcast=True)
@@ -183,14 +171,6 @@ def _reshape_cache_int4_kernel(
         mask=half_offs < half_k,
     )
 
-    half_v = head_size_v // 2
-    even_v_mask = even_offs < head_size_v
-    odd_v_mask = odd_offs < head_size_v
-    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
-
-    v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
-    v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
-
     v_min = tl.minimum(
         tl.min(tl.where(even_v_mask, v_even, float("inf"))),
         tl.min(tl.where(odd_v_mask, v_odd, float("inf"))),
@@ -199,38 +179,17 @@ def _reshape_cache_int4_kernel(
         tl.max(tl.where(even_v_mask, v_even, float("-inf"))),
         tl.max(tl.where(odd_v_mask, v_odd, float("-inf"))),
     )
+    # The 4-bit zero-point only fits ranges that contain zero.
+    v_min = tl.minimum(v_min, 0.0)
+    v_max = tl.maximum(v_max, 0.0)
     v_scale = tl.maximum((v_max - v_min) / 15.0, 1e-6)
-    v_zp_f = tl.clamp(
-        tl.where(
-            -v_min / v_scale >= 0,
-            (-v_min / v_scale + 0.5).to(tl.int32),
-            (-v_min / v_scale - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    v_zp_f = tl.clamp((-v_min / v_scale + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     inv_v = 1.0 / v_scale
     v_even_s = v_even * inv_v + v_zp_f
     v_odd_s = v_odd * inv_v + v_zp_f
-    v_even_q = tl.clamp(
-        tl.where(
-            v_even_s >= 0,
-            (v_even_s + 0.5).to(tl.int32),
-            (v_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    v_odd_q = tl.clamp(
-        tl.where(
-            v_odd_s >= 0,
-            (v_odd_s + 0.5).to(tl.int32),
-            (v_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    v_even_q = tl.clamp((v_even_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
+    v_odd_q = tl.clamp((v_odd_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     v_zp_int = v_zp_f.to(tl.int32)
     v_scale_bits = v_scale.to(tl.int32, bitcast=True)

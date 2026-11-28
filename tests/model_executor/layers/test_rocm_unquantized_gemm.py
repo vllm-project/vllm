@@ -403,3 +403,35 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x_view = wvsplitkrc_mock.call_args.args[0]
     assert x_view.is_contiguous()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("cu_count,takes_wvsplitkrc", [(256, True), (128, False)])
+def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_fits_reported_cus(
+    monkeypatch, cu_count, takes_wvsplitkrc
+):
+    """Measured on a real 128-CU partition, a full-device grid there is slower."""
+    # Needs 192 CUs: the full MI355X has 256, a DPX partition reports 128.
+    x = torch.randn(16, 2048, dtype=torch.float16)
+    weight = torch.randn(3072, 2048, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: cu_count)
+
+    wvsplitkrc_mock = MagicMock(
+        side_effect=lambda x_view, w, _, bias: torch.nn.functional.linear(
+            x_view, w, bias
+        )
+    )
+    monkeypatch.setattr(utils.ops, "wvSplitKrc", wvsplitkrc_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    grids = [call.args[2] for call in wvsplitkrc_mock.call_args_list]
+    assert grids == ([cu_count] if takes_wvsplitkrc else [])
+    assert torch.equal(out, ref)

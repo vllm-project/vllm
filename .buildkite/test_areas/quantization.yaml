@@ -17,6 +17,7 @@ steps:
   - vllm/transformers_utils/model_arch_config_convertor.py
   - vllm/models/deepseek_v41/quant_config.py
   - vllm/utils/humming.py
+  - vllm/v1/attention/ops/int4_per_token_head.py
   - tests/quantization
   - tests/single_rank_group.py
   - requirements/test/quantization_deps_cuda.txt
@@ -43,6 +44,7 @@ steps:
       - vllm/model_executor/layers/quantization
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/utils.py
+      - vllm/v1/attention/ops/int4_per_token_head.py
       - tests/quantization
       - tests/single_rank_group.py
       - vllm/_aiter_ops.py
