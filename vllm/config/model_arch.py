@@ -65,6 +65,10 @@ class ModelArchitectureConfig:
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""
 
+    mm_prefix_whole_prompt: bool = False
+    """Whether the PrefixLM bidirectional block is the whole prompt rather than
+    the image spans only (e.g. PaliGemma)."""
+
     per_layer_overrides: "list[dict[str, Any]] | None" = None
     """Per-layer values for the fields that vary, `None` unless some field does.
 
