@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3 8.2B dense model with hybrid thinking/non-thinking modes, validated for BF16 serving on Intel Xeon 6."
   date_added: 2026-08-14
-  date_updated: 2026-09-12
+  date_updated: 2026-11-04
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
@@ -57,6 +57,9 @@ variants:
 compatible_strategies:
   - single_node_tp
   - multi_node_tp
+
+kv_offload_support:
+  iaxl: verified
 
 hardware_overrides:
   cpu:
