@@ -390,12 +390,17 @@ def _make_jpeg_b64_frames(n: int, width: int = 8, height: int = 8) -> list[str]:
     return frames
 
 
-def test_load_base64_jpeg_returns_metadata():
+@pytest.mark.parametrize(
+    "fps_kwargs", [{}, {"fps": 0}, {"fps": -1}], ids=["unset", "fps0", "fps-1"]
+)
+def test_load_base64_jpeg_returns_metadata(fps_kwargs: dict):
     """Regression test: load_base64 with video/jpeg must return metadata.
 
     Previously, base64 JPEG frame sequences returned an empty dict for
     metadata, which broke downstream consumers that rely on fields like
     total_num_frames and fps. See PR #37301.
+
+    fps <= 0 is treated as unset, so it must give the same metadata.
     """
     num_test_frames = 3
 
@@ -403,7 +408,7 @@ def test_load_base64_jpeg_returns_metadata():
     data = ",".join(b64_frames)
 
     imageio = ImageMediaIO()
-    videoio = VideoMediaIO(imageio, num_frames=num_test_frames)
+    videoio = VideoMediaIO(imageio, num_frames=num_test_frames, **fps_kwargs)
     frames, metadata = videoio.load_base64("video/jpeg", data)
 
     # Frames array shape: (num_frames, H, W, 3)
@@ -477,6 +482,15 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
     videoio = VideoMediaIO(imageio, num_frames=0)
 
     with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
+        videoio.load_base64("video/jpeg", data)
+
+
+@pytest.mark.parametrize("fps", [float("nan"), float("inf"), float("-inf")])
+def test_load_base64_jpeg_raises_on_non_finite_fps(fps: float):
+    data = ",".join(_make_jpeg_b64_frames(3))
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=3, fps=fps)
+
+    with pytest.raises(ValueError, match="fps must be a finite number"):
         videoio.load_base64("video/jpeg", data)
 
 
