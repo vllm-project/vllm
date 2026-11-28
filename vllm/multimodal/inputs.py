@@ -144,6 +144,9 @@ class PlaceholderRange:
     """
     A boolean mask of shape `(length,)` indicating which positions
     between `offset` and `offset + length` to assign embeddings to.
+
+    The engine rejects a request whose `length` is negative or whose mask
+    is not `None` or a 1-D bool tensor of this shape.
     """
 
     @cached_property
