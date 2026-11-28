@@ -12,14 +12,17 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
 from ..conftest import AudioTestAssets, VllmRunner
+from ..models.registry import HF_EXAMPLE_MODELS
 from ..models.utils import check_logprobs_close
 from ..utils import create_new_process_for_each_test
 
-MODEL_PATH = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
+MODEL_PATH = hf_api().snapshot_download(
+    "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+)
 AUDIO_LORA_PATH = os.path.join(MODEL_PATH, "speech-lora")
 IMAGE_LORA_PATH = os.path.join(MODEL_PATH, "vision-lora")
 
-AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assistant|>"  # noqa: E501
+AUDIO_PROMPT = "<|user|><|audio|>Can you transcribe this audio?<|end|><|assistant|>"
 
 # Responses are greedy decoded; we just check the end of
 # the generated text. If the lora is inactive, this model
@@ -29,7 +32,6 @@ NUM_LOGPROBS = 5
 
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
-    "trust_remote_code": True,
     "dtype": "half",
     "enable_lora": "True",
     "max_num_seqs": 2,
@@ -40,6 +42,17 @@ VLLM_RUNNER_BASE_KWARGS = {
     "limit_mm_per_prompt": {"audio": 1},
     "enforce_eager": True,
 }
+
+
+@pytest.fixture(autouse=True)
+def _check_transformers_version():
+    HF_EXAMPLE_MODELS.get_hf_info(
+        "Phi4MultimodalForCausalLM"
+    ).check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
 
 def run_test(

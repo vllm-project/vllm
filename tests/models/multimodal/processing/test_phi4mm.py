@@ -7,6 +7,7 @@ import pytest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
 
 
@@ -31,8 +32,13 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Phi4MMMultiModalProcessor handles dynamic_hd properly."""
-    # Avoid initializing CUDA early
-    from vllm.model_executor.models.phi4mm import _IMAGE_PLACEHOLDER_TOKEN_ID
+    HF_EXAMPLE_MODELS.get_hf_info(
+        "Phi4MultimodalForCausalLM"
+    ).check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     ctx = build_model_context(
         model_id,
@@ -42,11 +48,10 @@ def test_processor_override(
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
-    # Build the image str / prompt based on the number of images we pass
-    img_str = "".join([f"<|image_{idx}|>\n" for idx in range(1, num_imgs + 1)])
+    img_str = "<|image|>\n" * num_imgs
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
 
-    image_size = ctx.get_hf_config().embd_layer["image_embd_layer"]["crop_size"]
+    image_size = ctx.get_hf_config().vision_config.crop_size
     dummy_image_size = (image_size * 7, image_size * 7)
     dummy_image = image_assets[0].pil_image.resize(dummy_image_size)
     mm_data = {"image": [dummy_image] * num_imgs}
@@ -58,7 +63,6 @@ def test_processor_override(
     )
 
     # Ensure we have the right number of placeholders per num_crops size
-    img_tok_count = processed_inputs["prompt_token_ids"].count(
-        _IMAGE_PLACEHOLDER_TOKEN_ID
-    )
+    image_token_id = ctx.get_hf_config().image_token_id
+    img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     assert img_tok_count == expected_toks_per_img * num_imgs

@@ -597,7 +597,6 @@ _MULTIMODAL_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4ForCausalLMV": ("phi4siglip", "Phi4ForCausalLMV"),
-    "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),
     "QianfanOCRForConditionalGeneration": (
         "qianfan_ocr",
@@ -848,6 +847,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "transformers",
         "TransformersMultiModalForTranscription",
     ),
+    "Phi4MultimodalForCausalLM": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForTranscription",
@@ -923,7 +926,6 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MllamaForConditionalGeneration": "0.10.2",
     "MotifForCausalLM": "0.10.2",
     "Phi4FlashForCausalLM": "0.10.2",
-    "Phi4MultimodalForCausalLM": "0.12.0",
     "JAISLMHeadModel": "0.22.0",
     "BaiChuanForCausalLM": "0.23.0",
     "BaichuanForCausalLM": "0.23.0",
@@ -981,6 +983,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MambaForCausalLM": "0.34.0",
     "TeleFLMForCausalLM": "0.34.0",
     "DbrxForCausalLM": "0.34.0",
+    "Phi4MMForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

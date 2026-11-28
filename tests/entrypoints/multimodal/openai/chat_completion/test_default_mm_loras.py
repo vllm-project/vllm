@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from tests.conftest import AudioTestAssets
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import RemoteOpenAIServer
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -17,7 +18,7 @@ from vllm.transformers_utils.repo_utils import hf_api
 
 # Contains a modality specific lora alongside the base model
 MULTIMODAL_MODEL_NAME = hf_api().snapshot_download(
-    "microsoft/Phi-4-multimodal-instruct"
+    "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
 )
 AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
 
@@ -26,6 +27,13 @@ ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original 
 
 @pytest.fixture(scope="module")
 def multimodal_server():
+    HF_EXAMPLE_MODELS.get_hf_info(
+        "Phi4MultimodalForCausalLM"
+    ).check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -41,7 +49,6 @@ def multimodal_server():
         "320",
         "--max-num-seqs",
         "2",
-        "--trust-remote-code",
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
@@ -78,12 +85,12 @@ async def test_default_mm_lora_chat_completions(
             "role": "user",
             "content": [
                 {
-                    "type": "text",
-                    "text": "Can you transcribe this audio?",
-                },
-                {
                     "type": "audio_url",
                     "audio_url": {"url": audio_assets[0].url},
+                },
+                {
+                    "type": "text",
+                    "text": "Can you transcribe this audio?",
                 },
             ],
         }
