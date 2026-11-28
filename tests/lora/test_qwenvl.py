@@ -7,6 +7,7 @@ import pytest
 import vllm
 from tests.conftest import VllmRunner
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
@@ -336,3 +337,69 @@ def test_qwen2vl_multiple_lora_types(
                 lora_id=lora_id,
                 lora_name="vision_tower",
             )
+
+
+def test_qwen2vl_tower_lora_image_and_video_in_one_step(
+    qwen2vl_vision_tower_connector_lora_files,
+    qwen2vl_vision_tower_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An image and a video scheduled in the same step are encoded by separate
+    `embed_multimodal` calls. Each call must use only its own items' tower and
+    connector LoRA mapping, instead of crashing or using the other request's
+    adapter."""
+    # In-process engine core: both requests are queued before the first step.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    video_prompt = Qwen2VLTester.PROMPT_TEMPLATE.replace(
+        "<|image_pad|>", "<|video_pad|>"
+    ).replace("image", "video")
+    prompts = [
+        {
+            "prompt": Qwen2VLTester.PROMPT_TEMPLATE,
+            "multi_modal_data": {"image": ImageAsset("cherry_blossom").pil_image},
+        },
+        {
+            "prompt": video_prompt,
+            "multi_modal_data": {
+                "video": VideoAsset("baby_reading", num_frames=8).np_ndarrays
+            },
+        },
+    ]
+    lora_paths = [
+        qwen2vl_vision_tower_connector_lora_files,
+        qwen2vl_vision_tower_lora_files,
+    ]
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=5)
+    next_lora_id = iter(range(1, 100))
+
+    with VllmRunner(
+        model_name=QWEN2VL_MODEL_PATH,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=32,
+        enable_tower_connector_lora=True,
+        mm_processor_cache_gb=0,
+        enable_prefix_caching=False,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+        max_model_len=8192,
+        gpu_memory_utilization=0.85,
+    ) as runner:
+
+        def generate(indices: list[int]) -> list[str]:
+            # Fresh adapter ids, so the encoder cache never serves an item.
+            lora_requests = []
+            for i in indices:
+                lora_id = next(next_lora_id)
+                lora_requests.append(LoRARequest(str(lora_id), lora_id, lora_paths[i]))
+            outputs = runner.get_llm().generate(
+                [prompts[i] for i in indices],
+                sampling_params,
+                lora_request=lora_requests,
+                use_tqdm=False,
+            )
+            return [output.outputs[0].text.strip() for output in outputs]
+
+        image_output, video_output = generate([0, 1])
+        assert EXPECTED_OUTPUTS_VISION[1].startswith(image_output)
+        assert video_output == generate([1])[0]
