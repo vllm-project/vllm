@@ -128,3 +128,54 @@ def test_clear_layer_kv_caches_drops_view_cache(monkeypatch):
 
     assert impl._kv_view_cache is None
     assert kv_cache_ref() is None
+
+
+def test_clear_cached_views_releases_views_and_rebuilds(monkeypatch):
+    impl = _make_impl(monkeypatch, kv_cache_dtype="fp8")
+    kv_cache = _make_kv_cache(dtype=torch.uint8)
+    views = impl._split_kv_cache(kv_cache, use_typed=True)
+    view_refs = tuple(weakref.ref(view) for view in views)
+    del views
+
+    impl._clear_cached_views()
+
+    assert all(view_ref() is None for view_ref in view_refs)
+    rebuilt = impl._split_kv_cache(kv_cache, use_typed=True)
+    assert rebuilt[0].data_ptr() == kv_cache.data_ptr()
+
+
+def test_composite_clear_cached_views_releases_child_views():
+    from vllm.v1.attention.backends.composite import (
+        MMPrefixAttentionRouting,
+        create_composite_attention_backend,
+    )
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    backend = create_composite_attention_backend(
+        AiterFlashAttentionBackend,
+        TritonAttentionBackend,
+        name="ViewCacheCompositeBackend",
+        backend_name="CUSTOM",
+        module=__name__,
+        routing_policy=MMPrefixAttentionRouting,
+    )
+    impl = backend.get_impl_cls()(
+        num_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        scale=HEAD_SIZE**-0.5,
+        num_kv_heads=NUM_KV_HEADS,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    cache = _make_kv_cache()
+    view_refs = [
+        weakref.ref(child._cached_kv_views(cache, lambda tensor: tensor.unbind(0))[0])
+        for child in impl.get_impl_variants()
+    ]
+    assert all(view_ref() is not None for view_ref in view_refs)
+
+    impl._clear_cached_views()
+
+    assert all(view_ref() is None for view_ref in view_refs)

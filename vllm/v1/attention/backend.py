@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
 import numpy as np
 import torch
@@ -404,6 +405,7 @@ class AttentionMetadata:
 
 
 T = TypeVar("T", bound=AttentionMetadata)
+_KVViews = TypeVar("_KVViews")
 
 
 @dataclass(slots=True)
@@ -788,6 +790,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
+    _kv_view_cache: tuple[torch.Tensor, int, Any] | None = None
 
     # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
     # impls without one run the top-k MQA path for all requests. Impls may
@@ -874,6 +877,24 @@ class AttentionImplBase(ABC, Generic[T]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
+
+    def _cached_kv_views(
+        self, kv_cache: torch.Tensor, build: Callable[[torch.Tensor], _KVViews]
+    ) -> _KVViews:
+        """Cache one backend-defined view bundle per tensor and storage address."""
+        cache = self._kv_view_cache
+        data_ptr = kv_cache.data_ptr()
+        if cache is None or cache[0] is not kv_cache or cache[1] != data_ptr:
+            views = build(kv_cache)
+            self._kv_view_cache = (kv_cache, data_ptr, views)
+            return views
+        return cast(_KVViews, cache[2])
+
+    def _clear_cached_views(self) -> None:
+        self._kv_view_cache = None
+        for impl in self.get_impl_variants():
+            if impl is not self:
+                impl._clear_cached_views()
 
     def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
         return (self,)
