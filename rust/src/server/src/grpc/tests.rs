@@ -939,8 +939,8 @@ async fn grpc_llm_uses_worker_default_with_frontend_aliases() {
     let mut frontend =
         crate::serve_tests::server_config(dir.path(), &dir.path().join("frontend.sock"));
     frontend.served_model_name = vec!["chat".into(), "test-model".into()];
-    let remote = crate::RemoteGrpcConfig::new(format!("http://{addr}"), None).unwrap();
-    let state = crate::build_state(&frontend, crate::LlmSource::RemoteGrpc(remote))
+    let llm = GrpcLlm::from_url(format!("http://{addr}"), 512.try_into().unwrap()).unwrap();
+    let state = crate::build_state(&frontend, crate::LlmSource::Provided(Box::new(llm)))
         .await
         .unwrap();
     let mut stream = state.llm().generate(grpc_llm_request()).await.unwrap();

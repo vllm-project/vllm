@@ -64,7 +64,6 @@ pub use vllm_llm::AdmissionLimits;
 use vllm_llm::{EngineCoreLlm, Llm};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
-pub use vllm_remote_llm::RemoteGrpcConfig;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
@@ -166,10 +165,6 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             )
             .await?;
             (Box::new(llm), Some((engine_core, server_info)))
-        }
-        LlmSource::RemoteGrpc(remote_grpc_config) => {
-            let llm = remote_grpc_config.into_llm(text_backend.as_ref())?;
-            (Box::new(llm), None)
         }
         LlmSource::Provided(llm) => (llm, None),
     };
@@ -278,8 +273,6 @@ pub enum LlmSource {
     /// The server connects to engine-core and serves it through an
     /// [`EngineCoreLlm`].
     EngineCore(EngineCoreConfig),
-    /// Connect to the worker's vLLM gRPC endpoint.
-    RemoteGrpc(RemoteGrpcConfig),
     /// A caller-built `Llm`, such as a router over several engines or a client
     /// for a remote one. The server treats it as opaque, even when it is an
     /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core

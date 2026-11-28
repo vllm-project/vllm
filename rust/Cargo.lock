@@ -5742,6 +5742,7 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
+ "vllm-remote-llm",
  "vllm-server",
  "vllm-text",
  "vllm-tracing",
@@ -5904,7 +5905,6 @@ dependencies = [
 name = "vllm-remote-llm"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "asynk-strim-attr",
  "futures",
  "prost-types",
@@ -5918,7 +5918,6 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-proto",
- "vllm-text",
 ]
 
 [[package]]

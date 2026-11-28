@@ -11,7 +11,7 @@ use serde::Serialize;
 use thiserror_ext::AsReport as _;
 
 use super::HfOverrides;
-use super::config::{HfTokenizerConfig, load_tokenizer_config};
+use super::config::{HfTokenizerConfig, ModelConfig, load_model_config, load_tokenizer_config};
 use crate::error::{Error, Result};
 
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
@@ -75,6 +75,17 @@ pub struct ModelFileSources {
     pub hf_token: Option<HfToken>,
 }
 
+impl ModelFileSources {
+    /// Load just the model config from its configured source.
+    pub async fn model_config(&self, overrides: &HfOverrides) -> Result<ModelConfig> {
+        let source = self.hf_config.as_ref().unwrap_or(&self.model);
+        let files = SourceFiles::open(source, RequiredFile::Config, self.hf_token.as_ref()).await?;
+        let path = files.config_path(self.hf_config.as_ref()).await?;
+        let patched = patched_config_path(path.as_deref(), overrides)?;
+        load_model_config(patched.as_deref().or(path.as_deref()))
+    }
+}
+
 /// Concrete tokenizer/config file locations resolved for one HF model id.
 #[derive(Debug, Clone)]
 pub struct ResolvedModelFiles {
@@ -97,17 +108,10 @@ pub struct ResolvedModelFiles {
 impl ResolvedModelFiles {
     /// Materialize a merge-patched config owned by these resolved model files.
     pub fn apply_overrides(&mut self, overrides: &HfOverrides) -> Result<()> {
-        if overrides.is_empty() {
-            return Ok(());
+        if let Some(path) = patched_config_path(self.config_path.as_deref(), overrides)? {
+            self.config_path = Some(path.to_path_buf());
+            self.config_temp_path = Some(Arc::new(path));
         }
-        let path = materialize_config(self.config_path.as_deref(), overrides).map_err(|error| {
-            Error::Tokenizer(format!(
-                "failed to materialize HF overrides: {}",
-                error.as_report()
-            ))
-        })?;
-        self.config_path = Some(path.to_path_buf());
-        self.config_temp_path = Some(Arc::new(path));
         Ok(())
     }
 
@@ -171,16 +175,7 @@ impl ResolvedModelFiles {
         };
         let config_files = config_files.as_ref().unwrap_or(&model_files);
 
-        let config_path = config_files.get("config.json").await?;
-        if config_path.is_none()
-            && let Some(source) = hf_config
-        {
-            return Err(Error::Tokenizer(format!(
-                "config source '{}' at revision '{}' does not contain config.json",
-                source.id,
-                source.revision.as_deref().unwrap_or("main"),
-            )));
-        }
+        let config_path = config_files.config_path(hf_config.as_ref()).await?;
 
         Ok(Self {
             tokenizer,
@@ -196,6 +191,21 @@ impl ResolvedModelFiles {
             config_temp_path: None,
         })
     }
+}
+
+fn patched_config_path(
+    path: Option<&Path>,
+    overrides: &HfOverrides,
+) -> Result<Option<tempfile::TempPath>> {
+    if overrides.is_empty() {
+        return Ok(None);
+    }
+    materialize_config(path, overrides).map(Some).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to materialize HF overrides: {}",
+            error.as_report()
+        ))
+    })
 }
 
 fn materialize_config(
@@ -247,6 +257,20 @@ enum SourceFiles {
 }
 
 impl SourceFiles {
+    async fn config_path(&self, explicit_source: Option<&ModelSource>) -> Result<Option<PathBuf>> {
+        let path = self.get("config.json").await?;
+        if path.is_none()
+            && let Some(source) = explicit_source
+        {
+            return Err(Error::Tokenizer(format!(
+                "config source '{}' at revision '{}' does not contain config.json",
+                source.id,
+                source.revision.as_deref().unwrap_or("main"),
+            )));
+        }
+        Ok(path)
+    }
+
     /// Open a local model directory when `source` points to one, otherwise a
     /// cached snapshot that contains `required`, and finally the Hub.
     async fn open(

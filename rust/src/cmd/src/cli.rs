@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
@@ -44,7 +45,7 @@ use vllm_server::{
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode,
     LlmSource, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RemoteGrpcConfig, RenderConfig, RendererSelection, Server, ServerConfig,
+    RenderConfig, RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -1524,20 +1525,21 @@ impl ServeArgs {
         self.runtime.server_config(listener_mode, grpc_listener_mode)
     }
 
-    pub(super) fn to_remote_grpc_config(&self, url: &str) -> anyhow::Result<RemoteGrpcConfig> {
-        let max_model_len = match self.managed_engine.max_model_len.as_deref() {
-            Some(value) => {
-                let Some(limit) = parse_human_readable_int(value)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .and_then(NonZeroU32::new)
-                else {
-                    anyhow::bail!("remote --max-model-len must be a positive token count");
-                };
-                Some(limit)
-            }
-            None => None,
-        };
-        RemoteGrpcConfig::new(url.to_owned(), max_model_len)
+    pub(super) async fn remote_max_model_len(&self) -> anyhow::Result<NonZeroU32> {
+        if let Some(value) = self.managed_engine.max_model_len.as_deref() {
+            return parse_human_readable_int(value)
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(NonZeroU32::new)
+                .context("remote --max-model-len must be a positive token count");
+        }
+        let sources = self.runtime.model_args().file_sources();
+        let limit = sources
+            .model_config(&self.runtime.hf_overrides)
+            .await?
+            .max_model_len()?
+            .context("config.json has no context length; pass --max-model-len")?;
+        NonZeroU32::new(limit)
+            .context("invalid context length in config.json: expected a positive token count")
     }
 
     pub(super) fn to_engine_core_config(
