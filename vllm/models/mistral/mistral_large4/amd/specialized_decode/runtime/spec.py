@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 
+import vllm.envs as envs
 from vllm.config import CompilationMode, VllmConfig
 
 AUTO, SPECIALIZED = "auto", "latency_specialized"
@@ -18,10 +18,25 @@ MAX_ROWS = 12
 SPEC_METHODS = ("dspark",)
 
 
+def on_cdna3() -> bool:
+    """CDNA3, MI300X / MI325X (gfx942): TP8 kernels, FP8 (FNUZ) routed experts
+    read in place. Otherwise CDNA4, MI355X (gfx950): TP4 kernels on MXFP4 a4w4
+    routed experts."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 3
+
+
 @dataclass(frozen=True)
 class DecodeConfig:
-    tp_size: int = 4  # the fused indexer's q_b split needs 16 local heads
-    blocks: int = 256  # one CTA per CU, all co-resident
+    # gfx950: 16 local heads at TP4; gfx942: 8 local heads at TP8, where the
+    # 1 TB of FP8 weights fit at 125 GB a GPU
+    tp_size: int = 4
+    blocks: int = 256  # one CTA per CU (gfx942: 256 of its 304), all co-resident
     # rows a launch serves (one decode token per request): vLLM's FULL-graph
     # capture sizes, so graph replays pad decode batches to them; eager steps
     # of other sizes and batches above 4 rows run stock. The 8-row launch
@@ -67,6 +82,9 @@ class DecodeConfig:
             reasons.append("does not support a KV connector")
         spec = config.speculative_config
         if spec is not None:
+            if on_cdna3():
+                # the TP8 verify launch (q > 1 rows a request) is not validated
+                reasons.append("does not support speculative decoding on gfx942")
             if getattr(spec, "method", None) not in SPEC_METHODS:
                 reasons.append(
                     "supports only " + "/".join(SPEC_METHODS) + " speculative decoding"
@@ -89,9 +107,15 @@ class DecodeConfig:
         if getattr(aux, "enable_return_routed_experts", False):
             reasons.append("does not support routed-expert capture")
         quant = config.model_config.quantization
-        if quant == "fp8" and (
-            os.environ.get("VLLM_FP8_MOE_REQUANT", "").lower() != "mxfp4"
-            or os.environ.get("VLLM_FP8_MOE_REQUANT_ACT", "a8w4").lower() != "a4w4"
+        requant = envs.VLLM_FP8_MOE_REQUANT.lower()
+        if on_cdna3():
+            if requant != "none":
+                reasons.append(
+                    "reads the block-FP8 routed experts in place on gfx942 "
+                    "(VLLM_FP8_MOE_REQUANT must be none)"
+                )
+        elif quant == "fp8" and (
+            requant != "mxfp4" or envs.VLLM_FP8_MOE_REQUANT_ACT.lower() != "a4w4"
         ):
             reasons.append(
                 "requires MXFP4 a4w4 routed experts (VLLM_FP8_MOE_REQUANT=mxfp4 "
@@ -100,7 +124,7 @@ class DecodeConfig:
         return reasons
 
 
-DECODE_CONFIG = DecodeConfig()
+DECODE_CONFIG = DecodeConfig(tp_size=8) if on_cdna3() else DecodeConfig(tp_size=4)
 
 
 def decode_backend(config: VllmConfig) -> str:

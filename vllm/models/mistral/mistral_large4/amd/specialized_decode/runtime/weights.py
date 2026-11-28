@@ -3,11 +3,14 @@
 """One MoE decoder layer's kernel arguments, built from the loaded vLLM modules.
 
 Attention / indexer / router weights are repacked into the kernels' tiled
-formats (copies). The routed experts are read in place: vLLM's AITER a4w4 MXFP4
-storage (aiter `shuffle_weight` values, `e8m0_shuffle` scales) is the
-kernels' ATOM layout. The shared expert, a separate block-FP8 MLP in vLLM, is
-re-quantized to MXFP4 the way `VLLM_FP8_MOE_REQUANT` quantizes the routed
-experts and passed through its own pointers.
+formats (copies). The routed experts are read in place. On gfx950 that is
+vLLM's AITER a4w4 MXFP4 storage (aiter `shuffle_weight` values, `e8m0_shuffle`
+scales), the kernels' ATOM layout. The shared expert, a separate block-FP8 MLP
+in vLLM, is re-quantized to MXFP4 the way `VLLM_FP8_MOE_REQUANT` quantizes the
+routed experts and passed through its own pointers. On gfx942 the routed
+experts stay block-FP8 (FNUZ) in AITER's MoE storage (`shuffle_weight` values,
+[N / 128, K / 128] fp32 scales), and the shared expert is copied into that
+layout.
 """
 
 from dataclasses import dataclass
@@ -32,11 +35,18 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weigh
     pack_bf16,
     pack_fp8,
 )
+from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.spec import (
+    on_cdna3,
+)
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.variants import (
     KernelVariant,
 )
+from vllm.platforms import current_platform
 
-FP8 = torch.float8_e4m3fn
+GFX942 = on_cdna3()
+# vLLM's FP8 weights after load: FNUZ on gfx942 (largest finite 240)
+FP8 = current_platform.fp8_dtype()
+FP8_MAX = torch.finfo(FP8).max
 N_ROUTED = 128
 INDEX_HEADS = 32
 INDEX_DIM = 128
@@ -112,17 +122,21 @@ def check_moe_layer(layer, npes: int = 4) -> None:
         raise MonoUnsupported("MoE layer without a shared expert")
     _fp8_param(layer.mlp.shared_experts.gate_up_proj)
     _fp8_param(layer.mlp.shared_experts.down_proj)
-    _routed_experts(layer.mlp.experts)
+    if GFX942:
+        _routed_experts_fp8(layer.mlp.experts)
+    else:
+        _routed_experts(layer.mlp.experts)
 
 
 def _q128(w: torch.Tensor, block_cols: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
-    """bf16/fp32 [r, c] -> (fp8, fp32 scale per 128 x block_cols block), amax / 448."""
+    """bf16/fp32 [r, c] -> (fp8, fp32 scale per 128 x block_cols block),
+    amax / FP8_MAX."""
     r, c = w.shape
     w = w.float()
     wp = F.pad(w, (0, (-c) % block_cols, 0, (-r) % 128))
     b = wp.view(wp.shape[0] // 128, 128, wp.shape[1] // block_cols, block_cols)
-    s = b.abs().amax((1, 3)).clamp_min(1e-12) / 448.0
-    q = (b / s[:, None, :, None]).clamp(-448, 448).view_as(wp)[:r, :c].to(FP8)
+    s = b.abs().amax((1, 3)).clamp_min(1e-12) / FP8_MAX
+    q = (b / s[:, None, :, None]).clamp(-FP8_MAX, FP8_MAX).view_as(wp)[:r, :c].to(FP8)
     return q.contiguous(), s.contiguous()
 
 
@@ -195,6 +209,60 @@ def _routed_experts(experts) -> dict[str, torch.Tensor]:
         if key.startswith("w"):
             v.is_shuffled = True  # aiter shuffle_weight layout (backend checked above)
         out[key] = v
+    return out
+
+
+def _shared_expert_fp8(mlp) -> dict[str, torch.Tensor]:
+    """The shared expert's block-FP8 weights in the routed experts' AITER
+    storage (`_routed_experts_fp8`): a copy of the values through aiter's
+    `shuffle_weight`, the scales as they are."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    ug, s_ug = _fp8_param(mlp.gate_up_proj)  # rows [gate; up], as w13
+    dn, s_dn = _fp8_param(mlp.down_proj)
+    w13, w2 = rocm_aiter_ops.shuffle_weights(ug[None], dn[None])
+    return {
+        "w_ug_sh": w13.contiguous(),
+        "w_dn_sh": w2.contiguous(),
+        "s_ug_sh": s_ug,
+        "s_dn_sh": s_dn,
+    }
+
+
+def _routed_experts_fp8(experts) -> dict[str, torch.Tensor]:
+    """Views of vLLM's block-FP8 routed-expert storage on AITER (no copy):
+    `shuffle_weight` 16x16 values and fp32 [N / 128, K / 128] scales an
+    expert."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
+    experts = getattr(experts, "routed_experts", experts)  # shared-expert wrapper
+    method = getattr(experts, "quant_method", None)
+    method = getattr(method, "old_quant_method", method)  # modular-kernel wrapper
+    backend = getattr(method, "fp8_backend", None)
+    if backend != Fp8MoeBackend.AITER:
+        raise MonoUnsupported(
+            f"routed experts on {backend} ({type(experts).__name__}/"
+            f"{type(method).__name__}); mono reads AITER block-FP8 storage"
+        )
+    out = {}
+    for name, key in (
+        ("w13_weight", "w_ug"),
+        ("w13_weight_scale_inv", "s_ug"),
+        ("w2_weight", "w_dn"),
+        ("w2_weight_scale_inv", "s_dn"),
+    ):
+        t = getattr(experts, name).data
+        if t.shape[0] != N_ROUTED or not t.is_contiguous():
+            raise MonoUnsupported(f"{name} {tuple(t.shape)}")
+        if key.startswith("w"):
+            if t.dtype != FP8:
+                raise MonoUnsupported(f"{name}: expected {FP8}, got {t.dtype}")
+            t.is_shuffled = True  # aiter shuffle_weight layout (backend checked above)
+        else:
+            n, k = getattr(experts, name[: -len("_scale_inv")]).shape[-2:]
+            if t.dtype != torch.float32 or tuple(t.shape[1:]) != (n // 128, k // 128):
+                raise MonoUnsupported(f"{name} {t.dtype} {tuple(t.shape)}")
+        out[key] = t
     return out
 
 
@@ -274,17 +342,22 @@ def build_moe_layer(layer, variant: KernelVariant, rank: int, npes: int) -> MoeL
         t["b_index_k"] = ix.k_norm.bias.float().contiguous()
     t["g_q"] = prm
 
-    t.update(_routed_experts(layer.mlp.experts))
-    shared = layer.mlp.shared_experts
-    if shared is None:
+    if layer.mlp.shared_experts is None:
         raise MonoUnsupported("MoE layer without a shared expert")
-    t.update(_shared_expert_mxfp4(shared))
+    elif GFX942:
+        t.update(_routed_experts_fp8(layer.mlp.experts))
+        t.update(_shared_expert_fp8(layer.mlp.shared_experts))
+        layouts: dict[str, Any] = {}
+    else:
+        t.update(_routed_experts(layer.mlp.experts))
+        t.update(_shared_expert_mxfp4(layer.mlp.shared_experts))
+        layouts = dict(
+            mxfp4_weight_layout=Mxfp4WeightLayout.ATOM,
+            mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
+        )
 
     W = LayerWeights(
-        nh, t, C, rank, npes,
-        mxfp4_weight_layout=Mxfp4WeightLayout.ATOM,
-        mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
-        physical_experts=N_ROUTED,
+        nh, t, C, rank, npes, physical_experts=N_ROUTED, **layouts
     )  # fmt: skip
     packed = variant.op.prepare_ml4_weights(W, "fp8_block128")
     if ix is not None:

@@ -18,6 +18,7 @@ from dataclasses import replace
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weights.config import (  # noqa: F401  (re-exported)
     EPS,
     FP8_MAX,
+    INDEX_FP8_MAX,
     MAX_LAYERS_PER_STEP,
     MOE_FORMATS,
     SCALE_BM,

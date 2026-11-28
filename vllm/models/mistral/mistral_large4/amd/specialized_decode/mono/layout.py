@@ -8,6 +8,10 @@
 import math
 import os
 
+from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.device.arch import (
+    GFX942,
+)
+
 from .geometry import (
     BLOCKS,
     Q_B_TILE,
@@ -133,7 +137,9 @@ def paged_row_contract(
 INDEX_CP_TILE = 4096
 INDEX_RADIX_DIGITS = 4
 INDEX_RADIX_BINS = 256
-INDEX_LOCAL_LDS_CAPACITY = 16384
+# Keys (one f32 score each) a select task stages in LDS: 64 KB on gfx950,
+# 32 KB of gfx942's 64 KB.
+INDEX_LOCAL_LDS_CAPACITY = 8192 if GFX942 else 16384
 
 
 def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
@@ -160,7 +166,8 @@ def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
 # The tree ends at the level holding a single list.  This is DeepSeek-V4.1's
 # design (``atom/models/deepseek_v41/mono/index_plan.py:95-154``) at these
 # constants: INDEX_SEG 16384, topk 2048 -> fan 8 -> two merge levels reach
-# 16384 * 8 * 8 = 1048576, with no LDS beyond today's.
+# 16384 * 8 * 8 = 1048576, with no LDS beyond today's.  gfx942's INDEX_SEG
+# 8192 has fan 4: two levels reach 131072, three 524288.
 INDEX_SEG = INDEX_LOCAL_LDS_CAPACITY
 
 
@@ -252,8 +259,10 @@ def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
 
 
 def sparse_keys_per_task(samples: int, heads: int = WAVES) -> int:
-    """Use narrower sparse tiles when samples or attention heads fill LDS."""
-    return 32 if heads > 2 * WAVES or (heads == WAVES and samples > 4) else 64
+    """Use narrower sparse tiles when samples or attention heads fill LDS.
+    gfx942's 64 KB of LDS holds 32 keys' latent and k_pe tiles (47 KB with 8
+    heads' q), not 64 (85 KB)."""
+    return 32 if GFX942 or heads > 2 * WAVES or (heads == WAVES and samples > 4) else 64
 
 
 def sample_wave_batches(samples: int) -> int:
