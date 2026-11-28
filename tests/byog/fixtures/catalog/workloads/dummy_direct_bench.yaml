@@ -1,0 +1,11 @@
+schema_version: 1
+name: dummy_direct_bench
+kind: benchmark
+description: Test-only direct benchmark fixture exercising DirectRunContext.
+execution_mode: direct
+lifecycle: none
+platforms: [nvidia]
+entrypoint: tests.byog.fake_launcher:DummyDirectBenchmark
+protocol_version: "1.0"
+defaults: {}
+allowed_params: []

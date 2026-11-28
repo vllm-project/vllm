@@ -1,0 +1,7 @@
+schema_version: 1
+name: test_all
+description: Test-only suite combining dummy server and direct benchmarks.
+benchmarks:
+  - type: dummy_server_bench
+  - type: dummy_direct_bench
+evals: []

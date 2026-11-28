@@ -1,0 +1,15 @@
+schema_version: 1
+name: dummy_server_bench
+kind: benchmark
+description: Test-only HTTP benchmark fixture exercising ServerRunContext and reset_cache.
+execution_mode: server
+lifecycle: reset_cache
+platforms: [nvidia]
+entrypoint: tests.byog.fake_launcher:DummyServerBenchmark
+protocol_version: "1.0"
+defaults:
+  concurrency: [1]
+  sleep_s: 0.0
+allowed_params:
+  - concurrency
+  - sleep_s

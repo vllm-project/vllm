@@ -1,0 +1,21 @@
+schema_version: 1
+name: phase0-gpu-smoke-qwen25-1.5b
+serve:
+  config:
+    model: Qwen/Qwen2.5-1.5B-Instruct
+    revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+    tensor-parallel-size: 1
+    max-model-len: 4096
+    gpu-memory-utilization: 0.85
+  env:
+    VLLM_LOGGING_LEVEL: INFO
+hardware:
+  gpu: [h200]
+  count: 1
+  nodes: 1
+evals:
+  - name: gsm8k
+    num_questions: 20
+    concurrency: [1, 4]
+    repeats: 1
+timeout_s: 600
