@@ -42,6 +42,64 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Scheduling and CUDA Graph Compatibility
+
+Async scheduling and CUDA graph capture are separate settings. Async scheduling
+overlaps CPU scheduling with GPU execution; CUDA graphs reduce GPU launch
+overhead. Disabling one does not require disabling the other.
+
+The following table describes the current upstream GPU model runner. A method
+still needs a supported target model, attention backend, and hardware platform;
+acceptance by configuration validation alone does not establish that support.
+
+| Method | Async scheduling | CUDA graphs required? | Additional weights |
+| --- | --- | --- | --- |
+| `ngram`, `ngram_gpu` | Compatible; both select the GPU n-gram proposer | No; the proposer launches kernels directly | None |
+| `suffix` | Compatible; uses the GPU suffix proposer | No; the proposer launches kernels directly | None |
+| `draft_model` | Compatible | No; autoregressive draft decode uses full graphs when available, otherwise eager execution | Separate draft model |
+| `eagle`, `eagle3` | Compatible | No; autoregressive draft decode uses full graphs when available, otherwise eager execution | Target-compatible EAGLE checkpoint |
+| `mtp` | Compatible | No | Native MTP weights, or an assistant checkpoint for models that require one; see [MTP](mtp.md) |
+| `dflash`, `dspark` | Compatible | No | Target-compatible draft weights; DSpark can reuse the target checkpoint |
+
+When `--async-scheduling` is omitted, vLLM enables it unless another setting
+prevents it. For example, an executor that does not support async scheduling
+causes automatic disabling with a warning, while explicitly passing
+`--async-scheduling` with that executor raises an error. Pooling models also
+default to synchronous scheduling. Use `--no-async-scheduling` to select
+synchronous scheduling explicitly.
+
+CUDA graph availability depends on the model and attention backend. Use
+`--enforce-eager` to disable graph capture. In autoregressive drafting, piecewise
+graphs for the target do not imply piecewise graphs for draft decode: the
+draft decode path uses full graphs or falls back to eager execution. See
+[CUDA Graphs](../../design/cuda_graphs.md) for graph modes.
+
+### Older Releases and Platform Plugins
+
+Some older releases, including the v0.30/v0.32 configurations reported in
+[#69832](https://github.com/vllm-project/vllm/issues/69832), use a CPU-side
+`ngram` proposer and restrict which speculative methods support async
+scheduling. In those releases, omitting `--async-scheduling` can disable async
+scheduling with a warning, while explicitly enabling it raises an error.
+The current GPU n-gram implementation described above does not have that
+method restriction.
+
+If startup fails with an error listing the speculative methods allowed with
+async scheduling:
+
+1. Pass `--no-async-scheduling` explicitly to keep the selected speculative
+   method and use synchronous scheduling.
+2. To keep async scheduling with n-gram speculation, use `"method": "ngram_gpu"`
+   if your installed release and platform support it. Changing the method name
+   does not add GPU proposer support to a platform plugin.
+3. Check the documentation for your installed vLLM version and platform plugin
+   before copying a recipe. In particular, upstream CUDA graph support does not
+   establish graph support on Ascend or another out-of-tree platform.
+
+If configuration succeeds but model loading or graph capture fails later,
+check the selected method's model and backend requirements. Disabling async
+scheduling does not resolve an unsupported draft model or attention backend.
+
 ## DSpine
 
 DSpine drafts tokens in parallel with adjacent causal injection and
