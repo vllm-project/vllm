@@ -67,12 +67,17 @@ class UnlimitedOCR2Renderer(HfRenderer):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         self._validate_prompt(prompt)
         return self._validate_result(
             super().process_for_engine(
-                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                arrival_time,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
         )
 
@@ -82,11 +87,16 @@ class UnlimitedOCR2Renderer(HfRenderer):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         self._validate_prompt(prompt)
         return self._validate_result(
             await super().process_for_engine_async(
-                prompt, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+                prompt,
+                arrival_time,
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+                tok_params=tok_params,
             )
         )

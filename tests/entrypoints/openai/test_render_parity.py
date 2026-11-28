@@ -122,6 +122,7 @@ class RenderCapture:
             *,
             prompt_extras=None,
             skip_mm_cache=False,
+            mm_metadata_only=False,
         ):
             assert len(conversations) == 1
             self.captured = CapturedRenderInputs(

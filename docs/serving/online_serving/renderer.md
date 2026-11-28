@@ -224,6 +224,15 @@ should split those fields:
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
 
+With `"metadata"` and `"none"`, Qwen2-VL, Qwen2.5-VL and Qwen3-VL compute
+image grids from the image size and skip the pixel transform. This only
+changes the render response, and generate requests are processed as before.
+The full image processor still runs for requests with videos or image
+embeddings, array or tensor images, images sent with a UUID while the
+processor cache is on, image options such as `max_pixels` in the request or the
+server config, or an image processor that does not resize or convert to RGB.
+Results computed from the image size are not stored in the processor cache.
+
 Choose the mode by where the media goes after render: through the render
 response to the workers (`"tensors"`), straight from the client to the encode
 worker (`"metadata"`), or to whichever worker a router picks (`"none"`).

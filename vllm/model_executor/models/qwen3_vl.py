@@ -96,7 +96,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalUUIDItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -158,6 +158,7 @@ from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
+    image_grids_from_sizes,
 )
 from .qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM, Qwen3Model
 from .utils import (
@@ -1345,6 +1346,14 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    def _apply_hf_processor_metadata_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+        mm_uuids: MultiModalUUIDItems | None,
+    ) -> BatchFeature | None:
+        return image_grids_from_sizes(self.info, mm_items, hf_kwargs, mm_uuids)
+
     def _get_per_video_kwargs(
         self, kwargs: Mapping[str, object], num_videos: int | None = None
     ) -> dict[str, list[Any]]:

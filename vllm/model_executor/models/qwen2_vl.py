@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor, Qwen2VLProcessor
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
@@ -76,10 +77,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
+    ImageProcessorItems,
     ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -1285,7 +1288,117 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         }
 
 
+# Models whose image grids match the HF processor when computed from the image size.
+# Other models reuse these processor classes and are not covered.
+_METADATA_ONLY_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
+)
+# `do_normalize` and `do_rescale` are set by vLLM for device normalization.
+# Any other image option, including size ones, goes through the HF processor.
+# Transformers versions resolve call-time size options differently.
+_METADATA_ONLY_KWARGS = frozenset({"do_normalize", "do_rescale"})
+
+
+def image_grids_from_sizes(
+    info: Qwen2VLProcessingInfo,
+    mm_items: MultiModalDataItems,
+    hf_kwargs: Mapping[str, object],
+    mm_uuids: MultiModalUUIDItems | None = None,
+) -> BatchFeature | None:
+    """Compute `image_grid_thw` from image sizes, without the pixel transform.
+
+    Returns `None` when the full HF processor is needed: other models or
+    modalities, image embeddings, array or tensor images, images sent only by
+    UUID, any image option such as `max_pixels`, or an image processor that
+    does not resize or patchifies differently from the vision config.
+    """
+    if info.get_hf_config().model_type not in _METADATA_ONLY_MODEL_TYPES:
+        return None
+    images = mm_items.get("image")
+    if (
+        set(mm_items) != {"image"}
+        or not isinstance(images, ImageProcessorItems)
+        or len(images) == 0
+    ):
+        return None
+
+    # An image sent only by UUID has no size here and may be served from the cache.
+    if any(images.get(idx) is None for idx in range(len(images))):
+        return None
+    # With a cache, a UUID may be reused later without the image.
+    # That needs a cache entry, which only the full path creates.
+    if mm_uuids is not None and any(
+        uuid is not None for uuid in mm_uuids.get("image") or ()
+    ):
+        return None
+    # HF may read an array or tensor as CHW where vLLM reads HWC.
+    if not all(isinstance(images.get(idx), Image.Image) for idx in range(len(images))):
+        return None
+
+    try:
+        merged_kwargs = info._merge_and_resolve_mm_processor_kwargs(hf_kwargs)
+    except Exception:
+        # Let the HF processor path report malformed options.
+        return None
+    # Other scopes, such as `common_kwargs`, may also reach the image processor.
+    if set(merged_kwargs) - {"images_kwargs", "videos_kwargs"}:
+        return None
+    # The HF processor validates every scope's values, even without videos.
+    for scope_kwargs in merged_kwargs.values():
+        if (
+            not isinstance(scope_kwargs, Mapping)
+            or set(scope_kwargs) - _METADATA_ONLY_KWARGS
+            or not all(isinstance(value, bool) for value in scope_kwargs.values())
+        ):
+            return None
+
+    vision_config = info.get_hf_config().vision_config
+    patch_size = vision_config.patch_size
+    image_processor = info.get_image_processor()
+    # The grid assumes the processor resizes and patchifies like the vision config.
+    # A saved channel layout can make HF read the image dimensions differently.
+    # Without RGB conversion, HF rejects images that are not RGB.
+    if (
+        not getattr(image_processor, "do_resize", True)
+        or not getattr(image_processor, "do_convert_rgb", True)
+        or getattr(image_processor, "input_data_format", None) is not None
+        or getattr(image_processor, "patch_size", patch_size) != patch_size
+        or getattr(image_processor, "merge_size", vision_config.spatial_merge_size)
+        != vision_config.spatial_merge_size
+    ):
+        return None
+    # The HF processor rejects a saved size without both pixel bounds.
+    size = image_processor.size
+    if not (size.get("shortest_edge") and size.get("longest_edge")):
+        return None
+    grids = []
+    for idx in range(len(images)):
+        image_size = images.get_image_size(idx)
+        try:
+            resized, _ = info._get_vision_info(
+                image_width=image_size.width,
+                image_height=image_size.height,
+                image_processor=image_processor,
+                mm_kwargs=hf_kwargs,
+                modality="image",
+            )
+        except ValueError:
+            # Let the HF processor raise its own error.
+            return None
+        grids.append([1, resized.height // patch_size, resized.width // patch_size])
+
+    return BatchFeature({"image_grid_thw": torch.tensor(grids, dtype=torch.long)})
+
+
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
+    def _apply_hf_processor_metadata_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+        mm_uuids: MultiModalUUIDItems | None,
+    ) -> BatchFeature | None:
+        return image_grids_from_sizes(self.info, mm_items, hf_kwargs, mm_uuids)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

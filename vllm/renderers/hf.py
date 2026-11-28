@@ -1464,6 +1464,7 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> TokensInput | MultiModalInput:
         """Pre-expand `prompt_embeds` sentinels before delegating to the MM
         processor, then attach `prompt_embeds` modality data to the result.
@@ -1477,14 +1478,18 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         """
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is None:
-            return super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
+            return super()._process_tokens(
+                prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
+            )
 
         tensors, placeholder_token_id = prompt_embeds_info
         mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
         cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
             list(prompt["prompt_token_ids"]), mm_updates
         )
-        engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
+        engine_input = super()._process_tokens(
+            prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
+        )
         self._apply_prompt_embeds_to_engine_input(
             cast(MultiModalInput, engine_input),
             tensors,
@@ -1499,12 +1504,13 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        mm_metadata_only: bool = False,
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is None:
             return await super()._process_tokens_async(
-                prompt, skip_mm_cache=skip_mm_cache
+                prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
             )
 
         tensors, placeholder_token_id = prompt_embeds_info
@@ -1513,7 +1519,7 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             list(prompt["prompt_token_ids"]), mm_updates
         )
         engine_input = await super()._process_tokens_async(
-            prompt, skip_mm_cache=skip_mm_cache
+            prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
         )
         self._apply_prompt_embeds_to_engine_input(
             cast(MultiModalInput, engine_input),

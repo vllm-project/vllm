@@ -1535,16 +1535,31 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return mm_kwargs, mm_prompt_updates
 
+    def _apply_hf_processor_metadata_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+        mm_uuids: MultiModalUUIDItems | None,
+    ) -> BatchFeature | None:
+        """Build only the processor outputs that prompt updates and metadata need.
+
+        Called when the caller does not use the processed tensors. Return `None`
+        to run the full HF processor instead, which is the default.
+        """
+        return None
+
     def _apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
+        mm_processed_data: BatchFeature | None = None,
     ) -> MultiModalProcessingResult:
-        with timing_ctx.record("apply_hf_processor"):
-            mm_processed_data = self._apply_hf_processor_main(
-                mm_items=inputs.mm_data_items,
-                hf_kwargs=inputs.hf_processor_mm_kwargs,
-            )
+        if mm_processed_data is None:
+            with timing_ctx.record("apply_hf_processor"):
+                mm_processed_data = self._apply_hf_processor_main(
+                    mm_items=inputs.mm_data_items,
+                    hf_kwargs=inputs.hf_processor_mm_kwargs,
+                )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -1578,6 +1593,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
+        if inputs.metadata_only:
+            with timing_ctx.record("apply_hf_processor"):
+                # UUIDs matter only for reuse through a cache.
+                # Without one, the renderer may generate request-scoped UUIDs.
+                mm_metadata_data = self._apply_hf_processor_metadata_only(
+                    inputs.mm_data_items,
+                    inputs.hf_processor_mm_kwargs,
+                    inputs.mm_uuid_items if inputs.cache is not None else None,
+                )
+            if mm_metadata_data is not None:
+                # These items have no tensors, so they must not enter the cache.
+                return self._apply_hf_processor(inputs, timing_ctx, mm_metadata_data)
+
         cache = inputs.cache
         has_passthrough_data = any(
             len(items.get_passthrough_data()) > 0

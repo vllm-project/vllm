@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -11,12 +12,16 @@ import torch
 from PIL import Image
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    extract_mm_features,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
@@ -641,3 +646,328 @@ def test_mm_device_do_normalize(
     torch.testing.assert_close(
         pixel_values_with_normalize.to(device), pixel_values_do_input_norm
     )
+
+
+def _process_images(
+    processor,
+    images: list[Image.Image | None],
+    mm_processor_kwargs: dict[str, object],
+    *,
+    metadata_only: bool,
+    cache: MultiModalProcessorOnlyCache | None = None,
+    uuids: list[str | None] | None = None,
+):
+    tokenizer = processor.info.get_tokenizer()
+    placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    prompt = tokenizer.encode(f"<|im_start|>user\n{placeholder * len(images)}hi")
+    return processor.apply(
+        ProcessorInputs(
+            prompt,
+            processor.info.parse_mm_data({"image": images}),
+            mm_uuid_items=None if uuids is None else {"image": uuids},
+            hf_processor_mm_kwargs=mm_processor_kwargs,
+            cache=cache,
+            metadata_only=metadata_only,
+        ),
+        TimingContext(),
+    )
+
+
+def _rendered_features(engine_input):
+    return extract_mm_features(engine_input, mm_payload="metadata")
+
+
+def _process_outcome(processor, images, mm_processor_kwargs, *, metadata_only):
+    # Some Transformers versions accept an input that others reject.
+    # Callers compare the two paths instead of assuming one outcome.
+    try:
+        engine_input = _process_images(
+            processor, images, mm_processor_kwargs, metadata_only=metadata_only
+        )
+    except Exception as exc:
+        # The message repeats the input, including the object address of each image.
+        return None, (type(exc), re.sub(r" at 0x[0-9a-fA-F]+", "", str(exc)))
+    return engine_input, None
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "Qwen/Qwen3-VL-4B-Instruct",
+    ],
+)
+def test_metadata_only_matches_full_processing(
+    image_assets: ImageTestAssets,
+    model_id: str,
+):
+    """Metadata-only processing skips pixel_values and renders identically."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 2})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [image_assets[0].pil_image, image_assets[1].pil_image.resize((300, 900))]
+
+    full = _process_images(processor, images, {}, metadata_only=False)
+    meta = _process_images(processor, images, {}, metadata_only=True)
+
+    assert all("pixel_values" in item for item in full["mm_kwargs"]["image"])
+    assert not any("pixel_values" in item for item in meta["mm_kwargs"]["image"])
+    assert meta["prompt_token_ids"] == full["prompt_token_ids"]
+    assert meta["mm_hashes"] == full["mm_hashes"]
+    assert meta["mm_placeholders"] == full["mm_placeholders"]
+    # The serialized metadata (image_grid_thw) must match byte for byte.
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize(
+    ("image_size", "mm_processor_kwargs"),
+    [
+        ((1120, 672), {"do_resize": False}),
+        ((640, 480), {"images_kwargs": {"patch_size": 14}}),
+        ((640, 480), {"images_kwargs": {"image_mean": [0.5, 0.5, 0.5]}}),
+        # Transformers versions resolve call-time size options differently.
+        ((896, 896), {"max_pixels": 512**2}),
+        ((640, 480), {"images_kwargs": {"min_pixels": 1024**2}}),
+        (
+            (896, 896),
+            {
+                "images_kwargs": {
+                    "size": {"shortest_edge": 3136, "longest_edge": 1024**2},
+                    "max_pixels": 512**2,
+                }
+            },
+        ),
+    ],
+)
+def test_metadata_only_falls_back_for_unmodeled_options(
+    image_size: tuple[int, int],
+    mm_processor_kwargs: dict[str, object],
+):
+    """Options that change the grid and are not modeled run the HF processor."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", image_size, color=(0, 128, 255))]
+
+    full = _process_images(processor, images, mm_processor_kwargs, metadata_only=False)
+    meta = _process_images(processor, images, mm_processor_kwargs, metadata_only=True)
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert meta["prompt_token_ids"] == full["prompt_token_ids"]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize("metadata_first", [True, False])
+def test_metadata_only_results_do_not_enter_the_cache(metadata_first: bool):
+    """A tensor request after a metadata-only one still gets pixel_values."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (640, 480), color=(10, 200, 30))]
+
+    order = [True, False] if metadata_first else [False, True]
+    results = {
+        metadata_only: _process_images(
+            processor, images, {}, metadata_only=metadata_only, cache=cache
+        )
+        for metadata_only in order
+    }
+
+    assert "pixel_values" in results[False]["mm_kwargs"]["image"][0]
+    assert "pixel_values" not in results[True]["mm_kwargs"]["image"][0]
+    assert results[True]["mm_hashes"] == results[False]["mm_hashes"]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("do_resize", False), ("input_data_format", "channels_last")],
+)
+def test_metadata_only_falls_back_for_saved_processor_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    value: object,
+):
+    """Saved settings that change how HF sizes the image make HF build the grids."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, Qwen2VLProcessingInfo)
+    image_processor = info.get_image_processor()
+    assert info.get_image_processor() is image_processor
+    monkeypatch.setattr(image_processor, attribute, value)
+    # Patch-aligned and above the default max_pixels, so resizing changes the grid.
+    images = [Image.new("RGB", (4480, 3136), color=(0, 128, 255))]
+
+    full, full_error = _process_outcome(processor, images, {}, metadata_only=False)
+    meta, meta_error = _process_outcome(processor, images, {}, metadata_only=True)
+
+    # Some Transformers versions reject this layout for the image.
+    assert meta_error == full_error
+    if full_error is not None:
+        return
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize("mode", ["L", "RGBA"])
+def test_metadata_only_falls_back_without_rgb_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+):
+    """Without RGB conversion, HF rejects a non-RGB image, so render must too."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, Qwen2VLProcessingInfo)
+    monkeypatch.setattr(info.get_image_processor(), "do_convert_rgb", False)
+    images = [Image.new(mode, (280, 280))]
+
+    full, full_error = _process_outcome(processor, images, {}, metadata_only=False)
+    meta, meta_error = _process_outcome(processor, images, {}, metadata_only=True)
+
+    assert meta_error == full_error
+    if full_error is not None:
+        return
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+def test_metadata_only_keeps_uuid_reuse_through_the_cache():
+    """A metadata-only request may name a cached image by UUID alone."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = Image.new("RGB", (640, 480), color=(10, 200, 30))
+
+    # A metadata-only request with a user UUID still fills the cache.
+    first = _process_images(
+        processor, [image], {}, metadata_only=True, cache=cache, uuids=["img-1"]
+    )
+    reused = _process_images(
+        processor, [None], {}, metadata_only=True, cache=cache, uuids=["img-1"]
+    )
+
+    assert "pixel_values" in first["mm_kwargs"]["image"][0]
+    assert reused["mm_hashes"] == first["mm_hashes"]
+    assert reused["prompt_token_ids"] == first["prompt_token_ids"]
+    assert _rendered_features(reused) == _rendered_features(first)
+
+
+def test_metadata_only_keeps_the_fast_path_for_uuids_without_a_cache():
+    """Without a cache, UUIDs cannot be reused, so they do not force the full path."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (640, 480), color=(10, 200, 30))]
+
+    full = _process_images(processor, images, {}, metadata_only=False, uuids=["r-0"])
+    meta = _process_images(processor, images, {}, metadata_only=True, uuids=["r-0"])
+
+    assert "pixel_values" not in meta["mm_kwargs"]["image"][0]
+    assert meta["mm_hashes"] == full["mm_hashes"]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+def test_metadata_only_falls_back_for_tensor_images():
+    """HF reads a (3, H, 3) tensor as CHW, so tensors run the HF processor."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [torch.zeros(3, 280, 3, dtype=torch.uint8)]
+
+    full = _process_images(processor, images, {}, metadata_only=False)
+    meta = _process_images(processor, images, {}, metadata_only=True)
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(meta) == _rendered_features(full)
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        {"max_pixels": 0},
+        {"images_kwargs": {"size": {"shortest_edge": 0, "longest_edge": 1024**2}}},
+        {"images_kwargs": {"do_normalize": "invalid"}},
+        {"common_kwargs": {"size": {"shortest_edge": 3136, "longest_edge": 0}}},
+        {"videos_kwargs": {"do_resize": "invalid"}},
+        {"images_kwargs": []},
+    ],
+)
+def test_metadata_only_keeps_the_hf_result_for_invalid_options(
+    mm_processor_kwargs: dict[str, object],
+):
+    """Invalid image options give the same HF result with and without metadata only."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (640, 480))]
+
+    full, full_error = _process_outcome(
+        processor, images, mm_processor_kwargs, metadata_only=False
+    )
+    meta, meta_error = _process_outcome(
+        processor, images, mm_processor_kwargs, metadata_only=True
+    )
+
+    # Transformers 5.16 ignores a lone max_pixels, so not every case fails.
+    assert meta_error == full_error
+    if full_error is None:
+        assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+        assert _rendered_features(meta) == _rendered_features(full)
+
+
+def test_metadata_only_falls_back_for_configured_sizes():
+    """Server-configured size options take the HF processor."""
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs={"images_kwargs": {"max_pixels": 512**2}},
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [Image.new("RGB", (896, 896))]
+    request = {
+        "images_kwargs": {"size": {"shortest_edge": 3136, "longest_edge": 1024**2}}
+    }
+
+    full = _process_images(processor, images, request, metadata_only=False)
+    meta = _process_images(processor, images, request, metadata_only=True)
+    configured_full = _process_images(processor, images, {}, metadata_only=False)
+    configured_meta = _process_images(processor, images, {}, metadata_only=True)
+
+    assert "pixel_values" in meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(meta) == _rendered_features(full)
+    assert "pixel_values" in configured_meta["mm_kwargs"]["image"][0]
+    assert _rendered_features(configured_meta) == _rendered_features(configured_full)
+
+
+def test_metadata_only_accepts_an_empty_image_list():
+    """An empty image list renders like the full path."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    full = _process_images(processor, [], {}, metadata_only=False)
+    meta = _process_images(processor, [], {}, metadata_only=True)
+
+    assert meta["prompt_token_ids"] == full["prompt_token_ids"]
+    assert meta["mm_hashes"] == full["mm_hashes"]
+    assert meta["mm_placeholders"] == full["mm_placeholders"]
