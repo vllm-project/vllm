@@ -13,7 +13,7 @@ from transformers import LlamaConfig, TokenizersBackend
 from tests.utils import RemoteLaunchRenderServer
 from vllm.multimodal.utils import encode_video_url
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture

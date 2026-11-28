@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use vllm_text::Prompt;
 
 use super::deepseek::{self, DsDialect};
 use super::{ChatRenderer, RenderedPrompt};
@@ -35,11 +34,7 @@ impl ChatRenderer for DeepSeekV4ChatRenderer {
         )?;
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(deepseek::render_request(
-                request,
-                DsDialect::V4,
-                &reasoning,
-            )?),
+            prompt: deepseek::render_request(request, DsDialect::V4, &reasoning)?,
             media_order: None,
             effective_template_kwargs: reasoning.template_kwargs(request),
         })

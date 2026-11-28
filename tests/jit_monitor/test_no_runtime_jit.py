@@ -36,12 +36,10 @@ JIT_MONITOR_MODELS = [
     JitModel("deepseek-ai/DeepSeek-V3"),
     JitModel("ibm-granite/granite-4.0-tiny-preview"),
     JitModel(
-        "vllm-project/deepseek_mtp_main_random",
-        draft="vllm-project/deepseek_mtp_draft_random",
+        "vllm/deepseek_mtp_main_random",
+        draft="vllm/deepseek_mtp_draft_random",
     ),
-    JitModel(
-        "vllm-project/deepseek-v3-random", draft="vllm-project/eagle-deepseek-v3-random"
-    ),
+    JitModel("vllm/deepseek-v3-random", draft="vllm/eagle-deepseek-v3-random"),
 ]
 
 

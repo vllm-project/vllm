@@ -90,6 +90,8 @@ CHECK_STRINGS = {
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
             # cloudpickle
+            # Only a trusted, inherited pipe connects the worker and planner.
+            "vllm/distributed/eplb/policy_process.py",
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/entrypoints/llm.py",
             "tests/utils.py",
