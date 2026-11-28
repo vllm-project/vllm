@@ -117,6 +117,26 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+#### Mixing long and short prompts
+
+If short prompts wait behind long prefills, keep the batch budget fixed and try
+`--long-prefill-token-threshold`. With chunked prefill enabled, a positive value
+caps the tokens scheduled for each long prefill in a step when the scheduler
+has multiple running or waiting requests. A lone request can use the full
+available budget. The default threshold of zero disables this cap.
+
+For example, take a step with a 16,384-token budget, a long prompt followed by
+a 512-token prompt, and no other work. With a threshold of 4,096, the long
+prompt can take 4,096 tokens and the short prompt can take all 512.
+Adding `--long-prefill-token-threshold-adaptive` raises the cap to at least the
+input budget divided by the number of running and waiting requests. In this
+example the long prompt can take 8,192 tokens. With four long prompts ahead
+of the short one, four 4,096-token chunks can still exhaust the budget.
+
+Replay the same arrival times and prompt lengths with each setting. Compare
+short-prompt p95/p99 TTFT, long-request completion latency, and total output
+tokens per second. Keep prefix-cache conditions consistent across runs.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.
