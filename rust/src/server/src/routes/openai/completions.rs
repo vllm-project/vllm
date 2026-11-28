@@ -245,6 +245,7 @@ async fn collect_completion(
         prompt_only,
         requested_logprobs,
         include_prompt_logprobs,
+        top_logprobs_limit,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
@@ -269,6 +270,7 @@ async fn collect_completion(
                     &collected.prompt_token_ids,
                     tokenizer.as_ref(),
                     return_tokens_as_token_ids,
+                    top_logprobs_limit,
                 )
             })
             .transpose()?;
@@ -380,6 +382,7 @@ async fn completion_chunk_stream(
         requested_logprobs,
         // Ignored: streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
+        top_logprobs_limit,
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
@@ -450,6 +453,7 @@ async fn completion_chunk_stream(
                                 &prompt_token_ids,
                                 tokenizer.as_ref(),
                                 return_tokens_as_token_ids,
+                                top_logprobs_limit,
                             )
                         })
                         .transpose();
@@ -740,9 +744,15 @@ fn echoed_prompt_logprobs_to_openai(
     prompt_token_ids: &[u32],
     tokenizer: &dyn Tokenizer,
     return_tokens_as_token_ids: bool,
+    top_logprobs_limit: Option<usize>,
 ) -> Result<LogProbs, ApiError> {
     if let Some(prompt_logprobs) = prompt_logprobs {
-        return decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids);
+        return decoded_prompt_logprobs_to_openai(
+            prompt_logprobs,
+            0,
+            return_tokens_as_token_ids,
+            top_logprobs_limit,
+        );
     }
 
     let mut logprobs = LogProbs {

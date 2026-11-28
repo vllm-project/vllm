@@ -60,6 +60,10 @@ pub(super) struct ResponseOptions {
     pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// How many candidates each echoed prompt position keeps in
+    /// `top_logprobs`, like Python's `completion_top_logprobs_limit`.
+    /// `None` keeps them all.
+    pub top_logprobs_limit: Option<usize>,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
@@ -120,6 +124,10 @@ pub(super) fn prepare_completion_request(
         Some(request.max_tokens.unwrap_or(DEFAULT_COMPLETION_MAX_TOKENS))
     };
     let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let top_logprobs_limit = logprobs
+        .filter(|_| logprob_token_ids.is_none())
+        .and_then(|logprobs| usize::try_from(logprobs).ok())
+        .map(|logprobs| logprobs + 1);
     let logprobs = if logprob_token_ids.is_some() {
         None
     } else {
@@ -243,6 +251,7 @@ pub(super) fn prepare_completion_request(
             prompt_only,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
+            top_logprobs_limit,
             return_token_ids,
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
             return_weight_versions: request.return_weight_versions.unwrap_or(false),
