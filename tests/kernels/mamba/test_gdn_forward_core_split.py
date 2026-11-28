@@ -5,6 +5,10 @@
 The decode-first split must match a single chunked recurrence over identical
 projected inputs. Convolution state is exact; recurrent math uses the existing
 chunk-versus-update tolerances.
+Each prefill backend consumes its own prefill-only chunk metadata, and the
+Triton/FLA and AITER FlyDSL backends also write the prefill output straight
+into ``core_attn_out``, so the split path checks that the prefill slice starts
+after the peeled decodes.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
@@ -39,7 +44,8 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="GDN layer kernels require CUDA"
+    not current_platform.is_cuda_alike(),
+    reason="GDN layer kernels require CUDA or ROCm",
 )
 
 BLOCK_SIZE = 16
@@ -122,6 +128,15 @@ def _run_forward_core(layer, cfg, meta, mixed_qkv, b, a):
         ("olmo", None),
         pytest.param(
             "qwen",
+            "aiter_flydsl",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm()
+                or not rocm_aiter_ops.is_gdn_flydsl_prefill_available(),
+                reason="needs ROCm with the AITER FlyDSL GDN prefill kernels.",
+            ),
+        ),
+        pytest.param(
+            "qwen",
             "flashinfer",
             marks=pytest.mark.skipif(
                 not current_platform.is_cuda()
@@ -198,7 +213,12 @@ def test_forward_core_split_matches_unified(
     assert meta_split.spec_sequence_masks is None
     cu_full = meta_split.non_spec_query_start_loc
     assert cu_full is not None
-    if builder.gdn_prefill_backend == "cutedsl":
+    chunk_indices = chunk_offsets = full_aiter = None
+    if builder.gdn_prefill_backend == "aiter_flydsl":
+        full_aiter = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+            torch.diff(cu_full.cpu()).tolist(), cu_seqlens=cu_full
+        )
+    elif builder.gdn_prefill_backend == "cutedsl":
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             prepare_metadata_cutedsl,
         )
@@ -217,6 +237,7 @@ def test_forward_core_split_matches_unified(
         num_prefill_tokens=batch.compute_num_tokens(),
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        aiter_prefill_metadata=full_aiter,
         prefill_query_start_loc=cu_full,
         prefill_state_indices=meta_split.non_spec_state_indices_tensor,
         prefill_has_initial_state=meta_split.has_initial_state,
