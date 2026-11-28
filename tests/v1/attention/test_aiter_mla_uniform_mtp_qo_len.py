@@ -36,7 +36,8 @@ def _reference(qo_len: torch.Tensor, max_qo_len: int, num_decode_tokens: int) ->
         return 0
 
     uniform_qo_len = num_decode_tokens // num_reqs
-    if uniform_qo_len <= 1:
+    # Single-token decode is padded too (the pre-#58381 code stopped at <= 1).
+    if uniform_qo_len < 1:
         return 0
 
     positive_qo_len = qo_len[qo_len > 0]
@@ -89,6 +90,19 @@ def test_the_padded_mtp_case_that_should_succeed():
     # 4 requests x 4 tokens = 16 captured, 8 live -> dummies are synthesizable.
     assert _ACTUAL(qo, 4, 16) == 4
     assert _reference(qo, 4, 16) == 4
+
+
+def test_padded_single_token_decode_gets_dummy_rows():
+    """Plain decode padded to a captured size (13 live + 3 padding rows).
+
+    Without dummy rows the batch reaches get_mla_metadata_v1 with
+    uni_seqlen_qo=-1, which AITER < v0.1.30 mis-plans for folded head counts.
+    """
+    qo = torch.tensor([1] * 13 + [0] * 3, dtype=torch.int32)
+    assert _ACTUAL(qo, 1, 16) == 1
+    assert _reference(qo, 1, 16) == 1
+    # Unpadded single-token decode keeps the plain path.
+    assert _ACTUAL(torch.ones(16, dtype=torch.int32), 1, 16) == 0
 
 
 def test_positive_after_zero_is_rejected():

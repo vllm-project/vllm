@@ -994,7 +994,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             return 0
 
         uniform_qo_len = num_decode_tokens // num_reqs
-        if uniform_qo_len <= 1:
+        # Single-token decode needs the dummy rows too. An empty padding row
+        # makes the batch non-uniform, so get_mla_metadata_v1 would get
+        # uni_seqlen_qo=-1. AITER before ROCm/aiter#6091 (v0.1.30) then
+        # indexes the per-request qo_indptr with folded pseudo-batch ids
+        # whenever the head count is folded onto the 16-head kernel (32..128
+        # bf16 heads on gfx942), so most rows of the padded batch read and
+        # write the wrong q/o rows and decode garbage.
+        if uniform_qo_len < 1:
             return 0
 
         # qo_len is derived from query_start_loc_cpu, so it is already
