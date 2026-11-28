@@ -133,6 +133,10 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
+        if vllm_config.num_speculative_tokens > 0:
+            # FULL replay needs speculative state buffers that Model Runner V2
+            # does not refresh for Bailing.
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(

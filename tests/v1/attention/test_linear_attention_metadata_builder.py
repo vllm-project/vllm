@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -8,9 +9,15 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import CUDAGraphMode, SpeculativeConfig
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    SpeculativeConfig,
+)
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.linear_attn import (
+    BailingLinearAttentionBackend,
     BailingLinearAttentionMetadataBuilder,
     LinearAttentionMetadataBuilder,
 )
@@ -187,3 +194,47 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
     ]
     assert second.query_start_loc_d.tolist() == [0, 2, 2, 2]
     assert second.num_accepted_tokens.tolist() == [2, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "requested_mode",
+    [
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+@pytest.mark.parametrize(
+    ("piecewise_capture_available", "expected_mode"),
+    [(True, CUDAGraphMode.PIECEWISE), (False, CUDAGraphMode.NONE)],
+)
+def test_bailing_speculative_decode_falls_back_from_full_graphs(
+    requested_mode: CUDAGraphMode,
+    piecewise_capture_available: bool,
+    expected_mode: CUDAGraphMode,
+):
+    vllm_config = create_vllm_config(
+        hf_config_override={
+            "architectures": ["BailingMoeV2_5ForCausalLM"],
+            "model_type": "bailing_hybrid",
+        },
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    compilation = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=requested_mode
+    )
+    compilation.set_splitting_ops_for_v1(vllm_config.parallel_config.all2all_backend)
+    support = BailingLinearAttentionMetadataBuilder.get_cudagraph_support(
+        vllm_config, _create_mamba_spec()
+    )
+    resolved = compilation.resolve_cudagraph_mode_and_sizes(
+        support,
+        BailingLinearAttentionBackend.get_name(),
+        uniform_decode_query_len=1 + vllm_config.num_speculative_tokens,
+        piecewise_capture_available=piecewise_capture_available,
+    )
+
+    assert resolved == expected_mode

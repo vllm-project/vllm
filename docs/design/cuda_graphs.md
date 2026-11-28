@@ -165,6 +165,7 @@ The following table lists backends that support full CUDA Graphs at the time of 
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | Mamba attention | `UNIFORM_SINGLE_TOKEN_DECODE` | |
+| Bailing linear attention | `UNIFORM_BATCH` | With speculative decoding enabled, vLLM falls back to piecewise CUDA graphs when available, or eager execution. |
 
 Unlisted backends are all declared as `NEVER`.
 
