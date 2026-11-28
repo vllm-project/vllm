@@ -58,14 +58,14 @@ impl StreamedResponseHandler {
         // Also handles multi-field SSE events where the buffer may start with
         // "event: ...\ndata: ..." (Dynamo frontend).
         let buffer = String::from_utf8_lossy(&self.buffer);
-        let data_start = if buffer.starts_with("data: ") {
+        let data_start = if buffer.starts_with("data:") {
             Some(0)
         } else {
-            // Look for a "data: " line in multi-field events
-            buffer.find("\ndata: ").map(|p| p + 1)
+            // Look for a "data:" line in multi-field events
+            buffer.find("\ndata:").map(|p| p + 1)
         };
         if let Some(offset) = data_start {
-            let content = buffer[offset + 6..].trim();
+            let content = buffer[offset + "data:".len()..].trim();
             if content == "[DONE]"
                 || (!content.is_empty()
                     && serde_json::from_str::<&serde_json::value::RawValue>(content).is_ok())
@@ -77,6 +77,16 @@ impl StreamedResponseHandler {
 
         &self.messages
     }
+}
+
+/// The payload of the first `data:` line of an SSE event, or `None` for
+/// events without one (comments, keep-alives). Other fields such as `event:`
+/// are skipped. Per the SSE spec, the space after the colon is optional.
+pub fn sse_data(message: &str) -> Option<&str> {
+    message
+        .lines()
+        .find_map(|line| line.strip_prefix("data:"))
+        .map(|data| data.strip_prefix(' ').unwrap_or(data))
 }
 
 #[cfg(test)]
@@ -198,6 +208,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_data_without_space() {
+        let mut handler = StreamedResponseHandler::new();
+        // Speculative emit without a trailing blank line.
+        let msgs = handler.add_chunk(b"data:{\"text\":\"a\"}");
+        assert_eq!(msgs, &["data:{\"text\":\"a\"}".to_string()]);
+        let msgs = handler.add_chunk(b"\n\ndata:[DONE]");
+        assert_eq!(msgs, &["data:[DONE]".to_string()]);
+    }
+
+    #[test]
+    fn test_sse_data() {
+        assert_eq!(sse_data("data: {\"a\":1}"), Some("{\"a\":1}"));
+        assert_eq!(sse_data("data:{\"a\":1}"), Some("{\"a\":1}"));
+        assert_eq!(sse_data("data:  x"), Some(" x"));
+        assert_eq!(sse_data("event: message\ndata:[DONE]"), Some("[DONE]"));
+        assert_eq!(sse_data(": ping"), None);
     }
 
     #[test]

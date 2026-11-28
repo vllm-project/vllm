@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use super::streaming::StreamedResponseHandler;
+use super::streaming::{StreamedResponseHandler, sse_data};
 use super::{
     ChatChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
     update_server_metrics,
@@ -75,9 +75,7 @@ impl OpenAIChatBackend {
                             // Take the data: line of each event, which may carry other
                             // fields (Dynamo sends "event: message\ndata: {...}").
                             // Comments and other events without data are skipped.
-                            let Some(chunk) =
-                                message.lines().find_map(|l| l.strip_prefix("data: "))
-                            else {
+                            let Some(chunk) = sse_data(message) else {
                                 continue;
                             };
 
@@ -527,6 +525,51 @@ mod tests {
                 assert_eq!(output.output_tokens, tokens, "{kind:?}");
                 assert_eq!(output.itl.len(), itl_count, "{kind:?}");
             }
+        }
+    }
+
+    /// The space after `data:` is optional in SSE. Some proxies drop it.
+    #[tokio::test]
+    async fn test_streaming_backends_accept_data_without_space() {
+        use std::io::Write;
+
+        use crate::backends::get_backend;
+        use crate::cli::BackendKind;
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for kind in [BackendKind::Openai, BackendKind::OpenaiChat] {
+            let api_url = spawn_sse_server_with_body(move |stream| {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}",
+                    concat!(
+                        "data:{\"choices\":[{\"text\":\"hi\",\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                        "event: message\ndata:{\"choices\":[{\"text\":\"!\",\"delta\":{\"content\":\"!\"}}]}\n\n",
+                        "data:{\"choices\":[],\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":9}}\n\n",
+                        "data:[DONE]\n\n",
+                    )
+                )
+                .unwrap();
+            });
+            let input = RequestFuncInput {
+                api_url,
+                model: "test-model".to_string(),
+                output_len: 2,
+                ..Default::default()
+            };
+            let output = get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+            assert!(output.success, "{kind:?}: {}", output.error);
+            assert_eq!(output.generated_text, "hi!", "{kind:?}");
+            assert_eq!(
+                (output.prompt_len, output.output_tokens),
+                (9, 2),
+                "{kind:?}"
+            );
+            assert_eq!(output.itl.len(), 1, "{kind:?}");
         }
     }
 
