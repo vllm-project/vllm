@@ -69,9 +69,20 @@ class KVCacheAccess(enum.IntFlag):
     LEGACY_IPC = enum.auto()
     """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
 
+    OPTIONAL_EXPORTS_FD = enum.auto()
+    """Another process imports it through POSIX file descriptors if the
+    extensible KV cache is available, but can fall back to legacy IPC if
+    unsupported."""
+
+    EXPORTS_FD_OPTIONAL = OPTIONAL_EXPORTS_FD
+
     def needs_single_chunk(self) -> bool:
         """Whether each segment must be backed by one physical allocation."""
-        exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
+        exports = (
+            KVCacheAccess.EXPORTS_FD
+            | KVCacheAccess.EXPORTS_FABRIC
+            | KVCacheAccess.OPTIONAL_EXPORTS_FD
+        )
         return bool(self & (KVCacheAccess.REGISTERS | exports))
 
 
@@ -198,6 +209,7 @@ class KVTransferConfig:
         )
 
         return KVConnectorFactory.kv_cache_access(self)
+
 
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache with UCX or RDMA,

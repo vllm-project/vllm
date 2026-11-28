@@ -326,6 +326,12 @@ _EXPORTS_FD_CONNECTOR = {
     "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
 }
 
+_EXPORTS_FD_WITH_FALLBACK_CONNECTOR = {
+    "kv_connector": "ExportsKVCacheWithFallbackTestConnector",
+    "kv_role": "kv_both",
+    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+}
+
 
 def _fake_executor(vllm_config, collective_rpc):
     from types import MethodType, SimpleNamespace
@@ -745,6 +751,198 @@ def test_posix_fd_importer_needs_the_extensible_kv_cache(kwargs, match):
     )
     with pytest.raises(ValueError, match=match):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+@requires_cuda_not_rocm
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(kv_cache_memory_bytes=1 << 30),
+        dict(num_gpu_blocks_override=16),
+    ],
+)
+def test_posix_fd_importer_falls_back_to_legacy_ipc(caplog_vllm, kwargs):
+    """When extensible KV cache is disabled by config (e.g. kv_cache_memory_bytes),
+    a connector with a fallback to legacy IPC falls back with a warning instead
+    of raising."""
+    from vllm.v1.worker.extensible_kv_cache import kv_cache_export_handle_types
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_WITH_FALLBACK_CONNECTOR),
+        **kwargs,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert kv_cache_export_handle_types(vllm_config) == 0
+    assert "Falling back to legacy IPC" in caplog_vllm.text
+
+
+@requires_cuda_not_rocm
+def test_posix_fd_importer_explicit_request_still_raises():
+    """An explicit request for enable_extensible_kv_cache still raises even
+    when a fallback is available."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_WITH_FALLBACK_CONNECTOR),
+        kv_cache_memory_bytes=1 << 30,
+        enable_extensible_kv_cache=True,
+    )
+    with pytest.raises(ValueError, match="enable_extensible_kv_cache"):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def test_posix_fd_optional_on_non_cuda_alike_platform_raises(monkeypatch):
+    """On a non-CUDA/ROCm platform, even an optional FD connector must raise
+    rather than falling back to legacy IPC, preserving the platform requirement."""
+    import vllm.platforms
+    from vllm.config.vllm import VllmConfig
+
+    transfer = KVTransferConfig(**_EXPORTS_FD_WITH_FALLBACK_CONNECTOR)
+    transfer.kv_cache_access()
+    monkeypatch.setattr(
+        vllm.platforms,
+        "current_platform",
+        SimpleNamespace(
+            device_type="cpu", is_cuda_alike=lambda: False, is_rocm=lambda: False
+        ),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            _extensible_kv_cache_resolved=False,
+            enable_extensible_kv_cache=None,
+            kv_cache_memory_bytes=None,
+            num_gpu_blocks_override=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(enable_elastic_ep=False),
+        speculative_config=None,
+        kv_transfer_config=transfer,
+    )
+    with pytest.raises(
+        ValueError, match="it is only supported on CUDA and ROCm"
+    ):
+        VllmConfig._resolve_extensible_kv_cache(config)
+
+
+@requires_cuda_not_rocm
+def test_posix_fd_optional_without_override():
+    """Optional FD alone without overrides resolves to extensible and exports FD."""
+    from vllm.v1.worker.extensible_kv_cache import (
+        MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        kv_cache_export_handle_types,
+    )
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_WITH_FALLBACK_CONNECTOR),
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    assert (
+        kv_cache_export_handle_types(vllm_config)
+        == MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    )
+
+
+@requires_cuda_not_rocm
+@pytest.mark.parametrize(
+    "connectors",
+    [
+        [_EXPORTS_FD_WITH_FALLBACK_CONNECTOR, _EXPORTS_FD_CONNECTOR],
+        [_EXPORTS_FD_CONNECTOR, _EXPORTS_FD_WITH_FALLBACK_CONNECTOR],
+    ],
+)
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(kv_cache_memory_bytes=1 << 30),
+        dict(num_gpu_blocks_override=16),
+    ],
+)
+def test_multi_connector_mixed_strict_and_optional_fd_rejects_with_override(
+    connectors, kwargs
+):
+    """Mixed strict and optional FD children reject when an override disables
+    extensible KV cache, regardless of child ordering."""
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": connectors},
+    )
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=transfer,
+        **kwargs,
+    )
+    with pytest.raises(ValueError, match="enable_extensible_kv_cache"):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+@requires_cuda_not_rocm
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(kv_cache_memory_bytes=1 << 30),
+        dict(num_gpu_blocks_override=16),
+    ],
+)
+def test_multi_connector_all_optional_fd_falls_back_with_override(
+    caplog_vllm, kwargs
+):
+    """MultiConnector with all optional FD children falls back to legacy IPC."""
+    from vllm.v1.worker.extensible_kv_cache import kv_cache_export_handle_types
+
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                _EXPORTS_FD_WITH_FALLBACK_CONNECTOR,
+                _EXPORTS_FD_WITH_FALLBACK_CONNECTOR,
+            ]
+        },
+    )
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=transfer,
+        **kwargs,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert kv_cache_export_handle_types(vllm_config) == 0
+    assert "Falling back to legacy IPC" in caplog_vllm.text
+
+
+@requires_cuda_not_rocm
+def test_multi_connector_mixed_strict_and_optional_fd_without_override():
+    """Mixed strict and optional FD children resolve to extensible when no
+    override is present."""
+    from vllm.v1.worker.extensible_kv_cache import (
+        MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        kv_cache_export_handle_types,
+    )
+
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                _EXPORTS_FD_WITH_FALLBACK_CONNECTOR,
+                _EXPORTS_FD_CONNECTOR,
+            ]
+        },
+    )
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=transfer,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    assert (
+        kv_cache_export_handle_types(vllm_config)
+        == MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    )
 
 
 def test_posix_fd_importer_keeps_the_extensible_kv_cache_next_to_nixl(
