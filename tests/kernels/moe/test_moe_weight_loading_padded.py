@@ -729,6 +729,15 @@ class TestLoadWeightsExpertMapping:
         for call, tensor in zip(calls, expected):
             torch.testing.assert_close(call[3], tensor, rtol=0, atol=0)
 
+    def test_stacked_tensor_with_unexpected_expert_count_raises(self):
+        """A stacked tensor that would leave redundant experts unloaded fails."""
+        with pytest.raises(ValueError, match="holds 12 experts"):
+            self._load(
+                self._mapping(num_redundant_experts=4),
+                [("gate_up_proj", torch.zeros(12, 4, 3))],
+                num_redundant_experts=4,
+            )
+
     @pytest.mark.parametrize(
         "suffix,quant_method,transposed",
         [
