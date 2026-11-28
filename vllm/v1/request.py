@@ -214,6 +214,8 @@ class Request:
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+        # Stamped on joining the running queue or starting an async KV load.
+        self.admission_seq = 0
 
         # Block-aligned token position of a proven shared prefix worth pinning
         # in the (sparse) prefix cache; 0 means none. Set at admission for

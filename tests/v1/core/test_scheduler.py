@@ -7099,6 +7099,90 @@ def test_fcfs_mixed_blocked_types_remote_load_drains_first():
     scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
+def _remote_load_then_local_request(
+    loaded_tokens: int, matched_tokens: int, local_tokens: int, budget: int
+) -> tuple[Scheduler, Request, Request]:
+    """Start an async KV load for `loaded`, then admit `local` (no external KV)
+    while it is in flight, and complete the load."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=budget,
+        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
+    )
+    connector = scheduler.connector
+    assert connector is not None
+    get_matched = connector.get_num_new_matched_tokens
+    connector.get_num_new_matched_tokens = lambda req, n: (  # type: ignore[method-assign]
+        (0, False) if req.request_id == "local" else get_matched(req, n)
+    )
+    (loaded,) = create_requests(1, num_tokens=loaded_tokens, req_ids=["loaded"])
+    (local,) = create_requests(1, num_tokens=local_tokens, req_ids=["local"])
+    scheduler.add_request(loaded)
+    scheduler.add_request(local)
+
+    output = scheduler.schedule()
+    assert loaded.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert set(output.num_scheduled_tokens) == {"local"}
+    done = output.num_scheduled_tokens["local"] == local_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["local"],
+            sampled_token_ids=[[0] if done else []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=KVConnectorOutput(finished_recving={"loaded"}),
+        ),
+    )
+    return scheduler, loaded, local
+
+
+def test_completed_kv_load_rejoins_running_at_admission_position():
+    """A completed async KV load is scheduled at the running-queue position it
+    took when its load started: ahead of a prefill admitted while it was loading,
+    which would otherwise take the whole token budget."""
+    scheduler, loaded, local = _remote_load_then_local_request(
+        loaded_tokens=64, matched_tokens=64, local_tokens=200, budget=32
+    )
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"loaded": 1, "local": 31}
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["loaded"]
+    assert output.scheduled_cached_reqs.req_ids == ["local"]
+    assert scheduler.running == [loaded, local]
+    assert not scheduler.kv_holding_waiting
+
+
+def test_unscheduled_kv_load_stays_waiting():
+    """A completed KV load that gets no tokens when tried ahead of a running
+    request is left in kv_holding_waiting, and rejoins on a later step."""
+    scheduler, loaded, local = _remote_load_then_local_request(
+        loaded_tokens=64, matched_tokens=32, local_tokens=4, budget=64
+    )
+
+    # DP prefill throttling defers its remaining local prefill.
+    output = scheduler.schedule(throttle_prefills=True)
+    assert output.num_scheduled_tokens == {"local": 1}
+    assert scheduler.running == [local]
+    assert list(scheduler.kv_holding_waiting) == [loaded]
+    assert loaded.status == RequestStatus.WAITING
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["local"],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"loaded": 32, "local": 1}
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["loaded"]
+    assert scheduler.running == [loaded, local]
+
+
 def test_abort_request_waiting_for_remote_kvs():
     scheduler = create_scheduler(use_kv_connector=True)
 
