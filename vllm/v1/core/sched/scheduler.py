@@ -229,7 +229,10 @@ class Scheduler(SchedulerInterface):
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
-        if self.vllm_config.ec_transfer_config is not None:
+        if (
+            self.vllm_config.ec_transfer_config is not None
+            and self.vllm_config.ec_transfer_config.is_ec_transfer_instance
+        ):
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )

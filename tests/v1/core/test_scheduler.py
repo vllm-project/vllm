@@ -5942,6 +5942,14 @@ def test_scheduler_no_ec_connector_by_default():
     assert scheduler.ec_connector is None
 
 
+def test_scheduler_inactive_ec_transfer_config():
+    """Test scheduler does not create EC connector when ECTransferConfig is inactive."""
+    cfg = ECTransferConfig(ec_buffer_size=1048576)
+    assert not cfg.is_ec_transfer_instance
+    scheduler = create_scheduler(ec_transfer_config=cfg)
+    assert scheduler.ec_connector is None
+
+
 def test_mamba_align_encoder_cache_cap_makes_progress():
     """Two individually cacheable images must not deadlock Mamba alignment."""
     block_size = 768
