@@ -674,3 +674,30 @@ def test_unresized_video_frame_budget(width, valid):
     else:
         with pytest.raises(ValueError, match="fixed video frame limit: 70"):
             process()
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+@pytest.mark.parametrize("duration_s", [20, 40])
+def test_long_audio_matches_hf_truncation(model_id: str, duration_s: int):
+    """Audio past the 30 s limit is truncated like in the HF processor, so the
+    capped placeholders still cover every audio feature."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    audio = np.zeros(duration_s * 16000, dtype=np.float32)
+    prompt = processor.dummy_inputs.get_dummy_text({"audio": 1})
+
+    hf_out = hf_processor(text=[prompt], audio=[audio], return_tensors="pt")
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": [audio]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    mask = processed["mm_kwargs"].get_data()["input_features_mask"]
+    assert isinstance(mask, torch.Tensor)
+    assert int(mask.sum()) == int(hf_out["input_features_mask"].sum())
+
+    placeholder = processed["mm_placeholders"]["audio"][0]
+    num_hf_tokens = int((hf_out["input_ids"] == hf_processor.audio_token_id).sum())
+    assert placeholder.get_num_embeds() == num_hf_tokens
