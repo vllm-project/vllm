@@ -107,6 +107,7 @@ def _metadata(shapes: dict) -> list[ParamMeta]:
 
 def _cold_start(make, weights):
     model = make()
+    track_loaded_params(model)  # so finish checks each update is complete
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
     return model
@@ -645,8 +646,8 @@ def test_copy_time_dtype_change_stays_direct(loader, sent, held, cast):
 
 
 def test_tensors_sharing_one_storage():
-    """Two checkpoint tensors on one storage: each write lands in its own
-    tensor, whichever tensor names the storage."""
+    """Two checkpoint tensors on one storage: each write lands in, and is
+    recorded as a load of, its own tensor."""
 
     def make():
         model = _Toy()
@@ -662,6 +663,45 @@ def test_tensors_sharing_one_storage():
     for name in ("a", "b"):
         ((_, dest),) = plan.get_dest(f"{name}.weight")
         assert dest.data_ptr() == getattr(model, name).weight.data_ptr()
+
+
+def test_write_into_a_view_of_a_fused_tensor_loads_both():
+    """A shard of fused `f` that also has its own checkpoint view `a`: the
+    write is labelled `a` but counts as loading `f`, which cold start loaded."""
+
+    def make():
+        model = _Toy()
+        model.f, model.a = _Layer(), _Layer()
+        model.f.weight = _param(4, 4, loader=lambda p, w, shard: p[:2].copy_(w))
+        model.a.weight = torch.nn.Parameter(
+            model.f.weight.data[:2], requires_grad=False
+        )
+        model.stacked = {"x": ("f.weight", 0)}
+        return model
+
+    _, plan = _check_plan_equals_cold_start(make, {"x": ((2, 4), BF16)})
+    assert plan.entries["x"].loads == ("a.weight", "f.weight")
+
+
+def test_interleaved_tensors_on_one_storage_fall_back():
+    """Column halves of one buffer: their byte spans interleave, so no write
+    can be labelled with one tensor by its bytes alone."""
+
+    def make():
+        model = _Toy()
+        base = torch.zeros(3, 8, dtype=BF16)
+        for i, name in enumerate(("a", "b")):
+            setattr(model, name, _Layer())
+            view = base[:, 4 * i : 4 * (i + 1)]
+            loader = lambda p, w: [p[r].copy_(w[r]) for r in range(3)]  # noqa: E731
+            param = torch.nn.Parameter(view, requires_grad=False)
+            param.weight_loader = loader
+            getattr(model, name).weight = param
+        return model
+
+    shapes = {"a.weight": ((3, 4), BF16), "b.weight": ((3, 4), BF16)}
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("b.weight") is None
 
 
 def _two_names(loader_a):

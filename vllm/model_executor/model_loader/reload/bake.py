@@ -28,6 +28,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.logger import init_logger
 
 from .direct import loadable_tensors
+from .geometry import byte_span
 from .trace import TraceTensor
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ class Target:
     tensor: str
     real: torch.Tensor
     byte_offset: int  # in its storage, as `begin_direct_reload` viewed it
+    byte_stop: int  # past its last byte
 
 
 class Targets:
@@ -57,15 +59,30 @@ class Targets:
     tests; `by_name` looks it up."""
 
     def __init__(self, model: torch.nn.Module):
-        self.by_storage: dict[int, Target] = {}
+        self.by_storage: dict[int, list[Target]] = {}
         self.by_name: dict[tuple[str, str], Target] = {}
         for name, t in loadable_tensors(model):
             if hasattr(t, "_ckpt"):
                 module, _, key = name.rpartition(".")
-                target = Target(module, key, t, t.storage_offset() * t.dtype.itemsize)
-                # writes into a storage are labelled with its first target
-                self.by_storage.setdefault(t.untyped_storage()._cdata, target)
+                start = t.storage_offset() * t.dtype.itemsize
+                stop = start
+                if t.numel():
+                    stop = byte_span(start, t.shape, t.stride(), t.dtype.itemsize)[1]
+                target = Target(module, key, t, start, stop)
+                storage = t.untyped_storage()._cdata
+                self.by_storage.setdefault(storage, []).append(target)
                 self.by_name[(module, key)] = target
+
+    def containing(self, storage: int, start: int, stop: int) -> list[Target]:
+        """The targets whose bytes contain a write to [start, stop), smallest
+        first; on a storage several tensors view (e.g. a fused weight) there
+        can be more than one."""
+        targets = [
+            t
+            for t in self.by_storage.get(storage, ())
+            if t.byte_offset <= start and stop <= t.byte_stop
+        ]
+        return sorted(targets, key=lambda t: t.byte_stop - t.byte_offset)
 
 
 def _storage_key(t: torch.Tensor) -> int | None:
@@ -101,6 +118,7 @@ class Copy:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
+    byte_stop: int  # past its last byte; `byte_offset` if it copies nothing
 
 
 @dataclass(slots=True)
@@ -145,16 +163,10 @@ class _PlanSink:
         self.wrote.add(name)
         key = dest.untyped_storage()._cdata  # dest is never a trace
         self.last_writer[key] = name
-        self.copies[name].append(
-            Copy(
-                src=src,
-                storage=key,
-                byte_offset=dest.storage_offset() * dest.dtype.itemsize,
-                shape=tuple(dest.shape),
-                stride=tuple(dest.stride()),
-                dtype=dest.dtype,
-            )
-        )
+        start = dest.storage_offset() * dest.dtype.itemsize
+        shape, stride, size = tuple(dest.shape), tuple(dest.stride()), dest.itemsize
+        stop = byte_span(start, shape, stride, size)[1] if dest.numel() else start
+        self.copies[name].append(Copy(src, key, start, shape, stride, dest.dtype, stop))
         return dest
 
     def value_read(self, trace: TraceTensor) -> NoReturn:

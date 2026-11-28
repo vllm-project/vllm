@@ -41,7 +41,6 @@ from .geometry import (
     Write,
     box_and_region,
     byte_runs,
-    byte_span,
     merge_writes,
 )
 
@@ -63,6 +62,7 @@ class Entry:
     boxes: tuple[Box, ...] | None  # what this rank needs; None: nothing
     writes: tuple[Write, ...] | None  # where it goes; None: fallback
     reason: str | None = None  # why it is a fallback
+    loads: tuple[str, ...] = ()  # tensors its writes count as loading
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +181,8 @@ def load_planned(
             batch[name, k] = (tensor, part.reshape(tensor.shape))
         if dest:
             held += full.nbytes
-        for w in plan.entries[name].writes or ():  # loaded without load_weights
-            mark_loaded(model, f"{w.module}.{w.tensor}" if w.module else w.tensor)
+        for tensor in plan.entries[name].loads:  # loaded without load_weights
+            mark_loaded(model, tensor)
         # Bounds how many source tensors a streaming caller keeps alive.
         if held > _FLUSH_BYTES:
             _copy_all(batch)
@@ -248,18 +248,21 @@ def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:
         found = [_write(c, shape, meta.dtype, targets) for c in copies]
     except Fallback as e:
         return Entry(name, shape, meta.dtype, (full,), None, str(e))
-    writes = [w for w in found if w is not None]
+    writes = [w for w, _ in found if w is not None]
     if not writes:  # another PP stage, a non-local expert, a tied alias
         return Entry(name, shape, meta.dtype, None, ())
     merged = merge_writes(writes)
     boxes = tuple(dict.fromkeys(w.src for w in merged))
-    return Entry(name, shape, meta.dtype, boxes, tuple(merged))
+    loads = tuple(dict.fromkeys(t for w, ts in found if w is not None for t in ts))
+    return Entry(name, shape, meta.dtype, boxes, tuple(merged), loads=loads)
 
 
 def _write(
     copy: Copy, shape: tuple[int, ...], dtype: torch.dtype, targets: Targets
-) -> Write | None:
-    """`copy` as a box and region; `None` if it copies nothing.
+) -> tuple[Write | None, tuple[str, ...]]:
+    """`copy` as a box and region, labelled with the smallest tensor that
+    contains it, and every tensor that contains it; `None` if it copies
+    nothing.
 
     Raises:
         Fallback: it is not a copy of checkpoint elements.
@@ -279,15 +282,23 @@ def _write(
             f"casts {src.dtype} (a view of the {dtype} checkpoint tensor) "
             f"to {copy.dtype} at copy_"
         )
-    target = targets.by_storage.get(copy.storage)
-    if target is None:
+    if copy.storage not in targets.by_storage:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
+    if 0 in copy.shape:
+        return None, ()
+    containing = targets.containing(copy.storage, copy.byte_offset, copy.byte_stop)
+    if not containing:
+        raise Fallback("copies into a tensor that is not a checkpoint tensor")
+    target = containing[0]
+    if any(
+        t.byte_offset > target.byte_offset or target.byte_stop > t.byte_stop
+        for t in containing[1:]
+    ):
+        raise Fallback("copies into tensors that interleave in one storage")
     size = (cast or dtype).itemsize
     rel = copy.byte_offset - target.byte_offset
     if rel % size or target.byte_offset % size:
         raise Fallback("copies into a destination viewed with another element size")
-    if 0 in copy.shape:
-        return None
     geom = src._geom
     if tuple(geom.shape) != copy.shape:
         if geom.numel() != prod(copy.shape):
@@ -298,12 +309,15 @@ def _write(
             raise Fallback("copy_ with a reshape that is not a view") from None
     dims = list(zip(copy.shape, geom.stride(), copy.stride))
     box, dst_shape, dst_stride = box_and_region(shape, geom.storage_offset(), dims)
-    return Write(
+    write = Write(
         box,
         target.module,
         target.tensor,
         Region(rel // size, dst_shape, dst_stride),
         cast,
+    )
+    return write, tuple(
+        f"{t.module}.{t.tensor}" if t.module else t.tensor for t in containing
     )
 
 
@@ -332,9 +346,7 @@ def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     for name, copies in traced.copies.items():
         for c in copies:
             if c.storage in targets.by_storage and 0 not in c.shape:
-                start, stop = byte_span(
-                    c.byte_offset, c.shape, c.stride, c.dtype.itemsize
-                )
+                start, stop = c.byte_offset, c.byte_stop
                 spans[c.storage].append((start, stop, len(spans[c.storage]), name, c))
     reasons: dict[str, str] = {}
     for items in spans.values():
