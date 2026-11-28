@@ -221,6 +221,75 @@ def test_non_string_arg_still_deserialized() -> None:
     assert args["mode"] == 420
 
 
+# ---------------------------------------------------------------------------
+# Bug 3: stray `arg_key` tags must not leak into the argument key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "raw_args",
+    [
+        pytest.param(
+            "<arg_key>content</arg_key></arg_key><arg_value>hi</arg_value>",
+            id="repeated-closing-tag",
+        ),
+        pytest.param(
+            "<arg_key>content</arg_key>\n</arg_key>\n<arg_value>hi</arg_value>",
+            id="repeated-closing-tag-whitespace",
+        ),
+        pytest.param(
+            "<arg_key><arg_key>content</arg_key><arg_value>hi</arg_value>",
+            id="repeated-opening-tag",
+        ),
+        pytest.param(
+            "<arg_key>stale</arg_key>"
+            "<arg_key>content</arg_key><arg_value>hi</arg_value>",
+            id="dangling-key-before-pair",
+        ),
+        pytest.param(
+            "<arg_key>content</arg_key><arg_value>hi</arg_value>",
+            id="well-formed",
+        ),
+    ],
+)
+def test_ignores_stray_arg_key_tags(raw_args: str, stream: bool) -> None:
+    """Stray `arg_key` tags must not leak into parsed or streamed keys."""
+    request = _build_chat_request(tool_choice="auto")
+    parser = _make_parser(request)
+    model_output = f"<tool_call>write_file\n{raw_args}\n</tool_call>"
+
+    if stream:
+        result = run_tool_extraction_streaming(parser, list(model_output), request)
+    else:
+        result = parser.extract_tool_calls(model_output, request)
+
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"content": "hi"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_ignores_stray_arg_key_tags_non_string_arg(stream: bool) -> None:
+    """Typed non-string deserialization still runs after stripping stray tags."""
+    request = _build_chat_request(tool_choice="auto")
+    parser = _make_parser(request)
+    model_output = (
+        "<tool_call>write_file\n"
+        "<arg_key><arg_key>mode</arg_key></arg_key>"
+        "<arg_value> 420 </arg_value>\n"
+        "</tool_call>"
+    )
+
+    if stream:
+        result = run_tool_extraction_streaming(parser, list(model_output), request)
+    else:
+        result = parser.extract_tool_calls(model_output, request)
+
+    assert len(result.tool_calls) == 1
+    assert json.loads(result.tool_calls[0].function.arguments) == {"mode": 420}
+
+
 def test_responses_extract_tool_calls_with_flat_tools() -> None:
     # required/named Responses calls route into extract_tool_calls with flat
     # FunctionTool (.name); _allowed_types must not raise.

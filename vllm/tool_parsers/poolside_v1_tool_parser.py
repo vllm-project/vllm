@@ -78,8 +78,13 @@ class PoolsideV1ToolParser(ToolParser):
         self.func_detail_regex = re.compile(
             r"<tool_call>\s*([^\n<]+?)\s*\n?\s*(<arg_key>.*?)?</tool_call>", re.DOTALL
         )
+        # Key cannot cross `<arg_key>` or `</arg_key>`, so stray tags never
+        # leak into the argument name. Possessive quantifiers prevent
+        # backtracking on unterminated buffers.
         self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
+            r"<arg_key>([^<]*+(?:<(?!/?arg_key>)[^<]*+)*+)(?:</arg_key>\s*+)++"
+            r"<arg_value>(.*?)</arg_value>",
+            re.DOTALL,
         )
 
         if not self.model_tokenizer:
@@ -349,6 +354,18 @@ class PoolsideV1ToolParser(ToolParser):
             # If we have a pending key, parse its value
             if self._pending_key is not None:
                 val_pos = self._buffer.find(self.arg_val_start)
+                next_key_pos = self._buffer.find(self.arg_key_start)
+                end_pos = self._buffer.find(self.tool_call_end_token)
+                if (
+                    next_key_pos != -1
+                    and (val_pos == -1 or next_key_pos < val_pos)
+                    and (end_pos == -1 or next_key_pos < end_pos)
+                ):
+                    # Drop a dangling value-less key when a newer `<arg_key>`
+                    # arrives before `<arg_value>`, matching `func_arg_regex`.
+                    self._buffer = self._buffer[next_key_pos:]
+                    self._pending_key = None
+                    continue
                 if val_pos == -1:
                     break
                 if val_pos > 0:
@@ -435,6 +452,10 @@ class PoolsideV1ToolParser(ToolParser):
             if key_end == -1:
                 break
             key = self._buffer[len(self.arg_key_start) : key_end]
+            if self.arg_key_start in key:
+                # Duplicate opening `<arg_key>` before `</arg_key>`: keep the
+                # innermost key, matching `func_arg_regex`.
+                key = key.rsplit(self.arg_key_start, 1)[-1]
             self._buffer = self._buffer[key_end + len(self.arg_key_end) :]
             self._pending_key = key
             continue
