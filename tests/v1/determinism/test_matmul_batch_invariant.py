@@ -12,6 +12,7 @@ from utils import skip_unsupported
 
 import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
+    bmm_batch_invariant,
     enable_batch_invariant_mode,
     matmul_batch_invariant,
     matmul_persistent,
@@ -222,3 +223,65 @@ def test_mm_out_dtype_keeps_aten_dtype_checks():
     out = torch.empty((4, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
     with pytest.raises(RuntimeError, match="dtype of the provided out tensor"):
         torch.mm(a, b, out_dtype=torch.float32, out=out)
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("k,n", [(128, 512), (513, 129), (2048, 1)])
+def test_bmm_row_is_bitwise_invariant_across_row_tiles(dtype, k, n):
+    """The same row must stay identical across row-tile sizes and positions."""
+    torch.manual_seed(4327)
+    weights = torch.randn(3, n, k, device=DEVICE_TYPE, dtype=dtype).transpose(1, 2)
+    rows = torch.randn(3, 129, k * 2, device=DEVICE_TYPE, dtype=dtype)[..., ::2]
+    needle = rows[:, 0].clone()
+    expected = bmm_batch_invariant(rows, weights)[:, 0].clone()
+    bit_dtype = torch.int32 if dtype == torch.float32 else torch.int16
+    expected_bits = expected.contiguous().view(bit_dtype)
+    for m in (1, 16, 17, 32, 33, 64, 65, 129):
+        for position in {0, m // 2, m - 1}:
+            storage = torch.empty(3, m, k * 2, device=DEVICE_TYPE, dtype=dtype)
+            x = storage[..., ::2]
+            x.copy_(rows[:, :m])
+            x[:, position] = needle
+            out = torch.empty(3, n, m, device=DEVICE_TYPE, dtype=dtype).transpose(1, 2)
+            assert bmm_batch_invariant(x, weights, out=out) is out
+            assert torch.equal(
+                out[:, position].contiguous().view(bit_dtype), expected_bits
+            )
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_bmm_graph_replay_preserves_row_tile_invariance(dtype):
+    """Graphs captured at different row counts preserve the same row's bits."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA graph validation requires CUDA")
+    torch.manual_seed(4607)
+    rows = torch.randn(2, 129, 128, device=DEVICE_TYPE, dtype=dtype)
+    weights = torch.randn(2, 128, 512, device=DEVICE_TYPE, dtype=dtype)
+    needle = rows[:, 0].clone()
+    expected = bmm_batch_invariant(rows, weights)[:, 0].clone()
+    bit_dtype = torch.int32 if dtype == torch.float32 else torch.int16
+    for m in (8, 17, 33, 65, 129):
+        x = rows[:, :m].clone()
+        x[:, -1] = needle
+        out = torch.empty(2, m, 512, device=DEVICE_TYPE, dtype=dtype)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                bmm_batch_invariant(x, weights, out=out)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            bmm_batch_invariant(x, weights, out=out)
+        graph.replay()
+        assert torch.equal(
+            out[:, -1].contiguous().view(bit_dtype),
+            expected.contiguous().view(bit_dtype),
+        )
+        x.mul_(0.5)
+        graph.replay()
+        actual = out.clone()
+        eager = bmm_batch_invariant(x, weights)
+        assert torch.equal(actual.contiguous().view(bit_dtype), eager.view(bit_dtype))
