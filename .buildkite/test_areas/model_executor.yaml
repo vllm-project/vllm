@@ -99,6 +99,9 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/mxfp4_utils.py
   - vllm/model_executor/models/gpt_oss.py
+  # the per-PR load-plan Qwen3-MoE FP8 case
+  - vllm/model_executor/layers/quantization/fp8.py
+  - vllm/model_executor/models/qwen3_moe.py
   - vllm/model_executor/model_loader/reload/
   - vllm/model_executor/model_loader/utils.py
   - vllm/model_executor/model_loader/weight_checksum.py
@@ -151,6 +154,7 @@ steps:
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_moe.py
+  - vllm/models/qwen3_5/
   - vllm/utils/deep_gemm.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/worker/extensible_kv_cache.py
