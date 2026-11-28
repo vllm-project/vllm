@@ -261,6 +261,8 @@ def test_reshape_and_cache_flash(
     if kv_cache_dtype == "nvfp4":
         if not current_platform.has_device_capability(100):
             pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
+        if kv_cache_layout == "NHD":
+            pytest.skip("NVFP4 KV cache only supports head-major (HND) layout.")
         if implementation != "cuda":
             pytest.skip("NVFP4 only supports CUDA implementation.")
         if kv_scale_type != "tensor":
@@ -522,7 +524,7 @@ def test_nvfp4_4over6_selects_lower_error_scale(
             cache_dtype,
             source.dtype,
             device=device,
-            cache_layout="NHD",
+            cache_layout="HND",
         )
         key_cache, value_cache = key_caches[0], value_caches[0]
         key_cache.zero_()
