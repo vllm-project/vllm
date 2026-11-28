@@ -32,7 +32,7 @@ class _PayloadLifetimeCheckingQueue:
         if self.dequeue_count == 1:
             payload = _RpcPayload()
             self.payload_ref = weakref.ref(payload)
-            return "consume", (payload,), {}, None
+            return 1, "consume", (payload,), {}, None
 
         assert self.payload_ref is not None
         assert self.payload_ref() is None
@@ -45,7 +45,7 @@ def test_worker_rpc_payload_released_before_next_dequeue():
     worker_proc.rpc_broadcast_mq = queue
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(consume=lambda payload: payload)
-    worker_proc.handle_output = lambda output: None
+    worker_proc.handle_output = lambda output, call_id=0: None
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
 
@@ -59,13 +59,16 @@ def test_execute_worker_rpc_returns_worker_exception():
     worker_proc: Any = WorkerProc.__new__(WorkerProc)
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(fail=fail)
-    outputs: list[Any] = []
-    worker_proc.handle_output = outputs.append
-    worker_proc._execute_worker_rpc(("fail", (), {}, None))
+    outputs: list[tuple[Any, int]] = []
+    worker_proc.handle_output = lambda output, call_id=0: outputs.append(
+        (output, call_id)
+    )
+    worker_proc._execute_worker_rpc((7, "fail", (), {}, None))
 
     assert len(outputs) == 1
-    assert isinstance(outputs[0], RuntimeError)
-    assert str(outputs[0]) == "test error"
+    assert isinstance(outputs[0][0], RuntimeError)
+    assert str(outputs[0][0]) == "test error"
+    assert outputs[0][1] == 7
 
 
 @pytest.mark.parametrize("stalled", [False, True])
@@ -86,9 +89,12 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
         assert timeout is not None and 0 < timeout <= 7
         if stalled:
             raise TimeoutError
-        return WorkerProc.ResponseStatus.SUCCESS, result
+        return 1, WorkerProc.ResponseStatus.SUCCESS, result
 
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_fault_tolerance=False)
+    )
     executor.is_failed = False
     executor.output_rank = 1
     executor.futures_queue = deque()
@@ -159,7 +165,7 @@ def test_execute_worker_rpc_feeds_watchdog():
     worker_proc: Any = WorkerProc.__new__(WorkerProc)
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(ok=ok)
-    worker_proc.handle_output = lambda output: None
+    worker_proc.handle_output = lambda output, call_id=0: None
     calls: list[str] = []
     watchdog = MagicMock()
     watchdog.feed.side_effect = lambda: calls.append("feed")
@@ -168,6 +174,93 @@ def test_execute_worker_rpc_feeds_watchdog():
         "vllm.v1.executor.multiproc_executor.get_watch_dog",
         return_value=watchdog,
     ):
-        worker_proc._execute_worker_rpc(("ok", (), {}, None))
+        worker_proc._execute_worker_rpc((1, "ok", (), {}, None))
 
     assert calls == ["feed", "rpc", "feed"]
+
+
+def test_collective_rpc_discards_stale_failure_and_timeout_replies():
+    """End-to-end TP=2 WorkerProc + MultiprocExecutor test verifying:
+    1) When enable_fault_tolerance=False and worker 0 fails, raising early
+       without blocking on worker 1 leaves worker 1's stale reply queued, and
+       the next RPC discards it via call_id and returns fresh replies.
+    2) When a call times out and a worker enqueues its late reply afterwards,
+       the next RPC discards stale call_ids and returns fresh replies.
+    """
+    worker_mqs: list[deque[Any]] = [deque(), deque()]
+
+    class _FakeMQ:
+        def __init__(self, idx: int):
+            self.idx = idx
+            self.fail_next_timeout = False
+
+        def enqueue(self, item: Any) -> None:
+            worker_mqs[self.idx].append(item)
+
+        def dequeue(self, timeout: float | None = None) -> Any:
+            if self.fail_next_timeout:
+                self.fail_next_timeout = False
+                raise TimeoutError
+            return worker_mqs[self.idx].popleft()
+
+    state = {"fail": True}
+
+    def _make_worker(rank: int) -> Any:
+        wp: Any = WorkerProc.__new__(WorkerProc)
+        wp.rank = rank
+        wp.use_async_scheduling = False
+        wp.worker_response_mq = _FakeMQ(rank)
+
+        def update_weights(tag: str) -> str:
+            if state["fail"]:
+                raise RuntimeError(f"rank {rank} failed on {tag}")
+            return f"ok-{rank}-{tag}"
+
+        wp.worker = SimpleNamespace(update_weights=update_weights)
+        return wp
+
+    workers = [_make_worker(0), _make_worker(1)]
+    response_mqs = [_FakeMQ(0), _FakeMQ(1)]
+
+    def broadcast_enqueue(rpc_request: Any) -> None:
+        for wp in workers:
+            wp._execute_worker_rpc(rpc_request)
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_fault_tolerance=False)
+    )
+    executor.is_failed = False
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=broadcast_enqueue)
+    executor.response_mqs = response_mqs
+
+    # 1. Call 1 fails on worker 0 and raises immediately without waiting on
+    #    worker 1; worker 1's stale (call_id=1) reply is discarded on retry.
+    with pytest.raises(RuntimeError, match="rank 0 failed on attempt1"):
+        executor.collective_rpc("update_weights", args=("attempt1",))
+    assert len(worker_mqs[0]) == 0
+    assert len(worker_mqs[1]) == 1
+
+    # Retry succeeds and gets aligned fresh responses.
+    state["fail"] = False
+    assert executor.collective_rpc("update_weights", args=("attempt2",)) == [
+        "ok-0-attempt2",
+        "ok-1-attempt2",
+    ]
+    assert len(worker_mqs[0]) == 0
+    assert len(worker_mqs[1]) == 0
+
+    # 2. Simulate timeout on worker 1: worker 1's reply stays queued in MQ,
+    #    then a subsequent retry discards that stale call_id reply.
+    response_mqs[1].fail_next_timeout = True
+    with pytest.raises(TimeoutError, match="update_weights timed out"):
+        executor.collective_rpc("update_weights", timeout=1.0, args=("timed_out",))
+    assert len(worker_mqs[1]) == 1
+
+    assert executor.collective_rpc("update_weights", args=("after_timeout",)) == [
+        "ok-0-after_timeout",
+        "ok-1-after_timeout",
+    ]
+    assert len(worker_mqs[0]) == 0
+    assert len(worker_mqs[1]) == 0

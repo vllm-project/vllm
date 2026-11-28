@@ -234,6 +234,7 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
         _FakeResponseMQ(
             [
                 (
+                    1,
                     WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
                     KVConnectorOutput(finished_recving={"req1"}, invalid_block_ids={7}),
                 )
@@ -242,6 +243,7 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
         _FakeResponseMQ(
             [
                 (
+                    1,
                     WorkerProc.ResponseStatus.SUCCESS,
                     ModelRunnerOutput(
                         req_ids=[],
@@ -286,22 +288,23 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
         assert aggregator._salvaged_outputs == []
 
 
+@pytest.mark.parametrize("enable_ft", [True, False])
 @pytest.mark.parametrize("non_block", [False, True])
 @pytest.mark.parametrize("connector", [None, "ec", "kv"])
 @pytest.mark.parametrize("second_fails", [False, True])
 def test_ft_rpc_failure_keeps_next_rpc_responses_aligned(
-    non_block, connector, second_fails
+    enable_ft, non_block, connector, second_fails
 ):
-    """FT retries must consume fresh replies, including RPCs without KV output."""
-    executor = _make_failed_step_executor(enable_ft=True)
+    """Retries must consume fresh replies whether FT is enabled or not."""
+    executor = _make_failed_step_executor(enable_ft=enable_ft)
     success = WorkerProc.ResponseStatus.SUCCESS
     failure = WorkerProc.ResponseStatus.FAILURE
     executor.response_mqs = [
-        _FakeResponseMQ([(failure, "device error"), (success, "recovered0")]),
+        _FakeResponseMQ([(1, failure, "device error"), (2, success, "recovered0")]),
         _FakeResponseMQ(
             [
-                (failure if second_fails else success, "previous step"),
-                (success, "recovered1"),
+                (1, failure if second_fails else success, "previous step"),
+                (2, success, "recovered1"),
             ]
         ),
     ]
