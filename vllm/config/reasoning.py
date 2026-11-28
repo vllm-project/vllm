@@ -7,6 +7,25 @@ from vllm.config.model import ModelConfig
 from vllm.config.utils import config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.mistral import is_mistral_tokenizer
+
+
+def _resolve_token_ids(tokenizer, marker: str) -> list[int]:
+    """Resolve a marker string to token IDs.
+
+    Mistral tokenizers encode control tokens such as ``[THINK]`` as
+    literal text, splitting them into several sub-word tokens, so a
+    marker that is one of their special tokens resolves to its single ID
+    through ``convert_tokens_to_ids``.  Every other marker is encoded,
+    including ordinary vocabulary pieces, whose single IDs differ from
+    their encoding, and strings outside the vocabulary such as
+    ``<think>``, which ``convert_tokens_to_ids`` maps to the unknown
+    token.  Hugging Face tokenizers already encode their special tokens
+    as single IDs.
+    """
+    if is_mistral_tokenizer(tokenizer) and marker in tokenizer.all_special_tokens:
+        return [tokenizer.convert_tokens_to_ids(marker)]
+    return tokenizer.encode(marker, add_special_tokens=False)
 
 
 @config
@@ -101,14 +120,12 @@ class ReasoningConfig:
             # If we don't have valid strings to tokenize,
             # we can't initialize the token IDs.
             return
-        self._reasoning_start_token_ids = tokenizer.encode(
-            reasoning_start_str, add_special_tokens=False
+        self._reasoning_start_token_ids = _resolve_token_ids(
+            tokenizer, reasoning_start_str
         )
-        self._reasoning_end_token_ids = tokenizer.encode(
-            reasoning_end_str, add_special_tokens=False
-        )
-        self._natural_reasoning_end_token_ids = tokenizer.encode(
-            natural_reasoning_end_str, add_special_tokens=False
+        self._reasoning_end_token_ids = _resolve_token_ids(tokenizer, reasoning_end_str)
+        self._natural_reasoning_end_token_ids = _resolve_token_ids(
+            tokenizer, natural_reasoning_end_str
         )
 
         if (
