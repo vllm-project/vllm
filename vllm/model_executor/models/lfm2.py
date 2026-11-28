@@ -427,7 +427,11 @@ class Lfm2Model(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         def get_layer(prefix: str):
@@ -493,8 +497,20 @@ class Lfm2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        def _maybe_reshape(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, loaded_weight in weights:
+                # GGUF stores the short conv weight as [dim, L], while
+                # ShortConv expects the HF Conv1d layout [dim, 1, L].
+                if "conv.conv.weight" in name and loaded_weight.dim() == 2:
+                    loaded_weight = loaded_weight.unsqueeze(1)
+                yield name, loaded_weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            _maybe_reshape(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 @attn_type("encoder_only")
