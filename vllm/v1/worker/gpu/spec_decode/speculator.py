@@ -374,6 +374,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 # PCPManager.sync_drafts indexes the draft logits by request
                 # state, so it must see every request's logits.
                 and parallel_config.prefill_context_parallel_size == 1
+                # Each PP micro-batch starts at batch position 0, so its draft
+                # step would take the rows of the other micro-batches' drafts.
+                and parallel_config.pipeline_parallel_size == 1
                 and self.draft_watermarker is None
                 and self.supports_batch_sharded_draft_logits()
             ),

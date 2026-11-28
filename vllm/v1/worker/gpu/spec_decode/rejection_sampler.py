@@ -283,10 +283,17 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        # A request skipped since its draft step may find its draft logits row
+        # reused by another request. Reject those drafts.
+        verify_draft_sampled = draft_sampled
+        if draft_logits is not None:
+            stale = draft_logits.stale_drafts(expanded_idx_mapping, expanded_local_pos)
+            if stale is not None:
+                verify_draft_sampled = draft_sampled.masked_fill(stale, -1)
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
-            draft_sampled,
+            verify_draft_sampled,
             cu_num_logits,
             pos,
             idx_mapping,

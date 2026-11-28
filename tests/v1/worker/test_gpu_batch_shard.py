@@ -751,7 +751,8 @@ def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
     # Every drafted request verifies against its own row.
     for rank, o in enumerate(owners):
         owned = [s for s in step0 if o.shard_mapping_np[s] == rank]
-        stale = _np(o.stale_drafts(_draft_batch(owned, num_logits_per_req)))
+        batch = _draft_batch(owned, num_logits_per_req)
+        stale = o.stale_drafts(batch.expanded_idx_mapping, batch.expanded_local_pos)
         assert not stale.any()
 
     # Step 1 skips the request at position 1 and puts a new request there.
@@ -765,22 +766,27 @@ def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
     owner_of_skipped = 1 % tp_size
     o = owners[owner_of_skipped]
     assert o.shard_mapping_np[skipped] == owner_of_skipped
-    stale = _np(o.stale_drafts(_draft_batch([skipped, new], num_logits_per_req)))
-    stale = stale.reshape(2, num_logits_per_req)
+    batch = _draft_batch([skipped, new], num_logits_per_req)
+    stale = o.stale_drafts(batch.expanded_idx_mapping, batch.expanded_local_pos)
+    stale = _np(stale).reshape(2, num_logits_per_req)
     # Only draft rows (local position > 0) of the skipped request are stale.
     assert stale[0].tolist() == [False] + [True] * (num_logits_per_req - 1)
     assert not stale[1].any()
 
 
-@pytest.mark.parametrize("pcp_size", [1, 2])
-def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
+@pytest.mark.parametrize("pcp_size,pp_size", [(1, 1), (2, 1), (1, 2)])
+def test_draft_logits_stay_replicated_under_pcp_and_pp(pcp_size: int, pp_size: int):
     """PCPManager.sync_drafts indexes the draft logits cache by request state,
-    so PCP keeps the cache replicated even under batch-sharded sampling."""
+    and PP micro-batches would take each other's rows, so PCP and PP keep the
+    cache replicated even under batch-sharded sampling."""
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
     speculator = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size)
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=pcp_size,
+                pipeline_parallel_size=pp_size,
+            )
         ),
         max_num_reqs=8,
         num_speculative_steps=2,
@@ -801,8 +807,9 @@ def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
         DraftModelSpeculator._init_draft_logits(speculator, target_model=None)
 
     draft_logits = speculator.draft_logits
-    assert (draft_logits.row_mapping is not None) == (pcp_size == 1)
-    assert draft_logits.values.shape[0] == (4 if pcp_size == 1 else 8)
+    sharded = pcp_size == pp_size == 1
+    assert (draft_logits.row_mapping is not None) == sharded
+    assert draft_logits.values.shape[0] == (4 if sharded else 8)
 
 
 def test_owners_of_reads_owner_table_or_batch_position():
