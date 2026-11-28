@@ -131,11 +131,11 @@ def construct_timeline_data(
 
     def tostr(sec_time: float) -> str:
         """Convert seconds to HH:MM:SS.mmm format."""
-        h = int(sec_time // 3600)
+        h, remainder = divmod(round(sec_time * 1000), 3_600_000)
         assert h < 100, "time seems to last more than 100 hours"
-        m = int((sec_time % 3600) // 60)
-        s = sec_time % 60
-        return f"{h:02d}:{m:02d}:{s:06.3f}"
+        m, remainder = divmod(remainder, 60_000)
+        s, ms = divmod(remainder, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
     def itl_type(itl: float) -> str:
         """Categorize ITL based on thresholds."""
