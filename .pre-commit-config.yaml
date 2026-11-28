@@ -7,6 +7,14 @@ default_stages:
 exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
 # Revs are frozen to commit SHAs, bump them with `pre-commit autoupdate --freeze [--repo <url>]`
 repos:
+- repo: local
+  hooks:
+  - id: runner-snapshot
+    name: runner snapshot
+    entry: python tools/pre_commit/check_spdx_header.py
+    language: python
+    types: [python]
+    pass_filenames: false
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: f368fb366ff7f2f808dd324b83a6d32267799e19  # frozen: v0.17.2
   hooks:
