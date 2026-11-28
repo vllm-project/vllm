@@ -3,10 +3,11 @@
 
 import os
 from contextlib import nullcontext
-from multiprocessing import connection, get_context
+from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import msgspec
 import pytest
@@ -17,9 +18,9 @@ import vllm.platforms as platforms
 from vllm.config import ParallelConfig, WatchdogConfig
 from vllm.config.utils import hash_config
 from vllm.utils import torch_utils
+from vllm.v1.engine import coordinator as coordinator_module
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
-from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
     CoreEngine,
@@ -34,30 +35,27 @@ from vllm.v1.executor import UniProcExecutor, multiproc_executor
 pytestmark = pytest.mark.skip_global_cleanup
 
 
-def _stall_coordinator_startup(writer, release):
-    with writer:
-        release.wait()
+def test_dp_coordinator_startup_timeout(monkeypatch: pytest.MonkeyPatch):
+    """The configured timeout bounds the wait, and expiry stops the child."""
+    context = MagicMock()
+    context.Pipe.return_value = (MagicMock(), MagicMock())
+    monkeypatch.setattr(coordinator_module, "get_mp_context", lambda: context)
+    # Nothing becomes ready, which is how an expired wait looks.
+    wait = MagicMock(return_value=[])
+    monkeypatch.setattr(connection, "wait", wait)
+    shutdown = MagicMock()
+    monkeypatch.setattr(coordinator_module, "shutdown", shutdown)
+    parallel_config = ParallelConfig(
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        data_parallel_coordinator_startup_timeout_seconds=300,
+    )
 
+    with pytest.raises(RuntimeError, match="timeout=300 seconds"):
+        coordinator_module.DPCoordinator(parallel_config)
 
-@pytest.mark.timeout(30)
-def test_dp_coordinator_timeout_terminates_child():
-    ctx = get_context("spawn")
-    reader, writer = ctx.Pipe(duplex=False)
-    release = ctx.Event()
-    proc = ctx.Process(target=_stall_coordinator_startup, args=(writer, release))
-    coordinator = object.__new__(DPCoordinator)
-    coordinator.proc = proc
-    with reader, writer:
-        proc.start()
-        writer.close()
-        try:
-            with pytest.raises(RuntimeError, match="timeout=1 seconds"):
-                coordinator._wait_for_zmq_addrs(reader, timeout=1)
-            assert not proc.is_alive()
-        finally:
-            if proc.is_alive():
-                proc.kill()
-            proc.join()
+    assert wait.call_args.kwargs["timeout"] == 300
+    shutdown.assert_called_once_with([context.Process.return_value])
 
 
 @pytest.mark.parametrize(

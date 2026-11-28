@@ -59,26 +59,28 @@ class DPCoordinator:
         timeout: int,
     ) -> tuple[str, str, str]:
         try:
-            with zmq_addr_pipe:
-                ready = multiprocessing.connection.wait(
-                    [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
+            ready = multiprocessing.connection.wait(
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
+            )
+            if not ready:
+                raise RuntimeError(
+                    "DP Coordinator process failed to report ZMQ addresses "
+                    f"within timeout={timeout} seconds during startup. "
+                    "Set --data-parallel-coordinator-startup-timeout-seconds "
+                    "to adjust this wait."
                 )
-                if not ready:
-                    raise RuntimeError(
-                        "DP Coordinator process failed to report ZMQ addresses "
-                        f"within timeout={timeout} seconds during startup. "
-                        "Set --data-parallel-coordinator-startup-timeout-seconds "
-                        "to adjust this wait."
-                    )
-                try:
-                    return zmq_addr_pipe.recv()
-                except EOFError:
-                    raise RuntimeError(
-                        "DP Coordinator process failed during startup."
-                    ) from None
+            try:
+                return zmq_addr_pipe.recv()
+            except EOFError:
+                raise RuntimeError(
+                    "DP Coordinator process failed during startup."
+                ) from None
         except BaseException:
+            # The finalizer is not registered yet, so stop the child here.
             shutdown([self.proc])
             raise
+        finally:
+            zmq_addr_pipe.close()
 
     def __init__(
         self,
@@ -127,7 +129,7 @@ class DPCoordinator:
             back_publish_address,
         ) = self._wait_for_zmq_addrs(
             parent_zmq_addr_pipe,
-            parallel_config.data_parallel_coordinator_startup_timeout_seconds,
+            timeout=parallel_config.data_parallel_coordinator_startup_timeout_seconds,
         )
 
         self.stats_publish_address = front_publish_address

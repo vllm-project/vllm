@@ -20,9 +20,12 @@ This document focuses on online deployments (with the API server). DP + EP is al
 
 There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
 
-For any online DP deployment that starts a coordinator, including non-MoE deployments using internal or hybrid load balancing, set `--data-parallel-coordinator-startup-timeout-seconds` on rank 0 to control how long the frontend waits for the coordinator's ZMQ socket addresses. The default is 120 seconds. You can also set `data-parallel-coordinator-startup-timeout-seconds` in the [serve YAML config](../configuration/serve_args.md).
+## Coordinator startup timeout
 
-With multi-node internal load balancing and the multiprocessing backend, each remote engine has 5 minutes to receive a reply after sending its initial `HELLO`. Rank 0 binds its handshake socket after the coordinator reports its addresses. The 5-minute deadline applies regardless of the coordinator timeout, so stagger remote engine startup if rank 0 needs longer to accept handshakes.
+At startup, the frontend waits up to 120 seconds for the DP coordinator to report its ZMQ socket addresses. To change this limit, set `--data-parallel-coordinator-startup-timeout-seconds` on the rank 0 node, or `data-parallel-coordinator-startup-timeout-seconds` in the [serve YAML config](../configuration/serve_args.md). It applies to every online DP deployment that starts a coordinator, including non-MoE models with internal or hybrid load balancing.
+
+!!! note
+    With multi-node DP and the multiprocessing backend, each engine on a remote node waits at most 5 minutes for rank 0 to reply, and rank 0 can only reply after its coordinator has started. Raising the coordinator timeout does not extend this limit. If rank 0 needs longer, start the remote nodes later.
 
 ## Internal Load Balancing
 
