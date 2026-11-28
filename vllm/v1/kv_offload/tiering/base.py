@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+from __future__ import annotations
+
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     ConfigInfoMapping,
     Locality,
@@ -34,6 +37,9 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
     from vllm.v1.kv_offload.base import OffloadingSpec
+
+
+logger = init_logger(__name__)
 
 
 # Type alias for job IDs used in async transfer tracking
@@ -175,6 +181,71 @@ class SecondaryTierManager(ABC):
     # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
 
+    # Constructors opting in must defer access to primary memory until workers
+    # finish pinning it. Metadata such as its address and strides is available.
+    supports_async_init: ClassVar[bool] = False
+
+    _ready: bool = True
+    _init_lock: threading.Lock | None = None
+    _init_thread: threading.Thread | None = None
+    _pending_init: Callable[[], None] | None = None
+
+    def _init_region(self, initialize: Callable[[], None]) -> None:
+        if not self._offloading_spec.async_init:
+            initialize()
+            return
+        self._init_lock = threading.Lock()
+        self._pending_init = initialize
+        self._ready = False
+
+    def start_background_init(self, readiness_lock: threading.Lock) -> None:
+        """Start deferred registration after the CPU workers finish pinning."""
+        if self._init_lock is None:
+            return
+        with self._init_lock:
+            initialize = self._pending_init
+            if initialize is None:
+                return
+            self._pending_init = None
+            thread = threading.Thread(
+                target=self._run_init,
+                args=(initialize, readiness_lock),
+                name="vllm_offload_tier_setup",
+                daemon=True,
+            )
+            try:
+                thread.start()
+            except RuntimeError:
+                logger.exception(
+                    "Failed to start %s tier initialization", self.tier_type
+                )
+                return
+            self._init_thread = thread
+
+    def _run_init(
+        self, initialize: Callable[[], None], readiness_lock: threading.Lock
+    ) -> None:
+        try:
+            initialize()
+        except Exception:
+            logger.exception("Failed to initialize %s tier", self.tier_type)
+            return
+        with readiness_lock:
+            self._ready = True
+
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def _finish_background_init(self) -> None:
+        """Finish any registration before releasing its memory and transports."""
+        if self._init_lock is None:
+            return
+        with self._init_lock:
+            self._pending_init = None
+            if self._init_thread is not None:
+                self._init_thread.join()
+                self._init_thread = None
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
@@ -200,7 +271,7 @@ class SecondaryTierManager(ABC):
 
     def __init__(
         self,
-        offloading_spec: "OffloadingSpec",
+        offloading_spec: OffloadingSpec,
         primary_kv_view: memoryview,
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
@@ -411,7 +482,7 @@ class SecondaryTierManager(ABC):
 
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
-        return
+        self._finish_background_init()
 
     @classmethod
     def build_metric_definitions(
@@ -420,7 +491,7 @@ class SecondaryTierManager(ABC):
         """Return Prometheus metric definitions emitted by this tier."""
         return {}
 
-    def get_stats(self) -> "OffloadingConnectorStats | None":
+    def get_stats(self) -> OffloadingConnectorStats | None:
         """Return and reset metric observations collected by this tier."""
         return None
 

@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from typing_extensions import override
@@ -336,17 +337,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
-        if self.async_init:
-            logger.warning(
-                "async_init is not supported with TieringOffloadingSpec yet; "
-                "setting the CPU tier up now"
-            )
-            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        if self.async_init:
+            for _, tier_cls in self._get_secondary_tiers(self.extra_config):
+                if not tier_cls.supports_async_init:
+                    logger.warning(
+                        "%s requires synchronous primary memory setup; "
+                        "disabling async_init",
+                        tier_cls.__name__,
+                    )
+                    self.async_init = False
+                    break
 
         # Pause between tier-poll rounds for tiers that need servicing
         # between engine steps. Zero or negative disables the thread, which
@@ -414,7 +420,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             scheduler_mmap: SharedOffloadRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None
-            secondary_tiers = []
+            secondary_tiers: list[SecondaryTierManager] = []
             try:
                 # Create scheduler-side SharedOffloadRegion (rank=None) so the
                 # primary tier can eagerly create a memoryview over _base.
@@ -441,16 +447,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
                 # Create secondary tiers
                 primary_kv_view = primary_tier.get_kv_memoryview()
-                for i, tier_config in enumerate(self.secondary_tier_configs):
-                    tier = SecondaryTierFactory.create_secondary_tier(
-                        tier_config, primary_kv_view, self
-                    )
-                    secondary_tiers.append(tier)
-                    logger.info(
-                        "Created secondary tier #%d (%s)",
-                        i,
-                        tier.tier_type,
-                    )
+                secondary_tiers.extend(self._create_secondary_tiers(primary_kv_view))
 
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
@@ -496,7 +493,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
-            if secondary_tiers and not (
+            if self.secondary_tier_configs and not (
                 self.config.replicated_layout
                 or (
                     self.config.canonical_layout
@@ -528,9 +525,25 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             keys.update(dict.fromkeys(tier_keys))
         return tuple(keys)
 
+    def _create_secondary_tiers(
+        self, primary_kv_view: memoryview
+    ) -> Iterable[SecondaryTierManager]:
+        for i, tier_config in enumerate(self.secondary_tier_configs):
+            try:
+                tier = SecondaryTierFactory.create_secondary_tier(
+                    tier_config, primary_kv_view, self
+                )
+            except Exception:
+                if not self.async_init:
+                    raise
+                logger.exception("Failed to create secondary tier #%d; skipping it", i)
+                continue
+            logger.info("Created secondary tier #%d (%s)", i, tier.tier_type)
+            yield tier
+
     @classmethod
     def _get_secondary_tiers(
-        cls, extra_config: dict[str, Any]
+        cls, extra_config: Mapping[str, Any]
     ) -> list[tuple[dict[str, Any], type[SecondaryTierManager]]]:
         """Resolve every configured secondary tier to its manager class.
 
@@ -568,6 +581,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
         worker_index = self.config.parallel.rank
+        prefault_shard = self._replicated_prefault_shard
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,
@@ -575,7 +589,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
             num_segments=REGION_SEGMENTS,
-            populate_shard=self._replicated_prefault_shard,
+            populate_shard=None if self.async_init else prefault_shard,
+            populate=not self.async_init,
         )
         try:
             if self.config.canonical_layout:
@@ -586,6 +601,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                defer_host_setup=self.async_init,
+                prefault_shard=prefault_shard,
+                pin_pace=self.async_init_pin_pace,
             )
         except Exception:
             worker_mmap.cleanup()

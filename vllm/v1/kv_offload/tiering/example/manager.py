@@ -56,6 +56,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     - Completes transfers immediately (synchronous)
     """
 
+    supports_async_init: ClassVar[bool] = True
     medium: ClassVar[Medium] = Medium.CPU
 
     def __init__(

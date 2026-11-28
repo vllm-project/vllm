@@ -99,6 +99,7 @@ class PendingPromotion:
 @dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
+    tiers: tuple[tuple[int, SecondaryTierManager], ...] = ()
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
@@ -314,6 +315,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._lock = threading.Lock()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
+        self._configured_tiers = tuple(enumerate(self.secondary_tiers))
+        # Publish each completed registration atomically with admission snapshots.
+        self._readiness_lock = threading.Lock()
+        self._all_ready = all(tier.is_ready() for tier in self.secondary_tiers)
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -373,6 +378,19 @@ class TieringOffloadingManager(OffloadingManager):
         self._tier_poll_stop = threading.Event()
         self._tier_poll_thread: threading.Thread | None = None
         self._start_tier_poll_thread()
+
+    @override
+    def on_workers_ready(self) -> None:
+        for tier in self.secondary_tiers:
+            tier.start_background_init(self._readiness_lock)
+
+    def _ready_tiers(self) -> tuple[tuple[int, SecondaryTierManager], ...]:
+        if self._all_ready:
+            return self._configured_tiers
+        with self._readiness_lock:
+            tiers = tuple(pair for pair in self._configured_tiers if pair[1].is_ready())
+            self._all_ready = len(tiers) == len(self._configured_tiers)
+        return tiers
 
     @property
     @override
@@ -517,7 +535,8 @@ class TieringOffloadingManager(OffloadingManager):
         try:
             self._process_finished_jobs(self._polled_tiers)
             for tier in self._polled_tiers:
-                tier.serve_external_requests(self._tier_parents[tier])
+                if tier.is_ready():
+                    tier.serve_external_requests(self._tier_parents[tier])
         finally:
             self._processed_jobs_this_step = gate
 
@@ -626,6 +645,8 @@ class TieringOffloadingManager(OffloadingManager):
         if tiers is None:
             tiers = self.secondary_tiers
         for tier in tiers:
+            if not tier.is_ready():
+                continue
             i = self._tier_index[tier]
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
@@ -770,7 +791,9 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.MISS
 
         any_retry = False
-        for i, tier in enumerate(self.secondary_tiers):
+        state = self._req_state.get(req_context.req_id)
+        tiers = state.tiers if state is not None else self._ready_tiers()
+        for i, tier in tiers:
             if i == exclude_tier_idx:
                 continue
             if not tier.access_mode.can_read:
@@ -1099,7 +1122,7 @@ class TieringOffloadingManager(OffloadingManager):
         if success:
             # Each participating tier gets its own pin for the async transfer.
             skip_tiers = state.skip_cascade_tiers
-            for tier_idx, tier in enumerate(self.secondary_tiers):
+            for tier_idx, tier in state.tiers:
                 if skip_tiers is not None and tier_idx in skip_tiers:
                     continue
                 if not self._should_store_to_tier(tier, len(keys)):
@@ -1153,9 +1176,9 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Record request-level and cascade opt-out decisions separately.
         """
-        state = RequestState(req_context=req_context)
+        state = RequestState(req_context=req_context, tiers=self._ready_tiers())
         self._metrics.on_new_request(req_context)
-        for tier_idx, tier in enumerate(self.secondary_tiers):
+        for tier_idx, tier in state.tiers:
             if tier_idx == exclude_tier_idx:
                 continue
             tier_ctx = tier.on_new_request(req_context)
@@ -1206,7 +1229,7 @@ class TieringOffloadingManager(OffloadingManager):
         if state.pending_cascade_keys:
             return
 
-        for tier_idx, tier in enumerate(self.secondary_tiers):
+        for tier_idx, tier in state.tiers:
             if tier_idx == exclude_tier_idx:
                 continue
             tier.on_request_finished(state.req_context)
@@ -1227,7 +1250,7 @@ class TieringOffloadingManager(OffloadingManager):
         # scheduled but a tier still has_pending_work()).
         self._maybe_process_finished_jobs()
 
-        for tier in self.secondary_tiers:
+        for _, tier in self._ready_tiers():
             tier.serve_external_requests(self._tier_parents[tier])
 
         # Reset the per-step gate AFTER serve_external_requests so that
@@ -1240,7 +1263,7 @@ class TieringOffloadingManager(OffloadingManager):
         # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
         # non-empty, so nothing finalizes early and the list still drains.
         self._flush_pending_cascades()
-        for tier in self.secondary_tiers:
+        for _, tier in self._ready_tiers():
             tier.on_schedule_end(context)
 
         for req_id in context.new_req_ids:
@@ -1256,18 +1279,21 @@ class TieringOffloadingManager(OffloadingManager):
         Work a live tier-poll thread finishes on its own is excluded, so an
         engine that only serves peers can go idle.
         """
-        if self._polled_tiers:
+        ready_tiers = self._ready_tiers()
+        if self._polled_tiers and any(
+            tier.tolerates_off_thread_polling for _, tier in ready_tiers
+        ):
             # Without a live thread, or with another tier a peer lookup can
             # promote from, only a step makes progress.
             thread = self._tier_poll_thread
-            if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
+            if thread is None or not thread.is_alive() or len(ready_tiers) > 1:
                 return True
             return any(state.pending_cascade_keys for state in self._req_state.values())
         return (
             bool(self._jobs)
             or bool(self._deferred_releases)
             or any(state.pending_cascade_keys for state in self._req_state.values())
-            or any(tier.has_pending_work() for tier in self.secondary_tiers)
+            or any(tier.has_pending_work() for _, tier in ready_tiers)
         )
 
     @override
@@ -1279,7 +1305,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         yield from self.primary_tier.take_events()
-        for tier in self.secondary_tiers:
+        for _, tier in self._ready_tiers():
             yield from tier.take_events()
 
     @override
@@ -1306,7 +1332,7 @@ class TieringOffloadingManager(OffloadingManager):
         and a peer is told it is absent; RETRY would instead stall both until
         the hold is released.
         """
-        for tier in self.secondary_tiers:
+        for _, tier in self._ready_tiers():
             tier.drain_jobs()
         # All tier I/O has stopped; consume their completion notifications
         # so manager bookkeeping is consistent before the primary reset.
@@ -1329,7 +1355,7 @@ class TieringOffloadingManager(OffloadingManager):
             state.pending_cascade_keys.clear()
             if not state.is_finished:
                 continue
-            for tier in self.secondary_tiers:
+            for _, tier in state.tiers:
                 tier.on_request_finished(state.req_context)
             self._metrics.on_request_finished(state.req_context)
             finished_req_ids.append(req_id)
@@ -1364,7 +1390,7 @@ class TieringOffloadingManager(OffloadingManager):
             else:
                 stats.aggregate(metrics_stats)
 
-        for tier in self.secondary_tiers:
+        for _, tier in self._ready_tiers():
             tier_stats = tier.get_stats()
             if tier_stats is None or tier_stats.is_empty():
                 continue

@@ -78,6 +78,197 @@ def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
     return mock
 
 
+@pytest.fixture
+def deferred_tiering_manager(tmp_path):
+    page = region_module.mmap.PAGESIZE
+    spec = TieringOffloadingSpec(make_offloading_config())
+    region = region_module.SharedOffloadRegion(
+        engine_id="deferred-tiering-test",
+        num_chunks=2,
+        rank=None,
+        kv_bytes_per_chunk=page,
+        cpu_page_size=page,
+        populate=False,
+        mmap_path=str(tmp_path / "primary.mmap"),
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=2, mmap_region=region)
+    managers = []
+
+    spec.async_init = True
+
+    def create(*tiers):
+        manager = TieringOffloadingManager(
+            primary_tier=primary, secondary_tiers=list(tiers)
+        )
+        managers.append(manager)
+        return manager
+
+    try:
+        yield create, primary, spec, region
+    finally:
+        if managers:
+            for manager in managers:
+                manager.shutdown()
+        else:
+            primary.shutdown()
+
+
+def test_request_only_uses_tiers_ready_at_admission(
+    deferred_tiering_manager,
+):
+    """CPU stores continue during setup; a late tier only receives new requests."""
+    create, primary, spec, _ = deferred_tiering_manager
+    started = threading.Event()
+    release = threading.Event()
+    tier = ExampleSecondaryTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+
+    def build():
+        started.set()
+        assert release.wait(5)
+
+    tier._init_region(build)
+    ready = ExampleSecondaryTierManager(
+        spec, primary.get_kv_memoryview(), "ready", access_mode="write"
+    )
+    manager = create(tier, ready)
+    old = ReqContext(req_id="before-ready")
+    new = ReqContext(req_id="after-ready")
+    old_keys, new_keys = to_keys([100]), to_keys([200])
+    try:
+        assert not started.is_set()
+        with manager.lock:
+            manager.on_new_request(old)
+            manager.on_workers_ready()
+            manager.on_workers_ready()
+        assert started.wait(5)
+        with manager.lock:
+            output = manager.prepare_store(
+                old_keys, old, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None and tuple(output.keys_to_store) == tuple(old_keys)
+            assert not tier.is_ready()
+        release.set()
+        tier._finish_background_init()
+        assert tier.is_ready()
+        with manager.lock:
+            manager.complete_store(old_keys, old, trigger=StoreTrigger.ON_COMPUTE)
+            assert tier.lookup(old_keys[0], old) is LookupResult.MISS
+            assert ready.lookup(old_keys[0], old) is LookupResult.HIT
+            manager.on_new_request(new)
+            output = manager.prepare_store(
+                new_keys, new, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None and tuple(output.keys_to_store) == tuple(new_keys)
+            manager.complete_store(new_keys, new, trigger=StoreTrigger.ON_COMPUTE)
+            assert tier.lookup(new_keys[0], new) is LookupResult.HIT
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+            evicting_keys = to_keys([300, 400])
+            output = manager.prepare_store(
+                evicting_keys, new, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None
+            assert tuple(output.keys_to_store) == tuple(evicting_keys)
+            manager.complete_store(evicting_keys, new, trigger=StoreTrigger.ON_COMPUTE)
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+            assert manager.lookup(new_keys[0], old) is LookupResult.MISS
+            assert manager.lookup(new_keys[0], new) is LookupResult.HIT_PENDING
+            for _ in range(2):
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            assert manager.lookup(new_keys[0], new) is LookupResult.HIT
+            manager.on_request_finished(old)
+            manager.on_request_finished(new)
+    finally:
+        release.set()
+
+
+def test_failed_deferred_tier_setup_preserves_cpu_stores(deferred_tiering_manager):
+    create, primary, spec, _ = deferred_tiering_manager
+
+    def build():
+        raise RuntimeError("secondary setup failed")
+
+    tier = ExampleSecondaryTierManager(spec, primary.get_kv_memoryview(), "example")
+    tier._init_region(build)
+    manager = create(tier)
+    with manager.lock:
+        manager.on_workers_ready()
+    tier._finish_background_init()
+    keys = to_keys([100])
+    with manager.lock:
+        manager.on_new_request(_CTX)
+        output = manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert output is not None and tuple(output.keys_to_store) == tuple(keys)
+        manager.complete_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert manager.lookup(keys[0], _CTX) is LookupResult.HIT
+        assert not tier.is_ready()
+        manager.on_request_finished(_CTX)
+
+
+@pytest.mark.parametrize("ready_before_reset", [False, True])
+def test_deferred_tier_promotion_waits_for_reset_flush(
+    deferred_tiering_manager, ready_before_reset
+):
+    """A late tier cannot overwrite primary slots while old worker DMA drains."""
+    create, primary, spec, _ = deferred_tiering_manager
+    tier = ExampleSecondaryTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    keys = to_keys([100])
+    tier.submit_store(TransferJob(0, keys, np.array([0]), False, _CTX))
+    assert list(tier.get_finished_jobs())[0].success
+    tier._init_region(lambda: None)
+    manager = create(tier)
+    with manager.lock:
+        manager.on_new_request(_CTX)
+        output = manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert output is not None and list(output.keys_to_store) == keys
+        manager.on_request_finished(_CTX)
+        if not ready_before_reset:
+            manager.reset_cache()
+        manager.on_workers_ready()
+    tier._finish_background_init()
+    with manager.lock:
+        if ready_before_reset:
+            manager.reset_cache()
+        assert _CTX.req_id not in manager._req_state
+        new = ReqContext(req_id="after-reset")
+        manager.on_new_request(new)
+        assert manager.lookup(keys[0], new) is LookupResult.MISS
+        assert primary.lookup(keys[0], new) is LookupResult.MISS
+        manager.on_reset_flushed()
+        assert manager.lookup(keys[0], new) is LookupResult.HIT_PENDING
+        for _ in range(2):
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+        assert manager.lookup(keys[0], new) is LookupResult.HIT
+        manager.on_request_finished(new)
+
+
+def test_shutdown_before_workers_ready_cancels_registration(deferred_tiering_manager):
+    create, primary, spec, region = deferred_tiering_manager
+    started = threading.Event()
+    tier = ExampleSecondaryTierManager(spec, primary.get_kv_memoryview(), "example")
+    tier._init_region(started.set)
+    manager = create(tier)
+    manager.shutdown()
+    manager.on_workers_ready()
+    assert not started.is_set()
+    assert region.mmap_obj is None
+
+
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 
@@ -165,6 +356,22 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         stats = self.stats
         self.stats = None
         return stats
+
+
+def test_tier_requiring_pinned_memory_keeps_synchronous_setup():
+    from vllm.platforms import current_platform
+
+    config = make_offloading_config(
+        extra_config={"async_init": True, "secondary_tiers": [{"type": "fs"}]}
+    )
+    assert TieringOffloadingSpec(config).async_init == current_platform.is_cuda()
+    config.extra_config["secondary_tiers"].append(
+        {
+            "type": "MetricsSecondaryTierManager",
+            "module_path": __name__,
+        }
+    )
+    assert not TieringOffloadingSpec(config).async_init
 
 
 def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):

@@ -31,6 +31,30 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def test_bind_failure_releases_zmq_context(monkeypatch):
+    contexts = []
+    context_type = zmq.Context
+
+    def create_context():
+        context = context_type()
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(zmq, "Context", create_context)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        try:
+            with pytest.raises(zmq.ZMQError) as exc_info:
+                ZmqTransport("failed", "127.0.0.1", port)
+            assert exc_info.value.errno == zmq.EADDRINUSE
+            assert contexts and all(context.closed for context in contexts)
+        finally:
+            for context in contexts:
+                context.destroy(linger=0)
+
+
 def _make_transport(host: str = "127.0.0.1", attempts: int = 8):
     """Construct a ZmqTransport on a fresh port, retrying on bind collisions.
 

@@ -523,6 +523,10 @@ class OffloadingManager(ABC):
         """
         return False
 
+    def on_workers_ready(self) -> None:
+        """Called with `lock` held once all workers can take transfers."""
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
