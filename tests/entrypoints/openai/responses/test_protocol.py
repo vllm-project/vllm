@@ -332,3 +332,50 @@ def test_non_list_tools_rejected_by_field_validation(tools, with_item) -> None:
         )
     (error,) = exc_info.value.errors()
     assert error["loc"] == ("tools",) and error["type"] == "list_type"
+
+
+def test_responses_input_item_sdk_validation_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.entrypoints.serve.utils.request_validation._MAX_SDK_VALIDATION_ENTRIES",
+        5,
+    )
+    text = {"type": "output_text", "text": "Hello"}
+    item = {"role": "assistant", "content": [text]}
+    request = ResponsesRequest.model_validate({"input": [item]})
+    assert isinstance(request.input, list)
+    assert isinstance(request.input[0], ResponseOutputMessage)
+
+    with pytest.raises(ValidationError) as exc_info:
+        ResponsesRequest.model_validate({"input": [{**item, "content": [text, text]}]})
+
+    assert any(
+        error["type"] == "sdk_validation_budget" for error in exc_info.value.errors()
+    )
+
+
+def test_responses_tool_sdk_validation_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.entrypoints.serve.utils.request_validation._MAX_SDK_VALIDATION_ENTRIES",
+        5,
+    )
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object"},
+        "strict": False,
+    }
+    request = ResponsesRequest.model_validate({"input": "Hello", "tools": [tool]})
+    assert request.tools[0].type == "function"
+
+    with pytest.raises(ValidationError) as exc_info:
+        ResponsesRequest.model_validate(
+            {"input": "Hello", "tools": [{**tool, "description": "Find a record"}]}
+        )
+
+    assert any(
+        error["type"] == "sdk_validation_budget" for error in exc_info.value.errors()
+    )

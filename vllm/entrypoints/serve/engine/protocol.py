@@ -13,6 +13,7 @@ from pydantic import (
     model_validator,
 )
 
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -118,7 +119,7 @@ class ModelList(OpenAIBaseModel):
     data: list[ModelCard] = Field(default_factory=list)
 
 
-class PromptTokenUsageInfo(OpenAIBaseModel):
+class PromptTokenUsageInfo(FailFastRequestMixin, OpenAIBaseModel):
     cached_tokens: int | None = None
     created_cache_tokens: int | None = None
     multimodal_tokens: dict[str, int] | None = None

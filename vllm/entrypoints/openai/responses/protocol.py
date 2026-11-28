@@ -73,6 +73,10 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import (
+    FailFastRequestMixin,
+    check_sdk_validation_budget,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import (
@@ -175,6 +179,40 @@ def _default_input_image_details(value: Any) -> Any:
         new_content.append(new_part)
 
     return {**value, "content": new_content} if changed else value
+
+
+def _prepare_responses_input_item(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+
+    item_type = item.get("type", "message")
+    item_model: type[
+        ResponseFunctionToolCall | ResponseReasoningItem | ResponseOutputMessage
+    ]
+    if item_type == "function_call":
+        item_model = ResponseFunctionToolCall
+    elif item_type == "reasoning":
+        item_model = ResponseReasoningItem
+    elif (
+        item_type == "message"
+        and item.get("role") == "assistant"
+        and isinstance(item.get("content"), list)
+    ):
+        item_model = ResponseOutputMessage
+    else:
+        return _default_input_image_details(item)
+
+    check_sdk_validation_budget(item)
+    normalized = ResponsesRequest._normalize_openresponses_input_item(item)
+    try:
+        return item_model(**normalized)
+    except ValidationError:
+        logger.debug(
+            "Failed to parse %s to %s, leaving for Pydantic validation",
+            item_type,
+            item_model.__name__,
+        )
+        return _default_input_image_details(normalized)
 
 
 def _tool_field(tool: Any, field: str) -> Any:
@@ -314,7 +352,7 @@ class PromptCacheOptionsParam(PromptCacheOptions):
         )
 
 
-class ResponsesRequest(OpenAIBaseModel):
+class ResponsesRequest(FailFastRequestMixin, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
     background: bool | None = False
@@ -337,7 +375,7 @@ class ResponsesRequest(OpenAIBaseModel):
             list[
                 Annotated[
                     ResponseInputOutputItem,
-                    BeforeValidator(_default_input_image_details),
+                    BeforeValidator(_prepare_responses_input_item),
                 ]
             ],
             FailFast(),
@@ -514,7 +552,13 @@ class ResponsesRequest(OpenAIBaseModel):
     # we take in previous_input_messages (ie in harmony format)
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
-    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    previous_input_messages: (
+        list[
+            OpenAIHarmonyMessage
+            | Annotated[dict, BeforeValidator(check_sdk_validation_budget)]
+        ]
+        | None
+    ) = None
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
@@ -777,88 +821,6 @@ class ResponsesRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
             )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def input_item_parsing(cls, data):
-        """Parse input items that are missing required fields or that Pydantic
-        cannot disambiguate in a Union of TypedDict / BaseModel types.
-
-        Specifically handles:
-        - function_call -> ResponseFunctionToolCall
-        - reasoning     -> ResponseReasoningItem (auto-generates id)
-        - message(role=assistant) -> ResponseOutputMessage (auto-generates
-          id/status and annotations)
-
-        Invalid structures are left for Pydantic to reject.
-        """
-        if not isinstance(data, dict):
-            return data
-        input_data = data.get("input")
-
-        # Early return for None, strings, or bytes
-        if input_data is None or isinstance(input_data, (str, bytes)):
-            return data
-
-        # Convert iterators (like ValidatorIterator) to list
-        if not isinstance(input_data, list):
-            try:
-                input_data = list(input_data)
-            except TypeError:
-                # Not iterable, leave as-is for Pydantic to handle
-                return data
-
-        processed_input = []
-        for item in input_data:
-            normalized_item = cls._normalize_openresponses_input_item(item)
-
-            if not isinstance(normalized_item, dict):
-                processed_input.append(normalized_item)
-                continue
-
-            item_type = normalized_item.get("type")
-
-            if item_type == "function_call":
-                try:
-                    processed_input.append(ResponseFunctionToolCall(**normalized_item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse function_call to ResponseFunctionToolCall, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(normalized_item)
-
-            elif item_type == "reasoning":
-                try:
-                    processed_input.append(ResponseReasoningItem(**normalized_item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse reasoning to ResponseReasoningItem, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(normalized_item)
-
-            elif item_type == "message" and normalized_item.get("role") == "assistant":
-                if not isinstance(normalized_item.get("content"), list):
-                    # String content is a valid EasyInputMessageParam,
-                    # do not coerce it to ResponseOutputMessage
-                    processed_input.append(item)
-                    continue
-
-                try:
-                    processed_input.append(ResponseOutputMessage(**normalized_item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse assistant message to ResponseOutputMessage, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(item)
-
-            else:
-                processed_input.append(normalized_item)
-
-        data["input"] = processed_input
         return data
 
     @staticmethod

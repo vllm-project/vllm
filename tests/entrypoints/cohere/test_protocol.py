@@ -34,7 +34,9 @@ from vllm.entrypoints.cohere.protocol import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolPlanDeltaEvent,
+    UserChatMessageV2,
 )
+from vllm.entrypoints.serve.utils import request_validation
 from vllm.exceptions import VLLMValidationError
 
 # ======================================================================
@@ -77,6 +79,31 @@ class TestCohereChatV2Request:
             CohereChatV2Request(model="m", messages=[])
         assert exc_info.value.parameter == "messages"
         assert exc_info.value.value is None
+
+    def test_sdk_validation_budget_preserves_message_type(self, monkeypatch):
+        monkeypatch.setattr(request_validation, "_MAX_SDK_VALIDATION_ENTRIES", 5)
+        request = CohereChatV2Request(
+            model="m",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        )
+        message = request.messages[0]
+        assert isinstance(message, UserChatMessageV2)
+        assert message.content[0].text == "hi"
+
+        monkeypatch.setattr(request_validation, "_MAX_SDK_VALIDATION_ENTRIES", 1)
+        assert CohereChatV2Request(model="m", messages=[message]).messages[0] is message
+
+    def test_sdk_validation_budget_rejects_object_above_limit(self, monkeypatch):
+        monkeypatch.setattr(
+            request_validation, "_MAX_SDK_VALIDATION_ENTRIES", 4, raising=False
+        )
+        message = {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        with pytest.raises(ValidationError) as exc_info:
+            CohereChatV2Request(model="m", messages=[message])
+
+        assert {error["type"] for error in exc_info.value.errors()} == {
+            "sdk_validation_budget"
+        }
 
     def test_zero_max_tokens_allowed(self):
         # Zero is allowed (the docs allow 0 -> return prompt only).

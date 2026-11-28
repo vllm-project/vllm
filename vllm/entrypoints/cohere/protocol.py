@@ -47,6 +47,7 @@ from cohere.types import (
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import vllm.envs as envs
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 
 # Re-export the SDK wire-format types alongside our local extensions so
@@ -128,7 +129,7 @@ CohereFinishReason = Literal[
 # ---------------------------------------------------------------------------
 
 
-class CohereChatV2Request(BaseModel):
+class CohereChatV2Request(FailFastRequestMixin, BaseModel):
     """Cohere Chat v2 request body.
 
     Mirrors the schema documented at https://docs.cohere.com/reference/chat.

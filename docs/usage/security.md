@@ -336,9 +336,19 @@ Certain API request parameters can have a large impact on resource consumption a
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
 
-On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validating
-the `input` list at the first invalid item and return HTTP 400. The error may
-include several details for that item.
+On the Python frontend, covered request schemas use fail-fast validation for
+lists and typed mappings, which limits the errors collected for each collection.
+A union can still report errors from several branches. This applies to OpenAI chat completions,
+completions, and Responses, including scale-out routes, as well as tokenization,
+pooling, embeddings, classification, scoring, and Anthropic and Cohere
+compatibility endpoints. The same behavior applies when `/invocations` uses a
+covered schema.
+
+The Python frontend checks request objects before passing them to OpenAI,
+Harmony, or Cohere SDK model validators. Each object is limited to 4,096 list
+items and object entries in total, including nested collections. The same
+limit applies to Harmony history objects and to Responses items normalized
+into SDK models.
 
 Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
 `VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).

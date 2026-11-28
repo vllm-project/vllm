@@ -13,6 +13,7 @@ from vllm.entrypoints.generate.base.protocol import (
     MMPayload,
     resolve_return_mm_kwargs_alias,
 )
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 
 
 class AnthropicError(BaseModel):
@@ -62,7 +63,7 @@ class AnthropicUsage(BaseModel):
     cache_read_input_tokens: int | None = None
 
 
-class AnthropicContentBlock(BaseModel):
+class AnthropicContentBlock(FailFastRequestMixin, BaseModel):
     """Content block in message."""
 
     type: Literal[
@@ -117,7 +118,7 @@ def _reject_tool_changes(content: str | list[AnthropicContentBlock] | None) -> N
             )
 
 
-class AnthropicMessage(BaseModel):
+class AnthropicMessage(FailFastRequestMixin, BaseModel):
     """Message structure."""
 
     role: Literal["user", "assistant", "system"]
@@ -266,7 +267,7 @@ AnthropicThinkingConfig = Annotated[
 ]
 
 
-class AnthropicMessagesRequest(BaseModel):
+class AnthropicMessagesRequest(FailFastRequestMixin, BaseModel):
     """Anthropic Messages API request."""
 
     model: str
@@ -480,7 +481,7 @@ class AnthropicContextManagement(BaseModel):
     original_input_tokens: int
 
 
-class AnthropicCountTokensRequest(BaseModel):
+class AnthropicCountTokensRequest(FailFastRequestMixin, BaseModel):
     """Anthropic messages.count_tokens request."""
 
     model: str
