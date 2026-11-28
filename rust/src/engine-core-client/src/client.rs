@@ -1016,21 +1016,11 @@ impl EngineCoreClient {
 
     /// Finish the current weight update.
     pub async fn finish_weight_update(&self) -> Result<()> {
-        self.finish_weight_update_with_abort(false).await
-    }
-
-    /// Finish or abort the current weight update.
-    pub async fn finish_weight_update_with_abort(&self, abort: bool) -> Result<()> {
-        let kwargs = if abort {
-            BTreeMap::from([("abort".to_string(), JsonValue::Bool(true))])
-        } else {
-            BTreeMap::new()
-        };
         self.collective_rpc(
             "finish_weight_update",
             None,
             Vec::<JsonValue>::new(),
-            kwargs,
+            BTreeMap::<String, JsonValue>::new(),
         )
         .await?;
         Ok(())

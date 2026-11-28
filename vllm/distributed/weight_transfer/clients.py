@@ -96,24 +96,11 @@ class HTTPVLLMWeightSyncClient:
             "update_weights", {"update_info": _json_safe_update_payload(update_info)}
         )
 
-    def update_lora_weights_http(
-        self,
-        tensors: dict[str, Any],
-        lora_name: str | None = None,
-    ) -> None:
-        """Send in-memory LoRA tensors over HTTP using safe safetensors encoding."""
-        from vllm.distributed.weight_transfer.lora_session import (
-            encode_lora_tensors_http,
-        )
-
-        self.update_weights(encode_lora_tensors_http(tensors, lora_name=lora_name))
-
     def finish_weight_update(
         self,
         weight_version: str | None = None,
         baseline: dict[str, str] | None = None,
         *,
-        abort: bool = False,
         reset_prefix_cache: bool | None = None,
     ) -> Any:
         """Finish the update; raise if the weights differ from `baseline`."""
@@ -122,8 +109,6 @@ class HTTPVLLMWeightSyncClient:
             "baseline": baseline,
             "reset_prefix_cache": reset_prefix_cache,
         }
-        if abort:
-            fields["abort"] = True
         json = {key: value for key, value in fields.items() if value is not None}
         result = self._post("finish_weight_update", json or None)
         if baseline is not None and not result["match"]:
@@ -177,17 +162,9 @@ class RayVLLMWeightSyncClient:
         request = WeightTransferUpdateRequest(update_info=update_info)
         ray.get([h.update_weights.remote(request) for h in self.handles])
 
-    def finish_weight_update(
-        self,
-        weight_version: str | None = None,
-        *,
-        abort: bool = False,
-    ) -> None:
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
         import ray
 
-        if abort:
-            ray.get([h.finish_weight_update.remote(abort=True) for h in self.handles])
-            return
         ray.get([h.finish_weight_update.remote() for h in self.handles])
         if weight_version is not None:
             ray.get(

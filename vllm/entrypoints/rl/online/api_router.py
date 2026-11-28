@@ -341,7 +341,6 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
-    abort: Annotated[bool, Body(embed=True)] = False,
     reset_prefix_cache: Annotated[bool | None, Body(embed=True)] = None,
 ):
     """Finish the weight update; with a baseline, also compare the weights."""
@@ -352,12 +351,7 @@ async def finish_weight_update(
     raw_request.app.state._pending_lora_weight_update = None
 
     with weight_operation_metrics().record("finish"):
-        await client.finish_weight_update(weight_version, abort=abort)
-
-    if abort:
-        return JSONResponse(
-            content={"message": "Weight update aborted", "aborted": True}
-        )
+        await client.finish_weight_update(weight_version)
 
     content: dict[str, Any] = {"message": "Weight update finished"}
     if pending_loras is not None:

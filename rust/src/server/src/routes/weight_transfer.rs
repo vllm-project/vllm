@@ -54,8 +54,6 @@ pub(crate) struct FinishWeightUpdateRequest {
     weight_version: Option<String>,
     baseline: Option<BTreeMap<String, String>>,
     #[serde(default)]
-    abort: bool,
-    #[serde(default)]
     reset_prefix_cache: Option<bool>,
 }
 
@@ -96,8 +94,6 @@ pub(crate) struct StartWeightUpdateResponse {
 #[derive(Serialize)]
 pub(crate) struct FinishWeightUpdateResponse {
     message: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    aborted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lora_adapters: Option<Vec<LoraAdapterSummary>>,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
@@ -268,19 +264,9 @@ pub async fn finish_weight_update(
 
     let _recorder = METRICS.api_server.record_weight_operation("finish");
     client
-        .finish_weight_update_with_abort(request.abort)
+        .finish_weight_update()
         .await
         .map_err(|error| utility_call_error("finish_weight_update", error))?;
-
-    if request.abort {
-        return Ok(Json(FinishWeightUpdateResponse {
-            message: "Weight update aborted",
-            aborted: Some(true),
-            lora_adapters: None,
-            matched: None,
-            mismatches: None,
-        }));
-    }
 
     let lora_summary = if let Some(adapters) = pending_loras {
         let summary = adapters.iter().map(LoraAdapterSummary::from).collect();
@@ -316,7 +302,6 @@ pub async fn finish_weight_update(
 
     Ok(Json(FinishWeightUpdateResponse {
         message: "Weight update finished",
-        aborted: None,
         lora_adapters: lora_summary,
         matched: mismatches.as_ref().map(Vec::is_empty),
         mismatches,

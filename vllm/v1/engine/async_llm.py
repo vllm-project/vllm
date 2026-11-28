@@ -1559,16 +1559,10 @@ class AsyncLLM(EngineClient):
             "update_weights", kwargs={"update_info": request.update_info}
         )
 
-    async def finish_weight_update(
-        self,
-        weight_version: str | None = None,
-        *,
-        abort: bool = False,
-    ) -> None:
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
         """Finish the weight update and set its version if provided."""
-        kwargs = {"abort": True} if abort else None
-        await self.collective_rpc("finish_weight_update", kwargs=kwargs)
-        if not abort and weight_version is not None:
+        await self.collective_rpc("finish_weight_update")
+        if weight_version is not None:
             await self.update_weight_version(weight_version)
 
     async def update_weight_version(self, new_version: str) -> None:

@@ -1,26 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side LoRA weight-update session and HTTP tensor codec.
+"""Worker-side LoRA weight-update session.
 
 Supports updating one or more LoRA adapters inside vLLM's unified
 `start_weight_update` -> `update_weights` -> `finish_weight_update`
-lifecycle from three sources:
+lifecycle from:
 1. Weight-transfer backends (NCCL / CUDA IPC, packed or unpacked) via
    `_LoRAWeightSink` (which implements `nn.Module.load_weights`).
-2. Pure HTTP in-memory tensors encoded with `safetensors` + base64
-   (zero pickle, works without `--weight-transfer-config`).
-3. Disk directories (`lora_path`), committed on `finish_weight_update`.
+2. Disk directories (`lora_path`), committed on `finish_weight_update`.
 """
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import pybase64 as base64
 import torch
-from safetensors.torch import load as safetensors_load
-from safetensors.torch import save as safetensors_save
 
+from vllm.config import set_current_vllm_config
 from vllm.lora.request import LoRARequest, _TensorLoRARequest
 
 
@@ -47,7 +43,7 @@ class LoRAAdapterUpdateSpec:
 
     @property
     def expects_tensors(self) -> bool:
-        """True if tensors will be streamed/posted rather than read from disk."""
+        """True if tensors will be streamed rather than read from disk."""
         return self.peft_config is not None
 
     @classmethod
@@ -60,59 +56,6 @@ class LoRAAdapterUpdateSpec:
             base_model_name=data.get("base_model_name"),
             is_3d_lora_weight=bool(data.get("is_3d_lora_weight", False)),
         )
-
-    def to_summary_dict(self) -> dict[str, Any]:
-        return {
-            "lora_name": self.lora_name,
-            "lora_int_id": self.lora_int_id,
-            "lora_path": self.lora_path,
-        }
-
-
-def encode_lora_tensors_http(
-    tensors: Mapping[str, torch.Tensor],
-    lora_name: str | None = None,
-) -> dict[str, Any]:
-    """Encode a mapping of LoRA tensors as a JSON-safe HTTP `update_info` dict.
-
-    Uses `safetensors` serialization (safe, no pickle) + base64.
-    """
-    if not tensors:
-        raise ValueError("tensors must not be empty")
-
-    # safetensors requires contiguous CPU tensors with non-aliased storage.
-    cpu_tensors: dict[str, torch.Tensor] = {}
-    seen_data_ptrs: set[int] = set()
-    for name, tensor in tensors.items():
-        t = tensor.detach().to(device="cpu").contiguous()
-        ptr = t.data_ptr()
-        if ptr in seen_data_ptrs:
-            t = t.clone()
-        seen_data_ptrs.add(t.data_ptr())
-        cpu_tensors[name] = t
-
-    raw = safetensors_save(cpu_tensors)
-    payload: dict[str, Any] = {
-        "safetensors_b64": base64.b64encode(raw).decode("ascii"),
-    }
-    if lora_name is not None:
-        payload["lora_name"] = lora_name
-    return payload
-
-
-def decode_lora_tensors_http(
-    update_info: Mapping[str, Any],
-) -> tuple[dict[str, torch.Tensor], str | None]:
-    """Decode an HTTP `update_info` payload produced by `encode_lora_tensors_http`."""
-    raw_b64 = update_info["safetensors_b64"]
-    if not isinstance(raw_b64, str) or not raw_b64:
-        raise ValueError("'safetensors_b64' must be a non-empty base64 string")
-    raw_bytes = base64.b64decode(raw_b64)
-    tensors = safetensors_load(raw_bytes)
-    lora_name = update_info.get("lora_name")
-    if lora_name is not None and not isinstance(lora_name, str):
-        raise ValueError("'lora_name' must be a string when provided")
-    return tensors, lora_name
 
 
 class _LoRAWeightSink(torch.nn.Module):
@@ -203,7 +146,7 @@ class _LoRAWeightSink(torch.nn.Module):
 
 
 class LoRAWeightUpdateSession:
-    """State for an active LoRA weight-update session on a worker."""
+    """State and lifecycle driver for an active worker LoRA weight-update session."""
 
     def __init__(self, specs: list[LoRAAdapterUpdateSpec]) -> None:
         if not specs:
@@ -229,22 +172,81 @@ class LoRAWeightUpdateSession:
     def has_tensor_adapters(self) -> bool:
         return any(spec.expects_tensors for spec in self.specs)
 
-    def receive_http_tensors(self, update_info: Mapping[str, Any]) -> bool:
-        """If `update_info` carries HTTP safetensors, decode & stash them.
-
-        Returns True if handled, False if `update_info` should be routed to the
-        configured `WeightTransferEngine` instead.
-        """
-        if "safetensors_b64" not in update_info:
-            return False
-        if not self.has_tensor_adapters:
-            raise ValueError(
-                "Received HTTP LoRA tensors, but no adapters in this session "
-                "were configured with peft_config"
+    @classmethod
+    def start(
+        cls, worker: Any, lora_adapters: list[dict[str, Any]]
+    ) -> "LoRAWeightUpdateSession":
+        """Start a LoRA weight-update session on `worker`."""
+        if worker.lora_config is None:
+            raise RuntimeError(
+                "LoRA is not enabled on this worker. Start vLLM with --enable-lora."
             )
-        tensors, lora_name = decode_lora_tensors_http(update_info)
-        self.sink.load_weights(tensors.items(), default_lora_name=lora_name)
-        return True
+        if worker._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already "
+                "active. Call finish_weight_update first."
+            )
+        session = cls.from_dicts(lora_adapters)
+        worker._weight_update_lora_session = session
+        worker._weight_update_active = True
+        worker._weight_update_is_draft = False
+        return session
+
+    def _select_local_update_info(
+        self, worker: Any, update_info: dict | list[dict]
+    ) -> dict[str, Any]:
+        if isinstance(update_info, list):
+            parallel_config = worker.vllm_config.parallel_config
+            return update_info[
+                parallel_config.data_parallel_index * parallel_config.world_size
+                + worker.rank
+            ]
+        return update_info
+
+    def _end(self, worker: Any) -> None:
+        worker._weight_update_lora_session = None
+        worker._weight_update_active = False
+        if self.uses_transfer_engine and worker.weight_transfer_engine is not None:
+            worker.weight_transfer_engine.reset_weight_update_target()
+        self.sink.stashed.clear()
+
+    def update(self, worker: Any, update_info: dict | list[dict]) -> None:
+        """Receive one LoRA weight update chunk on `worker`."""
+        with set_current_vllm_config(worker.vllm_config):
+            try:
+                local_update_info = self._select_local_update_info(worker, update_info)
+                worker._check_weight_transfer_engine()
+                assert worker.weight_transfer_engine is not None
+                if not self.has_tensor_adapters:
+                    raise ValueError(
+                        "Received weight-transfer tensors, but no adapters in "
+                        "this session were configured with peft_config"
+                    )
+                if not self.uses_transfer_engine:
+                    worker.weight_transfer_engine.set_weight_update_target(
+                        self.sink, worker.model_config
+                    )
+                    worker.weight_transfer_engine.start_weight_update()
+                    self.uses_transfer_engine = True
+                worker.weight_transfer_engine.update_weights(local_update_info)
+            except BaseException:
+                self._end(worker)
+                raise
+
+    def finish(self, worker: Any) -> None:
+        """Finalize transfer (if any) and atomically load all session adapters."""
+        with set_current_vllm_config(worker.vllm_config):
+            try:
+                if self.uses_transfer_engine:
+                    assert worker.weight_transfer_engine is not None
+                    worker.weight_transfer_engine.finish_weight_update()
+                for lora_request in self.build_lora_requests():
+                    if not worker.model_runner.add_lora(lora_request):
+                        raise RuntimeError(
+                            f"Failed to load LoRA adapter {lora_request.lora_name!r}"
+                        )
+            finally:
+                self._end(worker)
 
     def build_lora_requests(self) -> list[LoRARequest]:
         """Build worker-local `LoRARequest` / `_TensorLoRARequest` objects to commit."""
@@ -281,6 +283,3 @@ class LoRAWeightUpdateSession:
                     )
                 )
         return requests
-
-    def clear(self) -> None:
-        self.sink.stashed.clear()
