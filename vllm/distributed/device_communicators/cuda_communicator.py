@@ -327,6 +327,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
     def _can_access_peer(self) -> bool:
+        """Whether every rank can access every other rank's GPU.
+
+        Peer access is directed, so ranks can disagree; they agree on one
+        answer so that all of them or none enter the collective setup.
+        """
         from vllm.distributed.parallel_state import get_world_group
 
         # Local ranks are the logical device IDs `can_p2p` takes.
@@ -335,7 +340,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         torch.distributed.all_gather_object(
             local_ranks, local_rank, group=self.cpu_group
         )
-        return can_p2p(local_rank, local_ranks)
+        ok = torch.tensor([int(can_p2p(local_rank, local_ranks))], dtype=torch.int32)
+        torch.distributed.all_reduce(
+            ok, op=torch.distributed.ReduceOp.MIN, group=self.cpu_group
+        )
+        return bool(ok.item())
 
     @staticmethod
     def _mori_ep_v2() -> bool:
