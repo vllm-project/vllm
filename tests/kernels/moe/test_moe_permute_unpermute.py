@@ -228,6 +228,57 @@ def test_moe_permute_unpermute(
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
 
 
+@pytest.mark.parametrize("n_token", [1, 33, 1024])
+@pytest.mark.parametrize("scale_cols", [1, 16])
+@pytest.mark.parametrize("ep_size", [1, 4])
+@pytest.mark.parametrize("use_scratch", [False, True])
+def test_moe_permute_gathers_scales(
+    n_token: int, scale_cols: int, ep_size: int, use_scratch: bool, workspace_init
+):
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+    n_expert, topk, n_hidden = 64, 6, 2048
+    expert_map = None
+    n_local_expert = n_expert
+    if ep_size != 1:
+        n_local_expert, expert_map, _ = determine_expert_map(ep_size, 1, n_expert)
+        assert expert_map is not None
+        expert_map = expert_map.cuda()
+    set_random_seed(0)
+    hidden_states = torch.randn((n_token, n_hidden), device="cuda").to(torch.bfloat16)
+    a1q_scale = torch.rand((n_token, scale_cols), device="cuda")
+    gating_output = torch.randn((n_token, n_expert), device="cuda").to(torch.bfloat16)
+    _, topk_ids, _ = fused_topk(hidden_states, gating_output, topk, False)
+    scratch = None
+    if use_scratch:
+        scratch = get_moe_permute_scratch(
+            num_experts=n_expert,
+            num_local_experts=n_local_expert,
+            device=hidden_states.device,
+        )
+
+    _, permuted_scale, expert_first_token_offset, _, permuted_idx = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=a1q_scale,
+        topk_ids=topk_ids,
+        n_expert=n_expert,
+        n_local_expert=n_local_expert,
+        expert_map=expert_map,
+        scratch=scratch,
+    )
+
+    assert permuted_scale is not None
+    n_valid = int(expert_first_token_offset[-1])
+    torch.testing.assert_close(
+        permuted_scale[:n_valid],
+        a1q_scale[permuted_idx[:n_valid] // topk],
+        atol=0,
+        rtol=0,
+    )
+    # Rows routed to experts on other ranks keep the out-of-range sentinel.
+    assert (permuted_idx[n_valid:] == n_token * topk).all()
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_token", [1, 33, 128])
 @pytest.mark.parametrize("topk", [1, 6, 8])
