@@ -9,6 +9,7 @@ from functools import partial
 
 import torch
 
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -25,6 +26,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.multimodal.processing.inputs import EPD_VIDEO_PARTITION_KEY
 from vllm.multimodal.processing.processor import replace_token_matches
 from vllm.transformers_utils.configs.hy_v4 import HYV4VLConfig
 from vllm.transformers_utils.processors.hy_v4 import (
@@ -263,7 +265,12 @@ class HYV4VLDummyInputsBuilder(BaseDummyInputsBuilder[HYV4VLProcessingInfo]):
 
 class HYV4VLMultiModalProcessor(BaseMultiModalProcessor[HYV4VLProcessingInfo]):
     def apply(self, inputs, timing_ctx):
-        processor = self.info.get_hf_processor(**inputs.hf_processor_mm_kwargs)
+        kwargs = {
+            key: value
+            for key, value in inputs.hf_processor_mm_kwargs.items()
+            if key != EPD_VIDEO_PARTITION_KEY
+        }
+        processor = self.info.get_hf_processor(**kwargs)
         prompt = inputs.prompt
         for modality in ("image", "video"):
             if inputs.mm_data_items.get_count(modality, strict=False):
@@ -279,15 +286,42 @@ class HYV4VLMultiModalProcessor(BaseMultiModalProcessor[HYV4VLProcessingInfo]):
                         processor.tokenizer, f"<{modality}>", add_special_tokens=False
                     ),
                 )
-        inputs = replace(inputs, prompt=prompt)
+        return super().apply(replace(inputs, prompt=prompt), timing_ctx)
+
+    def _get_video_intervals(self, inputs, num_videos):
         options = self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
         intervals = options.get("second_per_grid_ts")
+        if intervals is None or not num_videos:
+            return None
+        if not isinstance(intervals, (list, tuple)) or len(intervals) != num_videos:
+            raise ValueError("second_per_grid_ts must match video count")
+        if any(
+            type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+            for value in intervals
+        ):
+            raise ValueError(
+                "second_per_grid_ts must contain positive finite intervals"
+            )
+        return intervals
+
+    def _partition_video_kwargs(self, inputs, video_index, num_videos):
+        intervals = self._get_video_intervals(inputs, num_videos)
+        if intervals is None:
+            return inputs
+        return replace(
+            inputs,
+            hf_processor_mm_kwargs={
+                **inputs.hf_processor_mm_kwargs,
+                "second_per_grid_ts": [intervals[video_index]],
+            },
+        )
+
+    def _cached_apply_hf_processor(self, inputs, timing_ctx):
+        videos = inputs.mm_data_items.get("video", ())
+        intervals = self._get_video_intervals(inputs, len(videos))
         if intervals is not None:
-            videos = inputs.mm_data_items.get("video", ())
             mm_items = inputs.mm_data_items
             if not isinstance(videos, DictEmbeddingItems):
-                if len(intervals) != len(videos):
-                    raise ValueError("second_per_grid_ts must match video count")
                 normalized = []
                 for item, interval in zip(videos, intervals):
                     if item is None:
@@ -301,12 +335,24 @@ class HYV4VLMultiModalProcessor(BaseMultiModalProcessor[HYV4VLProcessingInfo]):
                 mm_items = MultiModalDataItems(
                     {**inputs.mm_data_items, "video": VideoProcessorItems(normalized)}
                 )
+            inputs = replace(inputs, mm_data_items=mm_items)
+        if "second_per_grid_ts" in inputs.hf_processor_mm_kwargs:
             kwargs = dict(inputs.hf_processor_mm_kwargs)
-            kwargs.pop("second_per_grid_ts", None)
-            inputs = replace(
-                inputs, mm_data_items=mm_items, hf_processor_mm_kwargs=kwargs
-            )
-        return super().apply(inputs, timing_ctx)
+            del kwargs["second_per_grid_ts"]
+            inputs = replace(inputs, hf_processor_mm_kwargs=kwargs)
+        if intervals is not None:
+            # Explicit UUIDs bypass the media metadata when computing base keys.
+            # Fold the effective interval in for both raw and metadata-only items.
+            hashes = dict(self._get_mm_hashes(inputs))
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["video"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm, mm_hash=key, second_per_grid_t=float(interval)
+                )
+                for key, interval in zip(hashes["video"], intervals, strict=True)
+            ]
+            inputs = replace(inputs, mm_hashes_override=hashes)
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
         return _get_vision_fields(

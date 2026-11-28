@@ -1364,14 +1364,15 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     )
         return per_video_kwargs
 
-    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+    def _get_mm_hashes(
+        self, inputs: ProcessorInputs, *, video_index: int = 0
+    ) -> MultiModalHashes:
         per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
         if not per_video_kwargs or "video" not in inputs.mm_data_items:
             return super()._get_mm_hashes(inputs)
         # The base hash must not fold the raw per-video lists: the rehash below
         # already folds each video's own element, and folding the raw form too
-        # would make a partitioned encoder child (EPD fan-out carries a sliced
-        # list) hash the same video differently than the full request.
+        # would make a video's identity depend on the options for other items.
         kwargs = dict(inputs.hf_processor_mm_kwargs)
         videos_kwargs = kwargs.get("videos_kwargs")
         if isinstance(videos_kwargs, dict):
@@ -1381,7 +1382,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             videos_kwargs = {}
         for key in per_video_kwargs:
             # Mirror explicit scoped-over-flat precedence. Retain shadowed
-            # values and scalars; the proxy partitions only the active list.
+            # values and scalars; only the active list is partitioned.
             scope = videos_kwargs if key in videos_kwargs else kwargs
             if isinstance(scope.get(key), list):
                 scope.pop(key)
@@ -1401,7 +1402,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 )
             )
         per_video_kwargs = self._get_per_video_kwargs(
-            inputs.hf_processor_mm_kwargs, len(hashes["video"])
+            inputs.hf_processor_mm_kwargs, video_index + len(hashes["video"])
         )
         algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
         hashes["video"] = [
@@ -1410,9 +1411,28 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 mm_hash=mm_hash,
                 **{key: values[i] for key, values in per_video_kwargs.items()},
             )
-            for i, mm_hash in enumerate(hashes["video"])
+            for i, mm_hash in enumerate(hashes["video"], start=video_index)
         ]
         return hashes
+
+    def _partition_video_kwargs(
+        self, inputs: ProcessorInputs, video_index: int, num_videos: int
+    ) -> ProcessorInputs:
+        per_video = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, num_videos
+        )
+        if not per_video:
+            return inputs
+        # Compute keys from the original kwargs so non-video features retain
+        # their identity and the positional metadata never enters the hash.
+        hashes = self._get_mm_hashes(inputs, video_index=video_index)
+        kwargs = self.info._merge_and_resolve_mm_processor_kwargs(
+            inputs.hf_processor_mm_kwargs
+        )
+        kwargs["videos_kwargs"].update(
+            {key: [values[video_index]] for key, values in per_video.items()}
+        )
+        return replace(inputs, hf_processor_mm_kwargs=kwargs, mm_hashes_override=hashes)
 
     def _get_cache_missing_processor_kwargs(
         self,

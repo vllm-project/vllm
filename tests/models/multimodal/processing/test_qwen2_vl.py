@@ -11,12 +11,14 @@ import torch
 from PIL import Image
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
@@ -563,6 +565,34 @@ def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, An
         "do_sample_frames": False,
     }
     return {"video": [(video, metadata)]}
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen2_5_vl_rejects_valid_epd_partition_for_unsupported_processor():
+    model_id = "Qwen/Qwen2.5-VL-3B-Instruct"
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    mm_items = processor.info.parse_mm_data(
+        _build_qwen2_5_vl_video_mm_data(num_frames=4, fps=2.0)
+    )
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    uuids = {"video": ["test-video"]}
+
+    with pytest.raises(VLLMValidationError, match="does not support EPD video kwargs"):
+        processor(
+            prompt,
+            mm_items=mm_items,
+            mm_uuid_items=uuids,
+            hf_processor_mm_kwargs={"_epd_video_partition": [1, 2]},
+        )
+
+    # Opt-out fan-out sends no positional metadata, preserving the base key.
+    processed = processor(prompt, mm_items=mm_items, mm_uuid_items=uuids)
+    base_hashes = ProcessorInputs([], mm_items, uuids).get_mm_hashes(
+        processor.info.model_id, ctx.get_mm_config().mm_hasher_algorithm
+    )
+    assert processed["mm_hashes"] == base_hashes
+    assert len(processed["mm_placeholders"]["video"]) == 1
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])

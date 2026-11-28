@@ -111,9 +111,11 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
 | `--ec-consumer-zmq-addrs` | Mooncake EC consumer control addresses, aligned with `--decode-servers-urls`. Required for `ECMooncakeConnector`. Supported only in E+PD mode (`--prefill-servers-urls disable`). |
 | `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
+| `--enable-per-video-kwargs-slicing` | Enable processor-side partitioning of request-level per-video kwargs. Requires compatible encoder processors and EC consumer cache hashing. Defaults to off. |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
-When using `--enable-per-video-kwargs-slicing` with audio extracted from video,
+When using `--enable-per-video-kwargs-slicing`, partitioning is applied only to
+requests with non-empty `mm_processor_kwargs`. For audio extracted from video,
 put per-video `fps` or `num_frames` lists inside
 `mm_processor_kwargs.videos_kwargs` so the audio cache keys match across stages.
 

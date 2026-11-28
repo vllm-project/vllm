@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
-from vllm.models.hy_v4.common.mm_preprocess import HYV4VLDataParser
+from vllm.models.hy_v4.common.mm_preprocess import (
+    HYV4VLDataParser,
+    HYV4VLDummyInputsBuilder,
+    HYV4VLMultiModalProcessor,
+)
+from vllm.models.hy_v4_flash.common.vl_model import HYV4FlashVLProcessingInfo
 from vllm.transformers_utils.configs.hy_v4 import HYV4VLVisionConfig
+
+from ...utils import build_model_context
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -74,6 +82,64 @@ def test_hy_v4_rejects_invalid_video_timestamps(timestamps):
                 }
             }
         )
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_hy_v4_flash_preserves_timing_across_epd_partition(configured):
+    intervals = {"second_per_grid_ts": [0.5, 1.25]}
+    ctx = build_model_context(
+        "tencent/Hy4-flash",
+        model_config_kwargs={"max_model_len": 4096},
+        limit_mm_per_prompt={"video": 2},
+        mm_processor_kwargs={"second_per_grid_ts": [2.0, 3.0]} if configured else None,
+    )
+    mm_config = ctx.model_config.get_multimodal_config()
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    info = HYV4FlashVLProcessingInfo(ctx)
+    processor = HYV4VLMultiModalProcessor(info, HYV4VLDummyInputsBuilder(info))
+    placeholder = info.get_hf_processor().get_placeholder("video")
+    frames = np.zeros((8, 112, 112, 3), dtype=np.uint8)
+    video = (
+        frames,
+        {
+            "fps": 4.0,
+            "duration": 2.0,
+            "total_num_frames": 8,
+            "frames_indices": list(range(8)),
+            "do_sample_frames": False,
+            "video_backend": "opencv",
+        },
+    )
+    kwargs = intervals
+
+    def run(data, count, options):
+        return processor(
+            placeholder * count,
+            info.parse_mm_data({"video": data}),
+            {"video": ["same-video"] * count},
+            hf_processor_mm_kwargs=options,
+        )
+
+    parent = run([video, video], 2, kwargs)
+    keys = parent["mm_hashes"]["video"]
+    assert keys[0] != keys[1]
+    for item, interval in zip(
+        parent["mm_kwargs"]["video"], intervals["second_per_grid_ts"], strict=True
+    ):
+        assert float(item["video_timestamps"].data[1]) == interval
+    for index in range(2):
+        child = run([video], 1, {**kwargs, "_epd_video_partition": [index, 2]})
+        assert child["mm_hashes"]["video"] == keys[index : index + 1]
+        torch.testing.assert_close(
+            child["mm_kwargs"]["video"][0]["video_timestamps"].data,
+            parent["mm_kwargs"]["video"][index]["video_timestamps"].data,
+        )
+    data = parent["mm_kwargs"].get_data()
+    metadata = {key: data[key] for key in ("video_grid_thw", "video_timestamps")}
+    assert run(metadata, 2, kwargs)["mm_hashes"]["video"] == keys
+    with pytest.raises(ValueError, match="must match video count"):
+        run([video, video], 2, {"second_per_grid_ts": [0.5]})
 
 
 @pytest.mark.parametrize("projector_type", [None, "rmsnorm_mlp_adapter"])

@@ -20,6 +20,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
@@ -762,12 +764,8 @@ class _FanoutSession:
 
 
 @pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
-def test_fanout_slices_per_video_kwargs(proxy, monkeypatch, nested):
-    """A child carries the per-video element of the videos it holds.
-
-    The unsliced list made every encoder child sample with the first
-    element and publish under a hash the consumer never looks up.
-    """
+def test_fanout_passes_original_video_position(proxy, monkeypatch, nested):
+    """The encoder receives the full kwargs and its position among the videos."""
     seen: list = []
     monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
     monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
@@ -793,18 +791,16 @@ def test_fanout_slices_per_video_kwargs(proxy, monkeypatch, nested):
 
     by_url = {b["messages"][0]["content"][0]["video_url"]["url"]: b for _, b in seen}
     assert len(by_url) == 2
-    for url, num_frames, fps in (("a", [16], [2.0]), ("b", [32], [4.0])):
-        child = by_url[url]["mm_processor_kwargs"]
-        scope = child["videos_kwargs"] if nested else child
-        assert scope["num_frames"] == num_frames
-        assert scope["fps"] == fps
-        assert scope["do_sample_frames"] is True
-        assert scope["size"] == [420, 420]
+    for index, url in enumerate(("a", "b")):
+        assert by_url[url]["mm_processor_kwargs"] == {
+            **kwargs,
+            "_epd_video_partition": [index, 2],
+        }
         assert by_url[url]["media_io_kwargs"] == {"video": {"fps": 12}}
 
 
 def test_fanout_keeps_scalar_and_unrelated_kwargs(proxy, monkeypatch):
-    """Only known per-video lists are partitioned."""
+    """The proxy does not use the request's kwargs to decide when to index."""
     seen: list = []
     monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
     monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
@@ -819,8 +815,11 @@ def test_fanout_keeps_scalar_and_unrelated_kwargs(proxy, monkeypatch):
         )
     )
     assert len(seen) == 2
-    for _, child in seen:
-        assert child["mm_processor_kwargs"] == kwargs
+    for index, (_, child) in enumerate(seen):
+        assert child["mm_processor_kwargs"] == {
+            **kwargs,
+            "_epd_video_partition": [index, 2],
+        }
 
 
 @pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
@@ -879,13 +878,13 @@ def test_fanout_interleaved_media_and_two_encoders(proxy, monkeypatch, nested):
         images = [
             i for i in batch["messages"][0]["content"] if i["type"] == "image_url"
         ]
-        scope = batch["mm_processor_kwargs"]
-        if nested:
-            scope = scope["videos_kwargs"]
         if videos:
             # One video per child; position among the request's two videos.
-            expected = [16] if videos[0]["video_url"]["url"] == "a" else [32]
-            assert scope["num_frames"] == expected
+            index = 0 if videos[0]["video_url"]["url"] == "a" else 1
+            assert batch["mm_processor_kwargs"] == {
+                **kwargs,
+                "_epd_video_partition": [index, 2],
+            }
             assert not images
         else:
             assert batch["mm_processor_kwargs"] == kwargs
@@ -920,21 +919,57 @@ def test_fanout_rejects_short_per_video_list(proxy, monkeypatch):
     assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("scoped_value", [[16, 32], 16])
-def test_fanout_preserves_scoped_precedence(proxy, scoped_value):
-    """Only the effective list is sliced; a shadowed short list is legal."""
-    kwargs = {"num_frames": [99], "videos_kwargs": {"num_frames": scoped_value}}
-    original = copy.deepcopy(kwargs)
-    for index in range(2):
-        child = proxy._slice_mm_processor_kwargs(kwargs, [index])
-        expected = [scoped_value[index]] if isinstance(scoped_value, list) else 16
-        assert child == {
-            "num_frames": [99],
-            "videos_kwargs": {"num_frames": expected},
-        }
-    image = proxy._slice_mm_processor_kwargs(kwargs, [])
-    assert image == kwargs
-    assert kwargs == original
+@pytest.mark.parametrize(
+    ("flags", "allowed"),
+    [
+        ({"load_audio_from_video": True, "use_audio_in_video": False}, False),
+        ({"use_audio_in_video": True}, False),
+        ({"load_audio_from_video": False, "use_audio_in_video": True}, True),
+    ],
+)
+def test_epd_video_audio_validation_preserves_flag_precedence(proxy, flags, allowed):
+    body = {
+        "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
+        "mm_processor_kwargs": {**flags, "fps": [2.0, 4.0]},
+    }
+    if allowed:
+        proxy._validate_proxy_request(body, True)
+    else:
+        with pytest.raises(proxy.HTTPException, match="Move mm_processor_kwargs.fps"):
+            proxy._validate_proxy_request(body, True)
+
+    body["mm_processor_kwargs"] = {**flags, "videos_kwargs": {"fps": [2.0, 4.0]}}
+    proxy._validate_proxy_request(body, True)
+
+
+def test_fanout_positions_include_metadata_only_video_without_sending_it(
+    proxy, monkeypatch
+):
+    seen: list = []
+    monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
+    body = {
+        "mm_processor_kwargs": {"fps": 2.0},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video_embeds", "video_embeds": None, "uuid": "cached"},
+                    _vid("b"),
+                ],
+            }
+        ],
+    }
+    asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0"], "r", enable_per_video_kwargs_slicing=True
+        )
+    )
+    [(_, child)] = seen
+    assert child["mm_processor_kwargs"] == {
+        "fps": 2.0,
+        "_epd_video_partition": [1, 2],
+    }
+    assert len(child["messages"][0]["content"]) == 1
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -979,37 +1014,68 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
         index = uuids.index(item["uuid"])
         child_hash = hashes([item["uuid"]], child["mm_processor_kwargs"])[0]
         assert child_hash == parent_hashes[index]
-        if not short:
-            sliced = proxy._slice_mm_processor_kwargs(kwargs, [index])
-            assert hashes([item["uuid"]], sliced)[0] != parent_hashes[index]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("enabled", "kwargs", "invalid"),
+    ("enabled", "kwargs", "invalid_at_proxy", "trust"),
     [
-        (True, {"num_frames": [16]}, True),
-        (True, {"videos_kwargs": {"num_frames": [16]}}, True),
-        (True, {"fps": [2.0]}, True),
-        (True, {"videos_kwargs": {"fps": [2.0]}}, True),
-        (True, {"num_frames": [16, 32]}, False),
-        (True, {"num_frames": [99], "videos_kwargs": {"num_frames": [16, 32]}}, False),
-        (False, {"num_frames": [16]}, False),
-        (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False),
+        (True, {"num_frames": [16]}, True, True),
+        (True, {"videos_kwargs": {"num_frames": [16]}}, True, True),
+        (True, {"fps": [2.0]}, True, True),
+        (True, {"videos_kwargs": {"fps": [2.0]}}, True, True),
+        (True, {"num_frames": [16, 32]}, False, True),
+        (
+            True,
+            {"num_frames": [99], "videos_kwargs": {"num_frames": [16, 32]}},
+            False,
+            True,
+        ),
+        (False, {"num_frames": [16]}, False, True),
+        (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False, True),
+        (True, {"_epd_video_partition": [0, 2]}, True, True),
+        (False, {"_epd_video_partition": [0, 2]}, True, True),
+        pytest.param(False, ..., False, False, id="opt-out-absent-trust-off"),
+        pytest.param(True, ..., False, False, id="absent-trust-off"),
+        pytest.param(True, {}, False, False, id="empty-trust-off"),
+        pytest.param(True, None, False, False, id="null-trust-off"),
+        pytest.param(True, {"fps": 2.0}, False, False, id="nonempty-trust-off"),
+        pytest.param(
+            True, {"second_per_grid_ts": [0.5]}, False, True, id="encoder-rejects-hy4"
+        ),
     ],
 )
 async def test_per_video_kwargs_http_validation(
-    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid
+    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid_at_proxy, trust
 ):
-    """Reject invalid opted-in requests before ASGI response headers or fan-out."""
+    """Distinguish proxy-side 400s from encoder 400s after SSE starts."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
     expected = b"data: [DONE]\n\n" if stream else b'{"choices": []}'
+    hy4_error = isinstance(kwargs, dict) and "second_per_grid_ts" in kwargs
+    trust_error = not trust and isinstance(kwargs, dict) and bool(kwargs)
+    encoder_error = (
+        "second_per_grid_ts must match video count"
+        if hy4_error
+        else "Per-request mm_processor_kwargs are disabled"
+    )
+    stream_finished = False
 
     async def backend(request):
         stage = request.match_info["stage"]
-        seen[stage].append(await request.json())
+        payload = await request.json()
+        seen[stage].append(payload)
+        try:
+            validate_request_mm_kwargs(
+                mm_processor_kwargs=payload.get("mm_processor_kwargs"),
+                media_io_kwargs=payload.get("media_io_kwargs"),
+                trust_request_mm_kwargs=trust,
+            )
+        except VLLMValidationError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if stage == "encode" and hy4_error:
+            return web.json_response({"error": encoder_error}, status=400)
         if stage in ("encode", "prefill"):
             return web.json_response({})
         return web.Response(
@@ -1048,14 +1114,28 @@ async def test_per_video_kwargs_http_validation(
         body = {
             "model": "served-model-alias",
             "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
-            "mm_processor_kwargs": kwargs,
             "stream": stream,
         }
+        if kwargs is not ...:
+            body["mm_processor_kwargs"] = kwargs
         await proxy.on_startup()
         try:
+
+            async def observe_response(scope, receive, send):
+                async def observe_send(message):
+                    nonlocal stream_finished
+                    if (
+                        scope["path"] == "/v1/chat/completions"
+                        and message["type"] == "http.response.body"
+                    ):
+                        stream_finished |= not message.get("more_body", False)
+                    await send(message)
+
+                await target_app(scope, receive, observe_send)
+
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(
-                    app=target_app, raise_app_exceptions=False
+                    app=observe_response, raise_app_exceptions=False
                 ),
                 base_url="http://proxy",
             ) as client:
@@ -1074,28 +1154,39 @@ async def test_per_video_kwargs_http_validation(
         finally:
             await proxy.on_shutdown()
 
-    if invalid:
+    if invalid_at_proxy:
         assert response.status_code == 400
-        assert "entries, one per video" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert (
+            "is reserved by EPD"
+            if "_epd_video_partition" in kwargs
+            else "entries, one per video"
+        ) in detail
         assert seen == {"encode": [], "prefill": [], "decode": []}
+    elif hy4_error or trust_error:
+        assert len(seen["encode"]) == 2
+        assert seen["prefill"] == seen["decode"] == []
+        if stream:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            assert response.content == b""
+            assert not stream_finished
+        else:
+            assert response.status_code == 400
+            assert encoder_error in response.json()["detail"]
     else:
         assert response.status_code == 200
         assert response.content == expected
+        assert stream_finished
         assert len(seen["encode"]) == 2
         assert len(seen["prefill"]) == len(seen["decode"]) == 1
         for stage in ("prefill", "decode"):
-            assert seen[stage][0]["mm_processor_kwargs"] == kwargs
+            assert seen[stage][0].get("mm_processor_kwargs", ...) == kwargs
         for child in seen["encode"]:
             url = child["messages"][0]["content"][0]["video_url"]["url"]
             index = 0 if url == "a" else 1
-            actual = child["mm_processor_kwargs"]
-            if enabled:
-                if "videos_kwargs" in kwargs:
-                    assert actual == {
-                        "num_frames": [99],
-                        "videos_kwargs": {"num_frames": [[16, 32][index]]},
-                    }
-                else:
-                    assert actual == {"num_frames": [[16, 32][index]]}
-            else:
-                assert actual == kwargs
+            expected_kwargs = kwargs
+            if enabled and isinstance(kwargs, dict) and kwargs:
+                expected_kwargs = dict(kwargs)
+                expected_kwargs["_epd_video_partition"] = [index, 2]
+            assert child.get("mm_processor_kwargs", ...) == expected_kwargs
