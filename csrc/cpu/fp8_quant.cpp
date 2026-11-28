@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #if defined(__AVX512F__)
   #include <immintrin.h>
@@ -183,15 +184,45 @@ void dynamic_per_token_quant_impl(fp8_t* __restrict__ out,
         }                                                                    \
       })
 
+// The kernels address row m at base + m * stride(-2), so every leading
+// dimension must collapse into that one uniformly strided row dimension.
+bool rows_uniformly_strided(const torch::Tensor& t) {
+  int64_t expected_stride = t.stride(-2);
+  for (int64_t d = t.dim() - 3; d >= 0; --d) {
+    const int64_t inner_size = t.size(d + 1);
+    if (inner_size != 0 &&
+        expected_stride > std::numeric_limits<int64_t>::max() / inner_size) {
+      return false;
+    }
+    expected_stride *= inner_size;
+    if (t.size(d) != 1 && t.stride(d) != expected_stride) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void check_fp8_quant_args(const torch::Tensor& out,
                           const torch::Tensor& input) {
-  TORCH_CHECK(input.dim() >= 2 && input.is_cpu() && out.is_cpu(),
-              "fp8 quant expects CPU tensors with at least 2 dims");
+  TORCH_CHECK(
+      input.dim() >= 2 && out.dim() >= 2 && input.is_cpu() && out.is_cpu(),
+      "fp8 quant expects CPU tensors with at least 2 dims");
   TORCH_CHECK(input.stride(-1) == 1 && out.stride(-1) == 1,
               "last dimension of input and output must be contiguous");
+  TORCH_CHECK(input.size(-1) > 0, "fp8 quant expects a non-empty hidden size");
   TORCH_CHECK(out.size(-1) == input.size(-1) &&
                   out.numel() / out.size(-1) >= input.numel() / input.size(-1),
               "output must match input hidden size and hold all tokens");
+  // Empty batches never address a row, including in a padded output.
+  TORCH_CHECK(input.numel() == 0 || (rows_uniformly_strided(input) &&
+                                     rows_uniformly_strided(out)),
+              "leading dimensions of input and output must collapse into one "
+              "uniformly strided row dimension");
+  // Every token row is written, so with more than one token the output rows
+  // must not overlap. Inputs are only read and may alias.
+  TORCH_CHECK(input.numel() <= input.size(-1) || out.stride(-2) >= out.size(-1),
+              "output rows must not overlap: stride(-2) must be at least the "
+              "hidden size when more than one token is written");
 }
 
 }  // namespace
@@ -214,6 +245,9 @@ void static_scaled_fp8_quant(
                 "group_shape with exactly 2 elements is required");
     group_m = (*opt_group_shape)[0] == -1 ? num_tokens : (*opt_group_shape)[0];
     group_n = (*opt_group_shape)[1] == -1 ? hidden_size : (*opt_group_shape)[1];
+    TORCH_CHECK(group_m > 0 && group_n > 0,
+                "group_shape entries must be positive or -1 with a non-empty "
+                "input");
   };
 
   if (scale.dim() == 0 || (scale.dim() == 1 && scale.numel() == 1)) {
@@ -235,6 +269,8 @@ void static_scaled_fp8_quant(
       scale_stride_i = scale.stride(0);
     }
   } else if (scale.dim() == 2) {
+    TORCH_CHECK(scale.size(0) > 0 && scale.size(1) > 0,
+                "2D scale must not have an empty dimension");
     TORCH_CHECK(
         num_tokens % scale.size(0) == 0 && hidden_size % scale.size(1) == 0,
         "input shape must be divisible by 2D scale shape");
