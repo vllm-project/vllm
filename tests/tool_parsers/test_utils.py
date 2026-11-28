@@ -227,6 +227,30 @@ class TestCoerceToSchemaType:
         def test_unknown_type_returns_string(self):
             assert coerce_to_schema_type("hello", "unknown_type") == "hello"
 
+        def test_untyped_schema_null_becomes_json_null(self):
+            # Matches the Rust frontend: the literal text "null" for a
+            # parameter the schema does not constrain converts to JSON null.
+            assert coerce_to_schema_type("null", extract_types_from_schema({})) is None
+            assert (
+                coerce_to_schema_type("null", extract_types_from_schema(None)) is None
+            )
+            assert (
+                coerce_to_schema_type(
+                    "null", extract_types_from_schema({"description": "anything"})
+                )
+                is None
+            )
+
+        def test_untyped_schema_keeps_other_values_as_strings(self):
+            assert coerce_to_schema_type("42", extract_types_from_schema({})) == "42"
+            assert coerce_to_schema_type("hello", extract_types_from_schema({})) == (
+                "hello"
+            )
+
+        def test_string_typed_schema_keeps_null_literal_as_text(self):
+            types = extract_types_from_schema({"type": "string"})
+            assert coerce_to_schema_type("null", types) == "null"
+
         def test_json_fallback_for_unknown_type(self):
             assert coerce_to_schema_type('{"a": 1}', "unknown_type") == {"a": 1}
 
@@ -282,13 +306,13 @@ class TestExtractTypesFromSchema:
         assert result == {"array", "object"}
 
     def test_none_schema_defaults_to_string(self):
-        assert extract_types_from_schema(None) == ["string"]
+        assert extract_types_from_schema(None) == ["string", "null"]
 
     def test_non_dict_schema_defaults_to_string(self):
-        assert extract_types_from_schema("string") == ["string"]
+        assert extract_types_from_schema("string") == ["string", "null"]
 
     def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+        assert extract_types_from_schema({}) == ["string", "null"]
 
     def test_nested_anyof(self):
         schema = {

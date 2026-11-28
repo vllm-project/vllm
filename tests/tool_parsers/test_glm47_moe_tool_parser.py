@@ -157,6 +157,52 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
+    def test_untyped_param_null_becomes_json_null(self, glm47_tokenizer):
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="store_any",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "value": {"description": "anything"},
+                        },
+                    },
+                ),
+            ),
+        ]
+        parser = Glm47MoeModelToolParser(glm47_tokenizer, tools=tools)
+        request = Mock(spec=ChatCompletionRequest)
+        request.tools = tools
+        request.tool_choice = "auto"
+        out = "<tool_call>store_any<arg_key>value</arg_key><arg_value>null</arg_value></tool_call>"
+        r = parser.extract_tool_calls(out, request=request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"value": None}
+
+    def test_string_typed_param_null_stays_text(self, glm47_tokenizer):
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="store_text",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                    },
+                )
+            ),
+        ]
+        parser = Glm47MoeModelToolParser(glm47_tokenizer, tools=tools)
+        request = Mock(spec=ChatCompletionRequest)
+        request.tools = tools
+        request.tool_choice = "auto"
+        out = "<tool_call>store_text<arg_key>value</arg_key><arg_value>null</arg_value></tool_call>"
+        r = parser.extract_tool_calls(out, request=request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"value": "null"}
+
     def test_whitespace_preserved_in_arg_values(self, glm47_tool_parser, mock_request):
         out = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>  Beijing  </arg_value></tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
