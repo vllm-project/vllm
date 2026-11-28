@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -68,9 +69,11 @@ def _create_vllm_config() -> MagicMock:
     return vllm_config
 
 
-def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
+@pytest.mark.parametrize("missing", ["unprofiled", None, 0, 3, 5])
+def test_full_capture_graph_pool_and_memory_samples(monkeypatch, missing):
     """FULL capture must set graph_pool_id before entering torch.cuda.graph().
 
+    Profiling samples only the largest two FULL graphs in this pool.
     NCCL symmetric memory checks this global during graph capture; without
     it, capture fails with:
     AssertionError: graph_pool_id is not set under graph capture
@@ -89,7 +92,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
 
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=_create_vllm_config(),
-        device=torch.device("cpu"),
+        device=torch.device("cpu:0"),
         cudagraph_mode=CUDAGraphMode.FULL,
         decode_query_lens={1: 4},
     )
@@ -100,7 +103,29 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         num_reqs=4,
         uniform_token_count=1,
     )
-    manager._capture_descs[CUDAGraphMode.FULL] = [desc]
+    manager._capture_descs[CUDAGraphMode.FULL] = [
+        replace(desc, num_reqs=n, num_tokens=n) for n in (4, 2, 1)
+    ]
+    # The neighbor allocates during the second FULL graph. If any process
+    # reading is missing, the entire capture must use device-wide deltas.
+    memory = gpu_cudagraph_utils.GraphCaptureMemory()
+    process = iter(
+        None if i == missing else n
+        for i, n in enumerate((100, 101, 105, 108, 110, 115))
+    )
+    free = iter((800, 799, 795, 792, 750, 745))
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_process_memory_usage",
+        lambda _: next(process),
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda _: (next(free), 1000)
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    if missing != "unprofiled":
+        manager.capture_memory = memory
+        memory.record(manager.device)
 
     def create_forward_fn(desc, warmup):
         return lambda _mode: None
@@ -131,7 +156,15 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     ):
         manager.capture(create_forward_fn)
 
-    mock_cuda_graph.assert_called_once()
+    if missing == "unprofiled":
+        assert mock_cuda_graph.call_count == 3
+    else:
+        assert mock_cuda_graph.call_count == 2
+        memory.record(manager.device)
+        used = memory.used
+        assert (used[-1] - used[0], used[4] - used[3]) == (
+            (15, 2) if missing is None else (55, 42)
+        )
 
 
 def test_piecewise_capture_uses_pcp_dummy_slot_mappings():

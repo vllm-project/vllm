@@ -41,8 +41,7 @@ class _FakeCudaGraphManager:
         else:
             self._capture_descs = {CUDAGraphMode.FULL: descs} if needs_capture else {}
         # Profiling hooks set by profile_cudagraph_memory.
-        self._max_full_descs_to_capture: int | None = None
-        self._capture_mem_samples: list[int] | None = None
+        self.capture_memory: cgu.GraphCaptureMemory | None = None
         self.use_breakable_cg = False
 
     def needs_capture(self) -> bool:
@@ -78,9 +77,11 @@ def _make_profiling_runner(
         assert profile_only
         events.append("capture")
         # Simulate the manager's per-FULL-graph memory sampling.
-        samples = runner.cudagraph_manager._capture_mem_samples
-        if samples is not None:
-            samples.extend(mem_samples or [])
+        memory = runner.cudagraph_manager.capture_memory
+        memory.device_used.append(0)
+        for delta in mem_samples or []:
+            memory.device_used.extend((0, delta))
+        memory.device_used.append(captured_bytes)
         return captured_bytes
 
     runner.capture_model = _capture_model
@@ -166,11 +167,6 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
     assert runner.events == ["init", "capture", "teardown"]
     # Capture must use a throwaway pool, not the persistent global pool.
     assert runner.cudagraph_manager.pool == THROWAWAY_POOL
-    # FULL capture must be limited to the largest few graphs.
-    assert (
-        runner.cudagraph_manager._max_full_descs_to_capture
-        == cgu._FULL_GRAPH_PROFILING_SAMPLES
-    )
 
 
 @pytest.mark.parametrize(

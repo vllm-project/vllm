@@ -151,6 +151,31 @@ def has_compiled_submodule(model: nn.Module) -> bool:
     )
 
 
+class GraphCaptureMemory:
+    """Use one memory counter for the whole capture and its FULL graph samples."""
+
+    def __init__(self) -> None:
+        self.device_used: list[int] = []
+        self.process_used: list[int] = []
+
+    def record(self, device: torch.device) -> None:
+        if len(self.process_used) == len(self.device_used):
+            index = device.index
+            if index is None:
+                index = torch.accelerator.current_device_index()
+            used = current_platform.get_process_memory_usage(index)
+            if used is not None:
+                self.process_used.append(used)
+        # Deltas of negative free memory are increases in device usage.
+        self.device_used.append(-torch.accelerator.get_memory_info(device)[0])
+
+    @property
+    def used(self) -> list[int]:
+        if len(self.process_used) == len(self.device_used):
+            return self.process_used
+        return self.device_used
+
+
 class CudaGraphManager:
     """Captures and dispatches the CUDA graphs of one runner.
 
@@ -211,8 +236,7 @@ class CudaGraphManager:
         # Profiling hooks, set only by profile_cudagraph_memory() below: cap
         # FULL-mode capture at the N largest descriptors and record each
         # captured FULL graph's memory delta for extrapolation.
-        self._max_full_descs_to_capture: int | None = None
-        self._capture_mem_samples: list[int] | None = None
+        self.capture_memory: GraphCaptureMemory | None = None
 
         # (num_tokens, num_active_loras) -> token-keyed descriptors to try.
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
@@ -487,14 +511,11 @@ class CudaGraphManager:
                     continue
 
                 descs = self._capture_descs[mode]
-                if (
-                    mode == CUDAGraphMode.FULL
-                    and self._max_full_descs_to_capture is not None
-                ):
+                if mode == CUDAGraphMode.FULL and self.capture_memory is not None:
                     # Profiling only: capture a sample of the largest FULL
                     # graphs; the total cost is extrapolated from their
                     # per-graph memory deltas.
-                    descs = descs[: self._max_full_descs_to_capture]
+                    descs = descs[:_FULL_GRAPH_PROFILING_SAMPLES]
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
@@ -528,9 +549,9 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
-                        if self._capture_mem_samples is not None:
+                        if self.capture_memory is not None:
                             torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
+                            self.capture_memory.record(self.device)
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
                             torch.cuda.graph(
@@ -543,10 +564,9 @@ class CudaGraphManager:
                             # forks copy_stream, but wait_prefetch only happens in
                             # the next forward pass.
                             get_offloader().join_after_forward()
-                        if self._capture_mem_samples is not None:
+                        if self.capture_memory is not None:
                             torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            self._capture_mem_samples.append(free_before - free_after)
+                            self.capture_memory.record(self.device)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
 
@@ -1083,9 +1103,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
                 ]
-            manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
-            mem_samples: list[int] = []
-            manager._capture_mem_samples = mem_samples
+            manager.capture_memory = memory = GraphCaptureMemory()
 
             with capture_outside_cumem_pool():
                 measured = int(runner.capture_model(profile_only=True))
@@ -1096,6 +1114,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # they share the global pool at runtime, so the overlap is not
             # double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
+            # The first and last readings bracket the whole capture.
+            inner = iter(memory.used[1:-1])
+            mem_samples = [end - start for start, end in zip(inner, inner, strict=True)]
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
             return max(measured - sum(mem_samples) + full_estimate, 0)
         finally:

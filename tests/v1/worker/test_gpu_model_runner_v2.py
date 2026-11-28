@@ -498,10 +498,15 @@ def _make_capture_runner(
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cuda:0")
+    monkeypatch.setattr(
+        model_runner_module.current_platform, "get_process_memory_usage", lambda _: None
+    )
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
     )
     runner.cudagraph_manager = SimpleNamespace(
+        capture_memory=None,
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
         capture_stream=object(),
@@ -532,7 +537,7 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+        torch.accelerator, "get_memory_info", lambda device: (1 << 30, 1 << 30)
     )
     lock_calls = []
     monkeypatch.setattr(
@@ -577,7 +582,7 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+        torch.accelerator, "get_memory_info", lambda device: (1 << 30, 1 << 30)
     )
     lock_calls = []
     monkeypatch.setattr(
@@ -621,7 +626,7 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
         torch.accelerator, "empty_cache", lambda: cached.__setitem__(0, 0)
     )
     monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (total - cached[0], total)
+        torch.accelerator, "get_memory_info", lambda device: (total - cached[0], total)
     )
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
 

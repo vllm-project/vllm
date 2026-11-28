@@ -8,6 +8,7 @@ from bisect import bisect_right
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -604,6 +605,7 @@ def measure_kv_cache_bytes(
     requested_memory: int,
     transient_peak_bytes: int = 0,
     torch_reserve_growth_bytes: int = 0,
+    process_memory_increase: int | None = None,
     margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
@@ -616,8 +618,18 @@ def measure_kv_cache_bytes(
     larger of transient_peak_bytes and torch_reserve_growth_bytes is then kept
     free in full. The margin guards physical memory, so it never reduces an
     explicit budget that already leaves that much free.
+
+    process_memory_increase, this process's own device memory growth since
+    startup, replaces the drop in free memory as what the engine uses when
+    given, so other processes allocating or releasing memory meanwhile do not
+    move the budget. The headroom stays device-wide.
     """
-    non_kv_used = init_free_memory - free_memory - committed_bytes
+    used = (
+        init_free_memory - free_memory
+        if process_memory_increase is None
+        else process_memory_increase
+    )
+    non_kv_used = used - committed_bytes
     headroom = free_memory + committed_bytes
     margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
@@ -632,6 +644,7 @@ def measure_kv_cache_blocks(
     *,
     init_free_memory: int,
     requested_memory: int,
+    init_process_memory: int | None = None,
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
@@ -639,21 +652,30 @@ def measure_kv_cache_blocks(
     allocated peak) and torch_reserve_growth_bytes. Torch's cache is emptied
     first: its blocks may not fit the large workspaces the first real steps
     allocate. Then caps torch's caching allocator to leave
-    KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it.
+    KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it. With
+    init_process_memory, the budget counts this process's own memory growth
+    where the platform reports it; see `measure_kv_cache_bytes`.
     """
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
     free_memory = current_platform.free_device_memory(device)
+    process_memory_increase = None
+    if init_process_memory is not None:
+        process_memory = current_platform.get_process_memory_usage(device.index or 0)
+        if isinstance(process_memory, int):
+            process_memory_increase = process_memory - init_process_memory
     transient_peak = kv_cache.reserved_headroom_bytes
-    measured = dict(
+    measure = partial(
+        measure_kv_cache_bytes,
         init_free_memory=init_free_memory,
         free_memory=free_memory,
         committed_bytes=kv_cache.physical_bytes,
         transient_peak_bytes=transient_peak,
+        process_memory_increase=process_memory_increase,
         torch_reserve_growth_bytes=kv_cache.torch_reserve_growth_bytes,
     )
-    available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
+    available = measure(requested_memory=requested_memory)
     utilization = vllm_config.cache_config.gpu_memory_utilization
     # Explicit values just under 1.0 are mostly habits from estimate-based
     # sizing, which needed that headroom; this sizing measures it instead. Some
@@ -661,10 +683,7 @@ def measure_kv_cache_blocks(
     # lists so that those users can keep their setting.
     if utilization is not None and 0.7 < utilization < 1.0:
         # A budget of all memory free at startup is bound by the device alone.
-        withheld = (
-            measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
-            - available
-        )
+        withheld = measure(requested_memory=init_free_memory) - available
         if withheld >= 1 << 30:
             logger.warning_once(
                 "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "
