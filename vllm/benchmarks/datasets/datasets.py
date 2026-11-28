@@ -2217,11 +2217,13 @@ def get_samples(
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MultiModalConversationDataset
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = ConversationDataset
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
