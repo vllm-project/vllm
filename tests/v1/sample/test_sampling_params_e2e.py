@@ -169,6 +169,41 @@ def test_allowed_token_ids(llm):
     with pytest.raises(VLLMValidationError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
 
+    # Reject exceeding max size (MAX_NUM_ALLOWED_TOKEN_IDS = 1024).
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=list(range(2000))))
+
+
+def test_logit_bias_size_limit(llm):
+    """Check that exceeding logit_bias size limit raises an error
+    instead of crashing the engine."""
+    # Reject exceeding max size (MAX_NUM_LOGIT_BIAS_TOKENS = 1024).
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(logit_bias={i: 1.0 for i in range(2000)}),
+        )
+
+
+def test_stop_token_ids_size_limit_after_eos_merge(llm):
+    """Check that min_tokens requests whose stop IDs exceed
+    MAX_NUM_STOP_TOKEN_IDS (128) once EOS is merged raise an error instead of
+    crashing the engine, and that requests without min_tokens still run."""
+    # 128 user IDs that skip the special tokens (0-2), so merging EOS makes
+    # the set larger than 128.
+    stop_token_ids = list(range(3, 131))
+
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(stop_token_ids=stop_token_ids, min_tokens=1),
+        )
+
+    outputs = llm.generate(
+        PROMPT, SamplingParams(stop_token_ids=stop_token_ids, max_tokens=4)
+    )
+    assert len(outputs) == 1
+
 
 def test_seed(llm):
     """Check that seed impacts randomness."""

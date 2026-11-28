@@ -25,7 +25,11 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (
+    MAX_NUM_STOP_TOKEN_IDS,
+    BeamSearchParams,
+    SamplingParams,
+)
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -536,6 +540,17 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+
+            num_all_stop = len(sampling_params.all_stop_token_ids)
+            if sampling_params.min_tokens > 0 and num_all_stop > MAX_NUM_STOP_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Too many stop token IDs including EOS: {num_all_stop}. "
+                    f"The max size with min_tokens > 0 is "
+                    f"{MAX_NUM_STOP_TOKEN_IDS}.",
+                    parameter="stop_token_ids",
+                    value=num_all_stop,
+                )
+
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
