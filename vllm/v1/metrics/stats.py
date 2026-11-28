@@ -249,6 +249,11 @@ class SchedulerStats:
     # iterations in iteration_records ran. Only with
     # --enable-logging-iteration-details.
     queued_workload: QueuedWorkload | None = None
+    # Free KV cache blocks currently held back from admissions: the watermark
+    # (while requests are running), and the reserve for in-flight prefills
+    # that an async KV load admission must leave free (with a KV connector).
+    num_watermark_blocks: int = 0
+    num_inflight_load_reserved_blocks: int = 0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
