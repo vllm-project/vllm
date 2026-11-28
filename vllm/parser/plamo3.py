@@ -169,7 +169,7 @@ class Plamo3Parser(ParserEngine):
     ) -> None:
         # Configure PLaMo parsing and cache its multi-token reasoning markers.
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        self.thinking_enabled = bool(chat_kwargs.get("enable_thinking", True))
         kwargs.setdefault(
             "parser_engine_config",
             plamo3_config(thinking=self.thinking_enabled),

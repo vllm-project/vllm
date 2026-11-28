@@ -481,7 +481,7 @@ class Gemma4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("enable_thinking", False)
+        thinking = bool(chat_kwargs.get("enable_thinking", False))
         kwargs.setdefault("parser_engine_config", gemma4_config(thinking=thinking))
         super().__init__(tokenizer, tools, **kwargs)
         vocab = self.vocab

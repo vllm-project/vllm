@@ -61,7 +61,7 @@ class GraniteThinkingParser(NemotronV3Parser):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("enable_thinking", True)
+        thinking = bool(chat_kwargs.get("enable_thinking", True))
         kwargs.pop("parser_engine_config", None)
         Qwen3Parser.__init__(
             self,
