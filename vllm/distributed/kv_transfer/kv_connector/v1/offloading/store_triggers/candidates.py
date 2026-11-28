@@ -39,6 +39,7 @@ def select_store_candidates(
     scheduler_output: SchedulerOutput,
     req_status: RequestOffloadState,
     start_chunk_idxs: Sequence[int],
+    put_batching: bool = False,
 ) -> StoreCandidates:
     """Select the computed chunks of a request, from the given chunk of each group.
 
@@ -48,6 +49,9 @@ def select_store_candidates(
         req_status: the request.
         start_chunk_idxs: for each group, the first chunk that the trigger did
             not store yet.
+        put_batching: whether PUT batching clips the result. A batch may have
+            deferred the prompt's final tail into decode, so it stays reachable
+            as that prompt's end.
 
     Returns:
         The keys and positions of the reachable chunks, and the chunk range of
@@ -105,7 +109,9 @@ def select_store_candidates(
             store_horizon_chunks = None
         elif req.is_finished():
             store_horizon_chunks = num_chunks
-        elif num_chunks <= prompt_horizon_chunks:
+        elif num_chunks <= prompt_horizon_chunks or (
+            put_batching and start_chunk_idx < prompt_horizon_chunks
+        ):
             store_horizon_chunks = prompt_horizon_chunks
         else:
             # An active decode frontier is not a final request

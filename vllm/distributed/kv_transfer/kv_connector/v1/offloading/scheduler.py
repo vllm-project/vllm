@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from math import lcm
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -62,6 +63,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
 )
 from vllm.v1.kv_offload.config import OffloadAccessMode
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -70,6 +72,13 @@ logger = init_logger(__name__)
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
+
+# Opt-in PUT batching defaults (extra_config ``put_*``; see the usage docs).
+_DEFAULT_PUT_MAX_INFLIGHT_CHUNKS = 512
+_DEFAULT_PUT_GET_RESERVE_CHUNKS = 128
+# Steps a blocked request skips while admission state is unchanged, before
+# re-planning anyway (bounds both scan cost and retry latency).
+_PUT_RETRY_MAX_SKIPS = 15
 
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
@@ -186,12 +195,16 @@ class _StoreJobSink:
         self.jobs: dict[int, TransferJob] = {}
 
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        expected_failure: bool = False,
     ) -> PrepareStoreOutput | None:
         output = self._scheduler.manager.prepare_store(
             keys, req_context, trigger=self._trigger
         )
-        if output is None:
+        if output is None and not expected_failure:
             self.record_allocation_failure()
         return output
 
@@ -199,6 +212,20 @@ class _StoreJobSink:
         self._scheduler._connector_stats.increase_counter(
             _ConnectorMetricName.ALLOCATION_FAILURE
         )
+
+    def put_admission_state(self) -> tuple[int, ...]:
+        assert self._scheduler._put_manager is not None
+        return self._scheduler._put_manager.get_put_admission_state()
+
+    def keys_needing_put_credit(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> set[OffloadKey]:
+        assert self._scheduler._put_manager is not None
+        return self._scheduler._put_manager.keys_needing_put_credit(keys, req_context)
+
+    def num_admissible_chunks(self) -> int:
+        assert self._scheduler._put_manager is not None
+        return self._scheduler._put_manager.primary_tier.num_admissible_chunks()
 
     def add_job(
         self,
@@ -263,6 +290,34 @@ class OffloadingConnectorScheduler:
         self.access_mode: OffloadAccessMode = spec.access_mode
         self._connector_stats = OffloadingConnectorStats()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        self._put_batch_chunks = spec.extra_config.get("put_batch_chunks", 0)
+        self._put_manager: TieringOffloadingManager | None = None
+        # Batches admit whole units aligned across every group's chunks.
+        self._put_alignment = lcm(
+            self.config.alignment_tokens or 1,
+            *(g.tokens_per_chunk for g in self.config.kv_group_configs),
+        )
+        if self._put_batch_chunks:
+            if not isinstance(self.manager, TieringOffloadingManager):
+                raise ValueError("PUT batching requires a tiering manager")
+            self._put_manager = self.manager
+            # Full-attention groups store every chunk of a unit, so a unit
+            # needs at least this many credits; sparse groups may add more.
+            min_unit_chunks = sum(
+                self._put_alignment // g.tokens_per_chunk
+                for g in self.config.kv_group_configs
+                if g.sliding_window_size_in_chunks is None and not g.requires_cow_source
+            )
+            self.manager.configure_put_batching(
+                self._put_batch_chunks,
+                spec.extra_config.get(
+                    "put_max_inflight_chunks", _DEFAULT_PUT_MAX_INFLIGHT_CHUNKS
+                ),
+                spec.extra_config.get(
+                    "put_get_reserve_chunks", _DEFAULT_PUT_GET_RESERVE_CHUNKS
+                ),
+                min_unit_chunks=max(1, min_unit_chunks),
+            )
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -343,7 +398,11 @@ class OffloadingConnectorScheduler:
         self._store_handlers: dict[StoreTrigger, StoreTriggerHandler] = {
             handler_cls.trigger: handler_cls(self.config, self._events_tracker)
             for handler_cls in handler_classes
+            if handler_cls is not OnComputeStoreHandler
         }
+        self._store_handlers[StoreTrigger.ON_COMPUTE] = OnComputeStoreHandler(
+            self.config, self._events_tracker, self._put_batch_chunks
+        )
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
