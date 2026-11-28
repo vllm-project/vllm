@@ -4,7 +4,7 @@ meta:
   provider: "Meta"
   description: "Meta's Llama 3.1 8B dense instruction-tuned language model with 128K context"
   date_added: 2025-10-15
-  date_updated: 2026-09-12
+  date_updated: 2026-11-18
   tasks:
     - text
   related_recipes:
@@ -131,6 +131,21 @@ variants:
     vram_minimum_gb: 6
     description: "RedHatAI NVFP4 quantization"
 
+  amd_fp8_kv:
+    model_id: "amd/Llama-3.1-8B-Instruct-FP8-KV"
+    precision: fp8
+    label: "FP8 weights and activations with FP8 KV cache (AMD Quark)"
+    vram_minimum_gb: 10
+    description: "AMD FP8 weights and activations with an FP8 KV cache"
+    supported_hardware: [mi355x]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "--compilation-config"
+      - '{"custom_ops":["+rotary_embedding"],"pass_config":{"fuse_rope_kvcache":true},"use_inductor_graph_partition":true}'
+
 compatible_strategies:
   - single_node_tp
   - multi_node_tp
@@ -194,6 +209,18 @@ guide: |
   ```
 
   The first AITER launch may take several minutes while ROCm kernels are compiled and cached.
+
+  For the AMD FP8 + FP8 KV checkpoint on 1x MI355X, use AITER unified attention
+  and fuse RoPE with the KV-cache insert:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve amd/Llama-3.1-8B-Instruct-FP8-KV \
+    --tensor-parallel-size 1 \
+    --kv-cache-dtype fp8 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --compilation-config '{"custom_ops":["+rotary_embedding"],"pass_config":{"fuse_rope_kvcache":true},"use_inductor_graph_partition":true}'
+  ```
 
   ### pip (Intel Xeon 6 CPUs)
   For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
