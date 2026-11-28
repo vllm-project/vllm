@@ -55,8 +55,8 @@ void moe_w4a8_decode_rdna3(
     const std::optional<at::Tensor>& w13_zp, const at::Tensor& w2,
     const at::Tensor& w2_scale, const std::optional<at::Tensor>& w2_zp);
 
-// RDNA3.5 decode and prefill attention: the fields of every build (none off
-// gfx1151), and a launch of one build by its index.
+// RDNA decode and prefill attention: the fields of every build of the current
+// GPU's family (none on other GPUs), and a launch of one build by its index.
 std::vector<int64_t> rdna_decode_configs();
 std::vector<int64_t> rdna_decode_batch_configs();
 void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,

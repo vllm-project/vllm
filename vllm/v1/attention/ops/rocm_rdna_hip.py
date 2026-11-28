@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lookup of the RDNA3.5 attention kernels built into `_rocm_C`.
+"""Lookup of the RDNA attention kernels built into `_rocm_C`.
 
 Each entry of `csrc/rocm/rdna_{decode,prefill}_configs.h` is one
 build, with its shape and launch knobs as compile-time constants; those of
-`rdna_decode_batch_configs.h` serve a batch.
+`rdna_decode_batch_configs.h` serve a batch. Each header has a table per GPU
+family: gfx1151's (1536 VGPRs a SIMD lane), gfx1150's (1024), which gfx1152
+and gfx1153 also use, and RDNA4's gfx1201's, which gfx1200 also uses.
+`_rocm_C` lists the builds of the current device's tables.
 """
 
 import contextlib
