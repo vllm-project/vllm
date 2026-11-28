@@ -3,9 +3,12 @@
 
 import os
 from collections.abc import Sequence
+from io import BytesIO
 
+import numpy as np
 import pytest
 import regex as re
+import soundfile as sf
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
@@ -297,3 +300,33 @@ def test_vision_speech_models(
         mm_limit=1,
         tensor_parallel_size=1,
     )
+
+
+@pytest.mark.core_model
+def test_phi4mm_rejects_audio_over_resampling_limit(vllm_runner, monkeypatch):
+    with vllm_runner(
+        model_path,
+        runner="generate",
+        dtype=target_dtype,
+        max_model_len=4096,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 0, "audio": 1},
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        trust_remote_code=True,
+    ) as vllm_model:
+        # Lower the limit so the test can use ordinary capture rates.
+        monkeypatch.setattr(
+            "vllm.multimodal.audio._MAX_SCIPY_RESAMPLE_FACTOR", 256, raising=False
+        )
+        for audio_format in ("WAV", "FLAC", "OGG"):
+            with BytesIO() as buffer:
+                sf.write(buffer, np.zeros(4410), 44100, format=audio_format)
+                buffer.seek(0)
+                audio = load_audio(buffer, sr=None)
+            with pytest.raises(ValueError, match="SciPy resampling limit"):
+                vllm_model.generate_greedy(
+                    ["<|user|><|audio_1|><|end|><|assistant|>"],
+                    max_tokens=1,
+                    audios=[audio],
+                )

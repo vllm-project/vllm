@@ -61,6 +61,28 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert np.isfinite(out).all()
 
 
+@pytest.mark.parametrize(("orig_sr", "target_sr"), [(4, 3), (3, 4)])
+def test_scipy_resampler_rejects_factors_above_limit(
+    monkeypatch, dummy_audio, orig_sr, target_sr
+):
+    monkeypatch.setattr(
+        "vllm.multimodal.audio._MAX_SCIPY_RESAMPLE_FACTOR", 3, raising=False
+    )
+    resampler = AudioResampler(target_sr=target_sr, method="scipy")
+    with pytest.raises(ValueError, match="SciPy resampling limit"):
+        resampler.resample(dummy_audio, orig_sr=orig_sr)
+
+
+def test_scipy_resampler_accepts_reduced_factors_at_limit(monkeypatch, dummy_audio):
+    monkeypatch.setattr(
+        "vllm.multimodal.audio._MAX_SCIPY_RESAMPLE_FACTOR", 3, raising=False
+    )
+    out = resample_audio_scipy(dummy_audio, orig_sr=3000, target_sr=2000)
+    reference = resample_audio_scipy(dummy_audio, orig_sr=3, target_sr=2)
+    np.testing.assert_array_equal(out, reference)
+    assert out.shape == (4,)
+
+
 def test_resample_audio_scipy_non_divisible_sample_rates():
     audio = np.arange(441, dtype=float)
     out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
