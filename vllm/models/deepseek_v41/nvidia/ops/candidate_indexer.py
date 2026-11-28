@@ -14,7 +14,7 @@ from cutlass.cute.runtime import make_fake_tensor
 
 from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from .candidate_paged_logits import candidate_paged_logits, prepare_candidate_pages
+from .candidate_pcp import prepare_pcp_candidate_rows
 
 logger = init_logger(__name__)
 
@@ -191,8 +192,33 @@ class CandidateIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             raise ValueError(f"{prefix} requires the FP8 indexer cache")
         if (config.index_n_heads, config.index_head_dim) != (32, 128):
             raise ValueError(f"{prefix} requires 32 indexer heads of size 128")
-        if self.dcp_world_size != 1 or self.use_pcp:
-            raise ValueError(f"{prefix} does not support context parallelism")
+        if self.dcp_world_size != 1:
+            raise ValueError(f"{prefix} does not support DCP")
+        if self.use_pcp:
+            extra = vllm_config.additional_config
+            if not (
+                isinstance(extra, dict)
+                and extra.get("candidate_pcp_prototype") is True
+                and vllm_config.attention_config.indexer_sparse_logits is True
+            ):
+                raise ValueError(
+                    f"{prefix} with PCP requires the explicit "
+                    "additional_config.candidate_pcp_prototype opt-in"
+                )
+            parallel = vllm_config.parallel_config
+            if (
+                parallel.pipeline_parallel_size != 1
+                or parallel.data_parallel_size != 1
+                or vllm_config.speculative_config is not None
+                or vllm_config.kv_transfer_config is not None
+                or vllm_config.scheduler_config.async_scheduling is not False
+                or vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                or self.use_shardq
+            ):
+                raise ValueError(
+                    "The PCP candidate prototype requires standalone synchronous "
+                    "eager prefill without PP, DP, speculative decoding or ShardQ"
+                )
         if vllm_config.parallel_config.use_ubatching:
             raise ValueError(f"{prefix} does not support microbatching")
         count = config.candidate_topk_blocks
@@ -243,6 +269,9 @@ class CandidateIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         metadata = CandidateIndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
+        # PCP decode layouts and draft updates keep the existing dense path.
+        if self.use_pcp and (base.num_decodes or base.prefill is None):
+            return metadata
         # Dense prefill reuses K across queries, especially for a large causal
         # chunk. Candidate scoring needs a long context relative to both.
         if (
@@ -258,13 +287,22 @@ class CandidateIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         rows = base.num_decode_tokens + base.num_prefill_tokens
         requests = base.num_decodes + base.num_prefills
         if rows:
-            _candidate_rows(
-                common_attn_metadata.query_start_loc[: requests + 1],
-                common_attn_metadata.seq_lens[:requests],
-                self.row_lens[:rows],
-                self.row_indices[:rows],
-                self.compress_ratio,
-            )
+            if self.use_pcp:
+                if not prepare_pcp_candidate_rows(
+                    common_attn_metadata,
+                    self.compress_ratio,
+                    self.row_lens[:rows],
+                    self.row_indices[:rows],
+                ):
+                    return metadata
+            else:
+                _candidate_rows(
+                    common_attn_metadata.query_start_loc[: requests + 1],
+                    common_attn_metadata.seq_lens[:requests],
+                    self.row_lens[:rows],
+                    self.row_indices[:rows],
+                    self.compress_ratio,
+                )
             metadata.candidate = CandidatePlan(
                 block_table=common_attn_metadata.block_table_tensor[:requests],
                 row_indices=self.row_indices[:rows],
