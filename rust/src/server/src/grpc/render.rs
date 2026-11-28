@@ -128,6 +128,7 @@ async fn render(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint,
     } = prepare_and_render_chat(state, chat_request, None, omit_media_kwargs).await?;
 
     Ok(pb::RenderResponse {
@@ -135,6 +136,7 @@ async fn render(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint,
     })
 }
 
@@ -152,6 +154,7 @@ async fn render_chat(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint,
     } = prepare_and_render_chat(
         state,
         chat_request,
@@ -165,6 +168,7 @@ async fn render_chat(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint,
     })
 }
 
@@ -173,6 +177,7 @@ struct RenderedChat {
     structured_output: Option<pb::StructuredOutput>,
     engine_reasoning_gate: Option<pb::EngineReasoningGate>,
     media: Vec<pb::MediaItem>,
+    render_fingerprint: String,
 }
 
 async fn prepare_and_render_chat(
@@ -238,6 +243,7 @@ async fn prepare_and_render_chat(
         structured_output,
         engine_reasoning_gate,
         media,
+        render_fingerprint: state.render_fingerprint().unwrap_or_default().to_string(),
     })
 }
 

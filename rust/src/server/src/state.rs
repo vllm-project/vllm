@@ -45,6 +45,9 @@ pub struct AppState {
     /// `system_fingerprint` of chat and completion responses, fixed at
     /// startup.
     pub system_fingerprint: Option<String>,
+    /// `render_fingerprint` reported by the gRPC Render service, fixed at
+    /// startup.
+    pub render_fingerprint: Option<String>,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
@@ -90,6 +93,7 @@ impl AppState {
             chat,
             api_server_options: ApiServerOptions::default(),
             system_fingerprint: None,
+            render_fingerprint: None,
             cors: CorsConfig::default(),
             access_log: AccessLogConfig::default(),
             server_info: None,
@@ -124,6 +128,12 @@ impl AppState {
     /// Set the `system_fingerprint` of chat and completion responses.
     pub fn with_system_fingerprint(mut self, system_fingerprint: Option<String>) -> Self {
         self.system_fingerprint = system_fingerprint;
+        self
+    }
+
+    /// Set the `render_fingerprint` reported by the gRPC Render service.
+    pub fn with_render_fingerprint(mut self, render_fingerprint: String) -> Self {
+        self.render_fingerprint = Some(render_fingerprint);
         self
     }
 

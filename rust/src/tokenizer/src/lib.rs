@@ -26,6 +26,11 @@ pub use tiktoken::TiktokenTokenizer;
 pub use unavailable::UnavailableTokenizer;
 
 pub trait Tokenizer: Send + Sync {
+    /// Identify the implementation that produced token IDs.
+    fn library_tag(&self) -> String {
+        "unknown/unknown".to_string()
+    }
+
     /// Encode one prompt string into token IDs.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
 

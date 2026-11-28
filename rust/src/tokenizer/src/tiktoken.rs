@@ -452,6 +452,15 @@ impl LoadedTiktokenConfig {
 }
 
 impl Tokenizer for TiktokenTokenizer {
+    fn library_tag(&self) -> String {
+        match &self.backend {
+            Backend::Riptoken(_) => format!("riptoken/{}", env!("VLLM_RIPTOKEN_VERSION")),
+            Backend::TiktokenRs(_) => {
+                format!("tiktoken-rs/{}", env!("VLLM_TIKTOKEN_RS_VERSION"))
+            }
+        }
+    }
+
     fn encode(&self, text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
         // Tiktoken does not have a separate add_special_tokens toggle; both
         // backends recognize registered special tokens in the input.

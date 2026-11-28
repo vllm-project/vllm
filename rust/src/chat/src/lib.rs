@@ -47,6 +47,7 @@ pub use request::{
     ChatRole, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+use thiserror_ext::AsReport as _;
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
@@ -61,6 +62,12 @@ mod reasoning;
 mod renderer;
 mod request;
 mod stream;
+
+/// Resolve a configured chat template to its effective Jinja source.
+pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
+    renderer::hf::resolve_chat_template(chat_template)
+        .map_err(|error| Error::ChatTemplate(error.to_report_string()))
+}
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;

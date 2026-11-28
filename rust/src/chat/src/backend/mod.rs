@@ -124,6 +124,12 @@ pub struct LoadModelBackendsOptions {
 pub struct LoadedModelBackends {
     pub text_backend: DynTextBackend,
     pub chat_backend: DynChatBackend,
+    /// The concrete renderer selected after model-based auto-detection.
+    pub renderer: Option<RendererSelection>,
+    /// The tokenizer implementation that produced prompt token IDs.
+    pub tokenizer_library: Option<String>,
+    /// Resolved files shared by the text and chat backends.
+    pub resolved_model_files: vllm_text::backend::hf::ResolvedModelFiles,
 }
 
 /// Load text and chat backends for the given model id.

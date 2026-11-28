@@ -13,6 +13,7 @@ mod middleware;
 mod mm_wire;
 mod model_names;
 mod render;
+mod render_fingerprint;
 mod routes;
 mod runtime;
 #[cfg(test)]
@@ -171,6 +172,16 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         }
         LlmSource::Provided(llm) => (llm, None),
     };
+    let multimodal = chat_backend.multimodal_model_info().is_some();
+    let render_fingerprint = render_fingerprint::for_server(
+        config,
+        loaded.renderer,
+        loaded.tokenizer_library.as_deref(),
+        u64::from(llm.info().max_model_len),
+        multimodal,
+        &loaded.resolved_model_files,
+    )
+    .await?;
     let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
     let text = TextLlm::from_boxed(llm, text_backend)
         .with_served_model_name(metrics_model_name)
@@ -201,6 +212,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_api_keys(config.api_keys.clone())
         .with_cors(config.cors.clone())
         .with_access_log(config.access_log.clone())
+        .with_render_fingerprint(render_fingerprint)
         .with_system_fingerprint(system_fingerprint)
         .with_decisions(decisions);
     if let Some((engine_core, server_info)) = &engine_core {

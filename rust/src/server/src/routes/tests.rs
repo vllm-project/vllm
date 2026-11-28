@@ -859,6 +859,7 @@ fn test_render_state(max_model_len: Option<u32>) -> RenderState {
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
+        render_fingerprint: "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test".to_string(),
     }
 }
 
@@ -2861,6 +2862,7 @@ fn completion_suffix_render_app(chat_renderer: DynChatRenderer) -> axum::Router 
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        render_fingerprint: "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test".to_string(),
         max_model_len: Some(128),
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::new(backend, None, None),
@@ -3167,6 +3169,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
             lora_modules: Vec::new(),
+            render_fingerprint: "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test".to_string(),
         }));
         let (status, json) = post_json(
             &mut app,

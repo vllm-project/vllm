@@ -216,8 +216,18 @@ output: unspecified and `MM_PAYLOAD_TENSORS` include inline tensors;
 `MM_PAYLOAD_NONE` retains hashes and placeholder ranges only. JSON
 `mm_payload` and `return_mm_kwargs` do not select the gRPC output mode.
 
-The response includes prompt token IDs, the structured-output constraint,
-reasoning gate, and preprocessed media.
+Both responses include prompt token IDs, the structured-output constraint,
+reasoning gate, preprocessed media, and `render_fingerprint`: a versioned
+`rf1:<inputs-sha256>:<renderer-tag>` identifier. The digest covers the
+canonical renderer-input manifest, while the tag identifies the concrete
+renderer and tokenizer implementation. A generation worker can use it to
+reject token IDs from an incompatible renderer.
+
+For multimodal deployments, the render server must use the same resolved
+`--max-model-len` as the generation worker. Both processes must also resolve
+the same model files: an offline or warm-cache process fingerprints the
+snapshot it has locally, so a different cache contents intentionally produces
+a different fingerprint.
 See [the renderer documentation](../docs/serving/online_serving/renderer.md#rust-raw-json-grpc-rendering)
 and [`render.proto`](proto/render.proto) for the contract.
 
