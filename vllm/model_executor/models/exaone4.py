@@ -49,7 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -290,7 +290,7 @@ class Exaone4DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Exaone4Model(nn.Module):
+class Exaone4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -340,7 +340,7 @@ class Exaone4Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -352,11 +352,25 @@ class Exaone4Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        # EXAONE 4 uses post-LN: each decoder layer returns the full residual
+        # stream as `hidden_states` (its `residual` is the pre-MLP stream), so the
+        # aux hidden states are taken from `hidden_states` alone.
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, None
+            )
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, None
             )
 
         if not get_pp_group().is_last_rank:
@@ -365,10 +379,13 @@ class Exaone4Model(nn.Module):
             )
 
         hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
-class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
