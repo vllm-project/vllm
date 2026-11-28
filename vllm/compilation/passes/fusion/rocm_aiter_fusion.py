@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kFp8StaticTensorSym,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -882,6 +883,55 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         return _replacement
 
 
+class AiterSiluMulFp8StaticQuantPattern(VllmPatternReplacement):
+    """This pattern fuses silu_and_mul & aiter static per-tensor fp8 quant
+    into an aiter silu_and_mul_fp8_static_quant op.
+    """
+
+    FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_silu_mul_fused_fp8_static_quant_op()
+
+    def __init__(self, flatten: bool = False) -> None:
+        self.flatten = flatten
+        self.silu_and_mul_matcher = MatcherSiluAndMul()
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key=kFp8StaticTensorSym, match_rocm_aiter=True
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [
+            self.silu_and_mul_matcher.empty(1, 5, 4)
+            if self.flatten
+            else self.silu_and_mul_matcher.inputs()[0],
+            self.empty_fp32(1, 1),  # scale
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor, scale: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at1 = self.silu_and_mul_matcher(input)
+            # The Transformers backend flattens [1, T, N] to [T, N] before the quant.
+            if self.flatten:
+                at1 = at1.reshape(-1, at1.shape[-1])
+            return self.quant_matcher(at1, scale)
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor, scale: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if self.flatten:
+                input = input.reshape(-1, input.shape[-1])
+            result = self.FUSED_SILU_MUL_QUANT_OP(x=input, scale=scale)
+            # The static scale is an input, so it passes through unchanged.
+            return result, scale
+
+        return _replacement
+
+
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -899,6 +949,9 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
+        if match_aiter_quant_op:
+            for flatten in (False, True):
+                self.register(AiterSiluMulFp8StaticQuantPattern(flatten=flatten))
 
         self.dump_patterns(config, self.pm_pass)
 

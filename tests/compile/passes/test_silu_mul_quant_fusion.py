@@ -97,6 +97,23 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         return [FUSED_OPS[kFp8StaticTensorSym]]
 
 
+class TestSiluMulAiterFp8StaticQuantModel(TestSiluMulFp8QuantModel):
+    def ops_in_model_before(self):
+        return [
+            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
+            rocm_aiter_ops.get_per_tensor_quant_op(),
+        ]
+
+    def ops_in_model_after(self):
+        return [rocm_aiter_ops.get_silu_mul_fused_fp8_static_quant_op()]
+
+
+class TestSiluMulAiterFp8StaticQuant3DModel(TestSiluMulAiterFp8StaticQuantModel):
+    # [1, tokens, 2 * hidden] input, as in the Transformers backend.
+    def forward(self, x):
+        return super().forward(x.unsqueeze(0))
+
+
 class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, x: torch.Tensor, **kwargs):
         super().__init__()
@@ -252,6 +269,23 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
                 not current_platform.is_rocm(), reason="ROCm only"
             ),
         ),
+        # Static per-tensor FP8 quant through AITER (rocm_aiter_per_tensor_quant).
+        pytest.param(
+            TestSiluMulAiterFp8StaticQuantModel,
+            True,
+            ROCmFP8ScaledMMLinearKernel,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
+        pytest.param(
+            TestSiluMulAiterFp8StaticQuant3DModel,
+            True,
+            ROCmFP8ScaledMMLinearKernel,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
         # Block quant fusion for per-group FP8 (CUDA only).
         *[
             pytest.param(
@@ -276,6 +310,8 @@ def test_fusion_silu_and_mul_quant(
     dtype: torch.dtype,
     model_class: type[
         TestSiluMulFp8QuantModel
+        | TestSiluMulAiterFp8StaticQuantModel
+        | TestSiluMulAiterFp8StaticQuant3DModel
         | TestSiluMulNvfp4QuantModel
         | TestSiluMulGroupFp8QuantModel
         | TestSiluMulBlockQuantModel
@@ -287,7 +323,12 @@ def test_fusion_silu_and_mul_quant(
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
-    if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
+    uses_aiter_pass = model_class in (
+        TestSiluMulGroupFp8QuantModel,
+        TestSiluMulAiterFp8StaticQuantModel,
+        TestSiluMulAiterFp8StaticQuant3DModel,
+    )
+    if uses_aiter_pass and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
     if (
         isinstance(model_class, partial)
@@ -318,7 +359,7 @@ def test_fusion_silu_and_mul_quant(
 
     with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+        if IS_AITER_FOUND and uses_aiter_pass:
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
@@ -345,7 +386,11 @@ def test_fusion_silu_and_mul_quant(
         result2 = model2(x)
 
         # Check that it gives the same answer
-        if isinstance(model, TestSiluMulFp8QuantModel):
+        if isinstance(model, TestSiluMulAiterFp8StaticQuantModel):
+            # The fused kernel quantizes silu*mul from fp32; the reference rounds
+            # it to bf16/fp16 first, which can move a value by one FP8 code.
+            atol, rtol = 5e-2, 5e-2
+        elif isinstance(model, TestSiluMulFp8QuantModel):
             atol, rtol = 1e-3, 1e-3
         elif isinstance(model, TestSiluMulNvfp4QuantModel):
             atol, rtol = 1e-1, 1e-1
