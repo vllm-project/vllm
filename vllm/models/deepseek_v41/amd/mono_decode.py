@@ -22,7 +22,9 @@ On CDNA3 (gfx942) the kernels compute the same layer on their own copies of
 the weights (`mono/weights942.py`), at TP 4 and on steps of up to
 `MAX_ROWS_GFX942` rows. An index source's keys are written by
 `mono/keylist.py` between vLLM's indexer and K2 there, and the DSpark draft
-layers also take the FFN launch, built for the draft's routing.
+layers also take the FFN launch, built for the draft's routing. Where the
+copies of every layer do not fit next to the KV cache, `--monokernel-layers N`
+keeps the layers with ids N and above on vLLM's path, without copies.
 
 Every TP rank must take the same path at every layer (the kernels wait on each
 other's pushes): the conditions read only metadata every rank holds alike.
@@ -453,6 +455,17 @@ class MonoDecodeLayer:
             from vllm.models.deepseek_v41.amd.ops import topk as topk_ops
 
             topk_ops.build()
+        # The limit is on the model-wide layer id, so one below
+        # num_hidden_layers also keeps the DSpark draft layers on vLLM's path.
+        limit = vllm_config.kernel_config.monokernel_layers
+        if limit is not None:
+            logger.info_once(
+                "DSv4.1 mono decode: layers below %d take the mono path, the "
+                "rest vLLM's path",
+                limit,
+            )
+            if attn.layer_id >= limit:
+                return None
         draft = attn.layer_id >= config.num_hidden_layers
         # a draft layer's routing is the DSpark expert set (128 / 3 on V4.1-Flash)
         experts, topk = 384, 6
@@ -770,6 +783,10 @@ class MonoDecodeLayer:
             flush()
             return self._skip(why)
         assert swa is not None
+        if attn.indexer is not None:
+            # vLLM's path refreshes the ragged top-k its consumers read only as
+            # it runs; a consumer on vLLM's path would read an earlier step's.
+            attn._topk_ragged_cache = {}
         runner = _mono_runner(x.device, self if self.draft else None)
         logger.info_once(
             "DSv4.1 mono decode %slayer active (decode steps of <= %d rows)",

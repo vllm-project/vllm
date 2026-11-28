@@ -23,6 +23,9 @@ Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
 - 2: ratio-2 consumer with an Engram (K1 takes the residual settled)
 - 3: ratio-1 KV, index and candidate source
 - 4: ratio-1 index source over 3's candidates and KV
+
+With `--monokernel-layers 2`, layers 2-4 take vLLM's path, and layer 2 reads
+the top-k of layer 1's indexer, which ran on the kernels.
 """
 
 import os
@@ -417,7 +420,14 @@ if os.environ.get(MERGE_AB):
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    layers: int | None = None,
 ):
     """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
     mono path on or off: (each decode's outputs, the workers' mono layers); each decoder
@@ -447,6 +457,7 @@ def _decode(
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
         monokernel=mono,
+        monokernel_layers=layers,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
@@ -530,9 +541,20 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+    ("tp", "rows", "layers"),
+    [
+        (2, 8, None),
+        (4, 8, None),
+        (4, 42, None),
+        (8, 8, None),
+        (8, 28, None),
+        (8, 42, None),
+        (4, 8, 2),
+    ],
 )
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+def test_mono_decode_matches_the_model(
+    vllm_runner, monkeypatch, tmp_path, tp, rows, layers
+):
     arch = _arch()
     if not arch:
         pytest.skip("the mono kernels target CDNA4 and gfx942")
@@ -557,19 +579,21 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
 
     decodes = _decodes(tp, arch)
     on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch, layers
     )
     off, probe_off = _decode(
         vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
     )
 
     # both layer kinds took the mono path on every rank, at every decode step,
-    # and on gfx942 from the weight copies made at load
-    launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
+    # and on gfx942 from the weight copies made at load; past `layers`, none
+    mono = [i for i in WHOLE + FFN if layers is None or i < layers]
+    launches = len(mono)  # one launch (pair) a layer a step
     copies = arch == "gfx942"
     for rank in probe_on:
         assert rank["layers"] == {
-            i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
+            i: ["whole" if i in WHOLE else "ffn", True, copies] if i in mono else None
+            for i in WHOLE + FFN
         }, rank
         assert rank["epoch"] >= launches * STEPS * decodes, rank
         assert rank["epoch"] % launches == 0, rank

@@ -346,6 +346,14 @@ class KernelConfig:
     models, hardware and parallel layouts support it is model-specific; an
     unsupported deployment is refused at startup."""
 
+    monokernel_layers: int | None = None
+    """With `monokernel`, run the mono path on decoder layers with layer id
+    below this count only; the rest take the standard path and keep no kernel
+    weight copies. For GPUs where the copies of every layer do not fit next
+    to the KV cache (DeepSeek-V4.1-Flash on a 192 GB MI300X at TP4: 32 layers
+    at 1-8 users, 24 at 16). None (default) runs every eligible layer. Read
+    by DeepSeek-V4.1's mono decode; other models' monokernels ignore it."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Out-of-tree platforms can
     add names to the in-tree options:
@@ -500,6 +508,13 @@ class KernelConfig:
     B12X MoE backend keeps them compressed on the GPU and expands the routed
     experts' scales on each call, which saves memory (2.57 GiB on
     Qwen3.8-Flash-Next-FP4-Local) at some latency at higher batch sizes."""
+
+    def __post_init__(self) -> None:
+        if self.monokernel_layers is not None:
+            if self.monokernel_layers < 0:
+                raise ValueError("monokernel_layers must be None or >= 0")
+            if not self.monokernel:
+                raise ValueError("monokernel_layers requires monokernel")
 
     @field_validator("moe_backend", mode="before")
     @classmethod
