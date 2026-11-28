@@ -349,7 +349,10 @@ class SamplingParams(
     response. When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
-    When set to -1, return all `vocab_size` log probabilities."""
+    When set to -1, return all `vocab_size` log probabilities.
+    On GPU, multimodal placeholder tokens outside the model's output vocabulary
+    retain their token IDs with score `-inf` and rank `vocab_size + 1`, including
+    in logits modes."""
     prompt_logprob_token_ids: (
         Annotated[np.ndarray, GetPydanticSchema(lambda _, h: h(list[list[StrictInt]]))]
         | None
