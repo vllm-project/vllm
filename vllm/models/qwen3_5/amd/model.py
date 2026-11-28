@@ -126,6 +126,7 @@ from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms.rocm import on_gfx1100, on_gfx1201
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -229,6 +230,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=reduce_results,
+                fuse_in_proj_qkvzba=on_gfx1100() or on_gfx1201(),
                 # Recover the inductor gated-norm fusion (z read strided
                 # from packed qkvz).
                 fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm,
@@ -550,8 +552,20 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",
             )
+        mapper = self.hf_to_vllm_mapper
+        if any(getattr(m, "fuse_in_proj_qkvzba", False) for m in self.modules()):
+            # GDN in_proj_qkvz + in_proj_ba fused into in_proj_qkvzba
+            # (output shards [q, k, v, z, b, a]).
+            mapper = mapper | WeightsMapper(
+                orig_to_new_stacked={
+                    ".in_proj_qkv": (".in_proj_qkvzba", (0, 1, 2)),
+                    ".in_proj_z": (".in_proj_qkvzba", 3),
+                    ".in_proj_b": (".in_proj_qkvzba", 4),
+                    ".in_proj_a": (".in_proj_qkvzba", 5),
+                }
+            )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class Qwen3_5ForCausalLMBase(

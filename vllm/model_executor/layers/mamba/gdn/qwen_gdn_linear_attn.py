@@ -75,7 +75,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import cuda_unquantized_gemm
+from vllm.model_executor.layers.utils import (
+    _skinny_gemm_max_weight_bytes,
+    cuda_unquantized_gemm,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -741,6 +744,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
         overlap_ba_proj: bool = False,
+        fuse_in_proj_qkvzba: bool = False,
         fused_gdn_gated_rms_norm: (
             Callable[..., torch.Tensor | QuantizedActivation] | None
         ) = None,
@@ -788,34 +792,68 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = self.create_conv_proj(prefix)
 
-        # projection of the input hidden states
-        # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
-        # we need to create qkvz_proj adaptively here.
-        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
-        # in_proj_qkv and in_proj_z are created separately instead.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
+        # Opt-in: in_proj_qkvz and in_proj_ba read the same hidden_states, so run
+        # them as one GEMM (output [q, k, v, z, b, a]). Unquantized flat layout
+        # on the ROCm forward_cuda fallback only, without LoRA / spec decode.
+        # The caller must load the checkpoint into in_proj_qkvzba.
+        self.fuse_in_proj_qkvzba = (
+            fuse_in_proj_qkvzba
+            and current_platform.is_rocm()
+            and not GDN_AITER_TRITON_AVAILABLE
+            and not gqa_interleaved_layout
+            and self.quant_config is None
+            and vllm_config.lora_config is None
+            and self.speculative_config is None
+            and self._fused_in_proj_fits_skinny_gemm()
         )
+        if self.fuse_in_proj_qkvzba:
+            self.in_proj_qkvzba = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[
+                    self.key_dim,
+                    self.key_dim,
+                    self.value_dim,
+                    self.value_dim,
+                    self.num_v_heads,
+                    self.num_v_heads,
+                ],
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.in_proj_qkvzba",
+            )
+        else:
+            # projection of the input hidden states
+            # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
+            # we need to create qkvz_proj adaptively here.
+            # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
+            # in_proj_qkv and in_proj_z are created separately instead.
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
 
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
-        # layouts, so we use a factory method to create the projection.
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
+            # ba_proj doesn't support blockwise fp8 quantization.
+            # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
+            # layouts, so we use a factory method to create the projection.
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
         # Opt-in, for callers outside torch.compile (compiled callers would need a
         # custom op or Dynamo stream tracing; not validated). Plain cuBLAS ba GEMM only:
         # FlashInfer GEMMs share a process-wide workspace. Off with ubatching and LoRA.
         self._ba_stream = None
-        ba_method = getattr(self.in_proj_ba, "quant_method", None)
+        ba_method = (
+            None
+            if self.fuse_in_proj_qkvzba
+            else getattr(self.in_proj_ba, "quant_method", None)
+        )
         if (
             overlap_ba_proj
             and current_platform.is_cuda()
@@ -1074,6 +1112,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not supports_fused_mtp_decode():
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
+
+    def _fused_in_proj_fits_skinny_gemm(self) -> bool:
+        """Whether the fused per-rank in_proj weight stays under the skinny-GEMM
+        weight cap, so decode keeps wvSplitK instead of falling to the generic
+        GEMM (e.g. Qwen3.5-9B TP1 on gfx1100: 96.0 MiB qkvz, 96.5 MiB fused)."""
+        rows = (2 * self.key_dim + 2 * self.value_dim + 2 * self.num_v_heads) // (
+            self.tp_size
+        )
+        dtype_size = torch.get_default_dtype().itemsize  # the weights' params_dtype
+        return rows * self.hidden_size * dtype_size <= _skinny_gemm_max_weight_bytes()
 
     def create_conv_proj(self, prefix: str) -> ColumnParallelLinear:
         conv = ColumnParallelLinear(
@@ -1460,7 +1508,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 1: Input Projection
         # ============================================================
         qkvz_in = hidden_states if qkvz_input is None else qkvz_input
-        if self._ba_stream is None:
+        if self.fuse_in_proj_qkvzba:
+            # Column views of one [T, qkvz + ba] output; mixed_qkv / z / b / a
+            # are consumed by stride.
+            mixed_qkvzba, _ = self.in_proj_qkvzba(hidden_states)
+            ba_size = 2 * self.num_v_heads // self.tp_size
+            mixed_qkvz, ba = mixed_qkvzba.split(
+                [mixed_qkvzba.size(-1) - ba_size, ba_size], dim=-1
+            )
+        elif self._ba_stream is None:
             mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)
             ba, _ = self.in_proj_ba(hidden_states)
         else:
