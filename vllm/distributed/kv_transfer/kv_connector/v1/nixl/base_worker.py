@@ -2068,7 +2068,7 @@ class NixlBaseConnectorWorker:
         self.num_regions = len(seen_base_addresses)
         self.region_mem_types = region_mem_types
         self._mixed_mem_types = len(set(region_mem_types)) > 1
-        if self._has_mamba:
+        if self._has_mamba and not self._mixed_mem_types:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
 
         self._set_region_layers(region_layers)
@@ -2079,10 +2079,10 @@ class NixlBaseConnectorWorker:
 
         self._skip_dram_xfer = self._leaves_dram_xfer_to_host_leader()
         if self._mixed_mem_types:
-            assert self.use_mla and not self._has_mamba, (
-                "Mixed-device KV registration is only supported for MLA "
-                "models without Mamba layers."
+            assert self.use_mla, (
+                "Mixed-device KV registration is only supported for MLA models."
             )
+
         for mem_type in sorted(set(region_mem_types)):
             if mem_type == "DRAM" and self._skip_dram_xfer:
                 continue
@@ -2514,20 +2514,22 @@ class NixlBaseConnectorWorker:
             blocks_data = np.concatenate([blocks_data, mamba])
 
         if self._mixed_mem_types:
-            desc_is_dram = np.concatenate(
-                [
-                    np.full(
-                        count * block_size_ratio,
-                        mem_type == "DRAM",
-                        dtype=bool,
-                    )
-                    for mem_type, count in zip(
-                        self.region_mem_types,
-                        self.region_num_blocks,
-                        strict=True,
-                    )
-                ]
-            )
+            desc_is_dram_parts = [
+                np.full(
+                    count * block_size_ratio,
+                    mem_type == "DRAM",
+                    dtype=bool,
+                )
+                for mem_type, count in zip(
+                    self.region_mem_types,
+                    self.region_num_blocks,
+                    strict=True,
+                )
+            ]
+            if self._has_mamba:
+                desc_is_dram_parts.append(np.zeros(int(mamba[:, 4].sum()), dtype=bool))
+            desc_is_dram = np.concatenate(desc_is_dram_parts)
+
             assert len(desc_is_dram) == blocks_data[:, 4].sum()
             desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
             dram_idx = np.where(desc_is_dram)[0]

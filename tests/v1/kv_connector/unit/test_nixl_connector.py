@@ -2583,6 +2583,57 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     ]
 
 
+def test_mixed_memory_hybrid_mla_mamba_local_descriptors():
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.block_size = 16
+    worker.engine_id = "local"
+    worker.tp_rank = 0
+    worker.device_id = 3
+    worker.kv_caches_base_addr = {"local": {0: [100, 200]}}
+    worker._has_mamba = True
+    worker._mixed_mem_types = True
+    worker._skip_dram_xfer = False
+    worker.region_mem_types = ["DRAM", "VRAM"]
+    worker.region_num_blocks = [2, 3]
+    worker._desc_is_dram_by_block_size = {}
+    worker._desc_pos_by_block_size = {}
+    worker._dram_src_handles_by_block_size = {}
+    worker.nixl_memory_type = "VRAM"
+    worker._build_fa_local = MagicMock(  # type: ignore[method-assign]
+        return_value=np.array([[100, 10, 3, 10, 2], [200, 10, 3, 10, 3]])
+    )
+    worker._build_mamba_local = MagicMock(  # type: ignore[method-assign]
+        return_value=np.array([[300, 16, 3, 16, 3]])
+    )
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22]
+
+    handle, blocks = worker.register_local_xfer_handler(worker.block_size)
+
+    assert handle == 22
+    assert worker._dram_src_handles_by_block_size[worker.block_size] == 11
+    assert isinstance(blocks, np.ndarray)
+    assert blocks[:, 2].tolist() == [0, 3, 3]
+    assert worker._desc_is_dram_by_block_size[16].tolist() == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert worker._desc_pos_by_block_size[16].tolist() == [0, 1, 0, 1, 2, 3, 4, 5]
+    dlist_calls = worker.nixl_wrapper.prep_xfer_dlist.call_args_list
+    assert [call.kwargs["mem_type"] for call in dlist_calls] == ["DRAM", "VRAM"]
+    assert [call.args[1].tolist() for call in dlist_calls] == [
+        [[100, 10, 0, 10, 2]],
+        [[200, 10, 3, 10, 3], [300, 16, 3, 16, 3]],
+    ]
+
+
 @pytest.fixture
 def recv_worker():
     """Receive lifecycle state without distributed or device initialization."""
