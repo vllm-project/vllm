@@ -653,11 +653,21 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         else:
             sampled = greedy_argmax(logits)
-        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        self._maybe_predict_acceptance(
+            logits,
+            idx_mapping,
+            draft_step,
+            sampled if draft_logits is not None else None,
+        )
         return sampled
 
     def _maybe_predict_acceptance(
-        self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+        sampled_tokens: torch.Tensor | None = None,
+        sampling_logits: torch.Tensor | None = None,
     ) -> None:
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.predict(
@@ -666,6 +676,8 @@ class DraftModelSpeculator(BaseSpeculator):
                 draft_step,
                 self.draft_token_confidence_probs,
                 self.temperature,
+                sampled_tokens,
+                sampling_logits,
             )
 
     def observe_verification(

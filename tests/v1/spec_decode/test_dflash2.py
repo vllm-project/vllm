@@ -380,6 +380,8 @@ def _stub_base(monkeypatch, draft_logits):
         self.vocab_size = 17
         self.draft_tokens = torch.empty((2, 4), dtype=torch.int64, device=device)
         self.draft_logits = draft_logits
+        self.use_acceptance_estimator = False
+        self.use_draft_logits = draft_logits is not None
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
 
