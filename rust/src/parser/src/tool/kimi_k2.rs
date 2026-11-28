@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{digit1, multispace0 as ws0};
-use winnow::combinator::{alt, eof, repeat, seq};
+use winnow::combinator::{alt, eof, opt, seq};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
@@ -293,12 +293,13 @@ struct KimiK2ToolHeader {
     function_index: usize,
 }
 
-/// Parse a Kimi K2 tool-call header.
+/// Parse a Kimi K2 tool-call header, `functions.{name}:{index}`. Only the
+/// `functions.` prefix is stripped, so a dotted tool name stays whole.
 fn tool_header(input: &mut &str) -> ModalResult<KimiK2ToolHeader> {
     let (function_name, function_index) = seq!(
         _: ws0,
-        _: namespace_prefix,
-        tool_name_segment,
+        _: opt(literal("functions.")),
+        tool_name,
         _: literal(":"),
         tool_call_index,
     )
@@ -310,21 +311,10 @@ fn tool_header(input: &mut &str) -> ModalResult<KimiK2ToolHeader> {
     })
 }
 
-/// Parse Kimi K2 namespace segments before the final tool name.
-fn namespace_prefix(input: &mut &str) -> ModalResult<()> {
-    repeat(0.., namespace_segment).parse_next(input)
-}
-
-/// Parse a Kimi K2 namespace segment.
-fn namespace_segment<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
-    let (segment, _) = (tool_name_segment, literal(".")).parse_next(input)?;
-    Ok(segment)
-}
-
-/// Parse a Kimi K2 tool name segment.
-fn tool_name_segment<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
+/// Parse a Kimi K2 tool name.
+fn tool_name<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
     take_while(1.., |ch: char| {
-        !ch.is_whitespace() && ch != '<' && ch != ':' && ch != '.'
+        !ch.is_whitespace() && ch != '<' && ch != ':'
     })
     .parse_next(input)
 }
@@ -547,6 +537,26 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k2_keeps_dotted_tool_names() {
+        let input =
+            build_tool_section(&[build_tool_call("get-weather.v2", 0, r#"{"city":"Paris"}"#)]);
+
+        for chunk_size in [input.len(), 3] {
+            let mut parser = KimiK2ToolParser::new(&test_tools());
+            let mut output = ToolParserOutput::default();
+            for chunk in split_by_chars(&input, chunk_size) {
+                output.append(parser.parse_chunk(chunk).unwrap());
+            }
+            assert_eq!(parser.tool_call_id(0), Some("functions.get-weather.v2:0"));
+            output.append(parser.finish().unwrap());
+
+            let output = output.coalesce();
+            assert_eq!(output.calls()[0].name.as_deref(), Some("get-weather.v2"));
+            assert_eq!(output.calls()[0].arguments, r#"{"city":"Paris"}"#);
+        }
+    }
+
+    #[test]
     fn kimi_k2_accepts_non_functions_header_prefix() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         let input = format!(
@@ -557,18 +567,18 @@ mod tests {
 
         assert_eq!(output.calls()[0].tool_index, 42);
         assert_eq!(parser.tool_call_id(42), Some("api.tools.search:42"));
-        assert_eq!(output.calls()[0].name.as_deref(), Some("search"));
+        assert_eq!(output.calls()[0].name.as_deref(), Some("api.tools.search"));
         assert_eq!(output.calls()[0].arguments, "{}");
     }
 
     #[test]
-    fn kimi_k2_tool_header_parses_namespace_function_and_index() {
+    fn kimi_k2_tool_header_strips_only_the_functions_prefix() {
         let mut input = "api.tools.search:42";
         let header = tool_header(&mut input).unwrap();
 
         expect![[r#"
             KimiK2ToolHeader {
-                function_name: "search",
+                function_name: "api.tools.search",
                 function_index: 42,
             }
         "#]]
