@@ -62,6 +62,30 @@ _HF_PROCESSOR_KWARG_SCOPES = (
     "audio_kwargs",
 )
 
+_NORMALIZE_KWARGS = (
+    "do_normalize",
+    "do_rescale",
+    "image_mean",
+    "image_std",
+    "rescale_factor",
+)
+
+
+_PIXEL_KWARG_SCOPES = ("images_kwargs", "videos_kwargs")
+
+
+def _pixel_kwarg_scopes(kwargs: Mapping[str, object]) -> list[Mapping[str, object]]:
+    scopes = (kwargs.get(key) for key in _PIXEL_KWARG_SCOPES)
+    return [kwargs, *(scope for scope in scopes if isinstance(scope, Mapping))]
+
+
+def sets_normalize_kwargs(kwargs: Mapping[str, object] | None) -> bool:
+    return any(
+        key in scope
+        for scope in _pixel_kwarg_scopes(kwargs or {})
+        for key in _NORMALIZE_KWARGS
+    )
+
 
 def _recursively_merge_mm_processor_kwargs(
     defaults: Mapping[str, object],
@@ -767,14 +791,25 @@ class MultiModalConfig:
         if self.mm_device_do_normalize:
             # The model expects raw pixels and normalises on device;
             # overriding these per request would silently double-normalise.
-            for key in ("do_normalize", "do_rescale"):
-                if inference_kwargs.get(key):
-                    logger.warning_once(
-                        "mm_device_do_normalize is enabled; ignoring "
-                        "per-request mm_processor_kwargs[%r].",
-                        key,
-                    )
-                merged[key] = False
+            if any(
+                scope.get(key, False) is not False
+                for scope in _pixel_kwarg_scopes(inference_kwargs)
+                for key in _NORMALIZE_KWARGS
+            ):
+                logger.warning_once(
+                    "mm_device_do_normalize is enabled; ignoring per-request "
+                    "mm_processor_kwargs %s.",
+                    _NORMALIZE_KWARGS,
+                )
+            scopes: list[dict[str, object]] = [merged]
+            if any(key in merged for key in _PIXEL_KWARG_SCOPES):
+                for key in _PIXEL_KWARG_SCOPES:
+                    scope = merged.setdefault(key, {})
+                    assert isinstance(scope, dict)
+                    scopes.append(scope)
+            for scope in scopes:
+                scope["do_normalize"] = False
+                scope["do_rescale"] = False
         return merged
 
     def use_gpu_video_backend(self) -> bool:

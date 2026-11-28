@@ -641,3 +641,73 @@ def test_mm_device_do_normalize(
     torch.testing.assert_close(
         pixel_values_with_normalize.to(device), pixel_values_do_input_norm
     )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "request_kwargs"),
+    [
+        ({"images_kwargs": {"do_normalize": True, "do_rescale": True}}, {}),
+        ({}, {"images_kwargs": {"do_normalize": True, "do_rescale": True}}),
+        ({"image_mean": [0.1, 0.4, 0.7]}, {}),
+        ({"images_kwargs": {"image_std": [0.5, 0.25, 0.125]}}, {}),
+        ({"do_normalize": False}, {}),
+        ({"images_kwargs": {"min_pixels": 3136}}, {}),
+        ({}, {"images_kwargs": {"min_pixels": 3136}}),
+        ({}, {"videos_kwargs": {"min_pixels": 3136}}),
+    ],
+    ids=[
+        "scoped",
+        "request_scoped",
+        "image_mean",
+        "scoped_image_std",
+        "no_normalize",
+        "image_size",
+        "request_image_size",
+        "request_video_size",
+    ],
+)
+def test_mm_device_do_normalize_matches_processor_kwargs(
+    image_assets: ImageTestAssets,
+    mm_processor_kwargs: dict[str, object],
+    request_kwargs: dict[str, object],
+) -> None:
+    device = current_platform.device_type
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs or None,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    frames = np.random.default_rng(0).integers(0, 256, (4, 112, 168, 3), np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": 2.0,
+        "total_num_frames": 4,
+        "frames_indices": list(range(4)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    mm_items = processor.info.parse_mm_data(
+        {"image": [image_assets[0].pil_image], "video": [(frames, metadata)]}
+    )
+
+    def get_pixel_values() -> dict[str, torch.Tensor]:
+        outputs = processor(
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            "<|vision_start|><|video_pad|><|vision_end|>",
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=request_kwargs,
+        )
+        return outputs["mm_kwargs"].get_data()
+
+    pixel_values = get_pixel_values()
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    expected = get_pixel_values()
+
+    for key in ("pixel_values", "pixel_values_videos"):
+        torch.testing.assert_close(
+            input_norm(pixel_values[key].to(device), expected[key].dtype),
+            expected[key].to(device),
+        )

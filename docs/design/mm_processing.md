@@ -76,6 +76,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 - When `True`, normalisation and rescaling are done on the GPU using the `FusedMMInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
 - The flag is **enabled by default** for all models that support it.
+- Setting `do_normalize`, `do_rescale`, `image_mean`, `image_std` or `rescale_factor` in `--mm-processor-kwargs` (flat, or in `images_kwargs` or `videos_kwargs`) turns the flag off, so the processor applies them on the CPU. While it is on, these keys are ignored per request, with a warning.
 - Currently, it’s on by default for these architectures:
 
 | name                       | Architecture                                  | Example HF Models                                     |

@@ -20,6 +20,7 @@ from vllm.config.multimodal import (
     MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
+    sets_normalize_kwargs,
 )
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
@@ -945,7 +946,7 @@ class ModelConfig:
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
                 mm_device_do_normalize=self._resolve_mm_device_do_normalize(
-                    mm_device_do_normalize
+                    mm_device_do_normalize, mm_processor_kwargs
                 ),
             )
 
@@ -1159,7 +1160,9 @@ class ModelConfig:
         return self
 
     def _resolve_mm_device_do_normalize(
-        self, mm_device_do_normalize: bool | None
+        self,
+        mm_device_do_normalize: bool | None,
+        mm_processor_kwargs: dict[str, Any] | None,
     ) -> bool:
         if mm_device_do_normalize is None:
             if envs.VLLM_USE_RUST_FRONTEND:
@@ -1200,6 +1203,13 @@ class ModelConfig:
                 "mm_device_do_normalize is %s.",
                 "enabled" if mm_device_do_normalize else "disabled",
             )
+
+        if mm_device_do_normalize and sets_normalize_kwargs(mm_processor_kwargs):
+            logger.warning(
+                "mm_processor_kwargs sets normalization options, "
+                "forcing mm_device_do_normalize = False."
+            )
+            mm_device_do_normalize = False
 
         return mm_device_do_normalize
 
