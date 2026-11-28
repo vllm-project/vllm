@@ -895,16 +895,15 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _USE_FUSED_PAGED_MQA_LOGITS:
-            logger.info_once(
-                "Using AITER paged-MQA logits from %s.",
-                aiter_paged_mqa_logits_module.__name__,
-            )
-            deepgemm_fp8_paged_mqa_logits = (
-                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
-            )
             batch_size, next_n, heads, _ = q_fp8.shape
             out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
-            deepgemm_fp8_paged_mqa_logits(
+            preshuffle = indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA
+
+            # Picks the kernel and launch knobs per shape.
+            from aiter.paged_mqa_logits import paged_mqa_logits
+
+            logger.info_once("Using AITER paged-MQA logits (aiter.paged_mqa_logits).")
+            paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
                 weights,
@@ -912,10 +911,8 @@ def rocm_fp8_paged_mqa_logits(
                 context_lens,
                 block_tables,
                 max_model_len,
-                ChunkK=256,
-                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
+                Preshuffle=preshuffle,
                 KVBlockSize=block_size,
-                WavePerEU=2,
             )
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
