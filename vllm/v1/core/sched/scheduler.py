@@ -46,7 +46,11 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    resolve_prefix_replay_block_align,
+    resolve_prefix_replay_start,
+)
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -360,6 +364,12 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
+        # Every replayed group rebuilds the window on its own block grid, so a
+        # replay start is aligned to the LCM of their actual block sizes.
+        self.prefix_replay_block_align = resolve_prefix_replay_block_align(
+            kv_cache_config.kv_cache_groups,
+            vllm_config.parallel_config.decode_context_parallel_size,
+        )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         # The model runner skips drafting in steps where no scheduled request
         # can use the drafts. Only drafters with their own forward pass reserve
@@ -3780,10 +3790,15 @@ class Scheduler(SchedulerInterface):
         """Record where a prefix hit's replay starts and return the number of
         hit tokens to recompute; the caller rewinds the computed count by it.
 
-        The replayed tokens are the hit's last window (see
+        The replayed tokens are the hit's tail from the aligned start (see
         `Request.replay_start`): the worker rebuilds their sliding-window KV
         and leaves their cached KV alone. A hit whose KV load carries the
         window replays nothing.
+
+        `resolve_prefix_replay_start` floors that start to every replayed
+        group's block boundary, which only lengthens the window: the rebuilt
+        window still covers the tokens the unaligned window covered, and no
+        replayed token lands in a block the group retired to a null block.
         """
         if not self.prefix_replay_tokens:
             return 0
@@ -3791,8 +3806,12 @@ class Scheduler(SchedulerInterface):
             request.replay_start = 0
             return 0
         num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
-        request.replay_start = num_hit_tokens - num_replay_tokens
-        return num_replay_tokens
+        replay_start = resolve_prefix_replay_start(
+            num_hit_tokens, num_replay_tokens, self.prefix_replay_block_align
+        )
+        assert 0 <= replay_start <= num_hit_tokens - num_replay_tokens
+        request.replay_start = replay_start
+        return num_hit_tokens - replay_start
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.

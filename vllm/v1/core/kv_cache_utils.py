@@ -856,6 +856,41 @@ def partial_hash_hits_enabled(
     return True
 
 
+def resolve_prefix_replay_block_align(
+    kv_cache_groups: Sequence[KVCacheGroup],
+    dcp_world_size: int,
+) -> int:
+    """Token alignment a bounded-replay start must keep.
+
+    A replay start is a position in every group that declares a replay window,
+    so it has to land on each of their actual block boundaries: the LCM of their
+    block sizes (`resolve_dcp_kv_block_size`), or 1 when nothing replays.
+    """
+    block_sizes = [
+        resolve_dcp_kv_block_size(group, dcp_world_size)
+        for group in kv_cache_groups
+        if group.prefix_replay_tokens > 0
+    ]
+    return math.lcm(*block_sizes) if block_sizes else 1
+
+
+def resolve_prefix_replay_start(
+    num_hit_tokens: int, replay_window: int, block_align: int
+) -> int:
+    """Position a bounded replay restarts from, on a replay block boundary.
+
+    The replay rebuilds the hit's trailing window, so it starts one window below
+    the hit. Rounding that start down to `block_align` keeps the rebuilt range
+    inside real blocks: a start below a block boundary would sit in the skipped
+    (null-block) range the hit leaves below its window, and the rebuilt KV would
+    be written to the shared null block instead of the request's own. Rounding
+    only enlarges the window, never moves the start past its unaligned value,
+    and a start that rounds below 0 clamps to 0 (the whole hit replays).
+    """
+    replay_start = num_hit_tokens - min(replay_window, num_hit_tokens)
+    return max(replay_start - replay_start % block_align, 0)
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,

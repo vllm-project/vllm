@@ -143,6 +143,26 @@ class KVCacheCoordinator(ABC):
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
 
+    def _replay_group_computed_tokens(
+        self,
+        group_id: int,
+        num_local_computed_tokens: int,
+        total_computed_tokens: int,
+        replay_start: int,
+    ) -> tuple[int, int]:
+        """(local, total) computed tokens this group may treat as its prefix.
+
+        A bounded-replay group rebuilds its KV from `replay_start`, so it holds
+        nothing below that position: the skipped prefix it nulls ends at the
+        replay start instead of at the raw hit length, which may end inside a
+        skipped block and thus make the rebuild start inside a null block.
+        """
+        group = self.kv_cache_config.kv_cache_groups[group_id]
+        if replay_start <= 0 or group.prefix_replay_tokens <= 0:
+            return num_local_computed_tokens, total_computed_tokens
+        local = min(num_local_computed_tokens, replay_start)
+        return local, total_computed_tokens - num_local_computed_tokens + local
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -154,6 +174,7 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
+        replay_start: int = 0,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -180,6 +201,8 @@ class KVCacheCoordinator(ABC):
                 retention Mamba reserves a prefill checkpoint only on the chunk
                 reaching it; under dense retention every chunk publishes a
                 state, so it is ignored (0).
+            replay_start: Position a bounded replay restarts from, 0 when the
+                request replays nothing (see `Scheduler._mark_prefix_replay`).
 
         Returns:
             The number of blocks to allocate.
@@ -209,12 +232,15 @@ class KVCacheCoordinator(ABC):
                     if reservation is not None:
                         num_blocks_to_allocate += reservation
                         continue
+                group_local, group_total = self._replay_group_computed_tokens(
+                    i, num_local_computed_tokens, total_computed_tokens, replay_start
+                )
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
                     new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
+                    group_total,
+                    group_local,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
@@ -229,6 +255,7 @@ class KVCacheCoordinator(ABC):
         num_external_computed_tokens: int,
         num_tokens_main_model: int,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        replay_start: int = 0,
     ) -> None:
         """Add the new computed blocks to the request. Optionally allocate new
             blocks for external computed tokens (if any).
@@ -242,6 +269,8 @@ class KVCacheCoordinator(ABC):
             num_tokens_main_model: The target-token end of this step.
             skip_zeroing_group_ids: Groups whose external-token blocks are
                 written by an async load and must not be zeroed.
+            replay_start: Position a bounded replay restarts from, 0 when the
+                request replays nothing.
 
         """
         # A running request is already tracked in num_cached_block and won't
@@ -258,17 +287,26 @@ class KVCacheCoordinator(ABC):
         # ensures an earlier group's external `get_new_blocks` cannot evict a
         # later group's not-yet-touched cache-hit blocks.
         for i, manager in enumerate(self.single_type_managers):
+            group_local, _ = self._replay_group_computed_tokens(
+                i, num_local_computed_tokens, num_local_computed_tokens, replay_start
+            )
             manager.add_local_computed_blocks(
                 request_id,
                 new_computed_blocks[i],
-                num_local_computed_tokens,
+                group_local,
                 num_external_computed_tokens,
             )
         if num_external_computed_tokens > 0:
             for i, manager in enumerate(self.single_type_managers):
+                group_local, _ = self._replay_group_computed_tokens(
+                    i,
+                    num_local_computed_tokens,
+                    num_local_computed_tokens,
+                    replay_start,
+                )
                 manager.allocate_external_computed_blocks(
                     request_id,
-                    num_local_computed_tokens,
+                    group_local,
                     num_external_computed_tokens,
                     record_for_zeroing=i not in skip_zeroing_group_ids,
                     num_tokens_main_model=num_tokens_main_model,

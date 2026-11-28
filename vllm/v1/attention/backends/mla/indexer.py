@@ -1467,7 +1467,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         end = 0
 
         while end < n:
-            start, chunk_m, chunk_n = end, 0, 0
+            start, chunk_m, chunk_n, chunk_w = end, 0, 0, 0
 
             while end < n:
                 q, s = (
@@ -1475,16 +1475,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
+                new_w = max(chunk_w, s)
                 if fused_mqa_topk_eligible and new_n <= FUSED_MQA_TOPK_MAX_KEYS:
                     fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
                 else:
                     # fused_mqa_topk planning never packs past the key limit.
                     fits = (
                         not fused_mqa_topk_eligible
-                        and new_m * new_n <= max_logits_elems
+                        and new_m * new_w <= max_logits_elems
                     )
                 if new_n <= workspace_size and fits:
-                    chunk_m, chunk_n = new_m, new_n
+                    chunk_m, chunk_n, chunk_w = new_m, new_n, new_w
                     end += 1
                 else:
                     break
@@ -1496,15 +1497,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu[end].item(),
                     compressed_seq_lens_cpu[end].item(),
                 )
+                chunk_w = chunk_n
                 end += 1
 
             req_slice = slice(start + request_offset, end + request_offset)
+            # Everything below is bounded per row, not per packed batch: the
+            # logits a chunk materialises span ``[0, max causal key end)`` of its
+            # rows, and a fused MQA+top-k row accepts at most
+            # ``FUSED_MQA_TOPK_MAX_KEYS`` keys.  Both are properties of the
+            # request a row belongs to, so the packed width to budget is the MAX
+            # over the packed requests, not their sum.  Summing inflates the
+            # width by the number of packed requests and shrinks the row budget
+            # by the same factor, which multiplies the dense sub-calls (and the
+            # candidate publication, the KV gather and the kernel schedule built
+            # per chunk) without covering a single extra key.
             max_q = (
-                dense_logits_rows(chunk_n, max_logits_bytes)
-                if chunk_n > 0
+                dense_logits_rows(chunk_w, max_logits_bytes)
+                if chunk_w > 0
                 else max(1, chunk_m)
             )
-            if fused_mqa_topk_eligible and chunk_n <= FUSED_MQA_TOPK_MAX_KEYS:
+            if fused_mqa_topk_eligible and chunk_w <= FUSED_MQA_TOPK_MAX_KEYS:
                 max_q = FUSED_MQA_TOPK_MAX_ROWS
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
