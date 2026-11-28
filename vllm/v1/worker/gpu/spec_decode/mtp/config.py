@@ -82,7 +82,8 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
                 "speculative method 'dspark' instead of 'mtp'."
             )
         if (
-            spec.num_speculative_tokens > 1
+            spec.num_speculative_tokens is not None
+            and spec.num_speculative_tokens > 1
             and spec.draft_model_config.hf_config.model_type
             not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
         ):

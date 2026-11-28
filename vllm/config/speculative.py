@@ -304,7 +304,7 @@ def _validate_qwen3_omni_dspark(
         target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
     if target_layer_ids is None:
         target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
-    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+    if not isinstance(target_layer_ids, list | tuple) or not target_layer_ids:
         raise ValueError(
             "Qwen3-Omni DSpark requires a non-empty target_layer_ids list in "
             "the draft config."
@@ -444,7 +444,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    num_speculative_tokens: int | None = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -1470,6 +1470,7 @@ class SpeculativeConfig:
         return None
 
     def __post_init__(self):
+        """Initialize and validate the speculative configuration."""
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight

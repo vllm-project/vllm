@@ -267,8 +267,8 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             SpeculativeConfig._maybe_override_draft_max_position_embeddings(
                 spec.draft_model_config.hf_text_config, target.max_model_len
             )
-        config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
+        config_cls.adapt_draft_model_config(spec)
         if spec.num_speculative_tokens is None:
             raise ValueError(
                 "A speculative model was provided, but "
