@@ -9,22 +9,26 @@ notifications while `transfer` owns the Mooncake data plane.
 
 from __future__ import annotations
 
+import errno
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from typing import Any
 
 import torch
 import zmq
-
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path
 
 logger = init_logger(__name__)
 
 _MAX_PENDING_EVENTS = 4096
+_MAX_CONTROL_SOCKETS_PER_THREAD = 64
+_MAX_CACHED_CONTROL_SOCKETS_PER_CLIENT = 512
+_MAX_UNCACHED_CONTROL_SOCKETS_PER_CLIENT = 64
+_MAX_CACHED_TOPOLOGIES = 256
 _RESERVATION_REAP_INTERVAL_SECONDS = 1
 
 
@@ -33,44 +37,119 @@ ControlResponse = dict[str, Any]
 
 
 class ControlClient:
-    """Send control requests through reusable, thread-local REQ sockets."""
+    """Send requests through bounded, thread-local REQ socket caches."""
 
     def __init__(self, timeout_ms: int) -> None:
         self._context = zmq.Context()
         self._timeout_ms = timeout_ms
         self._local = threading.local()
-        self._topologies: dict[str, list[str]] = {}
+        max_sockets = self._context.get(zmq.MAX_SOCKETS)
+        # Keep the aggregate thread-local caches below half the context limit;
+        # transient requests have a separate, bounded share of that budget.
+        self._max_cached_sockets = min(
+            _MAX_CACHED_CONTROL_SOCKETS_PER_CLIENT, max(1, max_sockets // 2)
+        )
+        max_uncached_sockets = min(
+            _MAX_UNCACHED_CONTROL_SOCKETS_PER_CLIENT,
+            max(1, max_sockets // 8),
+            max(0, max_sockets - self._max_cached_sockets),
+        )
+        self._uncached_socket_slots = threading.BoundedSemaphore(max_uncached_sockets)
+        self._cached_sockets_lock = threading.Lock()
+        self._cached_sockets_count = 0
+        self._topologies: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._topologies_lock = threading.Lock()
         self._closed = False
 
-    def _sockets(self) -> dict[str, zmq.Socket]:
+    def _sockets(self) -> OrderedDict[str, zmq.Socket]:
         sockets = getattr(self._local, "sockets", None)
         if sockets is None:
-            sockets = {}
+            sockets = OrderedDict()
             self._local.sockets = sockets
         return sockets
 
-    def _discard(self, addr: str) -> None:
-        socket = self._sockets().pop(addr, None)
-        if socket is not None:
-            socket.close(linger=0)
+    def _reserve_cached_socket_slot(self) -> bool:
+        with self._cached_sockets_lock:
+            if self._cached_sockets_count >= self._max_cached_sockets:
+                return False
+            self._cached_sockets_count += 1
+            return True
 
-    def _exchange(self, addr: str, payload: ControlRequest) -> ControlResponse:
-        sockets = self._sockets()
-        socket = sockets.get(addr)
-        if socket is None:
-            socket = self._context.socket(zmq.REQ)
+    def _release_cached_socket_slot(self) -> None:
+        with self._cached_sockets_lock:
+            self._cached_sockets_count -= 1
+
+    def _new_socket(self, addr: str) -> zmq.Socket:
+        socket = self._context.socket(zmq.REQ)
+        try:
             socket.setsockopt(zmq.IPV6, 1)
             socket.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
             socket.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
             socket.setsockopt(zmq.LINGER, 0)
             socket.connect(addr)
+        except Exception:
+            socket.close(linger=0)
+            raise
+        return socket
+
+    def _socket(self, addr: str) -> tuple[zmq.Socket, bool]:
+        sockets = self._sockets()
+        socket = sockets.get(addr)
+        if socket is not None:
+            sockets.move_to_end(addr)
+            return socket, True
+
+        while len(sockets) >= _MAX_CONTROL_SOCKETS_PER_THREAD:
+            _, stale_socket = sockets.popitem(last=False)
+            try:
+                stale_socket.close(linger=0)
+            finally:
+                self._release_cached_socket_slot()
+
+        if self._reserve_cached_socket_slot():
+            try:
+                socket = self._new_socket(addr)
+            except Exception:
+                self._release_cached_socket_slot()
+                raise
             sockets[addr] = socket
+            return socket, True
+
+        # A thread with no cache slots available may still make progress, but
+        # its one-off sockets are bounded so other thread pools cannot exhaust
+        # the context while the cache budget is full.
+        if not self._uncached_socket_slots.acquire(timeout=self._timeout_ms / 1000):
+            raise zmq.ZMQError(errno.EMFILE)
+        try:
+            socket = self._new_socket(addr)
+        except Exception:
+            self._uncached_socket_slots.release()
+            raise
+        return socket, False
+
+    def _discard(self, addr: str) -> None:
+        socket = self._sockets().pop(addr, None)
+        if socket is not None:
+            try:
+                socket.close(linger=0)
+            finally:
+                self._release_cached_socket_slot()
+
+    def _exchange(self, addr: str, payload: ControlRequest) -> ControlResponse:
+        socket, cached = self._socket(addr)
         try:
             socket.send_json(payload)
             response = socket.recv_json()
         except Exception:
-            self._discard(addr)
+            if cached:
+                self._discard(addr)
             raise
+        finally:
+            if not cached:
+                try:
+                    socket.close(linger=0)
+                finally:
+                    self._uncached_socket_slots.release()
         assert isinstance(response, dict)
         return response
 
@@ -81,8 +160,11 @@ class ControlClient:
         return response.get("result")
 
     def discover_shards(self, base_addr: str) -> list[str] | None:
-        if base_addr in self._topologies:
-            return self._topologies[base_addr]
+        with self._topologies_lock:
+            shards = self._topologies.get(base_addr)
+            if shards is not None:
+                self._topologies.move_to_end(base_addr)
+                return list(shards)
         try:
             reply = self.request(base_addr, {"op": "peers"})
             ports = reply.get("ports") if isinstance(reply, dict) else None
@@ -97,8 +179,15 @@ class ControlClient:
                 exc_info=True,
             )
             return None
-        self._topologies[base_addr] = shards
-        return shards
+        with self._topologies_lock:
+            cached_shards = self._topologies.get(base_addr)
+            if cached_shards is not None:
+                self._topologies.move_to_end(base_addr)
+                return list(cached_shards)
+            self._topologies[base_addr] = tuple(shards)
+            while len(self._topologies) > _MAX_CACHED_TOPOLOGIES:
+                self._topologies.popitem(last=False)
+            return shards
 
     def close(self) -> None:
         if self._closed:

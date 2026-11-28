@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reset of ECMooncake local cache after reset_encoder_cache."""
+"""Mooncake connector cache-state and control-client resource-bound tests."""
 
+import errno
+import queue
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
 import torch
-
+import zmq
+from vllm.distributed.ec_transfer.ec_connector.mooncake import control
 from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
     MemoryAllocation,
@@ -132,6 +137,193 @@ def _assert_expired_and_no_load(conn: ECMooncakeScheduler, mm_hash: str) -> None
     assert not conn._transfers.has_state(mm_hash, (SchedulerTransferState.LOADING,))
     assert conn._transfers.take_loads_to_dispatch() == []
     assert conn._transfers.begin_load(mm_hash, _TRANSFER_ID, "r2") is None
+
+
+@pytest.fixture
+def mooncake_control_server() -> Iterator[tuple[list[str], list[int]]]:
+    ready: queue.Queue[list[str] | Exception] = queue.Queue(maxsize=1)
+    stop = threading.Event()
+    requests = [0]
+
+    def serve() -> None:
+        context = zmq.Context()
+        sockets: list[zmq.Socket] = []
+        ports: list[int] = []
+        ready_sent = False
+        try:
+            for _ in range(3):
+                socket = context.socket(zmq.REP)
+                ports.append(socket.bind_to_random_port("tcp://127.0.0.1"))
+                sockets.append(socket)
+            poller = zmq.Poller()
+            for socket in sockets:
+                poller.register(socket, zmq.POLLIN)
+            addresses = [f"tcp://127.0.0.1:{port}" for port in ports]
+            ready.put(addresses)
+            ready_sent = True
+            while not stop.is_set():
+                for socket, events in poller.poll(timeout=50):
+                    if events & zmq.POLLIN:
+                        socket.recv_json()
+                        requests[0] += 1
+                        socket.send_json(
+                            {"ok": True, "result": {"ports": [19020, 19021]}}
+                        )
+        except Exception as exc:  # noqa: BLE001 - surface fixture startup failures
+            if not ready_sent:
+                ready.put(exc)
+        finally:
+            for socket in sockets:
+                socket.close(linger=0)
+            context.term()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    result = ready.get(timeout=10)
+    if isinstance(result, Exception):
+        stop.set()
+        server.join(timeout=5)
+        raise result
+    try:
+        yield result, requests
+    finally:
+        stop.set()
+        server.join(timeout=5)
+        assert not server.is_alive()
+
+
+def test_control_client_evicts_and_recreates_least_recently_used_socket(
+    mooncake_control_server: tuple[list[str], list[int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(control, "_MAX_CONTROL_SOCKETS_PER_THREAD", 2)
+    addresses, _ = mooncake_control_server
+    address_a, address_b, address_c = addresses
+    client = control.ControlClient(timeout_ms=5000)
+    try:
+        client.request(address_a, {"op": "ping"})
+        client.request(address_b, {"op": "ping"})
+        socket_a = client._sockets()[address_a]
+        socket_b = client._sockets()[address_b]
+
+        client.request(address_a, {"op": "ping"})
+        client.request(address_c, {"op": "ping"})
+
+        assert len(client._sockets()) == 2
+        assert client._sockets()[address_a] is socket_a
+        assert socket_b.closed
+        assert address_b not in client._sockets()
+
+        client.request(address_b, {"op": "ping"})
+        assert len(client._sockets()) == 2
+        assert client._sockets()[address_b] is not socket_b
+        assert not client._sockets()[address_b].closed
+    finally:
+        client.close()
+
+
+def test_control_client_enforces_shared_context_socket_budget(
+    mooncake_control_server: tuple[list[str], list[int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(control, "_MAX_CACHED_CONTROL_SOCKETS_PER_CLIENT", 2)
+    context_class = zmq.Context
+
+    def small_context() -> zmq.Context:
+        context = context_class()
+        context.set(zmq.MAX_SOCKETS, 5)
+        return context
+
+    monkeypatch.setattr(control.zmq, "Context", small_context)
+    addresses, _ = mooncake_control_server
+    client = control.ControlClient(timeout_ms=5000)
+    try:
+        client.request(addresses[0], {"op": "ping"})
+        client.request(addresses[1], {"op": "ping"})
+        assert client._cached_sockets_count == 2
+
+        # Once the client-wide cache is full, use a bounded one-off socket.
+        client.request(addresses[2], {"op": "ping"})
+        assert client._cached_sockets_count == 2
+
+        opened: queue.Queue[None] = queue.Queue()
+        start = threading.Barrier(5)
+        release = threading.Event()
+
+        def hold_one_off_socket() -> None:
+            start.wait(timeout=5)
+            socket, cached = client._socket(addresses[2])
+            try:
+                assert not cached
+                opened.put(None)
+                assert release.wait(timeout=5)
+            finally:
+                if not cached:
+                    try:
+                        socket.close(linger=0)
+                    finally:
+                        client._uncached_socket_slots.release()
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(hold_one_off_socket) for _ in range(4)]
+            start.wait(timeout=5)
+            try:
+                opened.get(timeout=5)
+                with pytest.raises(queue.Empty):
+                    opened.get(timeout=0.1)
+                client._timeout_ms = 100
+                with pytest.raises(zmq.ZMQError) as error:
+                    client._socket(addresses[2])
+                assert error.value.errno == errno.EMFILE
+            finally:
+                release.set()
+            for future in futures:
+                future.result(timeout=10)
+
+        assert client._cached_sockets_count == 2
+    finally:
+        client.close()
+
+
+def test_control_client_bounds_topology_cache(
+    mooncake_control_server: tuple[list[str], list[int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(control, "_MAX_CACHED_TOPOLOGIES", 2)
+    addresses, requests = mooncake_control_server
+    address_a, address_b, address_c = addresses
+    client = control.ControlClient(timeout_ms=5000)
+    try:
+        client.discover_shards(address_a)
+        client.discover_shards(address_b)
+        client.discover_shards(address_c)
+        client.discover_shards(address_b)
+        client.discover_shards(address_a)
+
+        # C evicts A; the hit on B refreshes its position before A is queried.
+        assert requests[0] == 4
+    finally:
+        client.close()
+
+
+def test_control_client_returns_copies_of_cached_topologies(
+    mooncake_control_server: tuple[list[str], list[int]],
+) -> None:
+    addresses, _ = mooncake_control_server
+    address_a = addresses[0]
+    expected = [
+        f"{address_a.rsplit(':', 1)[0]}:19020",
+        f"{address_a.rsplit(':', 1)[0]}:19021",
+    ]
+    client = control.ControlClient(timeout_ms=5000)
+    try:
+        discovered = client.discover_shards(address_a)
+        assert discovered == expected
+        assert discovered is not None
+        discovered.append("tcp://corrupted:19020")
+        assert client.discover_shards(address_a) == expected
+    finally:
+        client.close()
 
 
 def test_scheduler_reset_encoder_cache_resets_connector():
