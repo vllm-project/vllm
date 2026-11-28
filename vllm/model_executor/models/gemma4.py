@@ -35,10 +35,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.gemma4_qkv_glue import gemma4_qkv_glue
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -58,6 +60,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.gemma4_rope import (
+    Gemma4RotaryEmbedding,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -577,6 +583,42 @@ class Gemma4Attention(nn.Module):
             mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
+        self._fused_glue = self._can_fuse_qkv_glue()
+        if self._fused_glue:
+            logger.info_once(
+                "Gemma4 attention: fused qkv norm + RoPE + FP8 quant + KV cache "
+                "write kernel enabled"
+            )
+        self._rot_pairs = getattr(
+            self.rotary_emb, "rope_angles", self.rotary_emb.rotary_dim // 2
+        )
+
+    def _can_fuse_qkv_glue(self) -> bool:
+        """The one-kernel q/k/v norm + RoPE + FP8 quant + FP8 cache write needs the
+        ROCm AITER unified attention backend with a per-tensor FP8 KV cache."""
+        if not envs.VLLM_ROCM_GEMMA4_FUSED_QKV_GLUE:
+            return False
+        from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+            RocmAiterUnifiedAttentionImpl,
+        )
+
+        impl = self.attn.impl
+        rope = self.rotary_emb
+        return (
+            isinstance(impl, RocmAiterUnifiedAttentionImpl)
+            and not impl._use_shuffle_kv
+            and impl.supports_quant_query_input
+            and self.attn.query_quant is not None
+            and self.attn.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and self.attn._q_scale.numel() == 1
+            and type(rope) in (RotaryEmbedding, Gemma4RotaryEmbedding)
+            and rope.is_neox_style
+            and rope.rotary_dim == self.head_dim
+            and self.q_norm.weight.dtype == torch.bfloat16
+            and self.head_dim % 2 == 0
+            and (self.num_heads & (self.num_heads - 1)) == 0
+            and (self.num_kv_heads & (self.num_kv_heads - 1)) == 0
+        )
 
     def forward(
         self,
@@ -584,6 +626,30 @@ class Gemma4Attention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        if self._fused_glue:
+            if self.is_kv_shared_layer:
+                x, _ = self.q_proj(hidden_states)
+                k_weight = self.q_norm.weight
+            else:
+                x, _ = self.qkv_proj(hidden_states)
+                k_weight = self.k_norm.weight
+            q = gemma4_qkv_glue(
+                x,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.q_norm.weight,
+                k_weight,
+                self.attn.layer_name,
+                not self.is_kv_shared_layer,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self._rot_pairs,
+                self.config.rms_norm_eps,
+            )
+            attn_output = self.attn(q, None, None, output_dtype=hidden_states.dtype)
+            output, _ = self.o_proj(attn_output)
+            return output
         if self.is_kv_shared_layer:
             # Shared KV: only Q is projected; K/V come from the target layer.
             q, _ = self.q_proj(hidden_states)
