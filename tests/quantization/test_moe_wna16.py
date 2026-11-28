@@ -719,3 +719,87 @@ def test_moe_wna16_experts_follow_the_checkpoint_exclusions(
     method = config.get_quant_method(_routed_experts_layer(), prefix)
 
     assert isinstance(method, UnquantizedFusedMoEMethod) is unquantized
+
+
+def _fake_capability(monkeypatch, value: int = 80) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(to_int=lambda: value),
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_moe_wna16_from_config_accepts_awq_key_names(monkeypatch):
+    """AWQ checkpoints use w_bit/q_group_size; the AutoAWQ MoE fallback passes
+    the raw checkpoint config to MoeWNA16Config.from_config, which must accept
+    the AWQ key names instead of failing with "Cannot find any of ['bits']"."""
+    _fake_capability(monkeypatch)
+    config = MoeWNA16Config.from_config(
+        {
+            "quant_method": "awq",
+            "w_bit": 4,
+            "q_group_size": 128,
+            "zero_point": True,
+            "modules_to_not_convert": ["lm_head"],
+        }
+    )
+    assert config.linear_quant_method == "awq"
+    assert config.weight_bits == 4
+    assert config.group_size == 128
+    assert config.has_zp is True
+    assert config.modules_to_not_convert == ["lm_head"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_moe_wna16_from_config_prefers_gptq_key_names(monkeypatch):
+    """When both key families are present, bits/group_size win over the AWQ
+    aliases, matching AutoAWQConfig's key priority."""
+    _fake_capability(monkeypatch)
+    config = MoeWNA16Config.from_config(
+        {
+            "quant_method": "gptq",
+            "bits": 8,
+            "group_size": 64,
+            "w_bit": 4,
+            "q_group_size": 128,
+            "sym": True,
+        }
+    )
+    assert config.weight_bits == 8
+    assert config.group_size == 64
+
+
+@pytest.mark.skip_global_cleanup
+def test_auto_awq_moe_fallback_config_parses(monkeypatch):
+    """AutoAWQ keeps the raw checkpoint keys in full_config for its MoE WNA16
+    fallback (auto_awq.AutoAWQConfig.get_quant_method); the exact expression
+    used by that fallback must not raise."""
+    _fake_capability(monkeypatch)
+    awq_config = AutoAWQConfig.from_config(
+        {
+            "quant_method": "awq",
+            "w_bit": 4,
+            "q_group_size": 128,
+            "zero_point": True,
+            "modules_to_not_convert": [],
+        }
+    )
+    # Same call as the "Falling back to Moe WNA16 kernels" branch.
+    fallback_config = MoeWNA16Config.from_config(awq_config.full_config)
+    assert fallback_config.linear_quant_method == "awq"
+    assert fallback_config.weight_bits == 4
+    assert fallback_config.group_size == 128
+    assert fallback_config.has_zp is True
+
+
+@pytest.mark.skip_global_cleanup
+def test_is_moe_wna16_compatible_accepts_awq_key_names(monkeypatch):
+    """The override_quantization_method entry must also read AWQ key names."""
+    _fake_capability(monkeypatch)
+    assert MoeWNA16Config.is_moe_wna16_compatible(
+        {"quant_method": "awq", "w_bit": 4, "q_group_size": 128}
+    )
+    assert MoeWNA16Config.is_moe_wna16_compatible(
+        {"quant_method": "gptq", "bits": 4, "group_size": 128}
+    )
