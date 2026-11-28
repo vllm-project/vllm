@@ -143,6 +143,34 @@ def _get_direct_dcp_topk_workspace(
     )
 
 
+# Rows merged per step. Bounds the merge scratch at
+# (1 + dcp_world_size) * 8 * DCP_TOPK_MERGE_ROWS * topk_tokens bytes.
+DCP_TOPK_MERGE_ROWS = 1024
+
+
+def _dcp_topk_merge_specs(
+    num_rows: int, topk_tokens: int, dcp_world_size: int
+) -> list[tuple[tuple[int, ...], torch.dtype]]:
+    """Workspace of one merge step: this rank's packed (score, id) candidates
+    and the rank-major all-gather destination the selector reads in place."""
+    rows = min(num_rows, DCP_TOPK_MERGE_ROWS)
+    return [
+        ((rows, topk_tokens, 2), torch.float32),
+        ((dcp_world_size * rows, topk_tokens, 2), torch.float32),
+    ]
+
+
+def _dcp_all_gather_into(output: torch.Tensor, input_: torch.Tensor) -> None:
+    """All-gather `input_` from every DCP rank into the rank-major
+    `output`, on the same communicator the group's all_gather uses."""
+    group = get_dcp_group()
+    pynccl_comm = getattr(group.device_communicator, "pynccl_comm", None)
+    if pynccl_comm is not None and not pynccl_comm.disabled:
+        pynccl_comm.all_gather(output, input_)
+    else:
+        dist.all_gather_into_tensor(output, input_, group=group.device_group)
+
+
 def _merge_dcp_topk_global(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -154,6 +182,7 @@ def _merge_dcp_topk_global(
     logits_dtype: torch.dtype = torch.float32,
     num_positions: int | None = None,
     direct_max_rows: int = 0,
+    workspace: list[torch.Tensor] | None = None,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -173,6 +202,11 @@ def _merge_dcp_topk_global(
     Batches of at most `direct_max_rows` rows exchange the candidates over
     symmetric memory instead of an NCCL all-gather (the workspace was created
     by `SparseAttnIndexer`).
+
+    Rows are merged `DCP_TOPK_MERGE_ROWS` at a time through `workspace`
+    (the buffers of `_dcp_topk_merge_specs`), taken from the workspace
+    manager when not given, so the scratch is bounded and reserved by the
+    profile run rather than allocated per call.
     """
     if dcp_world_size <= 1:
         return
@@ -204,40 +238,45 @@ def _merge_dcp_topk_global(
     score_bits = dcp_topk_score_bits(logits_dtype)
     id_bits = 32 if num_positions is None else dcp_topk_id_bits(num_positions)
     if 0 < topk_indices.shape[0] <= direct_max_rows:
-        workspace = _get_direct_dcp_topk_workspace(
+        direct_workspace = _get_direct_dcp_topk_workspace(
             topk_indices.device, direct_max_rows, topk_tokens
         )
-        assert workspace is not None
-        workspace.merge(
+        assert direct_workspace is not None
+        direct_workspace.merge(
             logits, topk_indices, cp_interleave, row_starts, score_bits, id_bits
         )
         return
 
-    packed = torch.empty(
-        (*topk_indices.shape, 2),
-        dtype=torch.float32,
-        device=topk_indices.device,
-    )
-    pack_dcp_topk_candidates_cutedsl(
-        logits,
-        topk_indices,
-        packed,
-        dcp_rank,
-        dcp_world_size,
-        cp_interleave,
-        row_starts,
-    )
-    # Gather along dim 0 and let the selector read the rank-major
-    # [world_size, rows, topk, 2] result: a dim-1 gather would reorder it into
-    # [rows, world_size * topk, 2] with a full extra copy.
-    gathered = get_dcp_group().all_gather(packed, dim=0)
-    stable_topk_from_gathered_candidates_cutedsl(
-        gathered.view(dcp_world_size, *packed.shape),
-        topk_tokens,
-        out=topk_indices,
-        score_bits=score_bits,
-        id_bits=id_bits,
-    )
+    num_rows = topk_indices.shape[0]
+    if workspace is None:
+        workspace = current_workspace_manager().get_simultaneous(
+            *_dcp_topk_merge_specs(num_rows, topk_tokens, dcp_world_size)
+        )
+    packed_buf, gather_buf = workspace
+    for start in range(0, num_rows, DCP_TOPK_MERGE_ROWS):
+        end = min(start + DCP_TOPK_MERGE_ROWS, num_rows)
+        rows = end - start
+        packed = packed_buf[:rows]
+        pack_dcp_topk_candidates_cutedsl(
+            logits[start:end],
+            topk_indices[start:end],
+            packed,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+            None if row_starts is None else row_starts[start:end],
+        )
+        # A prefix of the flat destination, so the gather stays contiguous and
+        # the selector reads it rank-major [world_size, rows, topk, 2] in place.
+        gather = gather_buf[: dcp_world_size * rows]
+        _dcp_all_gather_into(gather, packed)
+        stable_topk_from_gathered_candidates_cutedsl(
+            gather.view(dcp_world_size, rows, topk_tokens, 2),
+            topk_tokens,
+            out=topk_indices[start:end],
+            score_bits=score_bits,
+            id_bits=id_bits,
+        )
 
 
 def dcp_gather_kv_rows(
@@ -700,6 +739,12 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
+        if dcp_world_size > 1:
+            profile_specs.extend(
+                _dcp_topk_merge_specs(
+                    hidden_states.shape[0], topk_tokens, dcp_world_size
+                )
+            )
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
             # Allocate the largest fused_mqa_topk workspaces so they are
@@ -896,11 +941,21 @@ def sparse_attn_indexer(
                 gather_specs.extend(
                     _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
                 )
-        k_quant_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
+        # The merge scratch shares the allocation: it is live while the
+        # gathered K is still needed by the next chunk.
+        merge_specs = (
+            _dcp_topk_merge_specs(hidden_states.shape[0], topk_tokens, dcp_world_size)
+            if dcp_world_size > 1
+            else []
+        )
+        k_quant_full, k_scale_full, *extra_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
             *gather_specs,
+            *merge_specs,
         )
+        gather_bufs = extra_bufs[: len(gather_specs)]
+        merge_workspace = extra_bufs[len(gather_specs) :] or None
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
@@ -1095,6 +1150,7 @@ def sparse_attn_indexer(
                     logits_dtype=logits_dtype,
                     num_positions=max_model_len,
                     direct_max_rows=dcp_direct_topk_max_rows,
+                    workspace=merge_workspace,
                 )
             # Free this chunk's logits before the next chunk allocates its own.
             del logits
