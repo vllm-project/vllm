@@ -664,6 +664,11 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        # Rows of each non-last-stage output per captured graph; a
+        # sequence-sharded tensor has fewer rows than tokens.
+        self.intermediate_tensor_rows: dict[
+            BatchExecutionDescriptor, dict[str, int]
+        ] = {}
 
     def capture(
         self,
@@ -708,8 +713,11 @@ class ModelCudaGraphManager(CudaGraphManager):
         def persistent_like(x: torch.Tensor) -> torch.Tensor:
             return x.new_empty((max(max_tokens, x.shape[0]), *x.shape[1:]))
 
-        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+        def store_capture_output(
+            desc: BatchExecutionDescriptor, model_output: Any
+        ) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
+            num_tokens = desc.num_tokens
             if self.is_last_pp_rank:
                 # Last PP rank (common case). Under PP it may take no aux
                 # hidden states itself and return a bare tensor.
@@ -734,6 +742,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
                 intermediate_tensors = model_output
+                rows = {k: v.shape[0] for k, v in intermediate_tensors.tensors.items()}
+                self.intermediate_tensor_rows[desc] = rows
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = IntermediateTensors(
                         {
@@ -742,7 +752,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                         }
                     )
                 for k, v in intermediate_tensors.tensors.items():
-                    self.intermediate_tensors[k][:num_tokens] = v
+                    self.intermediate_tensors[k][: rows[k]] = v
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor, warmup: bool
@@ -812,7 +822,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     )
                     for context in ubatch_state.forward_contexts:
                         context.cudagraph_runtime_mode = cg_mode
-                    store_capture_output(num_tokens, finish())
+                    store_capture_output(desc, finish())
 
                 return ubatch_forward_fn
 
@@ -864,7 +874,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # model outputs. No need to keep track of the hidden states.
                     return None
 
-                store_capture_output(num_tokens, model_output)
+                store_capture_output(desc, model_output)
 
             return forward_fn
 
@@ -877,7 +887,10 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
-            return self.intermediate_tensors[: desc.num_tokens]
+            rows = self.intermediate_tensor_rows[desc]
+            return IntermediateTensors(
+                {k: v[: rows[k]] for k, v in self.intermediate_tensors.tensors.items()}
+            )
 
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]

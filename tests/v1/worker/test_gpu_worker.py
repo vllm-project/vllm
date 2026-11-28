@@ -130,6 +130,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
         _external_weight_charges=ExternalWeightCharges(),
+        get_model=torch.nn.Module,
     )
     original_threads = torch.get_num_threads()
     try:
@@ -608,6 +609,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
+        _pp_all_gather_tensors=None,
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         iteration_timer=None,

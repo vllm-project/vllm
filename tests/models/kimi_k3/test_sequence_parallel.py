@@ -43,6 +43,27 @@ class _RecordingMoE(nn.Module):
         return hidden_states
 
 
+class _RecordingDecoderLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hidden_shape: tuple[int, ...] | None = None
+        self.residual_shape: tuple[int, ...] | None = None
+
+    def forward(
+        self,
+        *,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        prefix_sum: torch.Tensor | None,
+        residual: torch.Tensor,
+    ):
+        assert positions.shape[0] == 3
+        assert prefix_sum is None
+        self.hidden_shape = tuple(hidden_states.shape)
+        self.residual_shape = tuple(residual.shape)
+        return hidden_states, None, residual
+
+
 class _Projection(nn.Module):
     def __init__(self, hidden_size: int = 2) -> None:
         super().__init__()
@@ -132,6 +153,89 @@ def test_moe_sequence_parallel_requires_data_parallel(
     )
 
     assert parallel_config.use_sequence_parallel_moe is expected
+
+
+def test_kimi_pipeline_stage_keeps_received_sequence_shard(monkeypatch):
+    """A later stage reads its TP rank's rows from the front of the full-size
+    input buffers instead of sharding them again."""
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = True
+    model.use_attn_res = False
+    model.start_layer = 0
+    model.end_layer = 1
+    model.aux_hidden_state_layers = ()
+    layer = _RecordingDecoderLayer()
+    model.layers = nn.ModuleList([layer])
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
+    )
+    monkeypatch.setattr(kimi_model, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        kimi_model,
+        "sp_shard",
+        Mock(side_effect=AssertionError("downstream PP stage must not shard twice")),
+    )
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+
+    intermediate_tensors = kimi_model.IntermediateTensors(
+        {
+            "hidden_states": torch.arange(6, dtype=torch.float32).view(3, 2),
+            "residual": torch.ones(3, 2),
+        }
+    )
+    output = model(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=intermediate_tensors,
+    )
+
+    assert isinstance(output, kimi_model.IntermediateTensors)
+    assert layer.hidden_shape == layer.residual_shape == (2, 2)
+    assert output["hidden_states"].shape == output["residual"].shape == (2, 2)
+
+
+def test_kimi_pipeline_stage_sends_aux_hidden_states_unsharded(monkeypatch):
+    """The runner hands earlier stages' aux hidden states to the speculator as
+    received, so a stage gathers its own before sending them on, while hidden
+    states and residuals stay sequence-sharded."""
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = True
+    model.use_attn_res = False
+    model.start_layer = 0
+    model.end_layer = 1
+    model.aux_hidden_state_layers = (1,)
+    model.layers = nn.ModuleList([_RecordingDecoderLayer()])
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
+    )
+    monkeypatch.setattr(kimi_model, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+    gather = Mock(side_effect=lambda x: torch.cat([x, x + 100], dim=0))
+    monkeypatch.setattr(kimi_model, "sp_all_gather", gather)
+    hidden = torch.arange(6, dtype=torch.float32).view(3, 2)
+
+    output = model(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=kimi_model.IntermediateTensors(
+            {"hidden_states": hidden, "residual": torch.ones(3, 2)}
+        ),
+    )
+
+    local_aux = hidden[:2] + 1
+    gather.assert_called_once()
+    torch.testing.assert_close(output["hidden_states"], hidden[:2])
+    torch.testing.assert_close(output["residual"], torch.ones(2, 2))
+    torch.testing.assert_close(
+        output["aux_hidden_states_0"], torch.cat([local_aux, local_aux + 100])[:3]
+    )
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):

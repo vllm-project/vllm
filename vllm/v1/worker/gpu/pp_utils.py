@@ -9,9 +9,13 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -105,6 +109,8 @@ class PPHandler:
         # Whether positions depend on encoder outputs, which only the first
         # stage has, so later stages use the first stage's positions.
         self.relay_positions = False
+        # The model's SupportsPP.pp_intermediate_tensors_are_sequence_sharded.
+        self.sequence_sharded = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -185,6 +191,30 @@ class PPHandler:
             return
         received = intermediate_tensors[PP_POSITIONS_KEY][:num_tokens]
         positions[..., :num_tokens].copy_(received.movedim(0, -1))
+
+    def check_sequence_shard(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        num_tokens: int,
+        num_tokens_after_padding: int,
+    ) -> None:
+        """Raise unless the previous stage split this batch over TP as this
+        stage does. Its TP rank r sent rows [r * c, (r + 1) * c) of its padded
+        batch, c = cdiv(padded tokens, TP), which line up with this stage's
+        only if both stages pad the batch to the same c."""
+        if not self.sequence_sharded:
+            return
+        tp_size = get_tensor_model_parallel_world_size()
+        expected = min(cdiv(num_tokens_after_padding, tp_size), num_tokens)
+        received = intermediate_tensors["hidden_states"].shape[0]
+        if received != expected:
+            raise RuntimeError(
+                f"The previous PP stage sent {received} sequence-parallel rows of "
+                f"hidden states for {num_tokens} tokens, but this stage pads the "
+                f"batch to {num_tokens_after_padding} tokens and expects "
+                f"{expected} rows per TP rank. Sequence-sharded PP stages must pad "
+                "every batch alike; use the same CUDA graph mode on every stage."
+            )
 
     def add_upstream_aux_hidden_states(
         self,

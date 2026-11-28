@@ -863,6 +863,19 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
+    pp_intermediate_tensors_are_sequence_sharded: bool = False
+    """Whether hidden states and residuals cross PP stages as each TP rank's
+    sequence-parallel rows.
+
+    When True, TP rank r sends rows [r * c, (r + 1) * c) of its stage's padded
+    batch, c = cdiv(padded tokens, TP), directly to TP rank r of the next stage,
+    without TP slicing or all-gather; the receiving stage reads them as its own
+    rows, so every stage must pad a batch alike. Other intermediate tensors,
+    such as aux hidden states for the speculator, carry every token. Set before
+    model loading completes; this describes the PP boundary layout, not whether
+    the model uses sequence parallelism internally.
+    """
+
     make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
     """Called when PP rank > 0 for profiling purposes."""
 
@@ -947,7 +960,8 @@ def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
         return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
-    return isinstance(model, SupportsPP)
+    # The optional boundary layout must not exclude existing structural models.
+    return isinstance(model, _SupportsPPType)
 
 
 def _supports_pp_inspect(model: type[object] | object) -> bool:
@@ -956,6 +970,19 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
         return False
 
     return supports_kw(model_forward, "intermediate_tensors")
+
+
+def pp_tensors_are_sequence_sharded(model: nn.Module) -> bool:
+    """Whether the model sets
+    `SupportsPP.pp_intermediate_tensors_are_sequence_sharded`.
+
+    The module that builds the intermediate tensors decides their layout, so
+    the flag counts on any submodule; a wrapper need not forward it.
+    """
+    return any(
+        getattr(module, "pp_intermediate_tensors_are_sequence_sharded", False)
+        for module in model.modules()
+    )
 
 
 @runtime_checkable

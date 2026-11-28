@@ -142,6 +142,28 @@ logger = init_logger(__name__)
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
 
+def use_kimi_k3_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    """Select Kimi K3's model-level sequence parallel path.
+
+    DeepGEMM MegaMoE requires distinct token shards on the TP/EP ranks, so it
+    uses sequence parallelism with or without PP. Other MoE backends use it
+    only for DP without PP.
+    """
+    parallel_config = vllm_config.parallel_config
+    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    return (
+        parallel_config.enable_expert_parallel
+        and parallel_config.tensor_parallel_size > 1
+        and (
+            use_mega_moe
+            or (
+                parallel_config.pipeline_parallel_size == 1
+                and parallel_config.data_parallel_size > 1
+            )
+        )
+    )
+
+
 def shard_sequence_parallel_mlp(
     hidden_size: int,
     intermediate_size: int,
@@ -701,7 +723,6 @@ class KimiDecoderLayer(nn.Module):
         layer_idx = self.layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.is_moe_layer = (
             self.is_moe
             and config.num_experts is not None
@@ -709,13 +730,7 @@ class KimiDecoderLayer(nn.Module):
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
             assert kda_config is not None
@@ -987,13 +1002,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
         parallel_config = vllm_config.parallel_config
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
+        if self.use_sequence_parallel:
+            logger.info_once(
+                "Kimi K3 model-level sequence parallelism is enabled.",
+                scope="global",
+            )
 
         self.vocab_size = config.vocab_size
 
@@ -1216,8 +1230,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding, hidden_states
                 )
-            hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Currently, SP is not supported with PP"
+            if get_pp_group().is_first_rank:
+                hidden_states = sp_shard(hidden_states)
+                assert residual is None
+            else:
+                # The previous stage sent this TP rank's rows, which the runner
+                # put at the front of the full-size input buffers.
+                local_num_tokens = cdiv(
+                    full_num_tokens, get_tensor_model_parallel_world_size()
+                )
+                hidden_states = hidden_states[:local_num_tokens]
+                assert residual is not None
+                residual = residual[:local_num_tokens]
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1269,11 +1293,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
+            if self.use_sequence_parallel and aux_hidden_states:
+                # The runner hands earlier stages' aux hidden states to the
+                # speculator as received, so they cross stages unsharded.
+                packed_aux = sp_all_gather(torch.cat(aux_hidden_states, dim=-1))
+                aux_hidden_states = list(
+                    packed_aux[:full_num_tokens].split(hidden_states.shape[-1], dim=-1)
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -1510,6 +1538,9 @@ class KimiLinearForCausalLM(
         self.quant_config = quant_config
         self.model = KimiLinearModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.model.use_sequence_parallel
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(

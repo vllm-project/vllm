@@ -22,8 +22,8 @@ copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
 
 With TP or PCP > 1, each (PCP, TP) position's PP chain is its own transport,
 sending to the same position in the next stage: a stage's TP ranks hold the
-same outputs and each sends all of them, and each PCP rank sends its own
-tokens.
+same outputs (or, for a sequence-sharded model, their own rows) and each sends
+all of them, and each PCP rank sends its own tokens.
 
 The platform's flag ops and peer copy come from `_CudaCopyEngines`, or on ROCm
 (gfx950) from `rocm_sdma.SdmaCopyEngines`, which uses HIP's stream memory ops

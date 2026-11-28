@@ -88,6 +88,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
+from vllm.model_executor.models.interfaces import pp_tensors_are_sequence_sharded
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -295,6 +296,9 @@ class Worker(WorkerBase):
         self._pp_transport: PPTransport | None = None
         # What a non-first PP rank receives into; checked on the NCCL path.
         self._pp_recv_specs: dict[str, RowSpec] = {}
+        # NCCL slices a tensor across TP ranks and all-gathers it on receive.
+        # A sequence-sharded model's TP-local tensors are sent whole instead.
+        self._pp_all_gather_tensors: dict[str, bool] | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -675,6 +679,8 @@ class Worker(WorkerBase):
             from vllm.distributed.pp_transport import create_pp_transport
 
             self._pp_transport = create_pp_transport(self.vllm_config, persistent)
+        if pp_tensors_are_sequence_sharded(self.get_model()):
+            self._pp_all_gather_tensors = {"hidden_states": False, "residual": False}
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1532,6 +1538,7 @@ class Worker(WorkerBase):
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
+                    all_gather_tensors=self._pp_all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1572,6 +1579,7 @@ class Worker(WorkerBase):
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
+                all_gather_tensors=self._pp_all_gather_tensors,
             )
             self._pp_send_work = handles[1:]
 
