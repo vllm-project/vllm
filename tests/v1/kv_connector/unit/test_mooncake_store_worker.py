@@ -6646,3 +6646,73 @@ def test_aborted_request_keeps_hbm_until_native_get_returns(monkeypatch):
     )
     assert all(block.ref_cnt == 0 for block in blocks)
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == free_before
+
+
+@pytest.fixture
+def master_metrics_url():
+    """A stand-in for the Mooncake master's metrics endpoint: two segments."""
+    import http.server
+
+    body = (
+        b"# TYPE segment_total_capacity_bytes gauge\n"
+        b'segment_total_capacity_bytes{segment="10.0.0.2:1"} 300\n'
+        b'segment_total_capacity_bytes{segment="10.0.0.1:2"} 100\n'
+        b'segment_allocated_bytes{segment="10.0.0.1:2"} 50\n'
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/metrics"
+    server.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_stage_placement_agrees_across_stages_and_follows_capacity(
+    master_metrics_url,
+):
+    # Each stage's worker builds its own placement.
+    stages = [
+        mooncake_store_worker.StagePlacement(master_metrics_url) for _ in range(4)
+    ]
+    picks = [[p.pick(f"{i:064x}") for p in stages] for i in range(4000)]
+    assert all(len(set(row)) == 1 for row in picks)
+    share = sum(row[0] == "10.0.0.2:1" for row in picks) / len(picks)
+    assert 0.70 < share < 0.80  # capacity 300 of 400
+
+
+@pytest.mark.cpu_test
+def test_store_service_put_splits_by_placement_segment(master_metrics_url):
+    placement = mooncake_store_worker.StagePlacement(master_metrics_url)
+    calls = []
+
+    def put(keys, addrs, sizes, config):
+        calls.append((keys, config.preferred_segments, config.group_ids))
+        return [len(k) for k in keys]
+
+    store = MagicMock()
+    store.batch_put_from_multi_buffers.side_effect = put
+    service = mooncake_store_worker.MooncakeStoreService(store, placement)
+    keys = [f"model@pp_rank:1@group:0@{i:064x}" for i in range(16)]
+    group_ids = [f"g{i}" for i in range(16)]
+    config = SimpleNamespace(preferred_segments=[], group_ids=group_ids)
+    res = service.put(keys, [[i] for i in range(16)], [[1]] * 16, config)
+
+    assert res == [len(k) for k in keys]
+    assert len(calls) == 2
+    for put_keys, segments, put_group_ids in calls:
+        assert segments == [placement.pick(put_keys[0].rsplit("@", 1)[-1])]
+        assert {placement.pick(k.rsplit("@", 1)[-1]) for k in put_keys} == {segments[0]}
+        assert put_group_ids == [group_ids[keys.index(k)] for k in put_keys]
+    assert sorted(k for put_keys, _, _ in calls for k in put_keys) == sorted(keys)
+    assert config.preferred_segments == []
+    assert config.group_ids == group_ids

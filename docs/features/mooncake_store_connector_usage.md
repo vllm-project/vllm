@@ -389,6 +389,8 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `colocate_pipeline_stages` (bool): With pipeline parallelism, put every stage's object for a chunk on the same Mooncake segment, chosen from the chunk hash and weighted by segment capacity, so the stages are offloaded to the same SSD and evicted together. Applies when `pipeline_parallel_size > 1` and no preferred segment is configured; a full segment falls back to Mooncake's own placement. Default: `true`.
+- `master_metrics_url` (str): Master metrics endpoint that `colocate_pipeline_stages` reads the segment list and capacities from, refreshed every 60 seconds. Default: `http://<master host>:9003/metrics` (the master's `--http_metrics_port`).
 
 #### Automatic cache prefix
 
