@@ -57,6 +57,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
+from vllm.v1.core.sched.reanchor import SessionReanchor
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -398,6 +399,17 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+        )
+        self.session_reanchor = (
+            SessionReanchor(
+                self.scheduler_config,
+                self.kv_cache_manager,
+                self.encoder_cache_manager,
+                self.max_model_len,
+                self.block_size,
+            )
+            if self.scheduler_config.enable_unbounded_streaming_input
+            else None
         )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -1374,6 +1386,17 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
+                    # Shift the session down before it reaches max_model_len.
+                    if (
+                        self.session_reanchor is not None
+                        and request.resumable
+                        and request.num_tokens >= self.session_reanchor.trigger
+                        and self.session_reanchor.shift(request)
+                    ):
+                        # Holds old indices. A resumed request installs its
+                        # features again.
+                        self._pending_encoder_input_ids.pop(request.request_id, None)
+                        num_computed_tokens = request.num_computed_tokens
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Pad new decode requests to uniform spec decoding size to
@@ -1712,6 +1735,15 @@ class Scheduler(SchedulerInterface):
             self.running
         )
 
+        # Only a WAITING session is shifted. If it did not get scheduled, it
+        # keeps its pending rotation for the next step it is scheduled in.
+        reanchor_reqs: dict[str, int] = {}
+        if self.session_reanchor is not None:
+            for req in scheduled_new_reqs:
+                if req.pending_reanchor_d:
+                    reanchor_reqs[req.request_id] = req.pending_reanchor_d
+                    req.pending_reanchor_d = 0
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -1814,6 +1846,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
+            reanchor_reqs=reanchor_reqs or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1965,6 +1998,11 @@ class Scheduler(SchedulerInterface):
         Returns False if the update was dropped for exceeding max_model_len.
         """
         new_num_tokens = session.num_tokens - 1 + len(update.prompt_token_ids or ())
+        if self.session_reanchor is not None and session.resumable:
+            # The session is shifted down when it resumes, before it is scheduled.
+            new_num_tokens -= self.session_reanchor.shift_size(
+                session.num_computed_tokens, new_num_tokens
+            )
         if new_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len:
             logger.warning(
                 "Dropping streaming update for request %s: session would "

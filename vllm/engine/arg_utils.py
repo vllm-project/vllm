@@ -596,6 +596,12 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
+    enable_unbounded_streaming_input: bool = (
+        SchedulerConfig.enable_unbounded_streaming_input
+    )
+    unbounded_streaming_input_margin_tokens: int | None = (
+        SchedulerConfig.unbounded_streaming_input_margin_tokens
+    )
     pp_microbatch_min_tokens: int = SchedulerConfig.pp_microbatch_min_tokens
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
@@ -1787,6 +1793,14 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
         scheduler_group.add_argument(
+            "--enable-unbounded-streaming-input",
+            **scheduler_kwargs["enable_unbounded_streaming_input"],
+        )
+        scheduler_group.add_argument(
+            "--unbounded-streaming-input-margin-tokens",
+            **scheduler_kwargs["unbounded_streaming_input_margin_tokens"],
+        )
+        scheduler_group.add_argument(
             "--pp-microbatch-min-tokens",
             **scheduler_kwargs["pp_microbatch_min_tokens"],
         )
@@ -2711,6 +2725,10 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
+            ),
+            enable_unbounded_streaming_input=self.enable_unbounded_streaming_input,
+            unbounded_streaming_input_margin_tokens=(
+                self.unbounded_streaming_input_margin_tokens
             ),
             pp_microbatch_min_tokens=self.pp_microbatch_min_tokens,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,

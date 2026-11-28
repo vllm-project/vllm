@@ -333,6 +333,9 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # req_id -> d: positions shifted down by d this step; the worker re-rotates
+    # the request's cached keys to match (--enable-unbounded-streaming-input).
+    reanchor_reqs: dict[str, int] | None = None
     # Publish these events once this step's worker output is processed, even
     # when the step schedules no tokens but frees encoder cache entries.
     encoder_cache_events: "list[ECCacheEvent] | None" = None
