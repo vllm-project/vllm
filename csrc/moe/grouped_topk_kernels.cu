@@ -1421,11 +1421,13 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     int64_t topk, bool renormalize, double routed_scaling_factor,
     torch::stable::Tensor const& bias, int64_t scoring_func,
     const std::optional<torch::stable::Tensor>& is_padding) {
-  const auto data_type = scores.scalar_type();
+  auto scores_contiguous = torch::stable::contiguous(scores);
+  const auto data_type = scores_contiguous.scalar_type();
   const auto bias_type = bias.scalar_type();
-  STD_TORCH_CHECK(scores.dim() == 2, "scores must be a 2D Tensor");
-  const int64_t num_tokens = scores.size(0);
-  const int64_t num_experts = scores.size(1);
+  STD_TORCH_CHECK(scores_contiguous.dim() == 2,
+                  "scores must be a 2D Tensor");
+  const int64_t num_tokens = scores_contiguous.size(0);
+  const int64_t num_experts = scores_contiguous.size(1);
   STD_TORCH_CHECK(n_group > 0, "n_group must be positive");
   STD_TORCH_CHECK(topk > 0, "topk must be positive");
   STD_TORCH_CHECK(topk_group > 0, "topk_group must be positive");
@@ -1452,22 +1454,24 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
                     "is_padding must have one entry per token");
     STD_TORCH_CHECK(is_padding->is_contiguous(),
                     "is_padding must be contiguous");
-    STD_TORCH_CHECK(is_padding->device() == scores.device(),
+    STD_TORCH_CHECK(is_padding->device() == scores_contiguous.device(),
                     "is_padding must be on the scores device");
     is_padding_ptr = is_padding->const_data_ptr<bool>();
   }
 
   // Always output float32 for topk_values (eliminates Python-side conversion)
   auto topk_values = torch::stable::new_empty(
-      scores, {num_tokens, topk}, torch::headeronly::ScalarType::Float);
+      scores_contiguous, {num_tokens, topk},
+      torch::headeronly::ScalarType::Float);
   auto topk_indices = torch::stable::new_empty(
-      scores, {num_tokens, topk}, torch::headeronly::ScalarType::Int);
+      scores_contiguous, {num_tokens, topk},
+      torch::headeronly::ScalarType::Int);
   const bool pdl_flag = num_tokens <= vllm::moe::PDLEnableTokens;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
-      scores.get_device_index());
+      scores_contiguous.get_device_index());
   const cudaStream_t stream =
-      get_current_cuda_stream(scores.get_device_index());
+      get_current_cuda_stream(scores_contiguous.get_device_index());
   auto const sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);
 
 #define LAUNCH_KERNEL_SF(T, BiasT, IdxT)                                      \
@@ -1475,7 +1479,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     switch (sf) {                                                             \
       case vllm::moe::SCORING_NONE:                                           \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_NONE>(    \
-            reinterpret_cast<T*>(scores.mutable_data_ptr()),                  \
+            reinterpret_cast<T*>(scores_contiguous.mutable_data_ptr()),       \
             reinterpret_cast<float*>(topk_values.mutable_data_ptr()),         \
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), is_padding_ptr,  \
@@ -1484,7 +1488,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
         break;                                                                \
       case vllm::moe::SCORING_SIGMOID:                                        \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
-            reinterpret_cast<T*>(scores.mutable_data_ptr()),                  \
+            reinterpret_cast<T*>(scores_contiguous.mutable_data_ptr()),       \
             reinterpret_cast<float*>(topk_values.mutable_data_ptr()),         \
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), is_padding_ptr,  \

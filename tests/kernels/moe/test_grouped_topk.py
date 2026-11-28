@@ -157,7 +157,8 @@ def test_grouped_topk_skips_mask_for_rows_gathered_before_routing(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda(),
+    reason="This test is skipped on non-CUDA platform.",
 )
 @pytest.mark.parametrize(
     "num_experts,num_groups,topk_group,topk",
@@ -228,6 +229,30 @@ def test_grouped_topk_padding_opcheck():
             torch.tensor([False, True, False, True], device="cuda"),
         ),
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+def test_grouped_topk_accepts_non_contiguous_scores():
+    from vllm import _custom_ops as ops
+
+    torch.manual_seed(0)
+    contiguous_scores = torch.randn((4, 16), device="cuda")
+    padded_scores = torch.full((4, 48), 99.0, device="cuda")
+    padded_scores[:, :16] = contiguous_scores
+    strided_scores = padded_scores[:, :16]
+    bias = torch.zeros(16, device="cuda")
+
+    contiguous_weights, contiguous_ids = ops.grouped_topk(
+        contiguous_scores, 4, 2, 2, True, 1.0, bias, 0
+    )
+    strided_weights, strided_ids = ops.grouped_topk(
+        strided_scores, 4, 2, 2, True, 1.0, bias, 0
+    )
+
+    torch.testing.assert_close(strided_weights, contiguous_weights)
+    torch.testing.assert_close(strided_ids, contiguous_ids)
 
 
 @pytest.mark.skipif(
