@@ -476,6 +476,22 @@ class AdaptiveVerificationManager:
         )
         return sum(num_non_draft_tokens_per_req.values()) + draft_budget
 
+    def refill_draft_budget(self, max_num_tokens: int) -> int:
+        """Admit more scheduled drafts within the selected decode graph."""
+        batch_budget = self._batch_budget
+        assert batch_budget is not None
+        drafts, non_drafts, budget = batch_budget
+        num_non_draft_tokens = sum(non_drafts.values())
+        budget_limit = min(
+            sum(drafts.values()),
+            self._max_total_logits - len(drafts) * self.num_bonus_tokens,
+            max_num_tokens - num_non_draft_tokens,
+        )
+        if budget_limit > budget:
+            self._batch_budget = (drafts, non_drafts, budget_limit)
+            budget = budget_limit
+        return num_non_draft_tokens + budget
+
     def compact_batch(
         self,
         num_draft_tokens_per_req: np.ndarray,
