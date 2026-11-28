@@ -60,6 +60,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
+from vllm.model_executor.layers.rotation import bind_rotation_transforms
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
@@ -455,6 +456,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             load_dummy_weights,
                         )
                     self.speculator.free_unused_weights(self.model)
+            draft_model = getattr(self.speculator, "model", None)
+            bind_rotation_transforms(self.model, draft_model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

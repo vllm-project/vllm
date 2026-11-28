@@ -25,6 +25,11 @@ The following are the supported quantization formats for vLLM:
 - [TorchAO](torchao.md) (deprecated)
 - [FP8 ViT Encoder Attention](fp8_vit_attn.md)
 
+## Checkpoint-backed online rotations
+
+See [Rotations before RMSNorm](online_rotation.md) for checkpoints that restore
+an offline-rotated residual stream at the main or MTP final norm boundary.
+
 ## Selecting Linear Backends
 
 To choose the kernel backend of quantized linear layers, for all of them with
