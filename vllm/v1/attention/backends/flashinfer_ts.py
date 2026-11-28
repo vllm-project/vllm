@@ -326,6 +326,8 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
 
 
 class FlashInferTSImpl(AttentionImpl[FlashInferTSMetadata]):
+    # The decode kernel takes host q/k/v scales.
+    frozen_kv_scales = "full_graph"
     forward_includes_kv_cache_update: bool = False
 
     def __init__(

@@ -17,6 +17,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from tests.models.utils import check_logprobs_close
 from vllm.config import CacheConfig, ModelConfig
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferEngine,
@@ -1598,15 +1599,13 @@ def test_kv_scale_reload(vllm_runner):
         pytest.skip(reason="Requires FP8 support")
 
     model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+    prompts = ["The capital of France is"]
+    kwargs = dict(enable_prefix_caching=False, max_model_len=32, max_num_seqs=1)
+    with vllm_runner(model_name=model, **kwargs) as llm:
+        cold = llm.generate_greedy_logprobs(prompts, 8, num_logprobs=5)
 
     # Load dummy weights, then reload real checkpoint
-    with vllm_runner(
-        model_name=model,
-        load_format="dummy",
-        enable_prefix_caching=False,
-        max_model_len=16,
-        max_num_seqs=1,
-    ) as llm:
+    with vllm_runner(model_name=model, load_format="dummy", **kwargs) as llm:
         llm.collective_rpc(
             "update_config",
             kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
@@ -1616,8 +1615,15 @@ def test_kv_scale_reload(vllm_runner):
             ["The capital of France is the city of Paris"],
             mask=["The capital of France is"],
         )[0]
+        reloaded = llm.generate_greedy_logprobs(prompts, 8, num_logprobs=5)
 
     assert reloaded_perp < 10
+    if not current_platform.is_cuda():
+        return
+    # Decode replays CUDA graphs captured with the dummy KV scales.
+    check_logprobs_close(
+        outputs_0_lst=cold, outputs_1_lst=reloaded, name_0="cold", name_1="reloaded"
+    )
 
 
 @pytest.mark.parametrize(

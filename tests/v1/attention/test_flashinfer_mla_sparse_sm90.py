@@ -175,7 +175,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     assert ckv.shape == ((8 - 1) * 2 * BLOCK_SIZE + BLOCK_SIZE, 1, HEAD)
     assert kpe.shape[-1] == qk_rope
     if impl.use_fp8_kv_cache:
-        assert kwargs["ckv_scale"] == 0.5 and kwargs["kpe_scale"] == 1.0
+        assert kwargs["ckv_scale"] == 0.5 and kwargs["kpe_scale"] == 0.5
     else:
         assert kwargs == {}
 

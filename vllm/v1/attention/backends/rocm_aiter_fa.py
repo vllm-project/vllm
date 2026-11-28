@@ -1177,6 +1177,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            # The asm decode's scale tables are built once from host scales.
+            self.frozen_kv_scales = "always"
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0.0

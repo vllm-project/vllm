@@ -435,11 +435,15 @@ class RocmAttentionImpl(AttentionImpl):
             value_cache = value_cache.view(self.fp8_dtype)
             # q_scale only applies to an fp8 query; this path keeps the query
             # in full precision, so a non-1.0 q_scale is not applicable here.
-            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
-                raise NotImplementedError(
-                    "A non 1.0 q_scale with an fp8 query is not currently "
-                    "supported by RocmAttentionImpl."
-                )
+            if query.dtype == self.fp8_dtype:
+                # FULL CUDA graphs keep this host check's outcome.
+                self.frozen_kv_scales = "full_graph"
+                self.frozen_kv_scale_names = frozenset("q")
+                if layer._q_scale_float != 1.0:
+                    raise NotImplementedError(
+                        "A non 1.0 q_scale with an fp8 query is not currently "
+                        "supported by RocmAttentionImpl."
+                    )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens

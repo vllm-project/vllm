@@ -276,10 +276,14 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
-                raise NotImplementedError(
-                    "A non-1.0 q_scale with an FP8 query is not supported"
-                )
+            if query.dtype == self.fp8_dtype:
+                # FULL CUDA graphs keep this host check's outcome.
+                self.frozen_kv_scales = "full_graph"
+                self.frozen_kv_scale_names = frozenset("q")
+                if layer._q_scale_float != 1.0:
+                    raise NotImplementedError(
+                        "A non-1.0 q_scale with an FP8 query is not supported"
+                    )
 
         segmented_attention(
             query=query[:num_actual_tokens],

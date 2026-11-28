@@ -25,6 +25,7 @@ from vllm.config import (
     DiffusionConfig,
     ModelConfig,
     SpeculativeConfig,
+    WeightTransferConfig,
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
@@ -154,6 +155,8 @@ def create_and_prepopulate_kv_cache(
     layout: KVCacheLayout,
     randomize_blocks: bool = True,
     kv_cache_dtype: str = "auto",
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
@@ -172,6 +175,8 @@ def create_and_prepopulate_kv_cache(
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
+        k_scale: Scale an fp8 cache's keys are stored with
+        v_scale: Scale an fp8 cache's values are stored with
 
     Returns:
         A 4D tensor in logical `(num_blocks, num_kv_heads, block_size,
@@ -213,6 +218,8 @@ def create_and_prepopulate_kv_cache(
     start_block_idx = 1
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
+        if fp8_kv_cache:
+            k_context, v_context = k_context / k_scale, v_context / v_scale
         t = torch.arange(k_context.shape[0], device=device)
         blk = start_block_idx + t // block_size
         off = t % block_size
@@ -557,6 +564,9 @@ def _test_backend_correctness(
     if fp8_kv_cache:
         query_fp8_dtype = current_platform.fp8_dtype()
         kv_fp8_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+        model_dtype_query = (
+            vllm_config.attention_config.disable_flashinfer_q_quantization
+        )
         atol = max(atol, 6e-2)
         rtol = max(rtol, 1e-1)
 
@@ -576,9 +586,9 @@ def _test_backend_correctness(
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
         if fp8_kv_cache:
-            q_ref = q.to(query_fp8_dtype).to(dtype)
-            k_ref = k_full.to(kv_fp8_dtype).to(dtype)
-            v_ref = v_full.to(kv_fp8_dtype).to(dtype)
+            q_ref = q if model_dtype_query else q.to(query_fp8_dtype).to(dtype)
+            k_ref = (k_full / layer_k_scale).to(kv_fp8_dtype).to(dtype) * layer_k_scale
+            v_ref = (v_full / layer_v_scale).to(kv_fp8_dtype).to(dtype) * layer_v_scale
         else:
             q_ref, k_ref, v_ref = q, k_full, v_full
 
@@ -685,6 +695,8 @@ def _test_backend_correctness(
         layout=layout,
         randomize_blocks=True,
         kv_cache_dtype=kv_cache_dtype,
+        k_scale=layer_k_scale,
+        v_scale=layer_v_scale,
     )
 
     # 4. Run vLLM backends and compare
@@ -912,7 +924,8 @@ def test_causal_backend_correctness(
 )
 def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
     """FlashAttentionImpl passes FA4 no descale for a per-tensor scale of 1.0,
-    which FA4 reads as exactly 1.0; calibrated scales keep their descale."""
+    which FA4 reads as exactly 1.0; calibrated scales, and any scale once weight
+    updates are on, keep their descale."""
     from vllm.v1.attention.backends.fa_utils import (
         flash_attn_varlen_func,
         is_fa_version_supported,
@@ -943,16 +956,18 @@ def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
         for _ in range(2)
     )
     block_table = torch.randperm(64, dtype=torch.int32, device=device)[:48]
+    cu_seqlens_q = torch.arange(
+        0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
+    )
+    seqused_k = torch.tensor(seq_lens, dtype=torch.int32, device=device)
 
     def run(descale: torch.Tensor | None) -> torch.Tensor:
         return flash_attn_varlen_func(
             q=q.to(fp8),
             k=k_cache,
             v=v_cache,
-            cu_seqlens_q=torch.arange(
-                0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
-            ),
-            seqused_k=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
             max_seqlen_q=q_len,
             max_seqlen_k=max(seq_lens),
             softmax_scale=head_size**-0.5,
@@ -977,6 +992,32 @@ def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
     assert calibrated is not None and torch.equal(calibrated, 0.5 * expanded)
     per_head = torch.tensor([1.0, 0.5, 1.0, 0.25], device=device)
     assert impl._descale(per_head, 1.0, shape) is not None
+
+    # A FULL graph captured at scale 1.0 freezes it (so reloads refuse to change
+    # it) unless weight updates are on; then the graph follows an update to 0.5.
+    frozen_impl = impl
+    default_vllm_config.weight_transfer_config = WeightTransferConfig()
+    impl = FlashAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8",
+    )
+    scale = torch.ones(1, device=device)
+    run(impl._descale(scale, 1.0, shape))  # JIT-compile outside capture
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        assert frozen_impl._descale(scale, 1.0, shape, "k") is None
+        captured = run(impl._descale(scale, 1.0, shape))
+    assert frozen_impl.frozen_kv_scales == "full_graph"
+    assert frozen_impl.frozen_kv_scale_names == {"k"}
+    scale.fill_(0.5)
+    graph.replay()
+    torch.testing.assert_close(captured, run(0.5 * expanded), atol=0, rtol=0)
+    assert impl.frozen_kv_scales is None
 
 
 @pytest.mark.skipif(
@@ -1212,8 +1253,6 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
 
     impl = object.__new__(flashinfer_backend.FlashInferImpl)
     impl.scale = 1.0
-    impl.bmm1_scale = None
-    impl.bmm2_scale = None
     impl.kv_cache_dtype = "auto"
     impl.is_kvcache_nvfp4 = False
     impl.head_size = 16
@@ -2211,6 +2250,53 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
         causal_mask_mod,
         use_sinks=True,
     )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_trtllm_prefill_bf16_query_fp8_kv_scales(default_vllm_config):
+    """TRTLLM prefill with a BF16 query dequantizes the FP8 KV cache with
+    k_scale / v_scale, so the kernel must not apply them a second time, nor
+    the q_scale of a query that was never quantized."""
+    import unittest.mock
+
+    from vllm.utils.flashinfer import supports_trtllm_attention
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    if not supports_trtllm_attention(is_prefill=True):
+        pytest.skip("TRTLLM prefill requires SM100.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    # The builder reads the current config, the impl the one passed below.
+    attention_config = AttentionConfig(
+        use_trtllm_attention=True, disable_flashinfer_q_quantization=True
+    )
+    default_vllm_config.attention_config = attention_config
+    name = "trtllm_prefill_attn_kvfp8_dequant"
+    with unittest.mock.patch.object(fi, name, wraps=getattr(fi, name)) as dequant:
+        _test_backend_correctness(
+            BATCH_SPECS["small_prefill"],
+            "Qwen/Qwen3-0.6B",
+            [AttentionBackendEnum.FLASHINFER],
+            causal_mask_mod,
+            kv_cache_dtype="fp8",
+            layer_k_scale=0.5,
+            layer_v_scale=2.0,
+            layer_q_scale=0.25,
+            attention_config=attention_config,
+        )
+    assert dequant.called
 
 
 @pytest.mark.skipif(

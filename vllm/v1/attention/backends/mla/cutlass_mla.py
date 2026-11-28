@@ -102,6 +102,8 @@ MAX_HEADS = 128
 
 
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    # Its q/k scale check runs on the host.
+    frozen_kv_scales = "full_graph"
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
 
@@ -255,9 +257,12 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if layer._q_scale_float != 1.0 or layer._k_scale_float != 1.0:
+        if is_quantized_kv_cache(self.kv_cache_dtype) and (
+            layer._q_scale_float != 1.0 or layer._k_scale_float != 1.0
+        ):
             raise NotImplementedError(
-                "CutlassMLAImpl does not support scaling for q and kv_latent yet"
+                "CUTLASS_MLA does not support FP8 KV-cache q/k scales other than "
+                "1.0; use --attention-backend FLASHINFER_MLA."
             )
 
         if type(q) is tuple:

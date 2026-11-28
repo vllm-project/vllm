@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -794,6 +794,12 @@ class AttentionImplBase(ABC, Generic[T]):
     # override it per instance, depending on the kv-cache layout.
     supports_dense_mha_prefill: bool = True
 
+    # Set when decode keeps its startup q/k/v scales ("full_graph": host values
+    # in FULL CUDA graphs; "always": cached); updates changing them are refused.
+    frozen_kv_scales: Literal["full_graph", "always"] | None = None
+    # Which of "q", "k", "v" are frozen; None for all of them.
+    frozen_kv_scale_names: frozenset[str] | None = None
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -874,6 +880,11 @@ class AttentionImplBase(ABC, Generic[T]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
+
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        """Derive state from `layer`'s q/k/v scales. Runs after every load and
+        reload, once the scales are final and before any CUDA graph replays."""
+        return
 
     def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
         return (self,)

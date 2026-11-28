@@ -183,3 +183,33 @@ def test_cpu_offloaded_table_keeps_storage_and_loader_across_updates(monkeypatch
             assert torch.equal(table.finalized[-1][name], expected[name])
         assert linear.weight is linear_weight
         assert torch.equal(linear.weight, new_linear_weight)
+
+
+def test_update_refused_when_decode_keeps_startup_kv_scales(monkeypatch):
+    """A changed KV scale that a decode path keeps from startup (here q, under
+    FULL CUDA graphs) is refused; scales it reads from device may change."""
+    from vllm.model_executor.model_loader.reload import lifecycle
+
+    impl = SimpleNamespace(
+        kv_cache_dtype="fp8",
+        frozen_kv_scales="full_graph",
+        frozen_kv_scale_names=frozenset("q"),
+    )
+    # A composite's unflagged variant does not widen the checked scales.
+    plain = SimpleNamespace(frozen_kv_scales=None, frozen_kv_scale_names=None)
+    impl.get_impl_variants = lambda: (impl, plain)
+    model = torch.nn.Module()
+    model.attn = torch.nn.Module()
+    model.attn.impl = impl
+    attn = model.attn
+    attn._q_scale_float, attn._k_scale_float, attn._v_scale_float = 1.0, 0.5, 0.5
+    graphs = SimpleNamespace(has_full_cudagraphs=lambda: True)
+    config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=graphs))
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    model.__dict__["_startup_kv_scales"] = lifecycle._kv_scales(model)
+
+    attn._k_scale_float = attn._v_scale_float = 0.25
+    lifecycle._check_frozen_kv_scales(model)
+    attn._q_scale_float = 2.0
+    with pytest.raises(RuntimeError, match="KV-cache scales"):
+        lifecycle._check_frozen_kv_scales(model)

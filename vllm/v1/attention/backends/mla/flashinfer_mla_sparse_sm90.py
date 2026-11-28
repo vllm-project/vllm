@@ -682,6 +682,8 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
+    # The decode kernel takes host k scales.
+    frozen_kv_scales = "full_graph"
     supports_shardq: ClassVar[bool] = True
 
     def __init__(
@@ -857,7 +859,8 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         kpe = flat[..., self.kv_lora_rank :]
 
         scale_kwargs = (
-            {"ckv_scale": float(layer._k_scale_float or 1.0), "kpe_scale": 1.0}
+            # The cache write quantizes kv_c and k_pe with the same k_scale.
+            {"ckv_scale": layer._k_scale_float, "kpe_scale": layer._k_scale_float}
             if self.use_fp8_kv_cache
             else {}
         )
