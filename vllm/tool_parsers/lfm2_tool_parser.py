@@ -360,7 +360,9 @@ class Lfm2ToolParser(ToolParser):
             if contains_broken_string_literal(tool_text):
                 return _content_only_or_none()
 
-            valid_and_added_text = make_valid_python(tool_text)
+            valid_and_added_text = make_valid_python(
+                tool_text, closed=has_end_in_current
+            )
             if valid_and_added_text is None:
                 return _content_only_or_none()
             valid_text, added_text = valid_and_added_text

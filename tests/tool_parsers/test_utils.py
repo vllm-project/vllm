@@ -387,6 +387,16 @@ class TestMakeValidPythonStringLiterals:
         assert make_valid_python(text) == (text, "")
         assert _kwarg_constant(_first_call(text)) == "it's fine"
 
+    def test_closed_block_is_not_completed(self):
+        # Once the caller has seen the end of the block, an open string is a
+        # malformed call, not a prefix: `)]` stays inside the string and
+        # completing it would invent a call that non-streaming rejects.
+        text = "[get_weather(city=\"'Paris')]"
+        assert make_valid_python(text) == (text + '")]', '")]')
+        assert make_valid_python(text, closed=True) is None
+        valid = "[get_weather(city='Paris')]"
+        assert make_valid_python(valid, closed=True) == (valid, "")
+
 
 class TestEscapeCtrlCharsInStrings:
     def test_newline_inside_string_escaped(self):

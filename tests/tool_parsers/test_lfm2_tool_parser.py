@@ -607,6 +607,35 @@ def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[0].function == DOTTED_NAME_FUNCTION_CALL
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        "[get_weather(city=\"'Paris')]",  # broken quote
+        '[get_weather(city="Paris)]',  # unterminated string
+    ],
+)
+def test_streaming_malformed_block_in_single_delta(
+    block: str, lfm2_tokenizer: TokenizerLike
+):
+    """A closed block that non-streaming rejects must not be streamed as a
+    tool call. Completing it (closing the open string) used to report a call
+    whose arguments were not valid JSON."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"Let me check. {TOOL_CALL_START}{block}{TOOL_CALL_END} Done."
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer), model_output, streaming=False
+    )
+    assert content == model_output
+    assert len(tool_calls) == 0
+
+    reconstructor = run_tool_extraction_streaming(
+        cls(lfm2_tokenizer), [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 0
+    assert reconstructor.other_content == "Let me check.  Done."
+
+
 def test_adjust_request_disables_skip_special_tokens(
     lfm2_tokenizer: TokenizerLike,
 ):
