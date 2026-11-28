@@ -3,6 +3,7 @@
 """ROCm attention backend for token-major segmented Triton attention."""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -14,14 +15,21 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.v1.attention.backend import (
+    AttentionLayer,
+    AttentionType,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import get_num_attention_heads_from_layers
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+    get_num_attention_heads_from_layers,
+)
 from vllm.v1.attention.ops.segmented_attention import (
     get_segmented_attention_workspace,
     segmented_attention,
@@ -41,9 +49,50 @@ logger = init_logger(__name__)
 def is_rdna() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_rdna
 
-    return on_gfx1x()
+    return on_rdna()
+
+
+@dataclass
+class RocmSegmentedAttentionMetadata(RocmAttentionMetadata):
+    mm_prefix_range_tensor: torch.Tensor | None = None
+    mm_prefix_max_span: int = 0
+
+
+def _query_mm_prefix_ranges(
+    common: CommonAttentionMetadata,
+) -> dict[int, list[tuple[int, int]]] | None:
+    """Keep image islands intersecting prefill queries using existing CPU data."""
+    ranges = common.mm_req_doc_ranges
+    prefilling = getattr(common, "is_prefilling", None)
+    if ranges is None or prefilling is None or prefilling.device.type != "cpu":
+        return ranges
+    starts = common.query_start_loc_cpu
+    lengths = common.seq_lens_cpu_upper_bound
+    exact_prefill = (
+        lengths is not None
+        and lengths.device.type == "cpu"
+        and starts.device.type == "cpu"
+    )
+    selected = {}
+    for seq, is_prefill in enumerate(prefilling.tolist()[: common.num_reqs]):
+        if not is_prefill:
+            continue
+        images = ranges.get(seq, [])
+        if exact_prefill:
+            assert lengths is not None
+            query_len = int(starts[seq + 1] - starts[seq])
+            end = int(lengths[seq])
+            begin = end - query_len
+            images = [
+                (first, last)
+                for first, last in images
+                if query_len > 0 and first < last and last >= begin and first < end
+            ]
+        if images:
+            selected[seq] = images
+    return selected or None
 
 
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -61,6 +110,39 @@ class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = kv_cache_spec.num_kv_heads
         self.headdim = kv_cache_spec.head_size
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmSegmentedAttentionMetadata:
+        common = common_attn_metadata
+        # Async speculative lengths are optimistic only for decode rows. Their
+        # image queries have already finished; prefill CPU lengths are exact.
+        ranges = _query_mm_prefix_ranges(common)
+        return RocmSegmentedAttentionMetadata(
+            num_actual_tokens=common.num_actual_tokens,
+            max_query_len=common.max_query_len,
+            query_start_loc=common.query_start_loc,
+            max_seq_len=common.max_seq_len,
+            seq_lens=common.seq_lens,
+            block_table=common.block_table_tensor,
+            slot_mapping=common.slot_mapping,
+            causal=common.causal,
+            mm_prefix_range_tensor=compute_mm_prefix_range_tensor(
+                ranges, common.num_reqs, common.seq_lens.device
+            ),
+            mm_prefix_max_span=max(
+                (
+                    last - first + 1
+                    for images in (ranges or {}).values()
+                    for first, last in images
+                    if first < last
+                ),
+                default=0,
+            ),
+        )
 
 
 class RocmSegmentedAttentionBackend(RocmAttentionBackend):
@@ -92,7 +174,7 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [64, 128, 256]
+        return [64, 128, 256, 512]
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -112,7 +194,7 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return False
+        return True
 
     @classmethod
     def supports_combination(
@@ -178,10 +260,10 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             kv_sharing_target_layer_name,
             sinks,
         )
-        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+        from vllm.platforms.rocm import on_gfx12x, on_rdna
 
         fp8 = kv_cache_dtype in ("fp8", "fp8_e4m3")
-        arch_supported = on_gfx12x() if fp8 else on_gfx1x()
+        arch_supported = on_gfx12x() if fp8 else on_rdna()
         gqa_ratio_supported = (
             num_kv_heads > 0
             and num_heads % num_kv_heads == 0
@@ -190,14 +272,14 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         if not (
             arch_supported
             and attn_type == AttentionType.DECODER
-            and head_size in (64, 128, 256)
+            and head_size in RocmSegmentedAttentionBackend.get_supported_head_sizes()
             and gqa_ratio_supported
             and kv_cache_dtype in ("auto", "float16", "bfloat16", "fp8", "fp8_e4m3")
             and alibi_slopes is None
         ):
             raise ValueError(
-                "ROCM_SEGMENTED_ATTN requires decoder attention on gfx1x "
-                "(gfx12 for FP8), head size 64, 128 or 256, GQA ratio 1-16, and "
+                "ROCM_SEGMENTED_ATTN requires decoder attention on RDNA "
+                "(gfx12 for FP8), head size 64, 128, 256 or 512, GQA ratio 1-16, and "
                 "does not support ALiBi."
             )
         # Startup tuning and target/draft compilation must share a Triton cache.
@@ -234,6 +316,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             max_tokens=config.scheduler_config.max_num_batched_tokens,
             fp8=self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
             autotune=self._autotune_enabled(),
+            mm_prefix=getattr(config.model_config, "is_mm_prefix_lm", False),
+            sliding_window=self.sliding_window[0],
         )
         return get_segmented_attention_workspace(device, sizes)
 
@@ -254,8 +338,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         kv_cache: torch.Tensor,
         attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor,
@@ -283,8 +367,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
 
         segmented_attention(
             query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens],
-            value=value[:num_actual_tokens],
+            key=key[:num_actual_tokens] if key is not None else None,
+            value=value[:num_actual_tokens] if value is not None else None,
             output=output[:num_actual_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
             key_cache=key_cache,
@@ -302,6 +386,11 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             sinks=self.sinks,
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,
+            mm_prefix_range=getattr(attn_metadata, "mm_prefix_range_tensor", None),
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
+            mm_prefix_max_span=getattr(attn_metadata, "mm_prefix_max_span", 0),
             workspace=workspace,
             use_tuned_config=self._autotune_enabled(),
         )
