@@ -114,6 +114,16 @@ def _aiter_w4a16_silu_via_a8w4(
     return out
 
 
+def _layout_kwargs(w, swizzle_mx_scale: str | None) -> dict:
+    """moe_gemm_a16w4's layout arguments for weight `w`: the default, or the
+    ones stored with it as `w.storage.aiter_layout` (the gfx942 mono copies,
+    `monokernel_shared_experts`)."""
+    layout = getattr(w.storage, "aiter_layout", None)
+    if layout is None:
+        return {"swizzle_mx_scale": swizzle_mx_scale}
+    return dict(layout)
+
+
 def aiter_triton_kernel_w4a16_moe_forward(
     hidden_states: torch.Tensor,
     w1,
@@ -292,7 +302,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         routing_data,
         gather_indx=gather_idx,
         gammas=gammas if apply_router_weight_on_input else None,
-        swizzle_mx_scale=swz,
+        **_layout_kwargs(w1, swz),
         apply_swiglu=True,
         alpha=swiglu_alpha,
         limit=swiglu_limit,
@@ -315,7 +325,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         routing_data,
         scatter_indx=scatter_idx,
         gammas=None if apply_router_weight_on_input else gammas,
-        swizzle_mx_scale=swz,
+        **_layout_kwargs(w2, swz),
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
         backend=a16w4_backend,
