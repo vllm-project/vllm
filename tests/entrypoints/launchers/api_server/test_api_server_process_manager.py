@@ -42,8 +42,11 @@ def update_admission_stats_worker(listen_address, sock, args, client_config):
     )
     value = client_config["client_index"] + 1
     stats.set_num_requests(value)
+    stats.set_preemption_overload_until_ns(value)
     args.barrier.wait()
-    args.results.put(stats.get_num_requests())
+    args.results.put(
+        (stats.get_num_requests(), stats.get_preemption_overload_until_ns())
+    )
 
 
 def _adopt_zmq_listener_worker(listen_address, sock, args, client_config):
@@ -207,13 +210,16 @@ def test_api_server_child_adopts_inherited_zmq_listeners(tmp_path, scheme):
 
 
 @pytest.mark.skip_global_cleanup
-def test_api_server_processes_share_admission_stats(api_server_args):
+@pytest.mark.parametrize("limit", ["max_num_queued_reqs", "max_preemption_rate"])
+def test_api_server_processes_share_admission_stats(api_server_args, limit):
+    """Either admission limit allocates the shared counters between servers."""
     args = api_server_args.copy()
     spawn_context = multiprocessing.get_context("spawn")
     worker_args = SimpleNamespace(
         barrier=spawn_context.Barrier(args["num_servers"]),
         results=spawn_context.Queue(),
-        max_num_queued_reqs=10,
+        max_num_queued_reqs=10 if limit == "max_num_queued_reqs" else None,
+        max_preemption_rate=10.0 if limit == "max_preemption_rate" else None,
     )
     args["args"] = worker_args
     args["target_server_fn"] = update_admission_stats_worker
@@ -224,7 +230,9 @@ def test_api_server_processes_share_admission_stats(api_server_args):
             process.join(timeout=30)
             assert process.exitcode == 0
 
-        assert [worker_args.results.get(timeout=5) for _ in range(3)] == [6] * 3
+        # Each server sees the sum of the request counters and the latest
+        # overload deadline published by any server (client_index + 1).
+        assert [worker_args.results.get(timeout=5) for _ in range(3)] == [(6, 3)] * 3
     finally:
         manager.shutdown()
         worker_args.results.close()

@@ -3,9 +3,10 @@
 
 import asyncio
 import copy
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -584,6 +585,21 @@ class RequestState:
         return PoolingOutput(data=pooling_output)
 
 
+# Minimum KV cache usage treated as active memory pressure when no requests are
+# waiting or deferred. Prevents stale preemption events in the sliding window
+# from rejecting new traffic once KV cache pressure has mostly drained.
+PREEMPTION_PRESSURE_MIN_KV_USAGE = 0.5
+
+
+@dataclass
+class _PreemptionWindowState:
+    """Per-engine sliding window and overload deadline state."""
+
+    events: deque[tuple[float, int]] = field(default_factory=deque)
+    window_preemptions: int = 0
+    overload_until_ts: float = 0.0
+
+
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
@@ -595,6 +611,9 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        max_preemption_rate: float | None = None,
+        preemption_window_seconds: float = 60.0,
+        preemption_pressure_min_kv_usage: float = PREEMPTION_PRESSURE_MIN_KV_USAGE,
     ):
         self.collect_stats = collect_stats
         self.tokenizer = tokenizer
@@ -605,6 +624,11 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        self.max_preemption_rate = max_preemption_rate
+        self.preemption_window_seconds = max(preemption_window_seconds, 1e-6)
+        self.preemption_pressure_min_kv_usage = preemption_pressure_min_kv_usage
+        self._preemption_states: dict[int, _PreemptionWindowState] = {}
+        self._preemption_overload_until_ts = 0.0
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -963,8 +987,112 @@ class OutputProcessor:
         if self.admission_stats is not None:
             self.admission_stats.set_num_requests(self.get_num_unfinished_requests())
 
-    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+    def _prune_preemption_events(
+        self, state: _PreemptionWindowState, now: float
+    ) -> float:
+        cutoff = now - self.preemption_window_seconds
+        while state.events and state.events[0][0] < cutoff:
+            _, count = state.events.popleft()
+            state.window_preemptions -= count
+        return state.window_preemptions * (60.0 / self.preemption_window_seconds)
+
+    def get_preemption_rate_per_min(
+        self,
+        now: float | None = None,
+        engine_index: int | None = None,
+    ) -> float:
+        """Return observed preemptions per minute in the configured window."""
+        ts = time.monotonic() if now is None else now
+        if engine_index is not None:
+            state = self._preemption_states.get(engine_index)
+            return self._prune_preemption_events(state, ts) if state else 0.0
+        return max(
+            (
+                self._prune_preemption_events(state, ts)
+                for state in self._preemption_states.values()
+            ),
+            default=0.0,
+        )
+
+    def _preemption_overload_until(self, state: _PreemptionWindowState) -> float:
+        assert self.max_preemption_rate is not None
+        scale = 60.0 / self.preemption_window_seconds
+        remaining = state.window_preemptions
+        for event_ts, count in state.events:
+            remaining -= count
+            if remaining * scale < self.max_preemption_rate:
+                return event_ts + self.preemption_window_seconds
+        raise RuntimeError(
+            "Preemption event window accounting out of sync: "
+            f"remaining={remaining}, events={len(state.events)}"
+        )
+
+    def is_preemption_overloaded(self, now: float | None = None) -> bool:
+        """Return whether preemption rate overload is currently active."""
+        if self.max_preemption_rate is None:
+            return False
+        ts = time.monotonic() if now is None else now
+        for state in self._preemption_states.values():
+            self._prune_preemption_events(state, ts)
+        if self.admission_stats is None:
+            if not self.has_unfinished_requests():
+                for state in self._preemption_states.values():
+                    state.overload_until_ts = 0.0
+                self._preemption_overload_until_ts = 0.0
+                return False
+            return ts < self._preemption_overload_until_ts
+        return self.admission_stats.is_preemption_overloaded(int(ts * 1e9))
+
+    def get_preemption_overload_remaining_s(self, now: float | None = None) -> float:
+        """Return seconds until the effective overload deadline expires.
+
+        With shared admission stats this reads the cross-process deadline, so
+        API servers that receive no scheduler stats (and therefore report a
+        local rate of 0) still log why they are rejecting requests.
+        """
+        ts = time.monotonic() if now is None else now
+        if self.admission_stats is not None:
+            until_ts = self.admission_stats.get_preemption_overload_until_ns() / 1e9
+        else:
+            until_ts = self._preemption_overload_until_ts
+        return max(0.0, until_ts - ts)
+
+    def update_scheduler_stats(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        now: float | None = None,
+        engine_index: int = 0,
+    ) -> None:
         self.lora_states.update_scheduler_stats(scheduler_stats)
+        if self.max_preemption_rate is None or scheduler_stats is None:
+            return
+        ts = time.monotonic() if now is None else now
+        state = self._preemption_states.get(engine_index)
+        if state is None:
+            state = _PreemptionWindowState()
+            self._preemption_states[engine_index] = state
+        if scheduler_stats.num_preemptions > 0:
+            state.events.append((ts, scheduler_stats.num_preemptions))
+            state.window_preemptions += scheduler_stats.num_preemptions
+        rate_per_min = self._prune_preemption_events(state, ts)
+        under_pressure = scheduler_stats.num_running_reqs > 0 and (
+            scheduler_stats.num_waiting_reqs > 0
+            or scheduler_stats.num_skipped_waiting_reqs > 0
+            or scheduler_stats.kv_cache_usage >= self.preemption_pressure_min_kv_usage
+        )
+        overloaded = under_pressure and rate_per_min >= self.max_preemption_rate
+        state.overload_until_ts = (
+            self._preemption_overload_until(state) if overloaded else 0.0
+        )
+        effective_until_ts = max(
+            (st.overload_until_ts for st in self._preemption_states.values()),
+            default=0.0,
+        )
+        self._preemption_overload_until_ts = effective_until_ts
+        if self.admission_stats is not None:
+            self.admission_stats.set_preemption_overload_until_ns(
+                int(effective_until_ts * 1e9)
+            )
 
     def do_tracing(
         self,

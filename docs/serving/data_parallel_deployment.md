@@ -28,6 +28,8 @@ It can be configured by simply including e.g. `--data-parallel-size=4` in the vl
 
 By contrast, the admission control limits `--max-num-queued-reqs` and `--max-num-queued-tokens` apply to the whole server, not per DP rank: each API server process counts in-flight requests and prefill backlog across all DP ranks it routes to. For example, with `--data-parallel-size=4 --max-num-seqs=256 --max-num-queued-reqs=256`, the deployment rejects new requests once 256 are in-flight in total, even though ranks could jointly run 1024. To keep ranks saturating, size the cap as roughly `data-parallel-size * max-num-seqs` plus the desired queue depth.
 
+The preemption-rate gate `--max-preemption-rate` is server-wide as well: every DP rank reports its scheduler stats to the API server process, which keeps the latest overload deadline across ranks, so a single rank that is thrashing its KV cache makes the deployment reject new requests with HTTP 503 until that rank's window drains or the deployment goes idle.
+
 Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be co-located with the DP ranks.
 
 This will run DP=4, TP=2 on a single 8-GPU node:

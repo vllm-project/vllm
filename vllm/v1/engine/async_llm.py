@@ -32,6 +32,7 @@ from vllm.exceptions import (
     GenerationError,
     GracefulHTTPError,
     MaxQueuedTokensError,
+    PreemptionOverloadError,
     ProfilerAlreadyActiveError,
     QueueOverflowError,
     VLLMClientError,
@@ -196,6 +197,10 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
+            max_preemption_rate=self.vllm_config.scheduler_config.max_preemption_rate,
+            preemption_window_seconds=(
+                self.vllm_config.scheduler_config.preemption_window_seconds
+            ),
         )
 
         # EngineCore (starts the engine in background process).
@@ -347,6 +352,9 @@ class AsyncLLM(EngineClient):
           counts as `n` slots.
         - `max_num_queued_tokens`: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
+        - `max_preemption_rate`: KV-cache thrashing protection — reject new
+          admissions while recent preemption rate exceeds the threshold and
+          the engine is actively busy (returns HTTP 503).
 
         Note: `get_num_queued_tokens` uses `prompt_len` for all prefilling requests.
         Chunked prefill progress and prefix-cache hits are not subtracted because the
@@ -363,6 +371,7 @@ class AsyncLLM(EngineClient):
                 FT recovery.
             QueueOverflowError: If `max_num_queued_reqs` would be exceeded.
             MaxQueuedTokensError: If `max_num_queued_tokens` would be exceeded.
+            PreemptionOverloadError: If `max_preemption_rate` is exceeded.
 
         """
         if (
@@ -408,6 +417,31 @@ class AsyncLLM(EngineClient):
                 )
                 self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+        max_preemption_rate = self.scheduler_config.max_preemption_rate
+        if max_preemption_rate is not None:
+            active_requests = (
+                self.admission_stats.get_num_requests()
+                if self.admission_stats is not None
+                else self.get_num_unfinished_requests()
+            )
+            if active_requests > 0 and self.output_processor.is_preemption_overloaded():
+                # With multiple API servers only client 0 receives scheduler
+                # stats, so other servers have a local rate of 0 and reject
+                # based on the shared deadline; log both to avoid confusion.
+                logger.debug(
+                    "High preemption rate - rejecting request %s "
+                    "(active_requests=%d, rate(local)=%.1f/min, max=%.1f/min, "
+                    "overload_remaining=%.1fs, source=%s).",
+                    request_id,
+                    active_requests,
+                    self.output_processor.get_preemption_rate_per_min(),
+                    max_preemption_rate,
+                    self.output_processor.get_preemption_overload_remaining_s(),
+                    "shared" if self.admission_stats is not None else "local",
+                )
+                self._record_admission_rejection("max_preemption_rate")
+                raise PreemptionOverloadError()
 
     def _record_admission_rejection(self, reason: str) -> None:
         """Increment the frontend admission rejection counter if logging is on."""
@@ -948,7 +982,10 @@ class AsyncLLM(EngineClient):
                                 processed_outputs.reqs_to_abort
                             )
 
-                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
+                    output_processor.update_scheduler_stats(
+                        outputs.scheduler_stats,
+                        engine_index=outputs.engine_index,
+                    )
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in

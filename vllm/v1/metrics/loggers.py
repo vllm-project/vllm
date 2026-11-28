@@ -45,7 +45,11 @@ WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
 
 # User-facing reason labels for frontend admission rejections.
-ADMISSION_REASONS = ("max_num_queued_reqs", "max_num_queued_tokens")
+ADMISSION_REASONS = (
+    "max_num_queued_reqs",
+    "max_num_queued_tokens",
+    "max_preemption_rate",
+)
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]

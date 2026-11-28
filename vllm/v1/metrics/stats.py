@@ -242,6 +242,7 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    num_preemptions: int = 0
     # Iterations to report: timed on the GPU by the output worker, or untimed
     # from EngineCore.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)

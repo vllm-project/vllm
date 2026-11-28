@@ -9952,3 +9952,94 @@ def test_ec_eviction_published_when_no_tokens_are_scheduled():
     assert [call.args[0].events for call in publisher.publish.call_args_list] == [
         [ECRemoved(mm_hashes=["cached"], medium="GPU")]
     ]
+
+
+def test_make_stats_tracks_num_preemptions_delta():
+    """make_stats peeks by default and resets only when consume_preemptions=True."""
+    scheduler_logged = create_scheduler(
+        block_size=16, num_blocks=21, collect_stats=True
+    )
+    req = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    scheduler_logged.add_request(req)
+    scheduler_logged.schedule()
+    scheduler_logged.running.remove(req)
+    scheduler_logged._preempt_request(req, 0.0)
+
+    # Out-of-band peek (e.g. log_error_detail) must not lose the delta.
+    peek_stats = scheduler_logged.make_stats()
+    assert peek_stats is not None
+    assert peek_stats.num_preemptions == 1
+    consumed_stats = scheduler_logged.make_stats(consume_preemptions=True)
+    assert consumed_stats is not None
+    assert consumed_stats.num_preemptions == 1
+    stats_next = scheduler_logged.make_stats(consume_preemptions=True)
+    assert stats_next is not None
+    assert stats_next.num_preemptions == 0
+
+    scheduler_unlogged = create_scheduler(
+        block_size=16, num_blocks=21, collect_stats=False, max_preemption_rate=None
+    )
+    assert scheduler_unlogged.make_stats() is None
+
+    scheduler_gated = create_scheduler(
+        block_size=16, num_blocks=21, collect_stats=False, max_preemption_rate=10.0
+    )
+    req2 = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    scheduler_gated.add_request(req2)
+    scheduler_gated.schedule()
+    scheduler_gated.running.remove(req2)
+    scheduler_gated._preempt_request(req2, 0.0)
+    gated_peek = scheduler_gated.make_stats()
+    assert gated_peek is not None
+    assert gated_peek.num_preemptions == 1
+    gated_stats = scheduler_gated.make_stats(consume_preemptions=True)
+    assert gated_stats is not None
+    assert gated_stats.num_preemptions == 1
+    gated_next = scheduler_gated.make_stats(consume_preemptions=True)
+    assert gated_next is not None
+    assert gated_next.num_preemptions == 0
+
+
+def test_reset_prefix_cache_does_not_count_as_preemption_overload():
+    """Administrative reset_prefix_cache must not inflate preemption stats."""
+    scheduler = create_scheduler(
+        block_size=16,
+        num_blocks=21,
+        enable_prefix_caching=True,
+        max_preemption_rate=10.0,
+    )
+    reqs = create_requests(num_requests=2, num_tokens=32, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+    scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    stats = scheduler.make_stats(consume_preemptions=True)
+    assert stats is not None
+    assert stats.num_preemptions == 0
+
+
+def test_update_from_output_routes_scheduler_stats_to_client_zero_for_preemption_rate():
+    """With max_preemption_rate enabled, scheduler_stats always route to client 0."""
+    scheduler = create_scheduler(
+        block_size=16,
+        num_blocks=21,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+    )
+    req = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    req.client_index = 1
+    scheduler.add_request(req)
+    out = scheduler.schedule()
+    mro = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        sampled_token_ids=[[EOS_TOKEN_ID - 1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    outputs = scheduler.update_from_output(out, mro)
+    assert 0 in outputs
+    assert outputs[0].scheduler_stats is not None
+    assert outputs[1].scheduler_stats is None
