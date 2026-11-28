@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`get_top_tokens` on the DeepSeek V4 MTP drafter.
+"""`get_top_tokens` on the ROCm DeepSeek V4 and V3.2 MTP drafters.
 
 The speculator opts into `use_local_argmax_reduction` by probing the draft
 model for `get_top_tokens`, and expects it to select the same greedy draft
@@ -22,13 +22,17 @@ from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
     pytest.skip(
-        "get_top_tokens is implemented on the ROCm DeepSeek V4 MTP drafter only.",
+        "get_top_tokens is implemented on the ROCm DeepSeek MTP drafters only.",
         allow_module_level=True,
     )
 
 from vllm.models.deepseek_v4.amd.mtp import (  # noqa: E402
     DeepSeekV4MTP,
     DeepSeekV4MultiTokenPredictor,
+)
+from vllm.models.deepseek_v32.amd.mtp import (  # noqa: E402
+    DeepseekV32MTP,
+    DeepseekV32MultiTokenPredictor,
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -97,11 +101,45 @@ def _make_predictor(vocab_size: int) -> DeepSeekV4MultiTokenPredictor:
     return predictor
 
 
-def _hidden_states(num_tokens: int, seed: int) -> torch.Tensor:
-    """The flat pre-hc_head residual the MTP layer returns."""
+def _make_v32_predictor(
+    vocab_size: int, num_mtp_layers: int = 1
+) -> DeepseekV32MultiTokenPredictor:
+    config = PreTrainedConfig()
+    config.hidden_size = HIDDEN_SIZE
+    config.vocab_size = vocab_size
+    config.rms_norm_eps = RMS_NORM_EPS
+
+    generator = torch.Generator().manual_seed(7)
+    layers = {}
+    for i in range(num_mtp_layers):
+        with (
+            mock.patch(f"{_EMBEDDING}.get_tensor_model_parallel_rank", return_value=0),
+            mock.patch(
+                f"{_EMBEDDING}.get_tensor_model_parallel_world_size", return_value=1
+            ),
+        ):
+            shared_head = SharedHead(config=config, prefix=f"shared_head.{i}")
+        assert shared_head.head is not None
+        with torch.no_grad():
+            shared_head.head.weight.normal_(0.0, 0.02, generator=generator)
+        shared_head = shared_head.to(device=DEVICE_TYPE, dtype=torch.bfloat16)
+        layers[str(START_LAYER_IDX + i)] = SimpleNamespace(shared_head=shared_head)
+
+    predictor = object.__new__(DeepseekV32MultiTokenPredictor)
+    torch.nn.Module.__init__(predictor)
+    predictor.layers = layers
+    predictor.mtp_start_layer_idx = START_LAYER_IDX
+    predictor.num_mtp_layers = num_mtp_layers
+    predictor.logits_processor = LogitsProcessor(vocab_size)
+    return predictor
+
+
+def _hidden_states(num_tokens: int, seed: int, width: int | None = None):
+    """V4: the flat pre-hc_head residual; V3.2: the post-norm hidden state."""
+    width = width or HC_MULT * HIDDEN_SIZE
     generator = torch.Generator().manual_seed(seed)
     hidden_states = torch.randn(
-        num_tokens, HC_MULT * HIDDEN_SIZE, dtype=torch.float32, generator=generator
+        num_tokens, width, dtype=torch.float32, generator=generator
     )
     return hidden_states.to(device=DEVICE_TYPE, dtype=torch.bfloat16)
 
@@ -152,13 +190,30 @@ def test_get_top_tokens_honors_padded_vocab(default_vllm_config):
     assert (top < vocab_size).all()
 
 
-def test_wrapper_forwards_spec_step_idx():
-    """`DeepSeekV4MTP` is what the speculator probes, so it needs the method."""
-    assert hasattr(DeepSeekV4MTP, "get_top_tokens")
+@pytest.mark.parametrize("wrapper_cls", [DeepSeekV4MTP, DeepseekV32MTP])
+def test_wrapper_forwards_spec_step_idx(wrapper_cls):
+    """The wrapper is what the speculator probes, so it needs the method."""
+    assert hasattr(wrapper_cls, "get_top_tokens")
 
     hidden_states = torch.empty(0)
-    wrapper = object.__new__(DeepSeekV4MTP)
+    wrapper = object.__new__(wrapper_cls)
     wrapper.model = SimpleNamespace(get_top_tokens=lambda *args: args)
 
-    assert DeepSeekV4MTP.get_top_tokens(wrapper, hidden_states, 2) == (hidden_states, 2)
-    assert DeepSeekV4MTP.get_top_tokens(wrapper, hidden_states) == (hidden_states, 0)
+    assert wrapper_cls.get_top_tokens(wrapper, hidden_states, 2) == (hidden_states, 2)
+    assert wrapper_cls.get_top_tokens(wrapper, hidden_states) == (hidden_states, 0)
+
+
+def test_v32_get_top_tokens_routes_to_the_step_s_head(default_vllm_config):
+    """`spec_step_idx` selects the same head as `compute_logits`."""
+    predictor = _make_v32_predictor(vocab_size=512, num_mtp_layers=2)
+    hidden_states = _hidden_states(16, seed=17, width=HIDDEN_SIZE)
+
+    tops = []
+    for spec_step_idx in (0, 1, 2, 3):
+        logits = predictor.compute_logits(hidden_states, spec_step_idx)
+        tops.append(predictor.get_top_tokens(hidden_states, spec_step_idx))
+        _assert_selects_max_logit(tops[-1], logits)
+
+    assert not torch.equal(tops[0], tops[1])
+    assert torch.equal(tops[2], tops[0])
+    assert torch.equal(tops[3], tops[1])
