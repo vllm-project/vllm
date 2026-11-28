@@ -413,6 +413,10 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        guard = self.config.terminal_guard
+        if guard is not None and not guard(self.state, terminal, value):
+            return self._emit_for_state(value, token_count)
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 

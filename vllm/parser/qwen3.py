@@ -45,9 +45,30 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
 FUNC_PREFIX = "<function="
+# Qwen3.8 INT4 sometimes writes a `<|im_start|>` where the `<` of `<function=`
+# should be. Special tokens are dropped before the grammar sees the text, so the
+# opener arrives as `function=...`. Only accepted inside a tool block, below.
+FUNC_PREFIX_NO_ANGLE = "function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
 PARAM_END = "</parameter>"
+
+TOOL_STATES: frozenset[ParserState] = frozenset(
+    {
+        ParserState.TOOL_PREAMBLE,
+        ParserState.TOOL_NAME,
+        ParserState.TOOL_ARGS,
+        ParserState.TOOL_BETWEEN,
+    }
+)
+
+
+def _tool_state_only(state: ParserState, terminal: str, value: str) -> bool:
+    # Outside <tool_call> a bare `function=` is just prose; don't eat it.
+    if value != FUNC_PREFIX_NO_ANGLE:
+        return True
+    return state in TOOL_STATES
+
 
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
@@ -209,7 +230,7 @@ def qwen3_config(
             # Tool call terminals
             "TOOL_START": tool_start,
             "TOOL_END": tool_end,
-            "FUNC_PREFIX": FUNC_PREFIX,
+            "FUNC_PREFIX": (FUNC_PREFIX, FUNC_PREFIX_NO_ANGLE),
             "FUNC_END": FUNC_END,
             "PARAM_START": PARAM_START,
             "PARAM_END": PARAM_END,
@@ -327,6 +348,7 @@ def qwen3_config(
         stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
+        terminal_guard=_tool_state_only,
     )
 
 
