@@ -166,6 +166,11 @@ def test_draft_decode_update_matches_fresh_build(builder_cls):
 
 # CDNA3 uses 64 segments until the 16-segment grid reaches about two programs per
 # CU: (2 * 304 - 1) // (16 * num_kv_heads) requests.
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
 @pytest.mark.parametrize(
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
@@ -213,3 +218,9 @@ def test_split_k_segments_follow_cu_occupancy_cdna3(
     assert metadata.num_par_softmax_segments == segments
     assert metadata.softmax_segm_output.shape[2] == segments
     assert metadata.softmax_segm_max.shape[0] >= num_seqs * query_len
+    # DiffKV re-allocates the output; it must stay sized like the base buffers.
+    assert builder.softmax_segm_output.shape[0] == builder.softmax_segm_max.shape[0]
+    assert (
+        metadata.softmax_segm_output.data_ptr()
+        == builder.softmax_segm_output.data_ptr()
+    )
