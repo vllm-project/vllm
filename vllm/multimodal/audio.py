@@ -182,11 +182,16 @@ def normalize_audio(
 # ============================================================
 
 _MAX_TORCHAUDIO_KERNEL_ELEMS = 1 << 24
+_TORCHAUDIO_LOWPASS_FILTER_WIDTH = 6
+_TORCHAUDIO_ROLLOFF = 0.99
 
 
 def _polyphase_kernel_elems(orig_sr: int, target_sr: int) -> int:
     gcd = math.gcd(orig_sr, target_sr)
-    return (orig_sr // gcd) * (target_sr // gcd)
+    orig_freq, new_freq = orig_sr // gcd, target_sr // gcd
+    base_freq = min(orig_freq, new_freq) * _TORCHAUDIO_ROLLOFF
+    width = math.ceil(_TORCHAUDIO_LOWPASS_FILTER_WIDTH * orig_freq / base_freq)
+    return new_freq * (orig_freq + 2 * width)
 
 
 def _bounded_resample_rates(
@@ -195,7 +200,7 @@ def _bounded_resample_rates(
     *,
     max_kernel_elems: int = _MAX_TORCHAUDIO_KERNEL_ELEMS,
 ) -> tuple[int, int]:
-    """Return rates whose reduced product fits `max_kernel_elems`."""
+    """Return rates whose padded sinc kernel fits `max_kernel_elems`."""
     if orig_sr < 1 or target_sr < 1:
         raise ValueError(
             f"Sample rates must be positive integers, got orig_sr={orig_sr}, "
@@ -207,6 +212,10 @@ def _bounded_resample_rates(
     orig_p, target_p = orig_sr // gcd, target_sr // gcd
     den_cap = max(1, int(math.sqrt(max_kernel_elems * target_p / orig_p)))
     approx = Fraction(orig_p, target_p).limit_denominator(den_cap)
+    if approx.numerator == 0 or (
+        _polyphase_kernel_elems(approx.numerator, approx.denominator) > max_kernel_elems
+    ):
+        raise ValueError("Audio resampling kernel exceeds the element limit.")
     return approx.numerator, approx.denominator
 
 
@@ -321,7 +330,12 @@ def _get_torchaudio_resampler(
     # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
     # (orig_sr, target_sr) pair; cache instances so repeated requests at a
     # common input rate skip the kernel rebuild.
-    return torchaudio.transforms.Resample(orig_sr, target_sr)
+    return torchaudio.transforms.Resample(
+        orig_sr,
+        target_sr,
+        lowpass_filter_width=_TORCHAUDIO_LOWPASS_FILTER_WIDTH,
+        rolloff=_TORCHAUDIO_ROLLOFF,
+    )
 
 
 def resample_audio_torchaudio(
