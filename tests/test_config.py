@@ -135,6 +135,38 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
+    ("architecture", "field", "value"),
+    [
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
+    ],
+)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
+    hf_config = SimpleNamespace(model_type="dspark")
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=hf_config,
+            architectures=[architecture],
+            dtype=torch.bfloat16,
+            head_dtype=torch.bfloat16,
+        ),
+        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
+        dspark_draft_topk=None,
+        quantization=None,
+        draft_lm_head_quantization=None,
+        num_speculative_tokens=7,
+    )
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
+        DSparkSpeculatorConfig.apply_options(spec)
+
+
+@pytest.mark.parametrize(
     ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
         (True, torch.bfloat16, False, 1, None),
@@ -1742,6 +1774,10 @@ def test_all2all_backend_has_portable_default():
 
 
 def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    # Import modules with import-time platform probes before faking CUDA, so
+    # they never query CUDA-only `_C` ops missing from non-CUDA builds.
+    import vllm.model_executor.layers.quantization.online.base  # noqa: F401
+
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
@@ -2562,15 +2598,23 @@ def test_engram_config_defaults_to_none():
     assert hash_config(config)
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ],
+)
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("enable_dbo,ubatch_size", [(True, 0), (False, 2)])
-def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size):
+def test_engram_rejects_microbatching(architecture, explicit, enable_dbo, ubatch_size):
     """Reject overlapping Engram staging even without an explicit EngramConfig."""
     config = cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(
-                architecture="DeepseekV41ForCausalLM",
+                architecture=architecture,
                 hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,
@@ -3534,8 +3578,8 @@ def test_update_config():
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "generate", "none"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "generate", "none"),
@@ -3552,8 +3596,8 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "pooling", "embed"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "pooling", "embed"),
@@ -3791,8 +3835,8 @@ def test_get_pooling_config_from_args():
 @pytest.mark.parametrize(
     ("model_id", "default_pooling_type", "pooling_type"),
     [
-        ("vllm-project/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
-        ("vllm-project/e5-small", "CLS", "MEAN"),  # BertModel
+        ("vllm/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("vllm/e5-small", "CLS", "MEAN"),  # BertModel
     ],
 )
 def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
@@ -4304,7 +4348,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
@@ -4334,13 +4378,13 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4352,7 +4396,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4390,7 +4434,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4424,7 +4468,7 @@ def test_is_chunked_prefill_supported(
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
@@ -4454,13 +4498,13 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4472,7 +4516,7 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4510,7 +4554,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
@@ -5161,7 +5205,7 @@ def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     speculative_config = SpeculativeConfig(
-        model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
+        model="vllm/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
         target_model_config=target_model_config,
         target_parallel_config=ParallelConfig(),

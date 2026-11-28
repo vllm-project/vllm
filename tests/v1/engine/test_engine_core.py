@@ -50,12 +50,13 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+        reason="V1 is currently supported only on CUDA, ROCm, and XPU.",
+        allow_module_level=True,
     )
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
