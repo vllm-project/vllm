@@ -40,7 +40,6 @@ pub use config::{
     OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
-pub use grpc::llm::RemoteGrpcConfig;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -65,6 +64,7 @@ pub use vllm_llm::AdmissionLimits;
 use vllm_llm::{EngineCoreLlm, Llm};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
+pub use vllm_remote_llm::RemoteGrpcConfig;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};

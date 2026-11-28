@@ -58,6 +58,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId
 use vllm_llm::EngineCoreLlm;
 use vllm_llm::{FinishReason, GenerateRequest, Llm as _};
 use vllm_metrics::METRICS;
+use vllm_remote_llm::GrpcLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -67,7 +68,6 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::health::{EngineHealth, HealthMonitor};
-use super::llm::GrpcLlm;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::render_server::Render as _;

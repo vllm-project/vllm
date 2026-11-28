@@ -11,6 +11,7 @@ members = [
     "src/metrics",
     "src/mock-engine",
     "src/parser",
+    "src/remote-llm",
     "src/server",
     "src/shm-object-storage",
     "src/text",
@@ -154,6 +155,7 @@ vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
 vllm-parser = { path = "src/parser" }
 vllm-proto = { path = "proto" }
+vllm-remote-llm = { path = "src/remote-llm" }
 vllm-server = { path = "src/server" }
 vllm-shm-object-storage = { path = "src/shm-object-storage" }
 vllm-text = { path = "src/text" }

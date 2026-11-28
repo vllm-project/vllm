@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! [`Llm`] over a remote `vllm.Inference` gRPC endpoint.
+
+mod convert;
+
 use std::num::NonZeroU32;
 
 use anyhow::Context as _;
@@ -21,11 +25,12 @@ use vllm_llm::{
 };
 use vllm_text::backend::TextBackend;
 
-use super::pb::inference_client::InferenceClient;
-use super::{convert, pb};
+use vllm_proto as pb;
+
+use self::pb::inference_client::InferenceClient;
 
 /// Token-only client for a vllm.Inference endpoint.
-pub(crate) struct GrpcLlm {
+pub struct GrpcLlm {
     readiness: watch::Receiver<bool>,
     _readiness_task: AbortOnDropHandle<()>,
     channel: Channel,
@@ -35,7 +40,7 @@ pub(crate) struct GrpcLlm {
 }
 
 impl GrpcLlm {
-    pub(crate) fn new(channel: Channel, model: String, max_model_len: u32) -> Self {
+    pub fn new(channel: Channel, model: String, max_model_len: u32) -> Self {
         let info = LlmInfo {
             max_model_len,
             model_dtype: None,
@@ -126,7 +131,7 @@ impl RemoteGrpcConfig {
         })
     }
 
-    pub(crate) fn into_llm(
+    pub fn into_llm(
         self,
         model: String,
         text_backend: &dyn TextBackend,

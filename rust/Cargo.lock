@@ -5901,6 +5901,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-remote-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asynk-strim-attr",
+ "futures",
+ "prost-types",
+ "serde_json",
+ "thiserror-ext",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "uuid",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-proto",
+ "vllm-text",
+]
+
+[[package]]
 name = "vllm-server"
 version = "0.1.0"
 dependencies = [
@@ -5960,6 +5981,7 @@ dependencies = [
  "vllm-llm",
  "vllm-metrics",
  "vllm-proto",
+ "vllm-remote-llm",
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
