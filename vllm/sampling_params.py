@@ -1337,7 +1337,10 @@ class SamplingParams(
         from vllm.v1.structured_output.backend_outlines import (
             validate_structured_output_request_outlines,
         )
-        from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.backend_xgrammar import (
+            LarkGrammarSizeError,
+            validate_xgrammar_grammar,
+        )
         from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
@@ -1395,7 +1398,11 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except VLLMValidationError:
+            except VLLMValidationError as exc:
+                # When auto tries xgrammar, keep its size rejection instead of
+                # sending the oversized grammar to a fallback backend.
+                if isinstance(exc.__cause__, LarkGrammarSizeError):
+                    raise
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.

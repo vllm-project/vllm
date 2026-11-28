@@ -8,7 +8,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai import BadRequestError
 
+from tests.utils import RemoteOpenAIServer
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -32,6 +34,36 @@ BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
 ]
+
+
+def test_xgrammar_lark_size_error_reports_configured_limit():
+    model = "Qwen/Qwen3-0.6B"
+    args = [
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--max-model-len",
+        "128",
+        "--enforce-eager",
+    ]
+    grammar = 'start: "hello"'
+    with (
+        RemoteOpenAIServer(
+            model, args, env_dict={"VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES": "8"}
+        ) as server,
+        server.get_client() as client,
+        pytest.raises(BadRequestError) as exc_info,
+    ):
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Greet me."}],
+            max_tokens=4,
+            extra_body={"structured_outputs": {"grammar": grammar}},
+        )
+
+    message = exc_info.value.response.json()["error"]["message"]
+    assert "maximum size of 8 bytes" in message
+    assert "VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES" in message
+    assert grammar not in message
 
 
 @dataclass(slots=True)

@@ -34,6 +34,19 @@ else:
 logger = init_logger(__name__)
 
 
+class LarkGrammarSizeError(ValueError):
+    """The xgrammar Lark input exceeds the configured byte limit."""
+
+
+def _validate_lark_grammar_size(grammar: str) -> None:
+    max_bytes = vllm.envs.VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES
+    if len(grammar) > max_bytes or len(grammar.encode("utf-8")) > max_bytes:
+        raise LarkGrammarSizeError(
+            f"Lark grammar exceeds the maximum size of {max_bytes} bytes. "
+            "Set VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES to adjust this limit."
+        )
+
+
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
@@ -145,7 +158,11 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
-                ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
+                _validate_lark_grammar_size(grammar_spec)
+                ctx = compile_regex_with_timeout(
+                    lambda grammar: self.full_vocab_compiler.compile_lark(grammar),
+                    grammar_spec,
+                )
             else:
                 ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -537,9 +554,12 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         # but don't compile it. The grammar is passed on unchanged.
         try:
             if grammar_is_likely_lark(so_params.grammar):
-                xgr.Grammar.from_lark(so_params.grammar)
+                _validate_lark_grammar_size(so_params.grammar)
+                compile_regex_with_timeout(xgr.Grammar.from_lark, so_params.grammar)
             else:
                 xgr.Grammar.from_ebnf(so_params.grammar)
+        except LarkGrammarSizeError as e:
+            raise VLLMValidationError(str(e)) from e
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
         return

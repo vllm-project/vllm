@@ -145,6 +145,14 @@ difficult to use, but it's really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
+The Python xgrammar backend limits Lark grammar input to 64 KiB by default.
+Set `VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES` to a larger byte limit if your
+deployment uses larger grammars, such as those generated from many strict
+Mistral tool schemas. The `VLLM_REGEX_COMPILATION_TIMEOUT_S` setting also
+applies to Lark parsing and compilation and defaults to 5 seconds.
+When `auto` tries xgrammar, size-limit errors stop validation. With Tekken
+Mistral tokenizers, `auto` routes Lark grammars directly to guidance.
+
 ??? code
 
     ```python

@@ -242,6 +242,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 512
+    VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES: int = 64 * 1024
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1824,6 +1825,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB": lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+    # Maximum UTF-8 size of Lark grammars processed by the Python xgrammar
+    # backend. Raise this for deployments with larger generated tool grammars.
+    "VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES": lambda: int(
+        os.getenv("VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES", str(64 * 1024))
+    ),
     # Maximum time in seconds allowed for regex compilation in structured
     # output backends (xgrammar, outlines). Prevents ReDoS attacks where
     # adversarial patterns cause exponential DFA state-space explosion.
@@ -2583,6 +2589,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_MAX_TOKENIZE_TOKENS",
+        "VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",

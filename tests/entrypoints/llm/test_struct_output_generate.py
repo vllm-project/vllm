@@ -831,6 +831,30 @@ def test_structured_output_auto_mode(
             assert isinstance(parsed_json, dict)
 
 
+def test_auto_backend_rejects_lark_over_configured_limit(
+    vllm_runner, monkeypatch: pytest.MonkeyPatch
+):
+    grammar = 'start: "a"'
+    monkeypatch.setenv("VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES", str(len(grammar) - 1))
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        structured_outputs=StructuredOutputsParams(grammar=grammar),
+    )
+    with (
+        vllm_runner(
+            "facebook/opt-125m",
+            enforce_eager=True,
+            max_model_len=128,
+            structured_outputs_config=StructuredOutputsConfig(backend="auto"),
+        ) as runner,
+        pytest.raises(
+            VLLMValidationError, match="VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES"
+        ),
+    ):
+        runner.llm.generate("Answer:", sampling_params=params)
+
+
 def test_guidance_ignore_eos_with_speculative_decoding(vllm_runner):
     with vllm_runner(
         "facebook/opt-125m",
