@@ -17,6 +17,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
+from tokenizers.processors import TemplateProcessing
+from transformers import PreTrainedTokenizerFast
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.generative_scoring.serving import (
@@ -291,6 +296,62 @@ class TestPromptBuilding:
 
         for i, exp in enumerate(expected):
             assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("template", "query", "items", "expected"),
+        [
+            pytest.param("<bos> $A", "query", ["item"], [1, 3, 4], id="bos"),
+            pytest.param("$A <eos>", "query", ["item"], [3, 4, 2], id="eos"),
+            pytest.param(
+                "<bos> $A <eos>", "query", ["item"], [1, 3, 4, 2], id="bos-eos"
+            ),
+            pytest.param(
+                "$A <bos>", "query", ["item"], [3, 4, 1], id="shared-id-eos-only"
+            ),
+            pytest.param(
+                "<bos> $A <eos>",
+                "<bos> query",
+                ["item"],
+                [1, 3, 1, 4, 2],
+                id="literal-bos",
+            ),
+            pytest.param("<bos> $A", "<bos>", ["item"], [3, 1, 1], id="ambiguous-bos"),
+            pytest.param("<bos> $A <eos>", "query", [[]], [1, 4, 2], id="empty-item"),
+            pytest.param("<bos> $A <eos>", [], ["item"], [3], id="empty-query-ids"),
+        ],
+    )
+    async def test_item_first_preserves_tokenizer_boundaries(
+        self, template, query, items, expected
+    ):
+        """Move an automatic prefix while retaining suffix and explicit tokens."""
+        tokenizer_backend = Tokenizer(
+            WordLevel(
+                {"<unk>": 0, "<bos>": 1, "<eos>": 2, "item": 3, "query": 4},
+                unk_token="<unk>",
+            )
+        )
+        tokenizer_backend.pre_tokenizer = WhitespaceSplit()
+        tokenizer_backend.post_processor = TemplateProcessing(
+            single=template, special_tokens=[("<bos>", 1), ("<eos>", 2)]
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer_backend,
+            bos_token="<bos>",
+            eos_token="<bos>" if template.endswith("<bos>") else "<eos>",
+            unk_token="<unk>",
+        )
+        serving = _create_serving(_create_mock_engine())
+        request = GenerativeScoringRequest(
+            query=query, items=items, label_token_ids=[3], item_first=True
+        )
+
+        engine_inputs, _ = await serving._build_prompts(
+            request, tokenizer, max_model_len=4096
+        )
+
+        tokens = engine_inputs[0]["prompt_token_ids"]  # type: ignore[typeddict-item]
+        assert tokens == expected
 
 
 class TestGeneration:

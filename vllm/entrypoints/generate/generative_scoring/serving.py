@@ -54,7 +54,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
             the label_token_ids (True) or return true model probabilities over
             the full vocab for those ids (False).
         item_first: If True, prepend items to query. Otherwise append items to query.
-        add_special_tokens: Whether to add special tokens when tokenizing.
+        add_special_tokens: Whether to add special tokens when tokenizing the query.
         cache_salt: Optional salt for prefix caching.
 
     """
@@ -86,7 +86,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
     )
     add_special_tokens: bool = Field(
         default=True,
-        description="Whether to add special tokens when tokenizing.",
+        description="Whether to add special tokens when tokenizing a text query.",
     )
     cache_salt: str | None = Field(
         default=None,
@@ -387,13 +387,35 @@ class ServingGenerativeScoring(BaseServing):
         else:
             query_token_ids = request.query
 
+        query_has_added_bos = False
+        if (
+            request.item_first
+            and request.add_special_tokens
+            and isinstance(request.query, str)
+            and request.items
+            and isinstance(request.items[0], str)
+            and query_token_ids
+            and query_token_ids[0] == tokenizer.bos_token_id
+        ):
+            # Find the raw query uniquely after BOS so we only move an inserted
+            # prefix, even when BOS and EOS share an ID.
+            bare_query_ids = tokenizer.encode(request.query, add_special_tokens=False)
+            if bare_query_ids:
+                query_len = len(bare_query_ids)
+                matching_offsets = [
+                    offset
+                    for offset in range(len(query_token_ids) - query_len + 1)
+                    if query_token_ids[offset : offset + query_len] == bare_query_ids
+                ]
+                query_has_added_bos = matching_offsets == [1]
+
         engine_inputs: list[EngineInput] = []
         prompt_token_counts: list[int] = []
 
         for item in request.items:
             # Tokenize item if it's a string
             if isinstance(item, str):
-                # Don't add special tokens for items to avoid duplicate BOS/EOS
+                # Avoid adding a second set of BOS/EOS tokens.
                 item_token_ids = tokenizer.encode(
                     item,
                     add_special_tokens=False,
@@ -403,7 +425,12 @@ class ServingGenerativeScoring(BaseServing):
 
             # Concatenate based on item_first setting
             if request.item_first:
-                prompt_token_ids = item_token_ids + query_token_ids
+                if query_has_added_bos and isinstance(item, str):
+                    prompt_token_ids = (
+                        query_token_ids[:1] + item_token_ids + query_token_ids[1:]
+                    )
+                else:
+                    prompt_token_ids = item_token_ids + query_token_ids
             else:
                 prompt_token_ids = query_token_ids + item_token_ids
 

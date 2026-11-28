@@ -18,6 +18,18 @@ This endpoint is automatically available when the server is started with a gener
 4. **Softmax Normalization**: Applies softmax over only the label tokens (when `apply_softmax=true`)
 5. **Score**: Returns the normalized probability of the first label token
 
+### Tokenization and special tokens
+
+Queries and items are tokenized separately. `add_special_tokens=true` (the
+default) enables automatic special tokens for a text query. For item-first
+requests with two text inputs, a tokenizer-added beginning-of-sequence token
+(BOS) goes before the item when it can be identified unambiguously. A
+tokenizer-added suffix remains after the query.
+
+Supplying an empty token-ID item (`items=[[]]`) scores the query alone with its
+usual tokenization. Set `add_special_tokens=false` to disable automatic special
+tokens.
+
 ## Finding Token IDs
 
 To find the token IDs for your labels, use the tokenizer:

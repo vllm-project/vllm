@@ -9,22 +9,27 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+BOS_MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request):
+    model_name = getattr(request, "param", MODEL_NAME)
     args = [
         "--dtype",
-        "bfloat16",
+        "float32" if model_name == BOS_MODEL_NAME else "bfloat16",
         "--max-model-len",
         "512",
         "--enforce-eager",
         "--max-num-seqs",
-        "32",
+        "1" if model_name == BOS_MODEL_NAME else "32",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    if model_name == BOS_MODEL_NAME:
+        args += ["--no-enable-prefix-caching", "--kv-cache-memory-bytes", "268435456"]
+    with RemoteOpenAIServer(model_name, args) as remote_server:
         yield remote_server
 
 
@@ -151,6 +156,48 @@ class TestGenerativeScoringAPI:
         r1_score = r1.json()["data"][0]["score"]
         r2_score = r2.json()["data"][0]["score"]
         assert abs(r1_score - r2_score) < 1e-6
+
+
+@pytest.mark.parametrize("server", [BOS_MODEL_NAME], indirect=True)
+class TestGenerativeScoringSpecialTokens:
+    @pytest.mark.parametrize(
+        "item",
+        ["Document: Paris is the capital of France.", []],
+        ids=["text", "empty-ids"],
+    )
+    def test_item_first_matches_explicit_opt_prompt(self, server, item):
+        """Score the same sequence as a prompt with explicit OPT token IDs."""
+        tokenizer = get_tokenizer(BOS_MODEL_NAME)
+        query = "\nQuestion: Is this city the capital of France?\nAnswer:"
+        item_ids = tokenizer.encode(item, add_special_tokens=False) if item else []
+        expected_ids = [
+            tokenizer.bos_token_id,
+            *item_ids,
+            *tokenizer.encode(query, add_special_tokens=False),
+        ]
+        common = {
+            "model": BOS_MODEL_NAME,
+            "label_token_ids": [
+                tokenizer.encode(label, add_special_tokens=False)[0]
+                for label in (" Yes", " No")
+            ],
+        }
+        actual = requests.post(
+            server.url_for("generative_scoring"),
+            json=common | {"query": query, "items": [item], "item_first": True},
+        )
+        reference = requests.post(
+            server.url_for("generative_scoring"),
+            json=common | {"query": expected_ids, "items": [[]]},
+        )
+
+        assert actual.status_code == reference.status_code == 200
+        actual_result = actual.json()
+        reference_result = reference.json()
+        assert actual_result["usage"] == reference_result["usage"]
+        assert actual_result["data"][0]["score"] == pytest.approx(
+            reference_result["data"][0]["score"], abs=1e-6
+        )
 
 
 if __name__ == "__main__":
