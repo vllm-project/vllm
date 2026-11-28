@@ -31,6 +31,11 @@ _QWEN_MODEL_TYPES = frozenset(
 # Covers L=1 constexpr, non-divisible runtime L, and divisible runtime L.
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
 
+# The gfx1151 W4A16 Triton kernel is specialized on the tile chosen for M and on
+# whether M is a multiple of 16. M <= 8 takes the HIP skinny path, so cover both
+# sides of each tile boundary above it.
+_W4A16_WARMUP_M = (9, 16, 17, 32, 33, 64, 65, 128, 129, 144, 1025, 2048)
+
 
 @dataclass(frozen=True, slots=True)
 class _QwenGDNWarmupConfig:
@@ -387,6 +392,79 @@ def _warm_state_gather_scatter_kernels(
         scatter_states(state, gathered, idx)
 
 
+def _warm_w4a16_kernels(runner: "GPUModelRunner") -> None:
+    """Compile the Triton W4A16 kernel for every loaded layer shape."""
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+        RDNAHybridW4A16LinearKernel,
+    )
+
+    dtype = runner.vllm_config.model_config.dtype
+    m_values = [m for m in _W4A16_WARMUP_M if m <= runner.max_num_tokens]
+    seen = set()
+    for layer in runner.get_model().modules():
+        kernel = getattr(getattr(layer, "scheme", None), "kernel", None)
+        if not isinstance(kernel, RDNAHybridW4A16LinearKernel):
+            continue
+        w_q, _, w_zp = kernel._get_weight_params(layer)
+        key = (tuple(w_q.shape), kernel.config.group_size, w_zp is not None)
+        if key in seen:
+            continue
+        seen.add(key)
+        for m in m_values:
+            x = torch.empty((m, w_q.shape[1] * 2), dtype=dtype, device=runner.device)
+            kernel.apply_weights(layer, x)
+    logger.info("Warmed W4A16 Triton kernels for %d layer shapes.", len(seen))
+
+
+def _warm_triton_attention_kernel(runner: "GPUModelRunner") -> None:
+    """Compile the unified-attention kernel for the bound hybrid KV cache."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    groups = runner.kv_cache_config.kv_cache_groups
+    for name, layer in runner.compilation_config.static_forward_context.items():
+        if not (
+            isinstance(layer, Attention)
+            and layer.attn_backend.get_name() == "TRITON_ATTN"
+            and layer.kv_cache_dtype == "auto"
+            and layer.kv_cache.ndim == 4
+        ):
+            continue
+        # Same K/V views as TritonAttentionImpl.forward: [B, H, N, 2 * hs].
+        hs = layer.head_size
+        key_cache, value_cache = layer.kv_cache[:1].transpose(1, 2).split(hs, dim=-1)
+        group_id = next(i for i, g in enumerate(groups) if name in g.layer_names)
+        block_table = runner.block_tables.input_block_tables[group_id][:1, :1]
+        device = runner.device
+        # The kernel key does not depend on the query length.
+        dtype = runner.vllm_config.model_config.dtype
+        q = torch.empty((1, layer.num_heads, hs), dtype=dtype, device=device)
+        unified_attention(
+            q=q,
+            k=key_cache,
+            v=value_cache,
+            out=torch.empty_like(q),
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32, device=device),
+            max_seqlen_q=1,
+            seqused_k=torch.tensor([1], dtype=torch.int32, device=device),
+            max_seqlen_k=1,
+            softmax_scale=hs**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            # Production passes the per-layer scales expanded per request, which
+            # makes them pointer arguments rather than constexpr None.
+            k_descale=layer._k_scale.expand(1, key_cache.shape[2]),
+            v_descale=layer._v_scale.expand(1, key_cache.shape[2]),
+        )
+        logger.info(
+            "Warmed Triton unified attention for block_size=%d.", key_cache.shape[1]
+        )
+        return
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.accelerator.synchronize(device)
@@ -405,7 +483,13 @@ def qwen_triton_warmup(
         return
 
     device = runner.device
-    logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
+    logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1151
+
+        if on_gfx1151():
+            _warm_w4a16_kernels(runner)
+            _warm_triton_attention_kernel(runner)
 
     gdn_config = _qwen_gdn_warmup_config(
         runner.compilation_config.static_forward_context
