@@ -352,7 +352,8 @@ class Worker(WorkerBase):
         if draft_names and not any(fnmatch_filter(draft_names, p) for p in patterns):
             logger.warning_once(
                 "Level 2 sleep discards draft model weights; reload_weights "
-                "restores only the target. Unless the draft is updated "
+                "restores only a draft stored in the target's checkpoint "
+                "(e.g. MTP). Unless the draft is updated "
                 "separately, set --sleep-preserve-parameter-names 'draft.*' "
                 "to keep them."
             )

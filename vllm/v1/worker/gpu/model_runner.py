@@ -21,7 +21,7 @@ import gc
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
 
@@ -62,7 +62,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.model_loader.utils import log_layer_backends
+from vllm.model_executor.model_loader.utils import (
+    get_draft_load_config,
+    log_layer_backends,
+)
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -657,6 +660,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Reload weights in place."""
         vllm_config = self.vllm_config
         model = self.get_model()
+        draft_model = self.get_draft_model()
+        spec = vllm_config.speculative_config
+        draft_config = spec.draft_model_config if spec is not None else None
+        # A draft stored in the target's checkpoint (e.g. MTP) reloads with it,
+        # first, so the target's load wins on shared tensors as at cold start.
+        if (
+            spec is not None
+            and draft_config is not None
+            and weights_iterator is None
+            and draft_model is not None
+            and draft_config is not vllm_config.model_config
+            and draft_config.model == vllm_config.model_config.model
+            and not spec.prefill_context_kv_only
+        ):
+            draft_vllm_config = copy(vllm_config)
+            draft_vllm_config.model_config = draft_config
+            draft_vllm_config.load_config = get_draft_load_config(vllm_config)
+            with self.draft_context():
+                reload_weights(
+                    draft_vllm_config,
+                    draft_model,
+                    None,
+                    weights_path,
+                    is_checkpoint_format,
+                )
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
