@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -604,7 +604,32 @@ class DeepseekV32Attention(MLAAttention):
         else:
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
-        shardq = attn_metadata.shardq
+        attn_out = self._forward_mqa_cp(mqa_q_arg, kv_cache, attn_metadata)
+
+        # NOTE(woosuk): While the below does not need to be in the eager region,
+        # we put it here to avoid copying the attention output. Move this back to the
+        # captured region once forward_mqa supports `out` argument.
+        x = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
+        ).transpose(0, 1)
+        out = (
+            output[:num_actual]
+            .view(num_actual, self.num_local_heads, self.v_head_dim)
+            .transpose(0, 1)
+        )
+        torch.bmm(x, self.W_UV, out=out)
+        if self.use_pcp and num_actual < output.shape[0]:
+            output[num_actual:].zero_()
+
+    def _forward_mqa_cp(
+        self,
+        mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+    ) -> torch.Tensor:
+        """Run forward_mqa, gathering the query and merging the partial
+        outputs across context-parallel ranks."""
+        shardq = getattr(attn_metadata, "shardq", None)
         mqa_metadata = attn_metadata
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
             if isinstance(mqa_q_arg, tuple):
@@ -672,18 +697,4 @@ class DeepseekV32Attention(MLAAttention):
                 )
             if self.use_pcp:
                 attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
-
-        # NOTE(woosuk): While the below does not need to be in the eager region,
-        # we put it here to avoid copying the attention output. Move this back to the
-        # captured region once forward_mqa supports `out` argument.
-        x = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)
-        out = (
-            output[:num_actual]
-            .view(num_actual, self.num_local_heads, self.v_head_dim)
-            .transpose(0, 1)
-        )
-        torch.bmm(x, self.W_UV, out=out)
-        if self.use_pcp and num_actual < output.shape[0]:
-            output[num_actual:].zero_()
+        return attn_out
