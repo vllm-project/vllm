@@ -114,7 +114,9 @@ from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
     compute_retention_mask,
+    pack_mrope_positions,
     recompute_mrope_positions,
+    unpack_mrope_positions,
 )
 from vllm.multimodal.video_prune.vidcom2 import (
     compute_retained_tokens_count as vidcom2_compute_retained_tokens_count,
@@ -2357,8 +2359,8 @@ class Qwen3VLForConditionalGeneration(
 
         Returns:
             Tuple of image embeddings for each image item.
-            Resulting embeddings will have extra 5 channels for
-            computed mrope positions, consistent with video embeddings.
+            Resulting embeddings will have encoded 5-channel mrope position
+            metadata appended, consistent with video embeddings.
 
         """
         if self.is_multimodal_pruning_enabled:
@@ -2379,7 +2381,9 @@ class Qwen3VLForConditionalGeneration(
                     ],
                     dim=1,
                 )
-                emb = torch.cat([emb, positions], dim=1)
+                emb = torch.cat(
+                    [emb, pack_mrope_positions(positions, emb.dtype)], dim=1
+                )
                 image_embeds_out.append(emb)
             image_embeds_split = tuple(image_embeds_out)
         return image_embeds_split
@@ -2398,8 +2402,9 @@ class Qwen3VLForConditionalGeneration(
 
         Returns:
             Tuple of video embeddings for each video item.
-            Resulting embeddings will have extra 5 channels for computed mrope
-            positions, and whether the index corresponds to a video embedding.
+            Resulting embeddings will have encoded 5-channel mrope position
+            metadata appended, including whether each index corresponds to a
+            video embedding.
 
         """
         grid_thw = video_input["video_grid_thw"]
@@ -2545,7 +2550,9 @@ class Qwen3VLForConditionalGeneration(
                 is_vision_start=is_vision_start,
                 retention_mask=retention_mask,
             )
-            to_concat.append(expanded_positions)
+            to_concat.append(
+                pack_mrope_positions(expanded_positions, merged_embeddings.dtype)
+            )
 
         final_video_embeddings = torch.cat(to_concat, dim=-1)
 
@@ -2854,12 +2861,13 @@ class Qwen3VLForConditionalGeneration(
 
         mm_embeddings_out = []
         mm_embeddings_pos = []
-        # Strip position information from embeddings (last 5 channels)
-        # For Qwen3 VL, handle potentially empty frames (from unpacking)
+        # Strip encoded 5-channel position metadata from embeddings.
+        # For Qwen3 VL, handle potentially empty frames (from unpacking).
         for mm in multimodal_embeddings:
             if mm.shape[0] > 0:  # Only process non-empty frames
-                mm_embeddings_out.append(mm[:, :-5])
-                mm_embeddings_pos.append(mm[:, -5:].permute(1, 0).long())
+                mm_emb, mm_pos = unpack_mrope_positions(mm, num_channels=5)
+                mm_embeddings_out.append(mm_emb)
+                mm_embeddings_pos.append(mm_pos)
             else:
                 # Empty frame - keep as is
                 mm_embeddings_out.append(mm)
