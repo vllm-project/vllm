@@ -559,6 +559,74 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
     assert not car._has_local_multicast_support(torch.device("cuda:0"))
 
 
+def _mnnvl_buffer_communicator(
+    monkeypatch, local_multicast: bool
+) -> tuple[car.CustomAllreduce, list[str]]:
+    """Build a stub communicator with a recording fake symm-mem backend."""
+    calls: list[str] = []
+
+    class _FakeGroup:
+        group_name = "tp"
+
+    class _FakeHandle:
+        multicast_ptr = 0
+
+    class _FakeSymmMem:
+        def empty(self, *args, **kwargs):
+            calls.append("empty")
+            return object()
+
+        def rendezvous(self, *args, **kwargs):
+            calls.append("rendezvous")
+            return _FakeHandle()
+
+    monkeypatch.setattr(car, "torch_symm_mem", _FakeSymmMem())
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: local_multicast,
+    )
+    monkeypatch.setattr(car.dist, "all_reduce", lambda *_args, **_kwargs: None)
+
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator._ptr = 0
+    communicator.group = _FakeGroup()
+    communicator.device = torch.device("cuda", 0)
+    communicator.world_size = 2
+    communicator.rank = 0
+    return communicator, calls
+
+
+@pytest.mark.parametrize("local_multicast", [False, True])
+def test_mnnvl_buffer_init_gated_on_multicast_support(monkeypatch, local_multicast):
+    """Attempt the MNNVL symmetric-memory rendezvous only when the group has
+    multicast support; it can never produce a usable buffer otherwise."""
+    communicator, calls = _mnnvl_buffer_communicator(monkeypatch, local_multicast)
+
+    communicator._init_mnnvl_buffer(8 * 1024 * 1024)
+
+    assert calls == (["empty", "rendezvous"] if local_multicast else [])
+
+
+def test_mnnvl_buffer_init_gated_on_multicast_support_requires_every_rank(
+    monkeypatch,
+):
+    """A rank without multicast support keeps the whole group off the
+    rendezvous, so no rank can desynchronize from the collective."""
+    communicator, calls = _mnnvl_buffer_communicator(monkeypatch, True)
+
+    def report_unsupported_peer(support, **_kwargs):
+        support.zero_()
+
+    monkeypatch.setattr(car.dist, "all_reduce", report_unsupported_peer)
+
+    communicator._init_mnnvl_buffer(8 * 1024 * 1024)
+
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     ("world_size", "device_capability", "local_multicast", "expected"),
     [
