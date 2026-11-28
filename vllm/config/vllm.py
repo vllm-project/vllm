@@ -592,7 +592,14 @@ class VllmConfig:
             "profiler": get_factors(self.profiler_config),
             "observability": get_factors(self.observability_config),
             "compilation": get_factors(self.compilation_config),
-            "kernel": get_factors(self.kernel_config),
+            "kernel": (
+                self.kernel_config.compile_factors(include_ir_impls=False)
+                if self.kernel_config is not None
+                and self.compilation_config is not None
+                and self.compilation_config.mode == CompilationMode.NONE
+                and not self.compilation_config.compile_mm_encoder
+                else get_factors(self.kernel_config)
+            ),
             "kv_transfer": get_factors(self.kv_transfer_config),
             "ec_transfer": get_factors(self.ec_transfer_config),
             "aux_output": get_factors(self.aux_output_config),

@@ -535,7 +535,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    def compile_factors(self) -> CompileFactors:
+    def compile_factors(self, *, include_ir_impls: bool = True) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
@@ -550,7 +550,13 @@ class KernelConfig:
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
-        return get_compile_factors(self, ignored_factors)
+        if include_ir_impls:
+            return get_compile_factors(self, ignored_factors)
+        # Eager dispatch depends on provider priority, but has no compiled
+        # artifact to invalidate when the provider source changes.
+        factors = get_compile_factors(self, ignored_factors | {"ir_op_priority"})
+        factors["ir_op_priority"] = get_compile_factors(self.ir_op_priority, set())
+        return factors
 
     @field_validator(
         "enable_flashinfer_autotune",
