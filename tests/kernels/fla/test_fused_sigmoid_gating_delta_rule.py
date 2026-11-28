@@ -10,6 +10,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
+from vllm.third_party.flash_linear_attention.ops.kda import fused_recurrent_kda_fwd
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -203,3 +204,70 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+@pytest.mark.parametrize("kernel", ["recurrent", "sigmoid_gating", "kda"])
+def test_state_index_table_stride_does_not_change_results(kernel: str):
+    """Equal index values must select the same states whatever the table's strides.
+    The kernels must step through a 2D table with stride_indices_tok (#68416).
+    A column-major copy of the table makes that stride differ from one.
+    The second sequence accepts its second token.
+    So its selected slot is not the first one in its row."""
+    set_random_seed(0)
+    q, k = (torch.randn(1, 6, 1, 64, device=DEVICE).half() for _ in range(2))
+    v = torch.randn(1, 6, 2, 64, device=DEVICE).half()
+    a, b = (torch.randn(6, 2, device=DEVICE).half() for _ in range(2))
+    A_log = torch.log(torch.empty(2, device=DEVICE).uniform_(1, 16))
+    dt_bias = torch.randn(2, device=DEVICE)
+    cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32, device=DEVICE)
+    accepted = torch.tensor([1, 2], dtype=torch.int32, device=DEVICE)
+    row_major = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32, device=DEVICE)
+    column_major = row_major.T.contiguous().T
+    assert column_major.stride() != row_major.stride()
+    initial = 0.5 * torch.randn(8, 2, 64, 64, device=DEVICE)
+    gk = F.logsigmoid(torch.randn(1, 6, 2, 64, device=DEVICE))
+
+    results = []
+    for indices in (row_major, column_major):
+        state = initial.clone()
+        if kernel == "kda":
+            out, _ = fused_recurrent_kda_fwd(
+                q=q,
+                k=k,
+                v=v,
+                g=gk,
+                beta=b.float().sigmoid()[None],
+                scale=64**-0.5,
+                initial_state=state,
+                inplace_final_state=True,
+                cu_seqlens=cu_seqlens,
+                ssm_state_indices=indices,
+                num_accepted_tokens=accepted,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            common = dict(
+                q=q,
+                k=k,
+                v=v,
+                initial_state=state,
+                cu_seqlens=cu_seqlens,
+                inplace_final_state=True,
+                ssm_state_indices=indices,
+                num_accepted_tokens=accepted,
+                use_qk_l2norm_in_kernel=True,
+            )
+            if kernel == "recurrent":
+                g = (-A_log.exp() * F.softplus(a.float() + dt_bias))[None]
+                out, _ = fused_recurrent_gated_delta_rule(
+                    g=g, beta=b.float().sigmoid()[None], **common
+                )
+            else:
+                out, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=A_log, a=a, b=b, dt_bias=dt_bias, **common
+                )
+        results.append((out.clone(), state))
+
+    torch.testing.assert_close(results[0][0], results[1][0], rtol=0, atol=0)
+    torch.testing.assert_close(results[0][1], results[1][1], rtol=0, atol=0)

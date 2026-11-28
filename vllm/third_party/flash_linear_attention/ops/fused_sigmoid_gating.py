@@ -108,9 +108,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             else:
                 i_t = 0
             # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+            state_idx = tl.load(
+                ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok
+            ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -160,7 +160,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         if INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
             final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
+                ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok
             ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
