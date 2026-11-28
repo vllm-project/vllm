@@ -372,6 +372,14 @@ class OnlineRenderer:
                 tool_server=tool_server,
             )
 
+        if request.previous_input_messages:
+            return self.create_error_response(
+                "previous_input_messages is only supported for Harmony (gpt-oss) "
+                "models; pass earlier turns as items in `input` instead.",
+                err_type="invalid_request_error",
+                param="previous_input_messages",
+            )
+
         if previous_messages is not None and any(
             isinstance(message, OpenAIMessage) for message in previous_messages
         ):

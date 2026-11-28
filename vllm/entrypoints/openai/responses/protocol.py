@@ -510,11 +510,15 @@ class ResponsesRequest(OpenAIBaseModel):
             "response object. Currently only supported for non-background."
         ),
     )
-    # similar to input_messages / output_messages in ResponsesResponse
-    # we take in previous_input_messages (ie in harmony format)
-    # this cannot be used in conjunction with previous_response_id
-    # TODO: consider supporting non harmony messages as well
-    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = Field(
+        default=None,
+        description=(
+            "Earlier conversation messages, in Harmony or chat format, rendered "
+            "before `input`. Only supported for Harmony (gpt-oss) models; other "
+            "models reject a non-empty list, so pass earlier turns as `input` "
+            "items instead. Cannot be combined with `previous_response_id`."
+        ),
+    )
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",

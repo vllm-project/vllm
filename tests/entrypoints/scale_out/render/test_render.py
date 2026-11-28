@@ -613,6 +613,28 @@ async def test_responses_render_rejects_previous_response_id_over_http(client):
 
 
 @pytest.mark.asyncio
+async def test_responses_render_rejects_previous_input_messages_over_http(client):
+    history = [
+        {"role": "user", "content": "Remember the color cobalt."},
+        {"role": "assistant", "content": "I will remember cobalt."},
+    ]
+    body = {"model": MODEL_NAME, "input": "Which color should I remember?"}
+
+    rejected = await client.post(
+        "/v1/responses/render", json={**body, "previous_input_messages": history}
+    )
+    empty = await client.post(
+        "/v1/responses/render", json={**body, "previous_input_messages": []}
+    )
+
+    assert rejected.status_code == 400
+    error = rejected.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_input_messages"
+    assert empty.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_completion_render_basic(client):
     """Test basic completion render endpoint."""
     # Make request to render endpoint
