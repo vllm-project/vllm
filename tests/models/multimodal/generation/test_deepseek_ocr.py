@@ -15,9 +15,26 @@ The correct guard is `patches.numel() == 0`.
 
 import pytest
 import torch
+from transformers import CLIPVisionConfig
 
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    finalize_model_weights,
+)
+from vllm.model_executor.models.deepencoder import (
+    DeepCLIPVisionEmbeddings,
+    ImageEncoderViT,
+)
 from vllm.model_executor.models.deepseek_ocr import DeepseekOCRForCausalLM
 from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
+from vllm.model_executor.models.step3_vl import Step3VisionEmbeddings
+from vllm.model_executor.models.step3_vl import get_abs_pos as step3_get_abs_pos
+from vllm.model_executor.models.vision import (
+    InterpolatedPosEmbedCache,
+    interpolate_cls_abs_pos,
+)
+from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
 
 
 class TestDeepseekOCREncodeLocalFeaturesGuard:
@@ -56,3 +73,222 @@ class TestDeepseekOCREncodeLocalFeaturesGuard:
         crop_shape = torch.tensor([1, 2])
         with pytest.raises(AttributeError):
             DeepseekOCRForCausalLM._encode_local_features(None, wb, crop_shape)
+
+
+def _make_small_sam() -> ImageEncoderViT:
+    sam = ImageEncoderViT(
+        img_size=64,
+        patch_size=8,
+        embed_dim=16,
+        depth=1,
+        num_heads=2,
+        out_chans=8,
+        use_abs_pos=True,
+    ).eval()
+    assert sam.pos_embed is not None
+    with torch.no_grad():
+        sam.pos_embed.copy_(torch.randn_like(sam.pos_embed))
+    return sam
+
+
+@pytest.mark.core_model
+@pytest.mark.usefixtures("default_vllm_config")
+class TestAbsPosEmbedCache:
+    def test_sam_cache_hit_and_bit_exact(self):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+        expected = ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+
+        with torch.inference_mode():
+            out1 = sam.get_abs_pos(sam.pos_embed, 6)
+            out2 = sam.get_abs_pos(sam.pos_embed, 6)
+
+        assert torch.equal(out1, expected)
+        assert out1 is out2
+        assert out1.is_contiguous()
+
+        # Non-member tensor bypasses instance cache.
+        other = torch.randn_like(sam.pos_embed)
+        other_out = sam.get_abs_pos(other, 6)
+        assert other_out is not out1
+        assert torch.equal(other_out, ImageEncoderViT._interpolate_abs_pos(other, 6))
+
+    def test_sam_refresh_in_place_after_default_weight_loader(self):
+        """`default_weight_loader` writes via `.data.copy_` (no `_version` bump),
+        so `finalize_model_weights` must refresh cached entries in place while
+        preserving `data_ptr()` for captured encoder CUDA/NPU graphs."""
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+
+        with torch.inference_mode():
+            before = sam.get_abs_pos(sam.pos_embed, 6)
+        cached_ptr = before.data_ptr()
+
+        new_weight = torch.randn_like(sam.pos_embed) + 5.0
+        default_weight_loader(sam.pos_embed, new_weight)
+        finalize_model_weights(sam)
+
+        expected = ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+        with torch.inference_mode():
+            after = sam.get_abs_pos(sam.pos_embed, 6)
+
+        assert torch.equal(after, expected)
+        assert after.data_ptr() == cached_ptr
+
+    def test_sam_invalidates_on_copy_and_param_replacement(self):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+
+        with torch.inference_mode():
+            first = sam.get_abs_pos(sam.pos_embed, 6)
+        first_ptr = first.data_ptr()
+
+        with torch.no_grad():
+            sam.pos_embed.copy_(torch.randn_like(sam.pos_embed) + 3.0)
+        with torch.inference_mode():
+            second = sam.get_abs_pos(sam.pos_embed, 6)
+        assert torch.equal(
+            second, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+        )
+        assert second.data_ptr() == first_ptr
+
+        sam.pos_embed = torch.nn.Parameter(
+            torch.randn_like(sam.pos_embed) - 3.0, requires_grad=False
+        )
+        with torch.inference_mode():
+            third = sam.get_abs_pos(sam.pos_embed, 6)
+        assert torch.equal(
+            third, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+        )
+
+    def test_sam_cache_bounded_by_preallocated_buffer(self):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+        # Size 4 has 4*4*16*4 = 1024 bytes; cap buffer at 3000 bytes so size 4
+        # and size 5 (1600 bytes) fit in the pre-allocated buffer while larger
+        # entries are skipped without evicting live slots.
+        sam._abs_pos_cache = InterpolatedPosEmbedCache(max_bytes=3000)
+        buf = sam._abs_pos_cache._buffer
+        buf_start = buf.data_ptr()
+        buf_end = buf_start + buf.numel()
+
+        # Pre-allocated buffer must be non-persistent (absent from state_dict).
+        assert "_abs_pos_cache._buffer" not in sam.state_dict()
+
+        with torch.inference_mode():
+            pinned = sam.get_abs_pos(sam.pos_embed, 4)
+            for size in range(5, 12):
+                if size == sam.pos_embed.size(1):
+                    continue
+                out = sam.get_abs_pos(sam.pos_embed, size)
+                assert torch.equal(
+                    out, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, size)
+                )
+            again = sam.get_abs_pos(sam.pos_embed, 4)
+
+        assert buf_start <= pinned.data_ptr() < buf_end
+        assert sam._abs_pos_cache._offset <= buf.numel()
+        assert again is pinned
+
+    def test_deepclip_and_step3_embeddings_cache_and_reload(self):
+        clip_cfg = CLIPVisionConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_attention_heads=2,
+            num_hidden_layers=1,
+            image_size=32,
+            patch_size=8,
+        )
+        clip_emb = DeepCLIPVisionEmbeddings(clip_cfg).eval()
+        step3_cfg = Step3VisionEncoderConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_attention_heads=2,
+            num_hidden_layers=1,
+            image_size=32,
+            patch_size=8,
+        )
+        step3_emb = Step3VisionEmbeddings(step3_cfg).eval()
+
+        for module, tgt_arg, tgt_grid in [
+            (clip_emb, 3 * 3 + 1, 3),
+            (step3_emb, 3 * 3, 3),
+        ]:
+            expected = interpolate_cls_abs_pos(
+                module.position_embedding(module.position_ids), tgt_grid
+            )
+            with torch.inference_mode():
+                out1 = module._get_pos_embed(tgt_arg)
+                out2 = module._get_pos_embed(tgt_arg)
+            assert torch.equal(out1, expected)
+            assert out1 is out2
+            cached_ptr = out1.data_ptr()
+
+            new_w = torch.randn_like(module.position_embedding.weight) + 2.0
+            default_weight_loader(module.position_embedding.weight, new_w)
+            finalize_model_weights(module)
+
+            expected_new = interpolate_cls_abs_pos(
+                module.position_embedding(module.position_ids), tgt_grid
+            )
+            with torch.inference_mode():
+                out3 = module._get_pos_embed(tgt_arg)
+            assert torch.equal(out3, expected_new)
+            assert out3.data_ptr() == cached_ptr
+
+            # Compare full cached forward against an uncached reference forward
+            # using the original get_abs_pos path on the exact same weights.
+            pixel_values = torch.randn(2, 3, 24, 24)
+            with torch.inference_mode():
+                cached_out = module(pixel_values)
+                patch_embeds = module.patch_embedding(pixel_values)
+                patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
+                class_embeds = module.class_embedding.expand(
+                    pixel_values.shape[0], 1, -1
+                )
+                ref_embeds = torch.cat([class_embeds, patch_embeds], dim=1)
+                pos_full = module.position_embedding(module.position_ids)
+                if isinstance(module, DeepCLIPVisionEmbeddings):
+                    ref_out = ref_embeds + module.get_abs_pos(
+                        pos_full, ref_embeds.size(1)
+                    )
+                else:
+                    ref_out = ref_embeds + step3_get_abs_pos(
+                        pos_full, patch_embeds.size(1)
+                    )
+                    ref_out = torch.cat(
+                        [
+                            ref_out[:, 0, :]
+                            .unsqueeze(1)
+                            .repeat(1, module.pad_tp_size - 1, 1),
+                            ref_out,
+                        ],
+                        dim=1,
+                    )
+            assert torch.equal(cached_out, ref_out)
+
+    def test_cold_cache_capture_does_not_populate_cache(self, monkeypatch):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+        expected = ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
+
+        monkeypatch.setattr(
+            current_platform, "is_current_stream_capturing", lambda: True
+        )
+        with torch.inference_mode():
+            out = sam.get_abs_pos(sam.pos_embed, 6)
+
+        assert torch.equal(out, expected)
+        assert len(sam._abs_pos_cache._entries) == 0
+        assert sam._abs_pos_cache._offset == 0
+
+    def test_torch_compile_bypasses_cache(self):
+        sam = _make_small_sam()
+        assert sam.pos_embed is not None
+
+        compiled = torch.compile(sam.get_abs_pos, backend="eager")
+        with torch.inference_mode():
+            out = compiled(sam.pos_embed, 6)
+
+        assert len(sam._abs_pos_cache._entries) == 0
+        assert torch.equal(out, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6))
