@@ -200,7 +200,12 @@ _AITER_FLYDSL_UNTUNED_SHAPE = (4992, 6144)
 
 
 @contextmanager
-def _patch_rocm_gfx950(linear_backend: str = "auto"):
+def _patch_rocm_gfx950(
+    linear_backend: str = "auto",
+    *,
+    supports_mx: bool = True,
+    linear_enabled: bool = True,
+):
     """Patch the platform so kernel selection runs as on gfx950 with AITER
     linear enabled and AITER MXFP8 configs tuned for `_AITER_FLYDSL_TUNED_SHAPE`."""
     from vllm._aiter_ops import rocm_aiter_ops
@@ -219,23 +224,34 @@ def _patch_rocm_gfx950(linear_backend: str = "auto"):
                 return_value=linear_backend,
             ),
             patch(
-                "vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl.current_platform"
-            ) as aiter_platform,
-            patch.object(rocm_aiter_ops, "is_linear_enabled", return_value=True),
+                "vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl.current_platform",
+                platform,
+            ),
+            patch(
+                "vllm.model_executor.kernels.linear.mxfp8.rocm_native.current_platform",
+                platform,
+            ),
+            patch(
+                "vllm.model_executor.kernels.linear.mxfp8.hipbmm.current_platform",
+                platform,
+            ),
+            patch(
+                "vllm.model_executor.kernels.linear.mxfp8.hipbmm."
+                "_ensure_hipb_mm_extension_initialized",
+            ),
+            patch.object(
+                rocm_aiter_ops, "is_linear_enabled", return_value=linear_enabled
+            ),
             patch.object(
                 rocm_aiter_ops,
                 "is_mxfp8_bpreshuffle_gemm_tuned",
                 side_effect=lambda n, k: (n, k) == _AITER_FLYDSL_TUNED_SHAPE,
             ),
-            patch.object(
-                RocmDotScaledMxfp8LinearKernel,
-                "is_supported",
-                return_value=(True, None),
-            ),
         ):
             platform._enum = PlatformEnum.ROCM
-            aiter_platform.is_rocm.return_value = True
-            aiter_platform.supports_mx.return_value = True
+            platform.is_rocm.return_value = True
+            platform.is_cuda.return_value = False
+            platform.supports_mx.return_value = supports_mx
             yield AiterFlyDSLMxfp8LinearKernel, RocmDotScaledMxfp8LinearKernel
     finally:
         torch.set_default_dtype(prev_dtype)
@@ -350,3 +366,48 @@ def test_mxfp8_weight_only_rejects_forced_w8a8_backend(backend, kernel_cls):
         pytest.raises(ValueError, match="quantization scheme"),
     ):
         init_mxfp8_linear_kernel(weight_shape=(128, 128), activation_quant_key=None)
+
+
+@pytest.mark.parametrize(
+    "hipbmm,expected",
+    [
+        ("0", "RocmDotScaledMxfp8LinearKernel"),
+        ("1", "RocmHipbmmMxfp8LinearKernel"),
+    ],
+)
+def test_rocm_mxfp8_hipbmm_opt_in(monkeypatch, hipbmm, expected):
+    """HIPBMM replaces the default backend only when explicitly enabled."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", hipbmm)
+    with _patch_rocm_gfx950():
+        kernel = init_mxfp8_linear_kernel(weight_shape=(64, 256))
+    assert type(kernel).__name__ == expected
+
+
+def test_rocm_mxfp8_hipbmm_rejects_bmm_and_partial_blocks():
+    from vllm.model_executor.kernels.linear.mxfp8.hipbmm import (
+        RocmHipbmmMxfp8LinearKernel,
+    )
+
+    bmm = Mxfp8LinearLayerConfig(weight_shape=(64, 256), bmm_batch_size=2)
+    partial_block = Mxfp8LinearLayerConfig(weight_shape=(64, 48))
+    assert not RocmHipbmmMxfp8LinearKernel.can_implement(bmm)[0]
+    assert not RocmHipbmmMxfp8LinearKernel.can_implement(partial_block)[0]
+
+
+@pytest.mark.parametrize(
+    "supports_mx,linear_enabled,batch_invariant,expected",
+    [
+        (False, True, False, "EmulationMxfp8LinearKernel"),
+        (True, False, False, "RocmDotScaledMxfp8LinearKernel"),
+        (True, True, True, "RocmDotScaledMxfp8LinearKernel"),
+    ],
+)
+def test_rocm_hipbmm_preserves_supported_fallbacks(
+    monkeypatch, supports_mx, linear_enabled, batch_invariant, expected
+):
+    """An opt-in preserves gfx942, disabled-AITER and batch-invariant support."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+    with _patch_rocm_gfx950(supports_mx=supports_mx, linear_enabled=linear_enabled):
+        kernel = init_mxfp8_linear_kernel(weight_shape=(1792, 5120))
+    assert type(kernel).__name__ == expected
