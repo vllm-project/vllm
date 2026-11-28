@@ -16,6 +16,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+PCP_GLOBAL_METADATA_SUFFIX = ".pcp_global"
+
 
 @dataclass
 class Qwen4ExpQSAMetadata(AttentionMetadata):

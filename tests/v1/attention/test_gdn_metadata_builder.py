@@ -16,6 +16,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     register_mamba_layers,
 )
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -26,7 +27,9 @@ from vllm.v1.attention.backends.gdn_attn import (
     plan_flashinfer_checkpoints,
 )
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.utils import AttentionGroup
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
@@ -153,10 +156,11 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
+    model_name: str = "Qwen/Qwen3.5-0.8B",
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
-        model_name="Qwen/Qwen3.5-0.8B",
+        model_name=model_name,
         block_size=BLOCK_SIZE,
     )
     vllm_config.compilation_config.cudagraph_mode = (
@@ -197,6 +201,52 @@ def _common_attn_metadata(
         ).view(num_reqs, num_extra)
     )
     return common.replace(block_table_tensor=torch.cat([block_table, extra], dim=1))
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_worker_metadata_builders_keep_state_indices_independent(
+    for_capture, model_name="Qwen/Qwen3.5-0.8B"
+):
+    """Building global PCP metadata must preserve the local builder's state slots."""
+    builder = _create_gdn_builder(full_cuda_graph=True, model_name=model_name)
+    spec = builder.kv_cache_spec
+    group = AttentionGroup(
+        GDNAttentionBackend,  # type: ignore[type-abstract]
+        ["layer.0"],
+        spec,
+        0,
+    )
+    group.create_metadata_builders(builder.vllm_config, DEVICE, num_metadata_builders=2)
+    cache_group = new_kv_cache_group(["layer.0"], spec)
+    cache_config = KVCacheConfig(
+        num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[cache_group]
+    )
+    common = create_common_attn_metadata(BatchSpec([8, 9], [1, 1]), BLOCK_SIZE, DEVICE)
+
+    def build(builder_idx, state_slots):
+        return build_attn_metadata(
+            attn_groups=[[group]],
+            num_reqs=2,
+            num_tokens=2,
+            query_start_loc_gpu=common.query_start_loc,
+            query_start_loc_cpu=common.query_start_loc_cpu,
+            max_query_len=1,
+            seq_lens=common.seq_lens,
+            max_seq_len=9,
+            block_tables=[torch.tensor(state_slots, dtype=torch.int32)],
+            slot_mappings=common.slot_mapping.unsqueeze(0),
+            kv_cache_config=cache_config,
+            seq_lens_cpu_upper_bound=common.seq_lens_cpu_upper_bound,
+            for_cudagraph_capture=for_capture,
+            metadata_builder_idx=builder_idx,
+        )["layer.0"]
+
+    local = build(0, [[2], [3]])
+    global_metadata = build(1, [[6], [7]])
+    assert local.non_spec_state_indices_tensor.tolist() == [2, 3]
+    assert global_metadata.non_spec_state_indices_tensor.tolist() == [6, 7]
+    build(0, [[4], [5]])
+    assert global_metadata.non_spec_state_indices_tensor.tolist() == [6, 7]
 
 
 def _build(

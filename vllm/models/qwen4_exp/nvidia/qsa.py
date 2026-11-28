@@ -17,7 +17,7 @@ from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -71,7 +71,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
+from ..common.qsa import (
+    PCP_GLOBAL_METADATA_SUFFIX,
+    Qwen4ExpQSAMetadata,
+    Qwen4ExpQSAMetadataBuilder,
+)
 from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_flashinfer import (
@@ -82,6 +86,16 @@ from .ops.qsa_flashinfer import (
 )
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
+
+_PCP_QSA_STREAMS: dict[torch.device, torch.cuda.Stream] = {}
+
+
+def _pcp_qsa_stream(device: torch.device) -> torch.cuda.Stream:
+    stream = _PCP_QSA_STREAMS.get(device)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _PCP_QSA_STREAMS[device] = stream
+    return stream
 
 
 @dataclass
@@ -275,13 +289,16 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        self.use_flashinfer = is_flashinfer_qsa_supported(
-            kv_cache_spec.dtype,
-            self.block_size,
-            block_topk,
-            kv_cache_spec.head_size,
-            num_heads,
-            kv_cache_spec.num_kv_heads,
+        self.use_flashinfer = (
+            is_flashinfer_qsa_supported(
+                kv_cache_spec.dtype,
+                self.block_size,
+                block_topk,
+                kv_cache_spec.head_size,
+                num_heads,
+                kv_cache_spec.num_kv_heads,
+            )
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
         )
         if not self.use_flashinfer:
             return
@@ -416,6 +433,8 @@ class Qwen4ExpQSAImpl(
 ):
     """Run paged sparse GQA with the QSA Triton kernel, or FlashInfer for
     prefill rows on Blackwell."""
+
+    supports_pcp = True
 
     def __init__(
         self,
@@ -698,18 +717,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.decode_context_parallel_size > 1
-        ):
+        if parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError(
-                "Qwen4Exp QSA does not support context parallelism"
+                "Qwen4Exp QSA does not support decode context parallelism"
             )
         if not getattr(config, "is_causal", True):
             raise NotImplementedError("Qwen4Exp QSA requires causal decoder attention")
 
         self.config = config
         self.hidden_size = int(config.hidden_size)
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = int(config.num_attention_heads)
         if self.total_num_heads % tp_size:
@@ -809,6 +826,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             assert isinstance(group, HiSparseMLAIndexGroup)
             index_group = group
         self.index_group = index_group
+        if self.use_pcp and self.index_group is not None:
+            raise NotImplementedError("Qwen4Exp QSA PCP does not support HiSparse")
         self.hisparse_cache = index_group.cache(0) if index_group else None
         self.attn_backend = (
             Qwen4ExpQSAHiSparseBackend if index_group else Qwen4ExpQSABackend
@@ -831,7 +850,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
         self.flashinfer_qsa_supported = (
-            index_group is None
+            not self.use_pcp
+            and index_group is None
             and is_flashinfer_qsa_supported(
                 self.kv_cache_torch_dtype,
                 self.indexer.compress_ratio,
@@ -846,7 +866,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # them take the separate kernels. The fused writer receives an fp8
         # pointer, which Triton cannot lower below sm_89.
         self.use_fused_qsa_prepare = (
-            self.use_fused_qk_norm_rope_gate
+            not self.use_pcp
+            and self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
             and (
                 self.kv_cache_torch_dtype != torch.uint8
@@ -911,6 +932,20 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         return FullAttentionManager.layer_config(spec)
 
+    def _start_pcp_kv_gather(
+        self, key: torch.Tensor, value: torch.Tensor
+    ) -> tuple[torch.cuda.Stream, torch.Tensor, int, int]:
+        stream = _pcp_qsa_stream(key.device)
+        current_stream = torch.cuda.current_stream()
+        key_width = key.shape[1] * key.shape[2]
+        value_width = value.shape[1] * value.shape[2]
+        local_kv = torch.cat((key.flatten(1), value.flatten(1)), dim=-1)
+        stream.wait_stream(current_stream)
+        local_kv.record_stream(stream)
+        with torch.cuda.stream(stream):
+            gathered_kv = get_pcp_group().all_gather(local_kv, dim=0)
+        return stream, gathered_kv, key_width, value_width
+
     @eager_break_during_capture
     def _run_qsa(
         self,
@@ -922,6 +957,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         output: torch.Tensor,
         output_gate: torch.Tensor | None,
         qkv: torch.Tensor,
+        pcp_hidden_restore_idx: torch.Tensor | None,
+        pcp_global_positions: torch.Tensor | None,
+        pcp_kv_gather: tuple[torch.cuda.Stream, torch.Tensor, int, int] | None,
     ) -> None:
         # query/key/value/output_gate are None when the fused prepare runs
         # inside the indexer launch.
@@ -972,6 +1010,15 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             Qwen4ExpQSANvidiaMetadata | Qwen4ExpQSAHiSparseMetadata,
             metadata[self.layer_name],
         )
+        pcp_active = pcp_hidden_restore_idx is not None
+        global_main_metadata = (
+            cast(
+                Qwen4ExpQSANvidiaMetadata,
+                metadata[self.layer_name + PCP_GLOBAL_METADATA_SUFFIX],
+            )
+            if pcp_active
+            else main_metadata
+        )
         if self.kv_cache.numel() == 0:
             raise RuntimeError("QSA main K/V cache is not bound")
 
@@ -1003,6 +1050,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
             block_indices=block_indices,
+            pcp_hidden_restore_idx=pcp_hidden_restore_idx,
+            pcp_global_positions=pcp_global_positions,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
@@ -1010,7 +1059,20 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.index_group.set_logical_topk_ready(0)
         if main_outputs is None:
             assert key is not None and value is not None
-            num_rows = slot_mapping.shape[0]
+            if pcp_active:
+                assert pcp_hidden_restore_idx is not None
+                if pcp_kv_gather is None:
+                    raise RuntimeError("QSA PCP K/V gather was not started")
+                stream, gathered_kv, key_width, value_width = pcp_kv_gather
+                current_stream = torch.cuda.current_stream()
+                current_stream.wait_stream(stream)
+                gathered_kv.record_stream(current_stream)
+                global_kv = gathered_kv[pcp_hidden_restore_idx]
+                key, value = global_kv.split((key_width, value_width), dim=-1)
+                key = key.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
+                value = value.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
+                slot_mapping = global_main_metadata.slot_mapping
+            num_rows = global_main_metadata.num_actual_tokens
             self.impl.do_kv_cache_update(
                 self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
@@ -1031,11 +1093,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             block_indices=block_indices,
             positions=indexer_metadata.logical_positions,
         )
+        if pcp_active and num_tokens < output.shape[0]:
+            output[num_tokens:].zero_()
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        *,
+        pcp_hidden_restore_idx: torch.Tensor | None = None,
+        pcp_global_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if self.fuse_indexer_projection:
@@ -1054,17 +1121,29 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         else:
             # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
             query = key = value = gate = None
+        pcp_kv_gather = None
+        if pcp_hidden_restore_idx is not None:
+            assert key is not None and value is not None
+            pcp_kv_gather = self._start_pcp_kv_gather(key, value)
         attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
-        self._run_qsa(
-            projected_qk,
-            positions,
-            query,
-            key,
-            value,
-            attn_output,
-            gate,
-            qkv,
-        )
+        try:
+            self._run_qsa(
+                projected_qk,
+                positions,
+                query,
+                key,
+                value,
+                attn_output,
+                gate,
+                qkv,
+                pcp_hidden_restore_idx,
+                pcp_global_positions,
+                pcp_kv_gather,
+            )
+        except BaseException:
+            if pcp_kv_gather is not None:
+                torch.cuda.current_stream().wait_stream(pcp_kv_gather[0])
+            raise
         flat_output = attn_output.view(num_tokens, -1)
         output, _ = self.o_proj(flat_output)
         return output

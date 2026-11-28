@@ -27,11 +27,18 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         config: PreTrainedConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        *,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ) -> None:
         super().__init__()
         self.prefix = prefix
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = (
+            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        )
         self.layer_idx = extract_layer_index(prefix)
         self.hidden_size = config.hidden_size
         self.activation = config.hidden_act

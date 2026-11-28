@@ -646,6 +646,8 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             max_tokens, dtype=torch.int32, device=device
         )
         max_requests = vllm_config.scheduler_config.max_num_seqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            max_requests *= 2
         self.request_capacity = max_requests
         if not self.is_circular_buffer and self.compress_ratio != 1:
             max_k_work = (
@@ -750,6 +752,10 @@ class QSAIndexerBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "QWEN4_EXP_QSA_INDEXER"
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls():

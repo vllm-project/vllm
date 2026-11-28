@@ -46,6 +46,15 @@ def test_cp_checks_allow_a_replicated_draft_backend_without_dcp(monkeypatch):
         cp_utils.check_attention_cp_compatibility(config)
 
 
+def test_qwen4_exp_qsa_rope_accepts_empty_rank():
+    from vllm.models.qwen4_exp.nvidia.qsa_indexer import apply_qsa_rope
+
+    tensor = torch.empty(0, 8, 128)
+    positions = torch.empty(3, 0, dtype=torch.int64)
+
+    assert apply_qsa_rope(None, positions, tensor) is tensor
+
+
 def test_skip_gate_only_for_zero_context():
     assert should_skip_dcp_context_attention(torch.zeros(3, dtype=torch.int32))
     assert not should_skip_dcp_context_attention(

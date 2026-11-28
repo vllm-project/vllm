@@ -104,6 +104,7 @@ def _store_rotated(dst, y, o1, o2, scale):
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
+        "num_q_tokens",
         "num_state_blocks",
         "num_compressed_blocks",
         "num_k_work",
@@ -117,6 +118,9 @@ def _qsa_prepare_kernel(
     pos_ptr,
     pos_stride_axis,
     pos_stride_token,
+    q_pos_ptr,
+    q_pos_stride_axis,
+    q_pos_stride_token,
     cos_sin_ptr,
     q_norm_weight_ptr,
     k_norm_weight_ptr,
@@ -138,6 +142,7 @@ def _qsa_prepare_kernel(
     compressed_cache_stride_block,
     compressed_cache_stride_token,
     num_tokens,
+    num_q_tokens,
     num_state_blocks,
     num_compressed_blocks,
     num_k_work,
@@ -171,10 +176,13 @@ def _qsa_prepare_kernel(
     MAIN_HK: tl.constexpr,
     MAIN_D: tl.constexpr,
     MAIN_PAGE_SIZE: tl.constexpr,
+    FUSE_MAIN: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(HQ, TILE_H_Q)
-    if pid >= num_index_work:
+    num_index_work = num_k_work + tl.cdiv(num_q_tokens, TILE_T_Q) * tl.cdiv(
+        HQ, TILE_H_Q
+    )
+    if FUSE_MAIN and pid >= num_index_work:
         # Main attention: one program per (token, Q or KV head) after the
         # indexer work. RoPE covers the first D // 2 dims, the width of the
         # shared cos/sin table.
@@ -244,7 +252,7 @@ def _qsa_prepare_kernel(
         head_tile = q_pid % num_head_tiles
         tokens = (token_tile * TILE_T_Q + tl.arange(0, TILE_T_Q)).to(tl.int64)
         heads = head_tile * TILE_H_Q + tl.arange(0, TILE_H_Q)
-        valid_tokens = tokens < num_tokens
+        valid_tokens = tokens < num_q_tokens
         valid_heads = heads < HQ
         dims = tl.arange(0, D)
         mask = valid_tokens[:, None, None] & valid_heads[None, :, None]
@@ -256,15 +264,17 @@ def _qsa_prepare_kernel(
             mask=mask,
             other=0.0,
         )
-        pos_t = tl.load(pos_ptr + tokens * pos_stride_token, mask=valid_tokens, other=0)
+        pos_t = tl.load(
+            q_pos_ptr + tokens * q_pos_stride_token, mask=valid_tokens, other=0
+        )
         if IS_2D_POSITIONS:
             pos_h = tl.load(
-                pos_ptr + pos_stride_axis + tokens * pos_stride_token,
+                q_pos_ptr + q_pos_stride_axis + tokens * q_pos_stride_token,
                 mask=valid_tokens,
                 other=0,
             )
             pos_w = tl.load(
-                pos_ptr + 2 * pos_stride_axis + tokens * pos_stride_token,
+                q_pos_ptr + 2 * q_pos_stride_axis + tokens * q_pos_stride_token,
                 mask=valid_tokens,
                 other=0,
             )
@@ -522,31 +532,27 @@ def qsa_prepare(
     compress_ratio: int,
     mrope_section: tuple[int, int, int] | None,
     rope_pos_offset: int | None,
-    main_qkv: torch.Tensor,
-    main_q_norm_weight: torch.Tensor,
-    main_k_norm_weight: torch.Tensor,
-    main_eps: float,
-    main_kv_cache: torch.Tensor,
-    main_slot_mapping: torch.Tensor,
-    main_k_scale: float,
-    main_v_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    key_positions: torch.Tensor | None = None,
+    main_qkv: torch.Tensor | None = None,
+    main_q_norm_weight: torch.Tensor | None = None,
+    main_k_norm_weight: torch.Tensor | None = None,
+    main_eps: float = 1e-6,
+    main_kv_cache: torch.Tensor | None = None,
+    main_slot_mapping: torch.Tensor | None = None,
+    main_k_scale: float = 1.0,
+    main_v_scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Normalize Q, compress K, then update the circular raw state.
 
-    Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its Q and gate.
+    `key_positions` allows PCP to prepare local Q and global K in one launch.
+    When `main_qkv` is supplied, also prepare the main Q/gate and write its K/V.
     """
-    num_tokens = q.shape[0]
-    main_head_dim = main_kv_cache.shape[-1] // 2
-    num_main_kv_heads = main_kv_cache.shape[2]
-    num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
-    main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
-    main_gate_out = torch.empty_like(main_q_out)
-    if num_tokens == 0:
-        return main_q_out, main_gate_out
+    num_q_tokens = q.shape[0]
+    num_tokens = k.shape[0]
     num_q_heads, head_dim = q_out.shape[1:]
     assert cos_sin_cache.shape[-1] * 2 == head_dim
-    assert q.shape == (num_tokens, num_q_heads * head_dim)
+    assert q.shape == (num_q_tokens, num_q_heads * head_dim)
+    assert q_out.shape == (num_q_tokens, num_q_heads, head_dim)
     assert k.shape == (num_tokens, head_dim)
     assert q.stride(-1) == 1
     assert k.stride(-1) == 1
@@ -560,34 +566,72 @@ def qsa_prepare(
     cache_has_rope_pos = rope_pos_offset is not None
     assert rope_pos_offset is None or rope_pos_offset == head_dim
     if is_2d_positions:
-        assert positions.shape == (3, num_tokens)
+        assert positions.shape == (3, num_q_tokens)
         assert is_k_mrope
-        pos_stride_axis, pos_stride_token = positions.stride()
+        q_pos_stride_axis, q_pos_stride_token = positions.stride()
     else:
-        assert positions.shape == (num_tokens,)
-        pos_stride_axis, pos_stride_token = 0, positions.stride(0)
+        assert positions.shape == (num_q_tokens,)
+        q_pos_stride_axis, q_pos_stride_token = 0, positions.stride(0)
+    if key_positions is None:
+        key_positions = positions
+    assert key_positions.shape == (
+        (3, num_tokens) if is_2d_positions else (num_tokens,)
+    )
+    if is_2d_positions:
+        pos_stride_axis, pos_stride_token = key_positions.stride()
+    else:
+        pos_stride_axis, pos_stride_token = 0, key_positions.stride(0)
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
-    qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
-    assert main_qkv.shape == (num_tokens, qkv_width)
-    assert main_qkv.stride(-1) == 1
-    assert main_slot_mapping.shape == (num_tokens,)
+    fuse_main = main_qkv is not None
+    if fuse_main:
+        assert main_qkv is not None
+        assert num_tokens == num_q_tokens and key_positions is positions
+        assert main_kv_cache is not None and main_slot_mapping is not None
+        assert main_q_norm_weight is not None and main_k_norm_weight is not None
+        main_head_dim = main_kv_cache.shape[-1] // 2
+        num_main_kv_heads = main_kv_cache.shape[2]
+        num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
+        qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
+        assert main_qkv.shape == (num_tokens, qkv_width)
+        assert main_qkv.stride(-1) == 1
+        assert main_slot_mapping.shape == (num_tokens,)
+        main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
+        main_gate_out = torch.empty_like(main_q_out)
+    else:
+        # These pointers are unused in the indexer-only specialization.
+        main_qkv = q
+        main_q_norm_weight = q_norm_weight
+        main_k_norm_weight = k_norm_weight
+        main_kv_cache = compressed_cache
+        main_slot_mapping = compressed_slots
+        main_q_out = main_gate_out = q_out
+        main_head_dim, num_main_q_heads, num_main_kv_heads = head_dim, num_q_heads, 1
+    if num_tokens == 0:
+        return (main_q_out, main_gate_out) if fuse_main else None
 
-    if num_tokens <= 4096:
+    if num_q_tokens <= 4096:
         TILE_T_Q, TILE_H_Q = 2, 2
     else:
         TILE_T_Q, TILE_H_Q = 2, 4
     num_k_work = k_work_metadata.shape[0]
-    num_q_work = triton.cdiv(num_tokens, TILE_T_Q) * triton.cdiv(num_q_heads, TILE_H_Q)
-    num_main_work = num_tokens * (num_main_q_heads + num_main_kv_heads)
+    num_q_work = triton.cdiv(num_q_tokens, TILE_T_Q) * triton.cdiv(
+        num_q_heads, TILE_H_Q
+    )
+    num_main_work = (
+        num_tokens * (num_main_q_heads + num_main_kv_heads) if fuse_main else 0
+    )
     _qsa_prepare_kernel[(num_k_work + num_q_work + num_main_work,)](
         q,
         q.stride(0),
         k,
         k.stride(0),
-        positions,
+        key_positions,
         pos_stride_axis,
         pos_stride_token,
+        positions,
+        q_pos_stride_axis,
+        q_pos_stride_token,
         cos_sin_cache,
         q_norm_weight,
         k_norm_weight,
@@ -609,6 +653,7 @@ def qsa_prepare(
         compressed_cache.stride(0),
         compressed_cache.stride(1),
         num_tokens,
+        num_q_tokens,
         state_cache.shape[0],
         compressed_cache.shape[0],
         num_k_work,
@@ -642,9 +687,10 @@ def qsa_prepare(
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
+        FUSE_MAIN=fuse_main,
         num_warps=1,
     )
-    return main_q_out, main_gate_out
+    return (main_q_out, main_gate_out) if fuse_main else None
 
 
 __all__ = ["qsa_prepare"]

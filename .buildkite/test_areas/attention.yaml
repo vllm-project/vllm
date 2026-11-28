@@ -13,6 +13,7 @@ steps:
     - vllm/model_executor/layers/attention
     - vllm/model_executor/layers/sparse_attn_indexer.py
     - vllm/v1/attention
+    - vllm/v1/worker/gpu/attn_utils.py
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/models/hy_v4/nvidia/flashmla_sparse.py
     - vllm/v1/hisparse/
@@ -37,6 +38,7 @@ steps:
       - vllm/model_executor/layers/attention
       - vllm/model_executor/layers/dash_attention.py
       - vllm/v1/attention
+      - vllm/v1/worker/gpu/attn_utils.py
       - vllm/models/glm5next/amd/ops/kpool_compress.py
       - tests/v1/attention
       - vllm/_aiter_ops.py
@@ -82,6 +84,7 @@ steps:
     - vllm/model_executor/layers/attention
     - vllm/model_executor/layers/sparse_attn_indexer.py
     - vllm/v1/attention
+    - vllm/v1/worker/gpu/attn_utils.py
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
@@ -102,6 +105,7 @@ steps:
       - vllm/model_executor/layers/attention
       - vllm/model_executor/layers/dash_attention.py
       - vllm/v1/attention
+      - vllm/v1/worker/gpu/attn_utils.py
       - vllm/models/glm5next/amd/ops/kpool_compress.py
       - tests/v1/attention
       - vllm/_aiter_ops.py
