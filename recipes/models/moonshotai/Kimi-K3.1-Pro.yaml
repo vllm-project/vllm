@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
+  performance_headline: "TP8 on two GB300 trays, one B300 node, one MI355X node, or one MI325X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -20,6 +20,7 @@ meta:
     810e: verified
     m890: verified
     ironwood: supported
+    mi325x: verified
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
@@ -84,6 +85,9 @@ features:
     # is gated off on TPU until it lands.
     hardware:
       ironwood: unsupported
+      # The generic DSpark config has no ROCm draft backend, and the target
+      # KV here is fp8_ds_mla. DSpark under DCP on gfx942 is still #64261.
+      mi325x: unsupported
   text_only:
     description: "Skip the vision encoder for text-only workloads; frees its memory for KV cache."
     # Always on in the TPU override (the TPU path is text-only), so the toggle
@@ -110,6 +114,8 @@ features:
       ppu: unsupported
       # The fused decode path has CUDA and ROCm kernels only.
       ironwood: unsupported
+      # FlyDSL latency_specialized kernels are gfx950-only (#60997 adds gfx942).
+      mi325x: unsupported
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
@@ -120,6 +126,7 @@ features:
       ppu: unsupported
       # NVFP4 is a Blackwell format; TPU serves with FP8 KV cache.
       ironwood: unsupported
+      mi325x: unsupported
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
@@ -152,7 +159,7 @@ variants:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, gb200, vr200, mi355x, 810e, m890, ironwood]
+    supported_hardware: [b300, gb300, gb200, vr200, mi355x, mi325x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -199,6 +206,12 @@ variants:
           - "fp8"
           - "--async-scheduling"
           - "--enable-prefix-caching"
+      # Outside the vllm org: main and the generic kimi-k31 ROCm image do not
+      # run fp8_ds_mla on gfx942. The image's entrypoint is `vllm`, not
+      # `vllm serve`, same as the MI355X ROCm image.
+      mi325x:
+        docker_image: "amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942"
+        docker_serve_command: "serve"
 
 compatible_strategies:
   - single_node_tp
@@ -224,18 +237,22 @@ strategy_hardware:
   single_node_tep:
     810e: unsupported
     m890: unsupported
+    # Selects deep_gemm_mega_moe and NVLink one-sided all-to-all.
+    mi325x: unsupported
   multi_node_tp:
     810e: unsupported
     m890: unsupported
     # TPU offers only TP+EP (the validated layout); plain multi-node TP is
     # not offered there.
     ironwood: unsupported
+    mi325x: unsupported
   # PD disaggregation has not been validated on TPU, and the default NIXL
   # connector is CUDA-oriented.
   pd_cluster:
     810e: unsupported
     m890: unsupported
     ironwood: unsupported
+    mi325x: unsupported
 
 # One B300 or MI355X node (8 GPUs) or two GB300 / VR200 trays (2 x 4 GPUs) hold the checkpoint.
 strategy_min_gpus:
@@ -2642,13 +2659,15 @@ presets:
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
 
-# DCP8 over the TP8 group (one B300 node or two GB300 trays); on GB300 also
-# DCP16 over a TP16 group of four trays (the AgentX concurrency-1 preset).
+# DCP8 over the TP8 group (one B300 node, two GB300 trays, or one MI325X
+# node); on GB300 also DCP16 over a TP16 group of four trays (the AgentX
+# concurrency-1 preset).
 decode_context_parallel:
   sizes:
     b300: [8]
     gb300: [8, 16]
     gb200: [8, 16]
+    mi325x: [8]
   match_tp: true
 
 strategy_overrides:
@@ -2700,6 +2719,11 @@ strategy_overrides:
           DEEPEP_COMBINE_TOKEN_BALANCED: "1"
   # B300 TP8: the KV cache can't hold the default 1,024 sequences, and
   # FlashInfer autotuning adds about two hours to startup.
+  # gfx942 (8x MI325X), single-node TP8. Stacked on hardware_overrides.amd,
+  # which already sets AITER, fast safetensors, breakable graphs, the ready
+  # timeout and SiTUv2=1 (a4w4, the same as the unset auto default). The
+  # scored runs set those four and did not set SiTUv2. This block only adds
+  # INT6 quick all-reduce.
   single_node_tp:
     hardware_overrides:
       b300:
@@ -2707,6 +2731,29 @@ strategy_overrides:
           - "--max-num-seqs"
           - "128"
           - "--no-enable-flashinfer-autotune"
+      mi325x:
+        extra_args:
+          - "--mm-encoder-tp-mode"
+          - "data"
+          - "--decode-context-parallel-size"
+          - "8"
+          - "--dcp-comm-backend"
+          - "a2a"
+          - "--max-model-len"
+          - "135168"
+          # K3.1 keeps per-sequence KDA state. The default of 1024 is more
+          # than the state slots this node has (604 with prefix caching on),
+          # and startup aborts before serving. 64 was verified to start.
+          - "--max-num-seqs"
+          - "64"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--quantization-config"
+          - '{"moe":{"weight":"int4_per_group_32"}}'
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+        extra_env:
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
   # TEP on one B300 node: experts on MegaMoE, which dispatches tokens over
   # NVLink one-sided all-to-all.
   single_node_tep:
@@ -2747,6 +2794,36 @@ notes:
   - title: "Text-only on TPU"
     when: { hardware: [ironwood] }
     body: "TPU serving runs through vllm-torchtpu, which does not load the vision tower for K3.1 — the command always carries `--language-model-only` and image/video are disabled."
+  - title: "MI325X serves a lossy INT4 requant of the MXFP4 experts"
+    when: { hardware: [mi325x] }
+    body: |
+      `--quantization-config '{"moe":{"weight":"int4_per_group_32"}}'`
+      requantizes the routed experts from MXFP4 to groupwise INT4 at load.
+      Attention, the shared experts and the vision tower stay BF16. The
+      scored run used checkpoint revision
+      `6d0a0202956796543364d666ab19c6ad1a494ee1`.
+
+      Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. The
+      generic `kimi-k31` ROCm image does not run this configuration on gfx942.
+      The nightly will once it has vllm-project/vllm#66769 and pins an AITER
+      that includes ROCm/aiter#7510 (no AITER release has it yet).
+
+      MI325X is single-node TP8 with DCP8 (`a2a`) and `--max-num-seqs 64`.
+      The default of 1024 does not start: it exceeds the KDA state slots.
+      Speculative decoding is off: the toggle would render the generic DSpark
+      config, which has no ROCm draft backend, and DSpark under DCP on gfx942
+      is still open (vllm-project/vllm#64261). The tool-call parser is on by
+      default in this recipe and was not in that command either.
+
+troubleshooting:
+  - title: "fp8_ds_mla requires gfx950 on the generic image"
+    when: { hardware: [mi325x] }
+    body: |
+      Startup raises `NotImplementedError: ROCM_AITER_MLA_SPARSE with
+      kv_cache_dtype=fp8_ds_mla requires gfx950 (aiter Triton
+      sparse_mla_fwd, fp8_dsv32_mla layout).` That is the error from main
+      and from the generic `kimi-k31` ROCm image. Use
+      `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`.
 
 guide: |
   ## Overview
@@ -2777,6 +2854,17 @@ guide: |
   concurrency, all with the K3.1 DSpark draft: plain TP8 with GPU KV and the low-latency decode
   backend at concurrency 1, DCP8 with GPU KV and the low-latency decode backend at 4, and DCP8
   with host KV offload from 16 to 48. It needs the image the preset pins.
+
+  On MI325X (gfx942), one 8-GPU node runs TP8 with DCP8 from
+  `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`, with the routed experts requantized online
+  to groupwise INT4 and the KV cache in `fp8_ds_mla`.
+
+  - **Accuracy.** INT6 quick all-reduce is lossy and may lower accuracy slightly. In our runs
+    it matched BF16 all-reduce on GSM8K (0.977) and on passkey retrieval up to 120k. Set
+    `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE` for BF16 all-reduce.
+  - **Performance.** About 240 output tok/s at 2k input and concurrency 8. INT6 cuts time to
+    first token by about 5% on long prompts, and DCP8 grows the KV cache from 1.5M to 8.3M
+    tokens for a few percent of decode speed.
 
   On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
