@@ -559,10 +559,11 @@ async def get_request(
             # from the trace.
             request_rates.append(0.0)
 
-    start_ts = time.time()
+    # Request offsets are relative to the start of replay.
+    start_ts = time.perf_counter()
     for request_index, request in enumerate(input_requests):
         if delay_ts[request_index] > 0:
-            current_ts = time.time()
+            current_ts = time.perf_counter()
             sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
             if sleep_interval_s > 0:
                 await asyncio.sleep(sleep_interval_s)

@@ -1240,6 +1240,9 @@ vllm bench serve --model Qwen/Qwen3.5-2B \
 
 This will replay the first 100 lines from the trace file `conversation.jsonl`.  
 
+Request arrivals are paced using a monotonic clock, so wall-clock adjustments
+during the run do not change the replay intervals.
+
 </details>
 
 ### 🧪 Hashing Benchmarks
