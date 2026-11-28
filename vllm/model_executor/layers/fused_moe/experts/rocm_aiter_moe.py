@@ -47,6 +47,9 @@ class AiterQuantType(IntEnum):
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
+# Trailing shared-expert columns of the meta buffers that mark, under EP, which
+# rank computes each row's shared experts (0 without EP).
+aiter_topK_ep_shared_cols: int = 0
 
 
 @lru_cache(maxsize=1)
@@ -60,7 +63,7 @@ def init_aiter_topK_meta_data(
     max_num_tokens: int = 32768,
     is_EP: bool = False,
 ):
-    global aiter_topK_meta_data
+    global aiter_topK_meta_data, aiter_topK_ep_shared_cols
     fake_expertid = n_routed_experts + n_shared_experts
 
     # all layers reuse same buffer
@@ -100,6 +103,33 @@ def init_aiter_topK_meta_data(
     s_topk_weights.fill_(shared_experts_score)
     assert aiter_topK_meta_data is None, "AITER topK meta data is already initialized"
     aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
+    aiter_topK_ep_shared_cols = n_shared_experts + 1 if is_EP else 0
+
+
+def localize_fused_shared_expert_ids(topk_ids: torch.Tensor) -> torch.Tensor:
+    """Re-mark which dispatched rows this EP rank computes the shared experts
+    for.
+
+    Under EP the meta buffer gives the real shared-expert ids to one rank per
+    row (`row % ep_size`) and a masked sentinel to the others. A dispatch that
+    all-gathers the combined `topk_ids` brings each source rank's marking of its
+    own rows instead, so a gathered token's shared experts would run on every
+    rank or on none. Overwrite those columns with this rank's marking of the
+    gathered rows.
+    """
+    cols = aiter_topK_ep_shared_cols
+    if aiter_topK_meta_data is None or cols == 0:
+        return topk_ids
+    meta_ids = aiter_topK_meta_data[1]
+    if topk_ids.dim() != 2 or topk_ids.shape[1] != meta_ids.shape[1]:
+        return topk_ids
+    rows = topk_ids.shape[0]
+    assert rows <= meta_ids.shape[0], (
+        f"AITER topK meta data supports {meta_ids.shape[0]} rows, "
+        f"but the dispatch gathered {rows}."
+    )
+    topk_ids[:, -cols:] = meta_ids[:rows, -cols:]
+    return topk_ids
 
 
 def inject_shared_expert_weights(
