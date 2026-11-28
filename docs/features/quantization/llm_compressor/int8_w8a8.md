@@ -12,6 +12,36 @@ Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs re
     **Blackwell GPU Limitation**: INT8 is not supported on compute capability >= 10.0 (e.g., RTX 6000 Blackwell).
     Use [FP8 quantization](fp8.md) instead, or run on Hopper/Ada/Ampere architectures.
 
+## RMSNorm and activation quantization fusion
+
+With compilation enabled, setting `pass_config.fuse_norm_quant=True` can fuse native
+RMSNorm (including residual addition) followed by dynamic, symmetric,
+per-token INT8 activation quantization into one CUDA operation. This removes
+the intermediate normalized activation and a separate quantization launch;
+it does not change the selected Linear backend or the weight format.
+
+```bash
+vllm serve <dynamic-per-token-int8-model> -O2 -cc.pass_config.fuse_norm_quant=True
+```
+
+The default is conditional on the optimization level and custom-op/provider
+configuration. Default O2 with native RMSNorm and disabled custom ops does not
+automatically enable this INT8 pattern; use the explicit setting above. Setting
+it to `False` disables this pass. See the [fusion configuration guide](../../../design/fusions.md).
+
+The pattern supports two-dimensional FP16/BF16 activations with a contiguous
+hidden dimension and matching contiguous norm weights. Residuals must be
+contiguous. The hidden size must be static and positive, and the match must also
+pass device and storage-alignment checks. Static or asymmetric INT8 quantization, other RMSNorm providers,
+batch-invariant mode, and precision-cast emulation retain their existing paths.
+Fusion preserves zero and small per-token scales; floating-point reduction
+differences can still change quantized values near rounding boundaries.
+
+To compare the paths, toggle `fuse_norm_quant` in the compilation pass config
+while keeping the model, Linear backend, attention backend, and other
+compilation settings fixed. Performance depends on the workload; removing an
+operator does not guarantee an end-to-end speedup.
+
 ## Prerequisites
 
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:

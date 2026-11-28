@@ -11,6 +11,7 @@ import vllm.plugins
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
@@ -20,6 +21,7 @@ from vllm.compilation.passes.fusion.rms_quant_fusion import (
     RMSNormQuantFusionPass,
 )
 from vllm.compilation.passes.fx_utils import find_auto_fn_maybe
+from vllm.compilation.passes.ir.lowering_pass import VllmIRLoweringPass
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )
@@ -61,6 +63,200 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA INT8 fusion")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("with_residual", [False, True])
+@pytest.mark.parametrize("num_tokens", [32, 128])
+@pytest.mark.parametrize("hidden_size,eps", [(256, 1e-5), (2048, 1e-6), (2051, 1e-6)])
+@torch.inference_mode()
+def test_dynamic_int8_rms_fusion_matches_direct_cuda(
+    dtype, with_residual, num_tokens, hidden_size, eps
+):
+    """Compiler replacement must preserve the CUDA op's codes and residual."""
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    with (
+        vllm.config.set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        norm = RMSNorm(hidden_size, eps=eps, dtype=dtype).cuda()
+
+        def run(x, residual):
+            if with_residual:
+                y, residual = norm(x, residual)
+            else:
+                y = norm(x)
+            q, scale, _ = ops.scaled_int8_quant(y)
+            return q, scale, residual
+
+        fusion = RMSNormQuantFusionPass(config)
+        backend = TestBackend(
+            fusion,
+            PostCleanupPass(config),
+            VllmIRLoweringPass(config),
+            FixFunctionalizationPass(config),
+        )
+        torch.manual_seed(60499)
+        x = torch.randn((num_tokens, hidden_size), device="cuda", dtype=dtype)
+        x[0].zero_()
+        x[1].mul_(1e-7)
+        x[2].mul_(1000)
+        residual = x * 0.5
+        result = torch.compile(run, backend=backend, fullgraph=True)(
+            x.clone(), residual.clone()
+        )
+        assert fusion.matched_count == 1
+        assert backend.op_count(torch.ops._C.dynamic_scaled_int8_quant.default) == 0
+        fused_op = torch.ops._C.rms_norm_dynamic_per_token_quant.default
+        q = torch.empty_like(x, dtype=torch.int8)
+        scale = torch.empty((num_tokens, 1), device="cuda", dtype=torch.float32)
+        expected_residual = residual.clone()
+        fused_op(
+            result=q,
+            input=x,
+            weight=norm.weight,
+            scale=scale,
+            epsilon=eps,
+            scale_ub=None,
+            residual=expected_residual if with_residual else None,
+        )
+        torch.testing.assert_close(
+            result, (q, scale, expected_residual), rtol=0, atol=0
+        )
+        assert torch.isfinite(scale).all()
+        assert not q[0].any()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA INT8 fusion")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("with_residual", [False, True])
+@pytest.mark.parametrize("weight_scale", [0.0, 2**-20])
+@torch.inference_mode()
+def test_dynamic_int8_rms_fusion_matches_unfused_small_scales(
+    dtype, with_residual, weight_scale
+):
+    """Compare the replacement with the graph it replaces, not the fused op."""
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    with (
+        vllm.config.set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        norm = RMSNorm(2048, eps=1e-6, dtype=dtype).cuda()
+        norm.weight.fill_(weight_scale)
+
+        def run(x, residual):
+            if with_residual:
+                y, residual = norm(x, residual)
+            else:
+                y = norm(x)
+            q, scale, _ = ops.scaled_int8_quant(y)
+            return q, scale, residual
+
+        before = TestBackend(
+            PostCleanupPass(config),
+            VllmIRLoweringPass(config),
+            FixFunctionalizationPass(config),
+        )
+        fusion = RMSNormQuantFusionPass(config)
+        after = TestBackend(
+            fusion,
+            PostCleanupPass(config),
+            VllmIRLoweringPass(config),
+            FixFunctionalizationPass(config),
+        )
+        x = torch.ones((32, 2048), device="cuda", dtype=dtype)
+        residual = x.clone()
+        expected = torch.compile(run, backend=before, fullgraph=True)(
+            x.clone(), residual.clone()
+        )
+        result = torch.compile(run, backend=after, fullgraph=True)(
+            x.clone(), residual.clone()
+        )
+        assert fusion.matched_count == 1
+        assert before.op_count(torch.ops._C.dynamic_scaled_int8_quant.default) == 1
+        assert after.op_count(torch.ops._C.dynamic_scaled_int8_quant.default) == 0
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA INT8 fusion")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "strided_input",
+        "strided_residual",
+        "unaligned_input",
+        "static",
+        "asymmetric",
+        "batch_invariant",
+        "precision_casts",
+        "other_provider",
+    ],
+)
+@torch.inference_mode()
+def test_dynamic_int8_rms_fusion_preserves_unsupported_graph(case, monkeypatch):
+    """Unsupported layouts or quantization must retain the unfused result."""
+    if case == "batch_invariant":
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            inductor_compile_config={
+                "emulate_precision_casts": case == "precision_casts"
+            },
+        )
+    )
+    if case == "other_provider":
+        config.kernel_config.ir_op_priority.fused_add_rms_norm = ["vllm_c"]
+    with (
+        vllm.config.set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        width = 2048
+        norm = RMSNorm(width, eps=1e-6, dtype=torch.bfloat16).cuda()
+        static_scale = (
+            torch.tensor([0.015625], device="cuda", dtype=torch.float32)
+            if case == "static"
+            else None
+        )
+
+        def run(x, residual):
+            y, residual = norm(x, residual)
+            return (
+                *ops.scaled_int8_quant(
+                    y, scale=static_scale, symmetric=case != "asymmetric"
+                ),
+                residual,
+            )
+
+        fusion = RMSNormQuantFusionPass(config)
+        cleanup = PostCleanupPass(config)
+        lowering = VllmIRLoweringPass(config)
+        before = TestBackend(cleanup, lowering)
+        after = TestBackend(fusion, cleanup, lowering)
+        torch.manual_seed(60499)
+        x = torch.randn((32, width), device="cuda", dtype=torch.bfloat16)
+        if case == "strided_input":
+            x = torch.randn((32, 2 * width), device="cuda", dtype=x.dtype)[:, ::2]
+        elif case == "unaligned_input":
+            x = torch.randn((32 * width + 1,), device="cuda", dtype=x.dtype)[1:]
+            x = x.view(32, width)
+        storage = torch.randn((64, width), device="cuda", dtype=torch.bfloat16)
+        r1 = (
+            storage.clone()[::2] if case == "strided_residual" else storage[:32].clone()
+        )
+        r2 = (
+            storage.clone()[::2] if case == "strided_residual" else storage[:32].clone()
+        )
+        expected = torch.compile(run, backend=before, fullgraph=True)(x, r1)
+        result = torch.compile(run, backend=after, fullgraph=True)(x, r2)
+        assert fusion.matched_count == 0
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
 
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels

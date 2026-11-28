@@ -303,6 +303,47 @@ def test_rms_norm_per_block_quant_batch_invariant(
     )
 
 
+# fp32 inputs show a reduction-order change in the scales; fp16/bf16 rarely
+# do.
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize("hidden_size", [512, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("quant_dtype", [torch.int8, FP8_DTYPE])
+@pytest.mark.parametrize("seed", list(range(4)))
+def test_rms_norm_dynamic_per_token_quant_batch_invariant(
+    hidden_size: int, dtype: torch.dtype, quant_dtype: torch.dtype, seed: int
+):
+    """C++ ``rms_norm_dynamic_per_token_quant`` must be batch invariant across
+    the register-kernel threshold (existing block kept)."""
+    import vllm._custom_ops as ops
+
+    device = torch.device(DEVICE_TYPE)
+    # One launch below the register-kernel threshold (two tokens per SM), one above.
+    num_sms = current_platform.num_compute_units()
+    small_tokens, large_tokens = num_sms, 4 * num_sms
+    torch.manual_seed(seed)
+    rows = torch.randn(large_tokens, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
+
+    def quant(x):
+        return ops.rms_norm_dynamic_per_token_quant(x, weight, 1e-6, quant_dtype)
+
+    out_large, scale_large = quant(rows.clone())
+    out_small, scale_small = quant(rows[:small_tokens].clone())
+    _assert_rows_bit_identical(
+        out_small,
+        out_large[:small_tokens],
+        "rms_norm_dynamic_per_token_quant output depends on num_tokens (block size)",
+    )
+    torch.testing.assert_close(
+        scale_small,
+        scale_large[:small_tokens],
+        rtol=0.0,
+        atol=0.0,
+        msg="rms_norm_dynamic_per_token_quant scales depend on num_tokens (block size)",
+    )
+
+
 @skip_if_not_cuda_alike
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
