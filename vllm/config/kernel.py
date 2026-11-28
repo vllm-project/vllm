@@ -139,6 +139,7 @@ InTreeMoEBackend = Literal[
     "flashinfer_b12x",
     "b12x",
     "flashinfer_moe_ep_mega_deep_gemm",
+    "flashinfer_moe_ep_nosync",
     "marlin",
     "humming",
     "triton_unfused",

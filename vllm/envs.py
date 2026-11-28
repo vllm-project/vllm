@@ -236,6 +236,8 @@ if TYPE_CHECKING:
     VLLM_MOE_LOCALIZE_BACKFILL: bool = False
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
+    VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK: int = 128
+    VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1819,6 +1821,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # fallback. EPLB uses the registered shards instead of the originals.
     "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
+    ),
+    # Maximum tokens per rank for FlashInfer's SM120 MXFP4 nosync workspace and
+    # its fallback threshold. Defaults to 128, preserving the existing behavior.
+    "VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK": lambda: int(
+        os.getenv("VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK", "128")
+    ),
+    # TP-only EP: dispatch each token from one leader rank and mask duplicate
+    # routes on the others, then use the existing TP reduction for partial outputs.
+    "VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.

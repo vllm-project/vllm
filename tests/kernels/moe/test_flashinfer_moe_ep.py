@@ -27,6 +27,7 @@ FlashInfer installed.
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -37,8 +38,13 @@ from tests.distributed.eplb_utils import distributed_run, set_env_vars_and_devic
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM
-from vllm.distributed.parallel_state import ensure_model_parallel_initialized
-from vllm.forward_context import set_forward_context
+from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import (
+    ensure_model_parallel_initialized,
+    set_custom_all_reduce,
+)
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -47,6 +53,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
     sm107_nvfp4_epilogue,
@@ -66,6 +73,11 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
     PassThroughPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
@@ -460,11 +472,14 @@ def _moe_config(
     swiglu_limit: float | None = None,
     *,
     sm90_format: str | None = None,
+    dp_size: int | None = None,
 ) -> FusedMoEConfig:
+    dp_size = world_size if dp_size is None else dp_size
+    assert world_size % dp_size == 0
     parallel = FusedMoEParallelConfig.make(
-        tp_size_=1,
+        tp_size_=world_size // dp_size,
         pcp_size_=1,
-        dp_size_=world_size,
+        dp_size_=dp_size,
         sp_size_=1,
         vllm_parallel_config=vllm_config.parallel_config,
     )
@@ -1359,4 +1374,482 @@ def _adapter_moe(backend: str, geometry: Geometry) -> SimpleNamespace:
         max_num_tokens=MAX_TOKENS_PER_RANK,
         swiglu_limit=10.0,
         routing_method=_routing_method(backend),
+    )
+
+
+def _local_nosync_weights(
+    geometry: Geometry, rank: int, num_local_experts: int, device: torch.device
+) -> dict[str, torch.Tensor]:
+    generator = torch.Generator(device=device).manual_seed(20261121 + rank)
+    weights = {}
+    for expert in range(rank * num_local_experts, (rank + 1) * num_local_experts):
+        for projection in ("w1", "w2", "w3"):
+            name = f"layers.0.ffn.experts.{expert}.{projection}"
+            shape = (
+                (geometry.intermediate_size, geometry.hidden_size // 2)
+                if projection != "w2"
+                else (geometry.hidden_size, geometry.intermediate_size // 2)
+            )
+            weights[f"{name}.weight"] = torch.randint(
+                0, 256, shape, device=device, generator=generator, dtype=torch.uint8
+            )
+            scale_shape = (*shape[:-1], shape[-1] // 16)
+            weights[f"{name}.scale"] = torch.randint(
+                120,
+                124,
+                scale_shape,
+                device=device,
+                generator=generator,
+                dtype=torch.uint8,
+            )
+    return weights
+
+
+class _DeterministicRoutingSimulatorRouter(RoutingSimulatorRouter):
+    def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        weights, ids = torch.topk(router_logits, self.top_k, dim=-1)
+        if indices_type is not None:
+            ids = ids.to(indices_type)
+        return torch.softmax(weights, dim=-1), ids
+
+
+def _nosync_sm120_layer_checks(
+    env: dict[str, str],
+    world_size: int,
+    geometry: Geometry,
+    dp_size: int | None = None,
+    fallback_tokens: int = 129,
+    execution_tokens: int = 64,
+    max_tokens_per_rank: int = 128,
+    dedup_uniform: bool = False,
+    require_custom_ar: bool = False,
+) -> None:
+    dp_size = world_size if dp_size is None else dp_size
+    tp_size = world_size // dp_size
+    set_env_vars_and_device(env)
+    if dedup_uniform:
+        os.environ["VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP"] = "1"
+        set_custom_all_reduce(require_custom_ar)
+    os.environ["VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK"] = str(
+        max_tokens_per_rank
+    )
+    rank = int(env["RANK"])
+    device = torch.device(f"cuda:{rank}")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.data_parallel_size = dp_size
+    vllm_config.parallel_config.data_parallel_rank = rank // tp_size
+    vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.kernel_config.moe_backend = "flashinfer_moe_ep_nosync"
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(tp_size, 1)
+        moe = _moe_config(
+            vllm_config,
+            geometry,
+            world_size,
+            device,
+            "flashinfer_moe_ep_nosync",
+            dp_size=dp_size,
+        )
+        layer = RoutedExperts(
+            layer_name="layers.0.ffn.experts",
+            params_dtype=torch.bfloat16,
+            moe_config=moe,
+            quant_config=Mxfp4Config(),
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            expert_map_manager=ExpertMapManager(
+                max_num_batched_tokens=128,
+                top_k=geometry.top_k,
+                global_num_experts=geometry.num_experts,
+                num_redundant_experts=0,
+                num_expert_group=None,
+                moe_parallel_config=moe.moe_parallel_config,
+                placement_strategy="linear",
+                enable_eplb=False,
+            ),
+        ).to(device)
+        weights = _local_nosync_weights(geometry, rank, moe.num_local_experts, device)
+        loaded = list(
+            layer.load_weights(
+                (
+                    name.removeprefix("layers.0.ffn.experts.").removesuffix(".scale")
+                    + (".weight_scale" if name.endswith(".scale") else ""),
+                    tensor,
+                )
+                for name, tensor in weights.items()
+            )
+        )
+        assert len(loaded) == 6 * moe.num_local_experts
+        raw_scales = layer.w13_weight_scale.clone(), layer.w2_weight_scale.clone()
+        if require_custom_ar:
+            with pytest.raises(ValueError, match="CustomAllreduce"):
+                layer.quant_method.process_weights_after_loading(layer)
+            return
+        if dedup_uniform and dp_size != 1:
+            with pytest.raises(ValueError, match="DP or SP"):
+                layer.quant_method.process_weights_after_loading(layer)
+            return
+        layer.quant_method.process_weights_after_loading(layer)
+        init_workspace_manager(device)
+        if dp_size == 1:
+            os.environ["VLLM_MOE_ROUTING_SIMULATION_STRATEGY"] = "normal_routing"
+            router = _DeterministicRoutingSimulatorRouter(
+                top_k=geometry.top_k,
+                global_num_experts=geometry.num_experts,
+                kernel_routing_method_type=RoutingMethodType.RenormalizeNaive,
+            )
+            runner = MoERunner(
+                layer_name="layers.0.ffn.experts",
+                moe_config=moe,
+                router=router,
+                routed_experts=layer,
+            )
+            if dedup_uniform:
+                torch.manual_seed(20261122)
+            hidden_states = torch.randn(
+                execution_tokens,
+                geometry.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            if dedup_uniform:
+                replicas = [torch.empty_like(hidden_states) for _ in range(world_size)]
+                torch.distributed.all_gather(replicas, hidden_states)
+                assert all(torch.equal(hidden_states, t) for t in replicas)
+            router_logits = torch.zeros(
+                execution_tokens,
+                geometry.num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+
+            def forward() -> torch.Tensor:
+                torch.manual_seed(20261122)
+                return runner.forward(hidden_states, router_logits)
+
+            with (
+                torch.inference_mode(),
+                set_forward_context(
+                    None,
+                    vllm_config,
+                    num_tokens=execution_tokens,
+                    num_tokens_across_dp=None,
+                ),
+            ):
+                torch.manual_seed(20261122)
+                topk_weights, topk_ids = router.select_experts(
+                    hidden_states, router_logits
+                )
+                expected = layer.forward_modular(
+                    hidden_states, topk_weights, topk_ids
+                ).clone()
+                if dedup_uniform:
+                    from dataclasses import replace
+
+                    from flashinfer.moe_ep import (
+                        MoEEpLayer,
+                        PrequantizedMoEWeights,
+                    )
+
+                    leader_output = expected
+                    adapter = layer.quant_method._nosync
+                    mega_layer = adapter._mega_layer
+                    nosync_config = mega_layer._megakernel_config
+                    assert nosync_config.dedup_replicated_inputs
+                    reference = MoEEpLayer(
+                        bootstrap=mega_layer._bootstrap,
+                        fleet_params=mega_layer._fleet_params,
+                        weights=PrequantizedMoEWeights(
+                            w13=layer.w13_weight.view(torch.float4_e2m1fn_x2),
+                            w2=layer.w2_weight.view(torch.float4_e2m1fn_x2),
+                            w13_scale=layer.w13_weight_scale,
+                            w2_scale=layer.w2_weight_scale,
+                        ),
+                        backend=replace(
+                            mega_layer._mega_config,
+                            megakernel=replace(
+                                nosync_config, dedup_replicated_inputs=False
+                            ),
+                            transformed_weights=mega_layer._get_transformed_weights(),
+                        ),
+                    )
+                    reference.warmup()
+                    expected = reference.forward(
+                        adapter._tensors(hidden_states, topk_ids, topk_weights)
+                    ).clone()
+                    reference.destroy()
+                    leader = (
+                        torch.arange(execution_tokens, device=device)
+                        .remainder(world_size)
+                        .eq(rank)
+                    )
+                    assert not leader_output[~leader].any()
+                    reduced = tensor_model_parallel_all_reduce(leader_output)
+                    torch.testing.assert_close(reduced, expected, atol=0, rtol=0)
+                actual = forward()
+                torch.accelerator.synchronize()
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+                expected_graph = actual.clone()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = forward()
+                actual.zero_()
+                graph.replay()
+                torch.accelerator.synchronize()
+                torch.testing.assert_close(actual, expected_graph, atol=0, rtol=0)
+
+            large_hidden = torch.randn(
+                fallback_tokens,
+                geometry.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            large_logits = torch.zeros(
+                fallback_tokens,
+                geometry.num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+            with (
+                torch.inference_mode(),
+                set_forward_context(
+                    None,
+                    vllm_config,
+                    num_tokens=fallback_tokens,
+                    num_tokens_across_dp=None,
+                ),
+            ):
+                topk_weights, topk_ids = router.select_experts(
+                    large_hidden, large_logits
+                )
+                expected = layer.forward_modular(large_hidden, topk_weights, topk_ids)
+                expected = tensor_model_parallel_all_reduce(expected)
+                actual = runner.forward(large_hidden, large_logits)
+                torch.accelerator.synchronize()
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            return
+        method = layer.quant_method
+        transformed = method._nosync._mega_layer._get_transformed_weights()
+        assert transformed.scale_layout == "deepgemm"
+        for name, parameter in (
+            ("w13", layer.w13_weight),
+            ("w2", layer.w2_weight),
+            ("w13_scale", layer.w13_weight_scale),
+            ("w2_scale", layer.w2_weight_scale),
+        ):
+            assert getattr(transformed, name).data_ptr() == parameter.data_ptr()
+        for actual, raw in (
+            (transformed.w13_scale, raw_scales[0]),
+            (transformed.w2_scale, raw_scales[1]),
+        ):
+            expected = (
+                raw.reshape(raw.shape[0], raw.shape[1], -1, 4)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view(torch.uint8)
+            )
+            assert torch.equal(actual.flatten(), expected.flatten())
+
+        hidden_states = torch.randn(
+            129, geometry.hidden_size, dtype=torch.bfloat16, device=device
+        )
+        topk_ids = (
+            torch.arange(129 * geometry.top_k, dtype=torch.int64, device=device)
+            .remainder(geometry.num_experts)
+            .view(129, geometry.top_k)
+        )
+        topk_weights = torch.full_like(topk_ids, 0.5, dtype=torch.float32)
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=129,
+            num_tokens_across_dp=torch.full(
+                (world_size,), 129, dtype=torch.int32, device="cpu"
+            ),
+        ):
+            assert not method._nosync.should_use(64)
+            dp_metadata = get_forward_context().dp_metadata
+            assert dp_metadata is not None
+            with dp_metadata.sp_local_sizes(1, pcp_size=1, use_ep=True):
+                actual = method.apply(
+                    layer, hidden_states, topk_weights, topk_ids, None, None
+                )
+                expected = method.moe_kernel.apply(
+                    hidden_states=hidden_states,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation=layer.activation,
+                    global_num_experts=geometry.num_experts,
+                    apply_router_weight_on_input=False,
+                    expert_map=layer.expert_map,
+                    shared_experts=None,
+                    shared_experts_input=None,
+                )
+        torch.accelerator.synchronize()
+        assert torch.equal(actual, expected)
+        with (
+            pytest.raises(RuntimeError, match="DP token metadata"),
+            torch.cuda.graph(torch.cuda.CUDAGraph()),
+        ):
+            method._nosync.should_use(64)
+        method._nosync.destroy()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_scale_lifetime_and_dp_fallback():
+    """Borrow final packed scales and use a global DP bound for fallback."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(_nosync_sm120_layer_checks, world_size, geometry)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_tp_only_output_is_not_reduced_twice():
+    """TP-only nosync must not repeat reduction of its complete expert output."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(_nosync_sm120_layer_checks, dp_size=1), world_size, geometry
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_tp_fallback_keeps_tp_allreduce():
+    """The DeepGEMM fallback must retain TP all-reduce on the same adapter."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(_nosync_sm120_layer_checks, dp_size=1), world_size, geometry
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_tp_token_limit_fallback():
+    """A smaller token limit must retain the correctly reduced DeepGEMM fallback."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(
+            _nosync_sm120_layer_checks,
+            dp_size=1,
+            fallback_tokens=65,
+            max_tokens_per_rank=64,
+        ),
+        world_size,
+        geometry,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_tp_dedup():
+    """Leader masking must remove duplicate work and preserve the full runner output."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Need at least two GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(_nosync_sm120_layer_checks, dp_size=1, dedup_uniform=True),
+        2,
+        geometry,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120 nosync MoE requires SM120 GPUs",
+)
+def test_nosync_sm120_tp_capacity_192():
+    """Run fused dedup at 192 tokens and retain DeepGEMM at 193 tokens."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Need at least two GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(
+            _nosync_sm120_layer_checks,
+            dp_size=1,
+            dedup_uniform=True,
+            execution_tokens=192,
+            fallback_tokens=193,
+            max_tokens_per_rank=192,
+        ),
+        2,
+        geometry,
+    )
+
+
+@pytest.mark.parametrize(
+    "dp_size, require_custom_ar",
+    [(1, True), (None, False)],
+    ids=["custom_ar", "nonuniform_dp"],
+)
+def test_nosync_sm120_tp_dedup_rejects_unsupported_inputs(
+    dp_size: int | None, require_custom_ar: bool
+):
+    """Reject unsupported routing and reduction backends before kernel launch."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Need at least two GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(
+            _nosync_sm120_layer_checks,
+            dp_size=dp_size,
+            dedup_uniform=True,
+            require_custom_ar=require_custom_ar,
+        ),
+        2,
+        geometry,
     )

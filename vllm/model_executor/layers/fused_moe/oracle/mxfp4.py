@@ -192,6 +192,7 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
     FLASHINFER_MOE_EP_DEEP_GEMM = "FLASHINFER_MOE_EP_DEEP_GEMM"
+    FLASHINFER_MOE_EP_NOSYNC = "FLASHINFER_MOE_EP_NOSYNC"
 
 
 # Backends that share the same TRTLLM weight format
@@ -228,7 +229,10 @@ def backend_to_kernel_cls(
 
         return [B12xExperts]
 
-    elif backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    elif backend in (
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC,
+    ):
         from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
             DeepGemmFP4Experts,
         )
@@ -398,6 +402,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "flashinfer_moe_ep_mega_deep_gemm": [
             Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM
         ],
+        "flashinfer_moe_ep_nosync": [Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC],
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
@@ -494,7 +499,10 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
 
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     """Map backend to its activation key (FP8, MXFP8, or None for BF16)."""
-    if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    if backend in (
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC,
+    ):
         return kFp8Dynamic128Sym
     if backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
         return kMxfp8Dynamic
@@ -884,6 +892,9 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).
         intermediate_size = round_up(intermediate_size, OCP_MX_BLOCK_SIZE)
         hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
+    elif backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC:
+        intermediate_size = round_up(intermediate_size, 256)
+        hidden_size = round_up(hidden_size, 256)
     elif backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         # DeepGEMM requires M/N/K alignment
         intermediate_size = round_up(intermediate_size, 128)
@@ -1639,7 +1650,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC,
+    ):
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
             w2_weight,
@@ -2148,7 +2162,10 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
-    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC,
+    ):
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             GroupShape,
         )

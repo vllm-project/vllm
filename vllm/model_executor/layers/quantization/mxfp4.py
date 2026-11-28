@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -49,6 +50,11 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_nosync import (
+        FlashInferNosyncMoe,
+    )
 
 logger = init_logger(__name__)
 
@@ -659,6 +665,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
+        self._nosync: FlashInferNosyncMoe | None = None
+        self._nosync_output_is_reduced = False
         if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
             from vllm._aiter_ops import rocm_aiter_ops
 
@@ -700,6 +708,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     @property
     def supports_eplb(self) -> bool:
         return True
+
+    @property
+    def output_is_reduced(self) -> bool:
+        return self._nosync_output_is_reduced or super().output_is_reduced
 
     @property
     def skip_forward_padding(self) -> bool:
@@ -969,6 +981,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
+        if self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_NOSYNC:
+            from vllm.model_executor.layers.fused_moe.experts.flashinfer_nosync import (
+                FlashInferNosyncMoe,
+            )
+
+            if self._nosync is not None:
+                self._nosync.destroy()
+            self._nosync = FlashInferNosyncMoe(
+                self.moe,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            )
+
         # Build quant config
         self._build_moe_kernel(layer)
 
@@ -1114,6 +1141,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
+        self._nosync_output_is_reduced = False
+        if (
+            self._nosync is not None
+            and not layer.apply_router_weight_on_input
+            and self._nosync.should_use(x.shape[0])
+        ):
+            self._nosync_output_is_reduced = not self._nosync.dedup_uniform
+            return self._nosync(x, topk_ids, topk_weights)
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
