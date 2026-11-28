@@ -18,6 +18,7 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
+    maybe_dequant_wo_a,
     rope_quant_attn_out,
     rope_quant_unsupported_reason,
 )
@@ -231,6 +232,11 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         if self._fuse_rope_quant:
             return rope_quant_attn_out(num_tokens, hidden_states.device)
         return super()._alloc_attn_out(num_tokens, hidden_states)
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        maybe_dequant_wo_a(self.wo_a)
+        # __init__ chose RopeQuant against the FP8 wo_a before loading.
+        self._fuse_rope_quant &= self.wo_a.weight.dtype == torch.float8_e4m3fn
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
@@ -636,6 +642,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return pad_to_supported_q_heads(num_heads)
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        maybe_dequant_wo_a(self.wo_a)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         z = self.wo_a.grouped_forward(
