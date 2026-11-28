@@ -83,12 +83,25 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEHostStagedEmbedding):
             name: torch.empty_like(host).view(torch.uint8).flatten(0, 1)
             for name, (_, host) in self._planes.items()
         }
-        self._dummy = get_current_vllm_config().load_config.load_format == "dummy"
+        vllm_config = get_current_vllm_config()
+        self._dummy = vllm_config.load_config.load_format == "dummy"
+        engram_config = vllm_config.engram_config
+        self._reader = (
+            engram_config.disk_offload_reader if engram_config else "buffered"
+        )
+        self._reader_threads = (
+            engram_config.disk_offload_threads if engram_config else 1
+        )
+        self._reader_queue_depth = (
+            engram_config.disk_offload_queue_depth if engram_config else 1
+        )
         self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
         self._shard_size = 0
         self._bound = False
         self._fds: dict[str, int] = {}
         self._sources: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        # Per plane: each shard's O_DIRECT fd, when the span reader is in use.
+        self._direct_fds: dict[str, torch.Tensor] = {}
 
     def allocate_embedding_weight(
         self,
@@ -146,6 +159,44 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEHostStagedEmbedding):
             self._sources[name] = (fds, bases)
         self._shards.clear()
         self._bound = True
+        if self._reader != "buffered":
+            self._open_direct()
+
+    def _open_direct(self) -> None:
+        """Reopen the shard files with O_DIRECT for the batched span reader.
+
+        In "auto" mode, falls back to the buffered reads when the extension
+        or O_DIRECT is unavailable; an explicit reader raises instead.
+        """
+        direct: dict[int, int] = {}
+        try:
+            from vllm import fs_io_C
+
+            backend = fs_io_C.read_spans_init(
+                self._reader_threads,
+                self._reader_queue_depth,
+                self._reader != "pread",
+            )
+            if self._reader == "io_uring" and backend != "io_uring":
+                raise OSError("io_uring is unavailable (kernel or seccomp)")
+            for path, fd in self._fds.items():
+                direct[fd] = os.open(path, os.O_RDONLY | os.O_DIRECT)
+        except (ImportError, OSError) as e:
+            for fd in direct.values():
+                os.close(fd)
+            if self._reader != "auto":
+                raise ValueError(
+                    f"PLE disk_offload_reader={self._reader!r} is unavailable: {e}"
+                ) from e
+            logger.warning_once("PLE disk offload reads through the page cache: %s", e)
+            return
+        for name, (fds, _) in self._sources.items():
+            self._direct_fds[name] = torch.tensor([direct[fd] for fd in fds.tolist()])
+        logger.info_once(
+            "PLE disk offload reads rows with O_DIRECT (%s, %d threads)",
+            backend,
+            self._reader_threads,
+        )
 
     def _gather_host_rows(self, ids: torch.Tensor) -> None:
         num_tokens = ids.shape[0]
@@ -175,6 +226,26 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEHostStagedEmbedding):
         fds, bases = self._sources[name]
         page, row_bytes = mmap.PAGESIZE, rows.shape[1]
         start = bases[shard] + local * row_bytes
+        if name in self._direct_fds:
+            from vllm import fs_io_C
+
+            # One batched O_DIRECT read of every row, GIL released.
+            direct = self._direct_fds[name][shard]
+            try:
+                fs_io_C.batch_read_spans(
+                    direct.numpy(), start.numpy(), row_bytes, rows.numpy()
+                )
+            except OSError:
+                # Name a row past the end of its file, as the buffered path does.
+                size = {fd: os.fstat(fd).st_size for fd in set(direct.tolist())}
+                for fd, offset in zip(direct.tolist(), start.tolist()):
+                    if offset + row_bytes > size[fd]:
+                        raise ValueError(
+                            f"PLE shard file {os.readlink(f'/proc/self/fd/{fd}')} "
+                            f"is truncated at offset {offset}"
+                        ) from None
+                raise
+            return
         first, last = start // page, (start + row_bytes - 1) // page
         run = torch.ones_like(first, dtype=torch.bool)
         run[1:] = (first[1:] > last[:-1] + 1) | (shard[1:] != shard[:-1])
