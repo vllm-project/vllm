@@ -62,16 +62,7 @@ class INCConfigParser:
         self._config = config
 
     def resolve(self, layer: "torch.nn.Module", layer_name: str) -> INCLayerConfig:
-        bits, group_size, sym = self._resolve_raw(layer, layer_name)
-        return INCLayerConfig(
-            bits=bits,
-            group_size=group_size,
-            sym=sym,
-            packing_format=self._config.packing_format,
-            backend=self._config.backend,
-            data_type=self._config.data_type,
-            quantized=bits < 16,
-        )
+        return self._resolve_raw(layer, layer_name)
 
     def get_layer_config(
         self, layer: "torch.nn.Module", layer_name: str
@@ -79,9 +70,7 @@ class INCConfigParser:
         layer_config = self.resolve(layer, layer_name)
         return layer_config.bits, layer_config.group_size, layer_config.sym
 
-    def _resolve_raw(
-        self, layer: "torch.nn.Module", layer_name: str
-    ) -> tuple[int, int | tuple[int, int], bool]:
+    def _resolve_raw(self, layer: "torch.nn.Module", layer_name: str) -> INCLayerConfig:
         REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
 
         def is_explicitly_configured(name: str) -> bool:
@@ -103,58 +92,35 @@ class INCConfigParser:
                     continue
             return False
 
-        def get_config(
-            name: str, quantized: bool = True
-        ) -> tuple[int, int | tuple[int, int], bool]:
-            if not self._config.extra_config:
-                return (
-                    self._config.weight_bits if quantized else 16,
-                    self._config.group_size if quantized else -1,
-                    self._config.sym if quantized else True,
-                )
-
-            if name in self._config.extra_config:
-                cfg = self._config.extra_config[name]
-                return (
-                    cfg.get("bits", self._config.weight_bits if quantized else 16),
-                    self._normalize_group_size(
-                        cfg.get(
-                            "group_size",
-                            self._config.group_size if quantized else -1,
-                        )
-                    ),
-                    cfg.get("sym", self._config.sym if quantized else True),
-                )
-
-            regex_special_chars = set(r"*+?^$()[]{}|\\")
-            for pattern, cfg in self._config.extra_config.items():
-                if not isinstance(pattern, str) or not any(
-                    c in regex_special_chars for c in pattern
-                ):
-                    continue
-
-                try:
-                    if re.search(re.compile(pattern), name) is not None:
-                        return (
-                            cfg.get(
-                                "bits",
-                                self._config.weight_bits if quantized else 16,
-                            ),
-                            self._normalize_group_size(
-                                cfg.get(
-                                    "group_size",
-                                    self._config.group_size if quantized else -1,
-                                )
-                            ),
-                            cfg.get("sym", self._config.sym if quantized else True),
-                        )
-                except re.error:
-                    continue
-
-            return (
-                self._config.weight_bits if quantized else 16,
-                self._config.group_size if quantized else -1,
-                self._config.sym if quantized else True,
+        def get_config(name: str, quantized: bool = True) -> INCLayerConfig:
+            overrides = self._config.extra_config or {}
+            cfg = overrides.get(name)
+            if cfg is None:
+                for pattern, candidate in overrides.items():
+                    if not isinstance(pattern, str) or not any(
+                        c in REGEX_SPECIAL_CHARS for c in pattern
+                    ):
+                        continue
+                    try:
+                        if re.search(pattern, name) is not None:
+                            cfg = candidate
+                            break
+                    except re.error:
+                        continue
+            cfg = cfg or {}
+            bits = cfg.get("bits", self._config.weight_bits if quantized else 16)
+            return INCLayerConfig(
+                bits=bits,
+                group_size=self._normalize_group_size(
+                    cfg.get("group_size", self._config.group_size if quantized else -1)
+                ),
+                sym=cfg.get("sym", self._config.sym if quantized else True),
+                packing_format=cfg.get("packing_format", self._config.packing_format),
+                backend=cfg.get("backend", self._config.backend),
+                data_type=self._config._normalize_data_type(
+                    cfg.get("data_type", self._config.data_type)
+                ),
+                quantized=bits < 16,
             )
 
         if self._config.extra_config and layer_name in self._config.extra_config:
