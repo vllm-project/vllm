@@ -17,6 +17,7 @@ from torch.multiprocessing import spawn
 from tests.utils import (
     ensure_current_vllm_config,
     init_test_distributed_environment,
+    multi_gpu_marks,
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
@@ -25,7 +26,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
+from vllm.models.kimi_k3.amd.linear import KimiMoE, KimiRoutedOutputTransform
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -233,12 +234,81 @@ def _check_writes_only_its_own_shard(
     torch.testing.assert_close(local[:, end:], before[:, end:], atol=0, rtol=0)
 
 
+def _kimi_k3_moe(prefix: str, tp_world: int, num_experts: int = 896) -> KimiMoE:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    config = KimiLinearConfig(
+        hidden_size=HIDDEN_SIZE,
+        hidden_act="situ",
+        activation_situ_beta=4.0,
+        activation_situ_linear_beta=25.0,
+        moe_intermediate_size=384 * tp_world,
+        num_experts=num_experts,
+        num_experts_per_token=16,
+        num_shared_experts=2,
+        routed_expert_hidden_size=LATENT_SIZE,
+        latent_moe_use_norm=True,
+        rms_norm_eps=EPS,
+    )
+    torch.manual_seed(0)
+    moe = KimiMoE(config, prefix=prefix)
+    for name, param in moe.named_parameters():
+        if param.dim() == 1:
+            param.data.fill_(1.0 if "norm" in name else 0.0)
+        else:
+            param.data.normal_(0.0, param.shape[-1] ** -0.5)
+    for module in moe.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            quant_method.process_weights_after_loading(module)
+    return moe
+
+
+def _check_merged_front_matches_unmerged(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    from vllm.config import get_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    vllm_config = get_current_vllm_config()
+    init_workspace_manager(device.index)
+    torch.set_default_dtype(DTYPE)
+    with (
+        set_forward_context(None, vllm_config),
+        torch.device(device),
+        torch.inference_mode(),
+    ):
+        moe = _kimi_k3_moe("model.layers.0.mlp", tp_world)
+        xs = {}
+        for num_tokens in (64, 512, 4096, 8192):
+            torch.manual_seed(num_tokens)
+            xs[num_tokens] = torch.randn(num_tokens, HIDDEN_SIZE)
+        unmerged = {num_tokens: moe(x) for num_tokens, x in xs.items()}
+        finalize_model_weights(moe)
+        assert moe.merged_front_weight is not None
+        for num_tokens, x in xs.items():
+            ref = unmerged[num_tokens]
+            torch.testing.assert_close(
+                moe(x), ref, atol=2**-6 * ref.abs().max().item(), rtol=0
+            )
+
+        other = _kimi_k3_moe("model.layers.1.mlp", tp_world, num_experts=384)
+        finalize_model_weights(other)
+        assert other.merged_front_weight is None
+
+
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "matches_replicated_ep": _check_matches_replicated_under_ep,
     "presharded_matches_replicated": _check_presharded_matches_replicated,
     "unfused_gathers": _check_unfused_tail_gathers_full_hidden,
     "own_shard_only": _check_writes_only_its_own_shard,
+    "merged_front_matches_unmerged": _check_merged_front_matches_unmerged,
 }
 
 
@@ -442,3 +512,19 @@ def test_falls_back_when_the_config_breaks_the_shard(
 
     assert not runner._tail_shardable
     assert runner._up_proj_shard_size == 0
+
+
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(n, marks=multi_gpu_marks(num_gpus=n)) for n in (2, 4, 8)]
+)
+def test_merged_front_matches_unmerged(
+    tp_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("The merged MoE front needs gfx950")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE")
+    _run_ranks("merged_front_matches_unmerged", tp_size)
