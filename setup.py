@@ -1632,6 +1632,7 @@ package_data = {
         "py.typed",
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
+        "model_executor/layers/gemmbf16_configs/*.json",
         # Tuned kernel configs must be explicit: the setuptools-scm git
         # file-finder is inactive when building from a .git-less tree
         # (e.g. tarball/sdist builds), which silently drops them from

@@ -1,0 +1,3982 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.7.4",
+    "cuda_version": "13.2",
+    "cublas_version": "13.8.0",
+    "cudnn_version": "92400",
+    "cudnn_frontend_version": "1.32.3",
+    "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:5c62267a4b9f46dbaea5f8594138305a8d4fe3c3db6d3aa8e6909d3e8c4c3dbf;nvidia-cutlass-dsl-libs-base==4.8.0:70413a6f57b754e38865369fb17ea2edeb58c40fbff522268949fa11940c88a3;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.0+cu132:fb1bf9c9a6a945fdb701baef7258fc252148a0fa9a23391bb46d3d43ce81f90e",
+    "gpu": "NVIDIA B200"
+  },
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1000, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1000, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1008, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1008, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1024, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1024, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1024, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((104, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((104, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((112, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((12, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((120, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1280, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1280, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1280, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((14, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((144, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((16384, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((16384, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((16384, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((168, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((168, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((176, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1792, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1792, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1792, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((192, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((20, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((200, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((200, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((200, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2048, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2048, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((208, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((208, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((208, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((224, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((224, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2304, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((24, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((240, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((240, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((256, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2560, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2560, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((264, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((272, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((272, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((280, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((280, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2816, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((288, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((304, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((304, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3072, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((312, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((32, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((32, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((320, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((320, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3328, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3328, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3328, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((336, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((336, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3584, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((3584, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((36, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((360, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((360, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((368, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((368, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((384, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((384, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((392, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((392, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((392, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((40, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((400, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((400, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4096, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4096, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4096, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4096, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((416, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((416, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((432, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((432, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4352, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4352, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4352, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((44, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((440, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((440, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((448, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((448, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((456, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((456, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4608, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4608, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((464, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((48, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((480, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4864, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4864, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((496, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((496, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((504, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((504, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((512, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((512, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5120, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5120, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5120, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5376, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5376, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((544, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((544, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((544, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((56, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((560, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5632, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5632, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5632, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((576, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5888, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5888, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((600, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((600, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((608, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6144, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6144, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((616, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((64, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((640, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((640, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((640, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((640, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6400, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6400, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((648, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6656, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6656, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6656, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6912, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6912, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6912, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6912, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((704, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((704, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7168, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7168, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7168, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((72, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((72, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((72, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((720, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((728, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((728, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((736, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7424, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7424, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7424, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((744, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((744, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7680, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7680, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((7680, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((784, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((784, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((792, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((80, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((80, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((80, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((800, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((816, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((816, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((8192, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((8192, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((8192, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((832, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((864, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((864, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((88, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((88, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((88, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((880, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((880, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((880, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((896, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((896, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((912, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((912, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((920, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((928, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((936, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((936, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((952, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((952, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((96, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((96, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((96, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((960, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((960, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    5
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((960, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((992, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((992, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((992, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    7
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1000, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1000, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1008, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1008, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1024, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((104, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((112, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((112, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((120, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((120, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((128, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((128, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((128, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1280, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((144, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((144, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((144, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1536, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1536, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1536, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1536, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((16, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((160, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((160, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((160, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((160, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((16384, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((168, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((168, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((176, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((176, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((176, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1792, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((18, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((192, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((192, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((192, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((200, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2048, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2048, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((208, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((216, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((224, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((224, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2304, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2304, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2304, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((240, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((240, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((256, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((256, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((256, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2560, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2560, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((264, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((264, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((264, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((272, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((272, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((28, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((280, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((280, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2816, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2816, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2816, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((288, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((288, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((288, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((304, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((304, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3072, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3072, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3072, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((312, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((312, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((312, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((320, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((320, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3328, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((336, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((336, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((352, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((352, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((352, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((352, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3584, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3584, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((360, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((360, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((368, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((368, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((384, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((384, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3840, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3840, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3840, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((3840, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((392, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((400, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((400, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((408, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((416, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((416, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((432, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((432, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4352, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((440, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((440, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((448, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((448, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((456, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((456, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4608, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4608, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((464, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((464, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((464, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((48, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((480, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((480, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((480, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4864, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4864, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((496, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((496, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((504, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((504, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((512, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((512, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5120, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((520, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((520, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((520, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((520, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5376, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5376, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((544, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((56, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5632, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((576, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((576, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((576, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5888, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((5888, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((600, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((600, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((608, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((608, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((608, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6144, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6144, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((64, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6400, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6400, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((648, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((648, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((648, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6656, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((672, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((672, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((672, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((672, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((680, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((680, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((680, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((680, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((696, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((696, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((696, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((696, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((704, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((704, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((7168, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((72, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((720, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((720, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((720, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((728, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((728, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((736, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((736, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((736, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((7424, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((744, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((744, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((768, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((768, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((768, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((768, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((7680, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((784, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((784, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((792, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((792, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((792, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((80, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((800, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((800, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((800, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((816, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((816, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((8192, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((832, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((832, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((832, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((864, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((864, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((88, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((880, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((896, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((896, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((912, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((912, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((920, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((920, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((920, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((928, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((928, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((928, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((936, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((936, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((952, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((952, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((960, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((992, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((1, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      32,
+      4,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((1, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      384,
+      1,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((1, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      256,
+      1,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((1, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      96,
+      1,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((2, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      128,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((2, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLDirectBf16Runner', ((2, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLDirectBf16Runner",
+    [
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((10, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((12, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((14, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((16, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((2, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      4,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((3, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      4,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((3, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((3, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      6,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((4, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((4, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((4, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      6,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((5, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      128,
+      10,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((5, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((5, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      6,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((6, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      4,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((6, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((6, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      5,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      32,
+      8,
+      128,
+      7,
+      1
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      5,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((8, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      128,
+      10,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((8, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      2,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((8, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      5,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((9, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ]
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((18, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((20, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((28, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((36, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((40, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((44, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((48, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((56, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((64, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ())": [
+    "CutlassBf16GemmRunner",
+    3
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((10, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((10, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((10, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((104, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    24
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((112, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    24
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((12, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((12, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((120, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    24
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((128, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    24
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((14, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((14, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((16, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((16, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((20, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((20, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((24, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((24, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((24, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((28, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((28, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((3, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((32, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((32, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((36, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((36, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((4, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((40, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((40, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((44, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((44, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((48, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((5, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((56, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((6, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((64, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    23
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((7, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((8, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((96, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    24
+  ],
+  "_generation": "550820dd93a523efbe4e0c348a987d240a0cd96ae7ec6b38f657374b7e2b7838"
+}

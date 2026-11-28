@@ -11,11 +11,15 @@ import importlib
 import importlib.metadata
 import importlib.util
 import inspect
+import json
 import os
 import shutil
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, NoReturn
 
+import regex as re
 import requests
 import torch
 from packaging.version import Version
@@ -36,7 +40,365 @@ def is_flashinfer_autotuning() -> bool:
     return AutoTuner.get().is_tuning_mode
 
 
-def flashinfer_bf16_mm(
+_BF16_TUNING_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "model_executor"
+    / "layers"
+    / "gemmbf16_configs"
+)
+_bf16_tuning_files_loaded = False
+# The file that was loaded, to load it again if FlashInfer's tuner cache is cleared.
+_bf16_tuning_file: Path | None = None
+# (M bucket, N, K) of every GEMM the loaded tuning file has a tactic for.
+_bf16_tuning_points: frozenset[tuple[int, int, int]] = frozenset()
+
+# <model>-tp<tensor parallel size>-<architecture>.json
+_BF16_TUNING_FILE_NAME = re.compile(
+    r"^(?P<model>.+)-tp(?P<tp>\d+)-(?P<arch>[a-z0-9]+)\.json$"
+)
+# The shape of a GEMM in a tuning file key: ((M, K), (K, N), ...)
+_BF16_TUNING_KEY_SHAPE = re.compile(r"\(\((\d+), (\d+)\), \((\d+), (\d+)\)")
+
+_DATACENTER_BLACKWELL_CAPABILITIES = ((10, 0), (10, 3))
+_DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
+
+# Some FlashInfer runners put the compute capability of the GPU they were tuned on
+# into the cache key: TGV as ((major, minor),), the CuTe-DSL runners as
+# major * 10 + minor at the end of the key. A key made on a GB200 (10.0) is never
+# found on a GB300 (10.3), and FlashInfer then runs its default tactic.
+_TGV_KEY_CAPABILITY = re.compile(r"\(\((\d+), (\d+)\),\)\)$")
+_CUTE_DSL_KEY_CAPABILITY = re.compile(r"(, True, )(\d+)\)\)$")
+
+
+def is_flashinfer_bf16_tuning_loaded() -> bool:
+    return _bf16_tuning_files_loaded
+
+
+def _retarget_capability(configs: dict, capability: tuple[int, int]) -> int:
+    """Rewrite the compute capability in the keys of a tuning file.
+
+    Only the capabilities of datacenter Blackwell GPUs are replaced, in the keys of
+    the runners that record it (see _TGV_KEY_CAPABILITY). Returns the number of
+    keys changed.
+    """
+    known = {major * 10 + minor for major, minor in _DATACENTER_BLACKWELL_CAPABILITIES}
+
+    def tgv(match: re.Match) -> str:
+        if int(match[1]) * 10 + int(match[2]) not in known:
+            return match[0]
+        return f"(({capability[0]}, {capability[1]}),))"
+
+    def cute_dsl(match: re.Match) -> str:
+        if int(match[2]) not in known:
+            return match[0]
+        return f"{match[1]}{capability[0] * 10 + capability[1]}))"
+
+    changed = 0
+    for key in list(configs):
+        if key.startswith("_"):
+            continue
+        if "'TGVRunner'" in key:
+            new_key = _TGV_KEY_CAPABILITY.sub(tgv, key)
+        elif "'CuteDSL" in key:
+            new_key = _CUTE_DSL_KEY_CAPABILITY.sub(cute_dsl, key)
+        else:
+            continue
+        if new_key != key:
+            configs[new_key] = configs.pop(key)
+            changed += 1
+    return changed
+
+
+def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
+    """Return the file FlashInfer should load for the current GPU.
+
+    Only the GPU name of a tuning file is checked. Every other metadata field
+    (library versions) is replaced with the wildcard "*" in a copy of the file,
+    which FlashInfer never reports as a mismatch.
+
+    FlashInfer ignores a tuning file whose recorded GPU name differs from the
+    current device. A file tuned on any datacenter Blackwell GPU (GB200, B200,
+    GB300, B300) is meant for all of them, so on such a GPU the copy records the
+    current name, and the compute capability that some runners record in their
+    keys (10.0 on GB200 and B200, 10.3 on GB300 and B300) is changed to the current
+    one, as FlashInfer would not find those entries otherwise. Consumer Blackwell
+    and other architectures keep the recorded name and are rejected by FlashInfer
+    as before.
+    """
+    with open(file) as f:
+        configs = json.load(f)
+    metadata = configs.get("_metadata")
+    if not isinstance(metadata, dict):
+        return file
+    saved = metadata.get("gpu")
+    for key in metadata:
+        if key != "gpu":
+            metadata[key] = "*"
+    if (
+        isinstance(saved, str)
+        and _DATACENTER_BLACKWELL_GPU_NAME.match(saved)
+        and tuple(torch.cuda.get_device_capability())
+        in _DATACENTER_BLACKWELL_CAPABILITIES
+    ):
+        metadata["gpu"] = torch.cuda.get_device_name()
+        retargeted = _retarget_capability(
+            configs, tuple(torch.cuda.get_device_capability())
+        )
+        if retargeted:
+            logger.info(
+                "Changed the compute capability in %d keys of %s to %s",
+                retargeted,
+                file.name,
+                tuple(torch.cuda.get_device_capability()),
+            )
+    path = workdir / file.name
+    with open(path, "w") as f:
+        json.dump(configs, f)
+    logger.info(
+        "Using FlashInfer tuning file %s (%s) on %s",
+        file.name,
+        saved,
+        metadata.get("gpu"),
+    )
+    return path
+
+
+def _bf16_tuning_arch_matches(arch: str) -> bool:
+    """Whether a tuning file of this architecture suits the current GPU."""
+    if arch == "blackwell":
+        return (
+            current_platform.is_cuda()
+            and tuple(torch.cuda.get_device_capability())
+            in _DATACENTER_BLACKWELL_CAPABILITIES
+        )
+    return False
+
+
+def _bf16_tuning_model_matches(file_model: str, name: str) -> bool:
+    """Whether a model name is the one a tuning file was made for.
+
+    A tuning file is named after the last component of the hub id. Checkpoints
+    derived from that model (-FP8, -NVFP4, -Instruct, ...) share its BF16 GEMM
+    shapes, so a name that continues the file's model after "-", "_" or "." also
+    matches. The name may be a hub id, a local path or a served model name.
+    """
+    name = name.rstrip("/").rsplit("/", 1)[-1].lower()
+    model = file_model.lower()
+    return name == model or (name.startswith(model) and name[len(model)] in "-_.")
+
+
+def find_flashinfer_bf16_tuning_file(
+    model_names: tuple[str, ...], tp_size: int
+) -> Path | None:
+    """Return the tuning file for a model, TP size and the current GPU, if any.
+
+    Files are named <model>-tp<tp size>-<architecture>.json. When several files
+    match, the one for the longest model name wins.
+    """
+    best: Path | None = None
+    best_length = -1
+    for file in sorted(_BF16_TUNING_DIR.glob("*.json")):
+        parsed = _BF16_TUNING_FILE_NAME.match(file.name)
+        if (
+            parsed is None
+            or int(parsed["tp"]) != tp_size
+            or not _bf16_tuning_arch_matches(parsed["arch"])
+        ):
+            continue
+        model = parsed["model"]
+        if len(model) > best_length and any(
+            _bf16_tuning_model_matches(model, name) for name in model_names
+        ):
+            best, best_length = file, len(model)
+    return best
+
+
+# The tuning file found for the model that could not be used (unreadable, or
+# rejected by FlashInfer), or None: a missing file is expected for many models,
+# an unusable one is a problem the user should hear about.
+_bf16_unusable_tuning_file: Path | None = None
+
+
+def flashinfer_bf16_unusable_tuning_file() -> Path | None:
+    return _bf16_unusable_tuning_file
+
+
+@functools.cache
+def load_flashinfer_bf16_tuning(model_names: tuple[str, ...], tp_size: int) -> bool:
+    """Load the FlashInfer tuning file for a model, TP size and the current GPU.
+
+    Returns whether a file was loaded. Without one, FlashInfer has no tactics for
+    this model and the BF16 GEMMs should stay on torch.
+    """
+    global _bf16_unusable_tuning_file
+    _bf16_unusable_tuning_file = None
+    file = find_flashinfer_bf16_tuning_file(model_names, tp_size)
+    if file is None:
+        logger.info(
+            "No FlashInfer BF16 tuning file for model %s with TP%d on this GPU in %s",
+            model_names[0] if model_names else "?",
+            tp_size,
+            _BF16_TUNING_DIR,
+        )
+        return False
+    from flashinfer.autotuner import AutoTuner
+
+    try:
+        with open(file) as f:
+            points = frozenset(
+                (int(m.group(1)), int(m.group(4)), int(m.group(2)))
+                for key in json.load(f)
+                if (m := _BF16_TUNING_KEY_SHAPE.search(key))
+                and m.group(2) == m.group(3)
+            )
+        with tempfile.TemporaryDirectory() as workdir:
+            path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
+            loaded = bool(AutoTuner.get().load_configs(str(path)))
+    except Exception as e:
+        logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
+        _bf16_unusable_tuning_file = file
+        return False
+    if not loaded:
+        logger.warning("FlashInfer rejected the tuning file %s", file)
+        _bf16_unusable_tuning_file = file
+        return False
+    global _bf16_tuning_files_loaded, _bf16_tuning_file, _bf16_tuning_points
+    _bf16_tuning_files_loaded = True
+    _bf16_tuning_file = file
+    _bf16_tuning_points = points
+    logger.info(
+        "Loaded FlashInfer BF16 tuning file %s with %d GEMM shapes (%d M buckets)",
+        file.name,
+        len({(n, k) for _, n, k in points}),
+        len(points),
+    )
+    return True
+
+
+def reload_flashinfer_bf16_tuning() -> None:
+    """Load the BF16 tuning file again after FlashInfer's tuner cache was cleared.
+
+    AutoTuner.clear_cache() drops the loaded tactics together with everything
+    else. If they cannot be restored, no BF16 GEMM may use FlashInfer: it would
+    run a default tactic, and the autotune warmup skips bf16 GEMMs as long as a
+    tuning file counts as loaded.
+    """
+    global _bf16_tuning_files_loaded, _bf16_tuning_points
+    file = _bf16_tuning_file
+    if file is None or not _bf16_tuning_files_loaded:
+        return
+    from flashinfer.autotuner import AutoTuner
+
+    try:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
+            loaded = bool(AutoTuner.get().load_configs(str(path)))
+    except Exception as e:
+        logger.warning("Cannot load FlashInfer tuning file %s again: %s", file, e)
+        loaded = False
+    if loaded:
+        logger.info("Loaded FlashInfer BF16 tuning file %s again", file.name)
+        return
+    _bf16_tuning_files_loaded = False
+    _bf16_tuning_points = frozenset()
+
+
+def load_flashinfer_bf16_tuning_for_current_model() -> bool:
+    """load_flashinfer_bf16_tuning() for the model and TP size of the vLLM config."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return False
+    model_config = vllm_config.model_config
+    names = [model_config.model]
+    served = getattr(model_config, "served_model_name", None)
+    if isinstance(served, str):
+        names.append(served)
+    elif served:
+        names.extend(served)
+    name_or_path = getattr(model_config.hf_config, "_name_or_path", None)
+    if name_or_path:
+        names.append(str(name_or_path))
+    return load_flashinfer_bf16_tuning(
+        tuple(dict.fromkeys(name for name in names if name)),
+        vllm_config.parallel_config.tensor_parallel_size,
+    )
+
+
+# M values (CUDA graph capture sizes) at which FlashInfer's bf16 GEMM autotuner
+# profiles and looks up tactics. None means FlashInfer's default buckets.
+_bf16_gemm_tuning_buckets: tuple[int, ...] | None = None
+# Largest CUDA graph capture size; None without CUDA graphs.
+_bf16_max_cuda_graph_m: int | None = None
+
+
+def init_flashinfer_bf16_tuning_buckets() -> None:
+    """Remember capture sizes and max_num_batched_tokens as bf16 GEMM buckets.
+
+    Called while the vLLM config is set (dispatch at model init), because the
+    config is not guaranteed to be available when the GEMM runs.
+    """
+    global _bf16_gemm_tuning_buckets, _bf16_max_cuda_graph_m
+    from vllm.config import get_current_vllm_config_or_none
+
+    _bf16_gemm_tuning_buckets = None
+    _bf16_max_cuda_graph_m = None
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return
+    sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+    if not sizes:
+        return
+    buckets = set(sizes)
+    buckets.add(vllm_config.scheduler_config.max_num_batched_tokens)
+    _bf16_gemm_tuning_buckets = tuple(sorted(buckets))
+    _bf16_max_cuda_graph_m = max(sizes)
+
+
+def is_flashinfer_bf16_gemm_outside_cuda_graphs(m: int) -> bool:
+    """Whether a bf16 GEMM with m rows runs outside the CUDA graphs.
+
+    A step with more tokens than the largest capture size runs eagerly, and an
+    eager FlashInfer GEMM costs several times more CPU time than torch's (its
+    tactic lookup and dispatch run on every call). On Qwen3.8-Flash-Next TP2
+    that made the GPUs wait for the CPU in such steps (-18% throughput at
+    concurrency 128 on GB300), while at these M the tuned FlashInfer kernels are
+    within 2% of cuBLAS. Such GEMMs stay on torch.
+    """
+    return _bf16_max_cuda_graph_m is not None and m > _bf16_max_cuda_graph_m
+
+
+def _bf16_lookup_bucket(m: int) -> int | None:
+    """The M bucket FlashInfer looks up a bf16 GEMM with m rows in.
+
+    With the buckets of init_flashinfer_bf16_tuning_buckets() FlashInfer rounds m
+    up to the smallest bucket that is not below it (the largest one if m is above
+    all of them). Without them it uses its own default mapping.
+    """
+    buckets = _bf16_gemm_tuning_buckets
+    if buckets is not None:
+        return next((b for b in buckets if b >= m), buckets[-1])
+    try:
+        from flashinfer.fused_moe.utils import map_to_hybrid_bucket_uncapped
+    except ImportError:
+        return None
+    return map_to_hybrid_bucket_uncapped(m)
+
+
+def is_flashinfer_bf16_gemm_tuned(m: int, n: int, k: int) -> bool:
+    """Whether the loaded tuning file has a tactic for an m x k by k x n GEMM.
+
+    FlashInfer looks a GEMM up by its M bucket, N and K. For one that is missing
+    (a CUDA graph capture size the file was not tuned for, say) it would run a
+    default tactic, and nothing tunes it because the autotune warmup skips bf16
+    GEMMs once a tuning file is loaded. Such a GEMM should stay on torch.
+    """
+    bucket = _bf16_lookup_bucket(m)
+    return bucket is not None and (bucket, n, k) in _bf16_tuning_points
+
+
+def _flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
@@ -45,14 +407,180 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    return mm_bf16(
-        a,
-        b,
-        bias=bias,
-        pdl=pdl,
-        out_dtype=torch.bfloat16,
-        backend=backend,
-    )
+    def _mm() -> torch.Tensor:
+        return mm_bf16(
+            a,
+            b,
+            bias=bias,
+            pdl=pdl,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+        )
+
+    if _bf16_gemm_tuning_buckets is None:
+        return _mm()
+    # autotune()'s bucket override is global to its context, so scope it to
+    # this call to keep other FlashInfer ops (MoE, fp4, ...) on their own
+    # buckets. tune_mode=False does not end an enclosing autotune(True): tuning
+    # mode is reference-counted. The same override applies at serving time, so
+    # cache lookups hit the capture-size buckets. round_up=True matches the
+    # warmup in kernel_warmup.py for an M that is not a capture size.
+    with autotune(
+        tune_mode=False,
+        tuning_buckets=_bf16_gemm_tuning_buckets,
+        round_up=True,
+    ):
+        return _mm()
+
+
+_warned_bf16_points: set[tuple[int, int, int]] = set()
+_warned_bf16_misses: set[tuple[int, int]] = set()
+
+
+def warn_flashinfer_bf16_untuned(m: int, n: int, k: int) -> None:
+    """Warn that a GEMM is not in the tuning file and runs on torch linear.
+
+    A shape (N, K) that the file does not have at all is reported once, however
+    many M buckets it is called with (CUDA graph capture alone visits dozens).
+    A shape the file has, but not for this M bucket, is reported once per
+    (M bucket, N, K).
+    """
+    bucket = _bf16_lookup_bucket(m) or m
+    point = (bucket, n, k)
+    shape_point = (0, n, k)
+    if point in _warned_bf16_points or shape_point in _warned_bf16_points:
+        return
+    if any(p[1:] == (n, k) for p in _bf16_tuning_points):
+        _warned_bf16_points.add(point)
+        logger.warning(
+            "FlashInfer BF16 tuning file has no entry for M bucket %d, N=%d, K=%d "
+            "(M=%d): this GEMM runs on torch linear. The same shape is not "
+            "reported again.",
+            *point,
+            m,
+        )
+    else:
+        _warned_bf16_points.add(shape_point)
+        logger.warning(
+            "FlashInfer BF16 tuning file has no entry for N=%d, K=%d at any M "
+            "(first seen at M=%d): GEMMs of this shape run on torch linear. The "
+            "same shape is not reported again.",
+            n,
+            k,
+            m,
+        )
+
+
+def _flashinfer_autotuner_stats():
+    try:
+        from flashinfer.autotuner import AutoTuner
+
+        return AutoTuner.get().stats
+    except Exception:
+        return None
+
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    backend: str,
+) -> torch.Tensor:
+    """_flashinfer_bf16_mm, warning when FlashInfer finds no tuned tactic.
+
+    The tuning file covers the shape (the caller checked), yet FlashInfer may not
+    find the entry, for example when the file was made by a different FlashInfer
+    version and its op names or keys differ. FlashInfer then silently runs its
+    default tactic. A miss shows up in FlashInfer's AutoTuner statistics (they
+    are only filled by FlashInfer versions that count inference-time misses).
+    """
+    stats = _flashinfer_autotuner_stats() if _bf16_tuning_files_loaded else None
+    misses = getattr(stats, "cache_misses", None)
+    out = _flashinfer_bf16_mm(a, b, bias, pdl, backend)
+    if stats is not None and misses is not None and stats.cache_misses > misses:
+        k = a.shape[-1]
+        m = a.numel() // k
+        bucket = _bf16_lookup_bucket(m) or m
+        shape = (b.shape[-1], k)
+        if shape not in _warned_bf16_misses:
+            _warned_bf16_misses.add(shape)
+            logger.warning(
+                "FlashInfer found no tuned tactic for a BF16 GEMM with N=%d, "
+                "K=%d (first seen at M bucket %d) although a tuning file is "
+                "loaded: it ran its default tactic. The file may have been made "
+                "with a different FlashInfer version. Other M buckets of this "
+                "shape are not reported (VLLM_LOGGING_LEVEL=DEBUG shows them).",
+                *shape,
+                bucket,
+            )
+        else:
+            logger.debug(
+                "FlashInfer ran its default tactic for a BF16 GEMM with M bucket "
+                "%d, N=%d, K=%d.",
+                bucket,
+                *shape,
+            )
+    return out
+
+
+# (FlashInfer backend, pdl) of the BF16 GEMMs that dispatch_unquantized_gemm sent to
+# FlashInfer, for warmup_flashinfer_bf16_gemms().
+_bf16_warmup_call: tuple[str, bool] | None = None
+
+
+def register_flashinfer_bf16_warmup(backend: str, pdl: bool) -> None:
+    """Remember how the model calls FlashInfer's BF16 GEMM, for the warmup."""
+    global _bf16_warmup_call
+    _bf16_warmup_call = (backend, pdl)
+
+
+@torch.inference_mode()
+def warmup_flashinfer_bf16_gemms(device: torch.device | str) -> int:
+    """Run every GEMM of the loaded BF16 tuning file once.
+
+    A process pays for the first call of every (M bucket, N, K) it sees: about
+    25 ms each, up to 1-2 s for some cuDNN and CuTe-DSL tactics. Nothing of it is
+    cached on disk (the tuning file only picks the tactic), so a server would pay
+    it in the first requests that reach a bucket the CUDA graph capture did not
+    run. Running the GEMMs of the file here moves that to startup.
+
+    The inputs are zeros, one weight per (N, K) at a time. A point that does not
+    fit in memory is skipped, and so is one above the CUDA graph capture sizes,
+    which runs on torch. Returns the number of GEMMs run.
+    """
+    if _bf16_warmup_call is None or not _bf16_tuning_files_loaded:
+        return 0
+    backend, pdl = _bf16_warmup_call
+    m_by_shape: dict[tuple[int, int], list[int]] = {}
+    for m, n, k in sorted(_bf16_tuning_points):
+        if not is_flashinfer_bf16_gemm_outside_cuda_graphs(m):
+            m_by_shape.setdefault((n, k), []).append(m)
+
+    done = skipped = 0
+    for (n, k), ms in sorted(m_by_shape.items()):
+        try:
+            weight = torch.zeros(n, k, dtype=torch.bfloat16, device=device)
+            x = torch.zeros(max(ms), k, dtype=torch.bfloat16, device=device)
+        except torch.OutOfMemoryError:
+            skipped += len(ms)
+            continue
+        for m in ms:
+            try:
+                _flashinfer_bf16_mm(x[:m], weight.t(), None, pdl, backend)
+            except torch.OutOfMemoryError:
+                skipped += 1
+            else:
+                done += 1
+        del weight, x
+    torch.accelerator.synchronize()
+    if skipped:
+        logger.warning(
+            "FlashInfer BF16 GEMM warmup skipped %d of %d GEMMs: out of memory.",
+            skipped,
+            done + skipped,
+        )
+    return done
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -220,6 +748,30 @@ def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
     try:
         return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
     except (RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
+def is_flashinfer_auto_bf16_gemm_supported() -> bool:
+    """Return whether FlashInfer mm_bf16(backend="auto") is available.
+
+    mm_bf16.is_backend_supported() only knows concrete backends, so require one
+    of them to support the device. "auto" runs FlashInfer's SM100 dispatcher.
+    """
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_flashinfer_bf16_gemm()
+    ):
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    from flashinfer import mm_bf16
+
+    try:
+        return bool(mm_bf16.is_compute_capability_supported(capability.to_int()))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         return False
 
 
@@ -1340,7 +1892,7 @@ def flashinfer_scaled_fp4_mm(
     if alpha is None:
         alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
-    if backend in ("cutlass", "cudnn"):
+    if backend in ("cutlass", "cudnn", "auto"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
@@ -1520,6 +2072,13 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
+    "find_flashinfer_bf16_tuning_file",
+    "load_flashinfer_bf16_tuning",
+    "load_flashinfer_bf16_tuning_for_current_model",
+    "reload_flashinfer_bf16_tuning",
+    "is_flashinfer_bf16_tuning_loaded",
+    "is_flashinfer_bf16_gemm_tuned",
+    "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",
