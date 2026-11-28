@@ -1296,6 +1296,10 @@ vLLM decodes audio bytes into waveforms using a selectable decoding backend:
 | `pyav` | PyAV (FFmpeg) only, no fallback |
 | `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
 
+When PyAV resamples audio, it flushes the resampler after the last decoded
+frame and returns `ceil(input_samples * target_rate / native_rate)` samples.
+The decoded duration and memory limits include the flushed samples.
+
 Select the backend per server via `--media-io-kwargs`:
 
 ```bash

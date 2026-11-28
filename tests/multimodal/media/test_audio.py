@@ -12,6 +12,7 @@ import pytest
 import soundfile as sf
 
 import vllm.envs as envs
+from vllm.multimodal.audio import resample_audio_pyav
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
@@ -102,6 +103,106 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
     """Audio exceeding the duration limit must be rejected during decode."""
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
+
+
+@pytest.mark.parametrize(
+    "native_sr,target_sr,num_samples",
+    [
+        (48000, 16000, 48000),
+        (16000, 22050, 16000),
+        (16000, 22050, 64),
+        (44100, 16000, 64),
+        (44100, 16000, 32),
+        (16000, 16000, 16000),
+    ],
+)
+def test_pyav_resampling_keeps_final_samples(native_sr, target_sr, num_samples):
+    """Resampling must retain the audio buffered after the last decoded frame."""
+    samples = np.full(num_samples, 0.25, dtype=np.float32)
+    buffer = BytesIO()
+    sf.write(buffer, samples, native_sr, format="WAV", subtype="FLOAT")
+    buffer.seek(0)
+
+    audio, sample_rate = load_audio(buffer, sr=target_sr, backend="pyav")
+
+    assert sample_rate == target_sr
+    assert len(audio) == (num_samples * target_sr + native_sr - 1) // native_sr
+    # The tail must carry signal, not padding; match the in-memory resampler.
+    expected = resample_audio_pyav(samples, orig_sr=native_sr, target_sr=target_sr)
+    np.testing.assert_array_equal(audio, expected)
+
+
+def test_pyav_resampling_trims_extra_flushed_samples(monkeypatch):
+    """The output length follows the input, not the libswresample build."""
+    av = audio_module.av
+    real_resampler = av.AudioResampler
+
+    class PaddingResampler:
+        def __init__(self, *args, **kwargs):
+            self._inner = real_resampler(*args, **kwargs)
+            self._rate = kwargs["rate"]
+
+        def resample(self, frame):
+            frames = self._inner.resample(frame)
+            if frame is None:
+                extra = av.AudioFrame.from_ndarray(
+                    np.ones((1, 7), dtype=np.float32), format="fltp", layout="mono"
+                )
+                extra.sample_rate = self._rate
+                frames.append(extra)
+            return frames
+
+    monkeypatch.setattr(av, "AudioResampler", PaddingResampler)
+    buffer = BytesIO()
+    sf.write(buffer, np.zeros(48000, dtype=np.float32), 48000, format="WAV")
+    buffer.seek(0)
+
+    audio, sample_rate = load_audio(buffer, sr=16000, backend="pyav")
+
+    assert sample_rate == 16000
+    assert len(audio) == 16000
+
+
+def test_pyav_flushes_before_rejecting_empty_audio():
+    """A short clip can have all its output buffered until the final flush."""
+    buffer = BytesIO()
+    sf.write(buffer, np.zeros(64, dtype=np.float32), 44100, format="WAV")
+    buffer.seek(0)
+
+    audio, sample_rate = load_audio(buffer, sr=16000, backend="pyav")
+
+    assert sample_rate == 16000
+    assert audio.ndim == 1
+    assert audio.size > 0
+
+
+@pytest.mark.parametrize("max_decode_bytes", [63999, 64000])
+def test_pyav_resampler_tail_counts_toward_decode_limit(max_decode_bytes):
+    """The final resampled frame must not bypass the decoded-byte limit."""
+    buffer = BytesIO()
+    sf.write(buffer, np.zeros(48000, dtype=np.float32), 48000, format="WAV")
+    buffer.seek(0)
+
+    if max_decode_bytes < 64000:
+        with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+            load_audio(
+                buffer, sr=16000, backend="pyav", max_decode_bytes=max_decode_bytes
+            )
+    else:
+        audio, _ = load_audio(
+            buffer, sr=16000, backend="pyav", max_decode_bytes=max_decode_bytes
+        )
+        assert audio.nbytes == max_decode_bytes
+
+
+def test_pyav_resampler_tail_counts_toward_duration_limit():
+    """Check duration after draining fractional-rate resampling output too."""
+    buffer = BytesIO()
+    sf.write(buffer, np.zeros(1600, dtype=np.float32), 44100, format="WAV")
+    buffer.seek(0)
+
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio(buffer, sr=16000, backend="pyav", max_duration_s=1600 / 44100)
 
 
 @pytest.mark.parametrize("backend", ["soundfile", "pyav", "torchcodec"])
