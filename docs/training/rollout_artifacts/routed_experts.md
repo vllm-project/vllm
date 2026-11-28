@@ -7,7 +7,7 @@ vllm serve Qwen/Qwen3-30B-A3B --enable-return-routed-experts
 # offline: LLM("Qwen/Qwen3-30B-A3B", enable_return_routed_experts=True)
 ```
 
-The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). There is no per-request on/off switch.
+The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). Requests can opt out with [`return_aux_outputs`](#return_aux_outputs).
 
 ## Requirements
 
@@ -47,7 +47,7 @@ restorer; the existing buffer-write semantics are unchanged.
 - **Shape:** `(num_tokens - 1 - routed_experts_prompt_start, num_moe_layers, num_experts_per_tok)`, `num_tokens` = prompt + output. The last sampled token has no row.
 - **Rows:** row `i` is position `routed_experts_prompt_start + i` of `prompt_token_ids + output_token_ids`.
 - **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
-- Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
+- Filled only when the request finishes. `None` if the flag is off, the request set `return_aux_outputs=False`, or the request aborted before any forward pass.
 
 ```python
 import base64, io
@@ -59,6 +59,19 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ## `routed_experts_prompt_start`
 
 Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
+
+## `return_aux_outputs`
+
+Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts` and no `sampling_mask`, and vLLM does not store its routing. Logprobs are unaffected: request them or not with `logprobs`, `logprob_token_ids` and `prompt_logprobs` as usual. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
+
+The opt-out removes the per-request work; the batch-wide work stays as long as the server flags are on:
+
+| Output | Skipped for an opted-out request | Still paid |
+| --- | --- | --- |
+| `routed_experts` | Recording and storing its routing rows, keeping them for cached blocks, and returning them. A step with no recording request skips the routing copy to the host entirely. | Routing capture on the GPU for the whole batch, and the host copy of the whole batch when any request in the step records. |
+| `sampling_mask` | Extracting, packing and returning its mask. | Mask computation for the whole batch and the PyTorch sampling path; the request still needs `temperature > 0` and `top_k > 0`. |
+
+Opted-out requests share the prefix cache with every other request. The KV blocks they compute have no stored routing, so a request that records routing recomputes from the first such block.
 
 ## Row storage
 

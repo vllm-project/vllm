@@ -168,6 +168,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         routed_experts_prompt_start,
+        return_aux_outputs,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -284,6 +285,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start,
+        return_aux_outputs: return_aux_outputs.unwrap_or(true),
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -551,6 +553,25 @@ mod tests {
         let error = lower(Some(4)).unwrap_err();
         assert!(error.kind().is_invalid_request());
         assert!(error.to_string().contains("routed_experts_prompt_start"));
+    }
+
+    #[test]
+    fn lower_sampling_params_forwards_return_aux_outputs() {
+        let lower = |return_aux_outputs: Option<bool>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    logprobs: Some(2),
+                    return_aux_outputs,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+            .unwrap()
+        };
+        assert!(lower(None).return_aux_outputs);
+        let skipped = lower(Some(false));
+        assert!(!skipped.return_aux_outputs);
+        assert_eq!(skipped.logprobs, Some(2));
     }
 
     #[test]
@@ -882,6 +903,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
@@ -937,6 +959,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
@@ -1132,6 +1155,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
@@ -1208,6 +1232,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
@@ -1279,6 +1304,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
@@ -1832,6 +1858,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_aux_outputs: true,
                 stream_interval: None,
             }
         "#]]
