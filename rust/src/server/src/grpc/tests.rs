@@ -907,7 +907,7 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
     .await;
     let (channel, server_task) =
         start_grpc_test_server(inference, control, health, Default::default()).await;
-    let llm = GrpcLlm::new(channel, "test-model".into(), 512);
+    let llm = GrpcLlm::new(channel, 512);
     let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(
@@ -921,6 +921,33 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
     assert_eq!(last.token_ids, [31, 42]);
     assert_eq!(last.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_uses_worker_default_with_frontend_aliases() {
+    let (addr, server_task, engine_task) =
+        grpc_server_with_keepalive(b"engine-grpc-frontend-aliases", None).await;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"qwen3","vocab_size":128,"max_position_embeddings":512}"#,
+    )
+    .unwrap();
+    let mut frontend =
+        crate::serve_tests::server_config(dir.path(), &dir.path().join("frontend.sock"));
+    frontend.served_model_name = vec!["chat".into(), "test-model".into()];
+    let remote = crate::RemoteGrpcConfig::new(format!("http://{addr}"), None).unwrap();
+    let state = crate::build_state(&frontend, crate::LlmSource::RemoteGrpc(remote))
+        .await
+        .unwrap();
+    let mut stream = state.llm().generate(grpc_llm_request()).await.unwrap();
+    assert_eq!(
+        stream.next().await.unwrap().unwrap().token_ids,
+        [u32::from(b'h')]
+    );
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }
@@ -2316,7 +2343,7 @@ async fn grpc_llm_cancels_unpolled_stream_on_drop() {
     .await;
     let (channel, server_task) =
         start_grpc_test_server(inference, control, health, Default::default()).await;
-    let llm = GrpcLlm::new(channel, "test-model".into(), 512);
+    let llm = GrpcLlm::new(channel, 512);
     let stream = llm.generate(grpc_llm_request()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), submitted_rx)
         .await

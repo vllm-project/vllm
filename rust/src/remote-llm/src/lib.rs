@@ -34,13 +34,12 @@ pub struct GrpcLlm {
     readiness: watch::Receiver<bool>,
     _readiness_task: AbortOnDropHandle<()>,
     channel: Channel,
-    model: String,
     info: LlmInfo,
     health: watch::Sender<bool>,
 }
 
 impl GrpcLlm {
-    pub fn new(channel: Channel, model: String, max_model_len: u32) -> Self {
+    pub fn new(channel: Channel, max_model_len: u32) -> Self {
         let info = LlmInfo {
             max_model_len,
             model_dtype: None,
@@ -69,7 +68,6 @@ impl GrpcLlm {
             channel,
             readiness,
             _readiness_task: AbortOnDropHandle::new(readiness_task),
-            model,
             info,
             health: watch::channel(true).0,
         }
@@ -98,7 +96,7 @@ impl Llm for GrpcLlm {
         reject_unsupported_fields(&request)?;
         let external_request_id = std::mem::take(&mut request.request_id);
         let rpc_request_id = Uuid::new_v4();
-        let grpc_request = convert::to_grpc_request(&self.model, rpc_request_id, request)?;
+        let grpc_request = convert::to_grpc_request(rpc_request_id, request)?;
         let mut client = InferenceClient::new(self.channel.clone());
         let response = client.generate_stream(grpc_request).await.map_err(status_to_llm_error)?;
         let frames = response.into_inner().map_err(status_to_llm_error);
@@ -131,11 +129,7 @@ impl RemoteGrpcConfig {
         })
     }
 
-    pub fn into_llm(
-        self,
-        model: String,
-        text_backend: &dyn TextBackend,
-    ) -> anyhow::Result<GrpcLlm> {
+    pub fn into_llm(self, text_backend: &dyn TextBackend) -> anyhow::Result<GrpcLlm> {
         let max_model_len = if let Some(limit) = self.max_model_len {
             limit.get()
         } else {
@@ -148,11 +142,7 @@ impl RemoteGrpcConfig {
             );
             limit
         };
-        Ok(GrpcLlm::new(
-            self.endpoint.connect_lazy(),
-            model,
-            max_model_len,
-        ))
+        Ok(GrpcLlm::new(self.endpoint.connect_lazy(), max_model_len))
     }
 }
 

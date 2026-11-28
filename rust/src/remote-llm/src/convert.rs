@@ -11,7 +11,6 @@ use vllm_proto as pb;
 
 /// Encode an already lowered token request for a remote generation RPC.
 pub(crate) fn to_grpc_request(
-    model: &str,
     rpc_request_id: Uuid,
     request: GenerateRequest,
 ) -> Result<pb::GenerateRequest, LlmError> {
@@ -35,7 +34,6 @@ pub(crate) fn to_grpc_request(
         })
         .transpose()?;
     Ok(pb::GenerateRequest {
-        model: model.into(),
         request_id: rpc_request_id.to_string(),
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: request.prompt_token_ids,

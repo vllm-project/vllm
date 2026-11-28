@@ -168,8 +168,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             (Box::new(llm), Some((engine_core, server_info)))
         }
         LlmSource::RemoteGrpc(remote_grpc_config) => {
-            let llm =
-                remote_grpc_config.into_llm(metrics_model_name.clone(), text_backend.as_ref())?;
+            let llm = remote_grpc_config.into_llm(text_backend.as_ref())?;
             (Box::new(llm), None)
         }
         LlmSource::Provided(llm) => (llm, None),
