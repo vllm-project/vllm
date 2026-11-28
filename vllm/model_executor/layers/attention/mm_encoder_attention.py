@@ -413,6 +413,36 @@ class MMEncoderAttention(CustomOp):
 
         self._init_fp8_state()
 
+    def register_fa4_warmup(
+        self, *, max_seqlen: int, max_num_tokens: int, max_num_seqs: int
+    ) -> None:
+        """Args:
+        max_seqlen: Longest sequence in one call, e.g. one image's patches.
+        max_num_tokens: Most tokens across the sequences of one call.
+        max_num_seqs: Most sequences in one call.
+
+        """
+        if self.attn_backend != AttentionBackendEnum.FLASH_ATTN or (
+            self._fa_version != 4
+        ):
+            return
+        from vllm.model_executor.warmup.fa4_varlen_warmup import (
+            FA4_VARLEN_ATTENTION_KERNEL,
+            FA4VarlenWarmupSpec,
+        )
+
+        FA4_VARLEN_ATTENTION_KERNEL.register_warmup(
+            FA4VarlenWarmupSpec(
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_size,
+                dtype=self.dtype,
+                max_seqlen=max_seqlen,
+                max_num_tokens=max_num_tokens,
+                max_num_seqs=max_num_seqs,
+            )
+        )
+
     def _init_fp8_state(self) -> None:
         """Initialize FP8 attention state from multimodal config.
 
