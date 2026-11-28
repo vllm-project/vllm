@@ -264,6 +264,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         return summaries
 
+    def has_blocked_weights(self) -> bool:
+        # Gates "+quant_fp8" in VllmConfig, as for block FP8 checkpoints. The
+        # DeepGEMM block linear then gets UE8M0-packed activation scales from
+        # the CUDA quant kernel, not fp32 scales from QuantFP8.forward_native.
+        specs = [self.args.linear, self.args.moe]
+        for target in (self.args.targets or {}).values():
+            if isinstance(target, str):
+                shorthand = _ONLINE_SHORTHANDS[target]
+                specs += [shorthand.linear, shorthand.moe]
+            else:
+                specs.append(target)
+        return any(
+            spec is not None and spec.weight == kFp8Static128BlockSym for spec in specs
+        )
+
     @classmethod
     def get_name(cls) -> QuantizationMethods:
         return "online"
