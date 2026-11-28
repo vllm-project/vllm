@@ -67,6 +67,9 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     """
     from vllm.model_executor.model_loader.utils import get_model_cls
 
+    spec = vllm_config.speculative_config
+    if spec is not None and not spec.speculator_config.uses_target_hc_residual:
+        return False
     target_cls = get_model_cls(vllm_config.model_config)
     return hasattr(target_cls, "get_mtp_target_hidden_states")
 

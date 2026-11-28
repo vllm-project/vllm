@@ -588,6 +588,7 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/config/speculative.py
   - vllm/config/attention.py
+  - vllm/envs.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
   - tests/models/hy_v4/test_shardq_sinks.py
   - tests/models/hy_v4/test_sequence_parallel.py

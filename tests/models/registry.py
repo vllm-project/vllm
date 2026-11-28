@@ -1753,6 +1753,17 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="inclusionAI/Ling-3.0-flash",
         trust_remote_code=True,
     ),
+    "DFlyDeepseekV41DraftModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        speculative_model="AngelSlim/DS-V4.1-Flash-DFly2-B6",
+        speculative_method="dfly",
+        num_speculative_tokens=5,
+        max_model_len=4096,
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        use_original_num_layers=True,
+        hf_overrides={"engram_layer_ids": [], "vision_n_layers": 0},
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "vllm/deepseek_mtp_main_random",
         speculative_model="vllm/deepseek_mtp_draft_random",

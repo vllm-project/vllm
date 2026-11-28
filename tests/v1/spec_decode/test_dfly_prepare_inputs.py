@@ -324,3 +324,105 @@ def test_all_padding_batch_without_mrope():
     )
     assert (indices[:, :count] == -1).all()
     assert (indices[:, count:] == -7).all()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA DFly2 KV layout")
+@pytest.mark.parametrize("record", [528, 584])
+@pytest.mark.parametrize("large_offset", [False, True])
+@pytest.mark.parametrize("replay", [False, True])
+def test_dsv41_context_excludes_rejected_and_inactive_tokens(
+    record, large_offset, replay
+):
+    """Read accepted KV across pages, including byte offsets beyond int32.
+
+    Scratch previously belonged to other requests. Invalid top-k, rejected
+    positions and inactive rows must overwrite it, and leave target KV intact.
+    """
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+    from vllm.models.deepseek_v41.nvidia.ops.dfly import gather_dfly_context
+
+    device = "cuda"
+    block_size = 16
+    stride = (2**31 if large_offset else 0) + block_size * record + 128
+    storage = torch.empty(
+        stride + block_size * record, device=device, dtype=torch.uint8
+    )
+    cache = storage.as_strided((2, block_size, record), (stride, record, 1))
+    torch.manual_seed(42)
+    latent = torch.randn(32, 512, device=device, dtype=torch.bfloat16)
+    quantize_and_insert_k_cache(
+        latent,
+        cache,
+        torch.arange(32, device=device),
+        block_size=block_size,
+        bytes_per_token=record,
+    )
+    before = cache.clone()
+    # Decode the two record formats independently of the gather kernel.
+    if record == 528:
+        fp8 = before[:, :, :512].contiguous().view(torch.float8_e4m3fn).float()
+        scales = torch.exp2(before[:, :, 512:].float() - 127).repeat_interleave(32, -1)
+        expected = (fp8 * scales).to(torch.bfloat16).reshape(32, 512)
+    else:
+        pages = before.reshape(2, -1)
+        data = pages[:, : block_size * 576].reshape(2, block_size, 576)
+        fp8 = data[:, :, :448].contiguous().view(torch.float8_e4m3fn).float()
+        scales = pages[:, block_size * 576 :].reshape(2, block_size, 8)[:, :, :7]
+        scales = torch.exp2(scales.float() - 127).repeat_interleave(64, -1)
+        tail = data[:, :, 448:].contiguous().view(torch.bfloat16)
+        expected = torch.cat(((fp8 * scales).to(torch.bfloat16), tail), -1).reshape(
+            32, 512
+        )
+    # Offset views and strided tables exercise the same contracts as batch buffers.
+    tables = torch.tensor(
+        [[9, 9, 9], [1, 0, 9], [0, 1, 9], [0, 1, 9]], device=device, dtype=torch.int32
+    )[1:, :2]
+    topk = torch.tensor(
+        [[9, 9, 9, 9], [0, 15, 16, 18], [2, -1, 32, 3]],
+        device=device,
+        dtype=torch.int32,
+    )
+    rows = torch.tensor([99, 1, 2, 100], device=device)[1:]
+    replay_rows = None
+    if replay:
+        rows = torch.tensor([37, 108, 100], device=device)
+        replay_rows = torch.tensor([30, 37, 108], device=device)
+    anchors = torch.tensor([18, 3, 16], device=device)
+    active = torch.tensor([True, True, False], device=device)
+    output = torch.full((3, 10, 512), 17, device=device, dtype=torch.bfloat16)
+    indices = torch.full((3, 128), 17, device=device, dtype=torch.int32)
+    for offset, window in ((0, False), (4, True)):
+        gather_dfly_context(
+            cache,
+            tables,
+            block_size,
+            topk,
+            rows,
+            anchors,
+            active,
+            output,
+            indices,
+            offset=offset,
+            width=4,
+            window=window,
+            replay_rows=replay_rows,
+        )
+    expected_positions = [
+        [16, 31, 0, -1, 30, 31, 0, 1],
+        [2, -1, -1, -1, -1, 0, 1, 2],
+        [-1] * 8,
+    ]
+    expected_output = torch.zeros_like(output[:, :8])
+    expected_indices = torch.full_like(indices[:, :8], -1)
+    for request, positions in enumerate(expected_positions):
+        for col, physical in enumerate(positions):
+            if physical >= 0:
+                expected_output[request, col] = expected[physical]
+                expected_indices[request, col] = request * 10 + col
+    torch.testing.assert_close(output[:, :8], expected_output, rtol=0, atol=0)
+    torch.testing.assert_close(indices[:, :8], expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(cache, before, rtol=0, atol=0)
+    assert (output[:, 8:] == 17).all()
+    assert (indices[:, 8:] == 17).all()

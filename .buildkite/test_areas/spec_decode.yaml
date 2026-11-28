@@ -17,6 +17,8 @@ steps:
     - vllm/models/hy_v4/nvidia/dfly.py
     - vllm/models/hy_v4/nvidia/dfly_speculator.py
     - vllm/models/hy_v4/common/
+    - vllm/models/deepseek_v41/
+    - vllm/models/deepseek_v4/common/spec_decode.py
     - vllm/models/qwen4_exp/
     - vllm/platforms/
     - vllm/sampling_params.py
@@ -71,6 +73,23 @@ steps:
       - vllm/model_executor/layers/
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (8xH200) [Nightly] DeepSeek-V4.1 DFly2"
+  key: spec-decode-dsv41-dfly2-nightly
+  device: h200
+  num_devices: 8
+  optional: true
+  timeout_in_minutes: 120
+  source_file_dependencies:
+    - vllm/models/deepseek_v41/
+    - vllm/models/deepseek_v4/common/spec_decode.py
+    - vllm/models/hy_v4/common/dfly_speculator.py
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/config/speculative.py
+    - vllm/model_executor/models/registry.py
+    - tests/v1/e2e/spec_decode/acceptance_rates/dfly/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dfly/
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
   key: spec-decode-eagle-2-llama3-qwen-vl-other

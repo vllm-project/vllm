@@ -10,5 +10,6 @@ def needs_mtp_hidden_buffer(spec_config: SpeculativeConfig | None) -> bool:
     return (
         spec_config is not None
         and spec_config.uses_target_hidden_states
+        and spec_config.speculator_config.uses_target_hc_residual
         and not spec_config.uses_aux_hidden_states
     )

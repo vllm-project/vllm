@@ -782,6 +782,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
     "HYV4DFlyModel": ("vllm.models.hy_v4", "HYV4DFlyForCausalLM"),
+    "DFlyDeepseekV41DraftModel": (
+        "vllm.models.deepseek_v41.nvidia.dfly",
+        "DFlyDeepseekV41DraftModel",
+    ),
     "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
 }
 

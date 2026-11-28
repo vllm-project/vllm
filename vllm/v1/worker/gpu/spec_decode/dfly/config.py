@@ -16,6 +16,7 @@ class DFlySpeculatorConfig(DraftModelSpeculatorConfig):
 
     base_method = "dfly"
     uses_target_hidden_states = True
+    uses_target_hc_residual = False
     shares_target_positions = False
     parallel_drafting = True
 
