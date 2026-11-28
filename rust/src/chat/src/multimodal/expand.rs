@@ -128,12 +128,11 @@ pub(super) fn expand_prompt_token_ids(
 
     for lane in &lanes {
         if !lane.replacements.is_empty() {
-            bail_multimodal!(
-                "placeholder token `{}` was not found in tokenized prompt for {} remaining `{}` item(s)",
-                lane.placeholder_token,
-                lane.replacements.len(),
-                lane.modality
-            );
+            return Err(Error::MissingMultimodalPlaceholder {
+                placeholder: lane.placeholder_token.to_string(),
+                remaining: lane.replacements.len(),
+                modality: lane.modality,
+            });
         }
     }
 
@@ -324,7 +323,10 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+        assert!(matches!(
+            error,
+            Error::MissingMultimodalPlaceholder { remaining: 1, .. }
+        ));
     }
 
     #[test]
@@ -350,7 +352,10 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+        assert!(matches!(
+            error,
+            Error::MissingMultimodalPlaceholder { remaining: 1, .. }
+        ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }
 
@@ -584,8 +589,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Multimodal(message)
-                if message.contains("<|video_pad|>") && message.contains("`video`")
+            Error::MissingMultimodalPlaceholder { placeholder, remaining: 1, modality: Modality::Video }
+                if placeholder == "<|video_pad|>"
         ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }

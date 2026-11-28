@@ -7,6 +7,7 @@ top-k combine.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 
 from .block_scales import _scale_offsets
@@ -1068,9 +1069,11 @@ def _combine_kernel(
     LAUNCH_DEPENDENTS: tl.constexpr,
     PUSH: tl.constexpr,
     HALO_ROWS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
-    if LAUNCH_DEPENDENTS:
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+    if launch_pdl and LAUNCH_DEPENDENTS:
         tl.extra.cuda.gdc_launch_dependents()
     token = tl.program_id(0).to(tl.int64)
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -1142,5 +1145,5 @@ def _combine(
         sp is not None,
         HALO_ROWS,
         num_warps=2,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )

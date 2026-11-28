@@ -23,6 +23,9 @@ class _InputOptions(TypedDict):
     arrival_time: NotRequired[float]
     """The time when the input was received (before rendering)."""
 
+    media_io_kwargs: NotRequired[dict[str, dict[str, object]] | None]
+    """Optional per-modality media loading and decoding arguments."""
+
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
@@ -153,6 +156,11 @@ class MultiModalInput(_InputOptions):
     `prompt_token_ids`.
     """
 
+    skip_mm_cache: NotRequired[bool]
+    """
+    If true, skip the multimodal processor cache for this request.
+    """
+
 
 def mm_input(
     prompt_token_ids: list[int],
@@ -257,6 +265,9 @@ class EncoderDecoderInput(TypedDict):
 
     arrival_time: NotRequired[float]
     """The time when the input was received (before rendering)."""
+
+    media_io_kwargs: NotRequired[dict[str, dict[str, object]] | None]
+    """Optional per-modality media loading and decoding arguments."""
 
 
 SingletonInput: TypeAlias = DecoderOnlyEngineInput | MultiModalEncDecInput

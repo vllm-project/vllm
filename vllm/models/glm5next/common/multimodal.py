@@ -812,10 +812,12 @@ class Glm5NextProfilingProcessor(BaseMultiModalProcessor[Glm5NextProcessingInfo]
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         scheduler_config: SchedulerConfig | None = None,
+        seq_len: int | None = None,
     ) -> MultiModalInput:
         info = self.info
         vision_config = info.get_hf_config().vision_config
-        seq_len = info.ctx.model_config.max_model_len
+        if seq_len is None:
+            seq_len = info.get_dummy_seq_len(info.ctx.model_config.max_model_len)
         if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
             seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 

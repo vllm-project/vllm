@@ -28,7 +28,8 @@ def is_flashinfer_qsa_supported(
     """Whether FlashInfer 0.7.4 can plan this geometry on this device."""
     return (
         current_platform.is_device_capability_family(100)
-        and kv_dtype == torch.bfloat16
+        # An FP8 cache is allocated as uint8 holding e4m3 bytes; Q matches it.
+        and kv_dtype in (torch.bfloat16, torch.uint8)
         and has_flashinfer()
         and block_size in (4, 8, 16, 32, 64, 128)
         and head_dim in (64, 128, 192, 256)
@@ -48,6 +49,7 @@ def get_workspace_size(
     max_seq_len_kv: int,
     block_size: int,
     block_topk: int,
+    kv_dtype: torch.dtype,
     device: torch.device,
 ) -> int:
     """Workspace bytes for the largest prefill. Only shapes matter, so
@@ -56,11 +58,14 @@ def get_workspace_size(
         get_q_token_kv_block_sparse_workspace_size,
     )
 
-    q = torch.empty((1, 1, 1), dtype=torch.bfloat16, device=device).expand(
+    if kv_dtype == torch.uint8:
+        kv_dtype = torch.float8_e4m3fn
+    # Q has the cache's dtype.
+    q = torch.empty((1, 1, 1), dtype=kv_dtype, device=device).expand(
         max_num_tokens, num_heads, head_dim
     )
     k_cache = torch.empty(
-        (1, num_kv_heads, page_size, head_dim), dtype=torch.bfloat16, device=device
+        (1, num_kv_heads, page_size, head_dim), dtype=kv_dtype, device=device
     )
     block_table = torch.empty((1, 1), dtype=torch.int32, device=device).expand(
         max_num_reqs, cdiv(max_seq_len_kv, page_size)
@@ -82,6 +87,7 @@ def get_workspace_size(
         group_size=GROUP_SIZE,
         kv_block_size=block_size,
         split_kv=False,
+        out_dtype=torch.bfloat16,
     )
 
 
@@ -159,18 +165,21 @@ def qsa_sparse_paged_prefill(
     scale: float,
     output_gate: torch.Tensor,
     out: torch.Tensor,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> None:
     """Write `sigmoid(output_gate) * attention` of prefill rows into `out`.
 
     `block_indices` holds the indexer's selected blocks, -1 padded;
     `token_to_req` indexes all of `block_table`, whose prefill requests start
-    at `num_decodes`; `seq_lens` holds those requests' lengths.
+    at `num_decodes`; `seq_lens` holds those requests' lengths. An FP8 cache
+    (uint8 storage) takes FP8 `query` (unit scale) and its per-tensor
+    `k_scale`/`v_scale`.
     """
     from flashinfer.attention.prims_ts import QTokenKvBlockSparsePagedTSWrapper
 
     _, num_kv_heads, page_size, row = kv_cache.shape
     head_dim = row // 2
-    k_cache, v_cache = kv_cache[..., :head_dim], kv_cache[..., head_dim:]
     # FlashInfer loads whole blocks and its causal mask does not clear NaN/Inf
     # in V; unwritten tail slots may hold another cache group's bytes.
     _zero_partial_tail_kernel[(seq_lens.numel(),)](
@@ -187,6 +196,9 @@ def qsa_sparse_paged_prefill(
         ROW_BLOCK=next_power_of_2(row),
         KV_BLOCK=block_size,
     )
+    if kv_cache.dtype == torch.uint8:
+        kv_cache = kv_cache.view(torch.float8_e4m3fn)
+    k_cache, v_cache = kv_cache[..., :head_dim], kv_cache[..., head_dim:]
     workspace = torch.empty(workspace_size, dtype=torch.uint8, device=query.device)
     # A plan binds this layer's K/V and the batch shapes, so plan every call;
     # its ~0.35 ms of host time hides behind the GPU except on short prefills.
@@ -207,6 +219,8 @@ def qsa_sparse_paged_prefill(
         packed_query=True,
         split_kv=False,
         q_dtype=query.dtype,
+        kv_dtype=kv_cache.dtype,
+        out_dtype=out.dtype,
     )
     wrapper.run(
         query,
@@ -216,7 +230,10 @@ def qsa_sparse_paged_prefill(
         token_to_req,
         positions,
         qo_indptr=qo_indptr,
-        sm_scale=scale,
+        # Per-tensor K/V dequantization: K folds into the softmax scale, V
+        # scales the output. Both are 1 for a BF16 cache.
+        sm_scale=scale * k_scale,
+        v_scale=v_scale,
         out=out,
     )
     numel = out.numel()

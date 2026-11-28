@@ -131,12 +131,14 @@ class AttentionConfig:
 
     indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
     """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
-    sparse-attention indexer. "auto" (default) picks the model's default:
-    "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100, "float32" otherwise.
+    sparse-attention indexer, also used by Kimi K3. "auto" (default) picks the
+    model's default: "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100,
+    "float32" otherwise (Kimi K3 included).
     "float32" reduces the head-weighted scores in FP32 and feeds them to the
     top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
-    in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
-    logits directly, while other top-k kernels read an FP32 copy. The sparse
+    in BF16 with BF16 head weights and lets the top-k kernels that take BF16
+    rank the logits directly (DeepSelect; in decode also the cooperative and
+    persistent kernels), while the others read an FP32 copy. The sparse
     MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
     on SM90 and ROCm, independently of this setting."""
 

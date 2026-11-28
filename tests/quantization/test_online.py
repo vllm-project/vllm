@@ -22,6 +22,7 @@ from tests.quantization.utils import (
     quant_config_args,
 )
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+from tests.utils import multi_gpu_test
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
@@ -2306,7 +2307,7 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="mxfp8_moe_mxfp8_activation",
         ),
         pytest.param(
-            "vllm-project/Qwen3-0.6B-MXFP8",
+            "vllm/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
             Fp8PtpcOnlineLinearMethod,
@@ -2430,7 +2431,7 @@ def test_online_quantization(
             assert_source_weights_released,
         )
 
-    if model_name == "vllm-project/Qwen3-0.6B-MXFP8":
+    if model_name == "vllm/Qwen3-0.6B-MXFP8":
         original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
@@ -2506,7 +2507,7 @@ def test_online_quantization(
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         o_proj = model.model.layers[1].self_attn.o_proj
         moe = model.model.layers[0].mlp.experts
-    elif model_name == "vllm-project/Qwen3-0.6B-MXFP8":
+    elif model_name == "vllm/Qwen3-0.6B-MXFP8":
         o_proj = model.model.layers[0].self_attn.o_proj
         moe = None
     elif model_name in (NVFP4_MOE_MODEL_NAME, MODELOPT_NVFP4_MOE_MODEL_NAME):
@@ -3010,6 +3011,31 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+def _check_loaded_ep_experts(model: torch.nn.Module) -> None:
+    experts = next(
+        layer for layer in model.modules() if isinstance(layer, RoutedExperts)
+    )
+    assert experts.expert_map is not None
+    num_local = (experts.expert_map >= 0).sum().item()
+    assert 0 < num_local < experts.expert_map.numel()
+    assert experts.w2_weight.shape[0] == num_local
+    assert getattr(experts, "w2_input_scale", None) is None
+
+
+@multi_gpu_test(num_gpus=4)
+def test_modelopt_nvfp4_mxfp4_ep_loads_local_experts(vllm_runner, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        MODELOPT_NVFP4_MOE_MODEL_NAME,
+        quantization="mxfp4",
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enforce_eager=True,
+        max_model_len=256,
+    ) as llm:
+        llm.apply_model(_check_loaded_ep_experts)
 
 
 @pytest.mark.skipif(
@@ -3835,7 +3861,7 @@ def test_online_nvfp4_quantizes_original_expert_weights(staging_device: str) -> 
         # time, so the peak stays close to the model memory instead of holding the
         # whole serialized model next to the requantized one.
         (
-            "vllm-project/Qwen3-0.6B-MXFP8",
+            "vllm/Qwen3-0.6B-MXFP8",
             0.76,
             {"quantization_config": {"linear": "fp8_per_channel"}},
         ),
