@@ -743,7 +743,13 @@ class MessageQueue:
                     return not (written_flag and read_count != self.buffer.n_reader)
 
                 if SPINLOOP_EXT_ENABLED and not check():
-                    spinloop(metadata_buffer, check, timeout=SPINLOOP_TIMEOUT_SECONDS)
+                    spinloop_timeout = SPINLOOP_TIMEOUT_SECONDS
+                    if timeout is not None:
+                        remaining = timeout - (time.monotonic() - start_time)
+                        spinloop_timeout = min(spinloop_timeout, remaining)
+                    # The extension treats timeouts <= 1e-9 as unbounded.
+                    if spinloop_timeout > 1e-9:
+                        spinloop(metadata_buffer, check, timeout=spinloop_timeout)
 
                 if not check():
                     # this block is written and not read by all readers
