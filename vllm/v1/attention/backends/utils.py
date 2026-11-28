@@ -22,7 +22,7 @@ from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
@@ -1136,18 +1136,21 @@ def compute_causal_conv1d_metadata(
     token_chunk_offset_ptr = None
     for BLOCK_M in [8]:  # cover all BLOCK_M values
         nums = -(-seqlens // BLOCK_M)
+        nums_np = nums.numpy()
         nums_dict[BLOCK_M] = {}
         nums_dict[BLOCK_M]["nums"] = nums
-        nums_dict[BLOCK_M]["tot"] = nums.sum().item()
-        mlist = np_to_pinned_tensor(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]["tot"] = int(nums_np.sum())
+        mlist = np_to_pinned_tensor(np.repeat(np.arange(len(nums_np)), nums_np))
         nums_dict[BLOCK_M]["mlist"] = mlist
         mlist_len = len(nums_dict[BLOCK_M]["mlist"])
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
-        offsetlist = []  # type: ignore
-        for num in nums:
-            offsetlist.extend(range(num))
-        offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
+        starts = np.cumsum(nums_np) - nums_np
+        offsetlist = np_to_pinned_tensor(
+            (np.arange(mlist_len, dtype=np.int64) - np.repeat(starts, nums_np)).astype(
+                np.int32
+            )
+        )
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
         if batch_ptr is None:
