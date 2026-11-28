@@ -8,6 +8,8 @@ from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    CutlassInt8ScaledMMLinearKernel,
+    TritonInt8ScaledMMLinearKernel,
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -19,6 +21,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 
 logger = init_logger(__name__)
 
@@ -35,6 +38,19 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     def get_min_capability(cls) -> int:
         # turing and up
         return 75
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        kernel = getattr(self, "kernel", None)
+        return (
+            self.strategy == QuantizationStrategy.CHANNEL
+            and not self.is_static_input_scheme
+            and self.input_symmetric
+            and isinstance(
+                kernel,
+                (CutlassInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel),
+            )
+        )
 
     def create_weights(
         self,
@@ -105,7 +121,19 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Compressed-tensors W8A8 INT8 backend cannot use "
+                    "pre-processed weights"
+                )
+            layer._already_called_process_weights_after_loading = True
+            return
+
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
         self.kernel.process_weights_after_loading(layer)
+        layer._already_called_process_weights_after_loading = True
 
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
