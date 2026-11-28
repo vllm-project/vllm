@@ -4,6 +4,7 @@
 import copy
 import json
 import os
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,9 @@ else:
     llguidance = LazyLoader("llguidance", globals(), "llguidance")
     llguidance_hf = LazyLoader("llguidance.hf", globals(), "llguidance.hf")
     llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
+
+# One LLExecutor per thread, since bitmask fills can run in a pool.
+_executor_local = threading.local()
 
 logger = init_logger(__name__)
 
@@ -316,6 +320,27 @@ class GuidanceGrammar(StructuredOutputGrammar):
         # or otherwise in an error state
         llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
         self.check_error()
+
+    @classmethod
+    def fill_bitmask_batch(
+        cls,
+        grammars: list[tuple[StructuredOutputGrammar, int]],
+        bitmask: torch.Tensor,
+    ) -> None:
+        guidance_grammars: list[GuidanceGrammar] = []
+        matchers: list[tuple[llguidance.LLMatcher, int]] = []
+        for grammar, batch_index in grammars:
+            assert isinstance(grammar, GuidanceGrammar)
+            guidance_grammars.append(grammar)
+            matchers.append((grammar.ll_matcher, batch_index))
+
+        executor = getattr(_executor_local, "executor", None)
+        if executor is None:
+            executor = llguidance.LLExecutor(num_threads=1)
+            _executor_local.executor = executor
+        llguidance_torch.fill_next_token_bitmask_par(executor, matchers, bitmask)
+        for grammar in guidance_grammars:
+            grammar.check_error()
 
     def is_terminated(self) -> bool:
         return self.terminated

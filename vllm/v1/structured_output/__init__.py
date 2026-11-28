@@ -219,9 +219,14 @@ class StructuredOutputManager:
         `masked_ids`, the implicit reasoning ends masked while reasoning.
         """
         assert self._grammar_bitmask is not None
+        # Group the rows to fill by grammar class, so backends that can fill
+        # many rows in one call (xgrammar) do so; others fill one at a time.
+        active_grammars: dict[
+            type[StructuredOutputGrammar], list[tuple[StructuredOutputGrammar, int]]
+        ] = {}
         for grammar, index, apply_bitmask, masked_ids in batch:
             if apply_bitmask and not grammar.is_terminated():
-                grammar.fill_bitmask(self._grammar_bitmask, index)
+                active_grammars.setdefault(type(grammar), []).append((grammar, index))
             else:
                 # Note that for thinking support, we will need to
                 # reset the relevant part of the bitmask for consequent
@@ -231,6 +236,13 @@ class StructuredOutputManager:
                     row = self._grammar_bitmask[index].numpy().view(np.uint32)
                     for token_id in masked_ids:
                         row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
+
+        for grammar_cls, grammars in active_grammars.items():
+            if len(grammars) == 1:
+                grammar, index = grammars[0]
+                grammar.fill_bitmask(self._grammar_bitmask, index)
+            else:
+                grammar_cls.fill_bitmask_batch(grammars, self._grammar_bitmask)
 
     def _async_submit_fill_bitmask(
         self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
