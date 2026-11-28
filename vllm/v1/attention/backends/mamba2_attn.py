@@ -121,6 +121,8 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
+    # Prefill rows with exactly one chunk; picks the SSD kernels.
+    num_single_chunk_seqs_p: int = 0
 
     # Internal prefill checkpoints, one entry per prefill row. The chunk
     # index selects the varlen_states row holding the checkpoint state.
@@ -177,6 +179,7 @@ class Mamba2AttentionMetadataBuilder(
         checkpoint_chunk_idx = None
         checkpoint_meta = None
         prep_initial_states = False
+        num_single_chunk_seqs_p = 0
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
@@ -209,6 +212,7 @@ class Mamba2AttentionMetadataBuilder(
                 seq_idx_p,
                 last_chunk_indices_p,
                 checkpoint_chunk_idx,
+                num_single_chunk_seqs_p,
             ) = self._build_chunk_metadata_tensors(
                 self.chunk_size,
                 common,
@@ -221,6 +225,7 @@ class Mamba2AttentionMetadataBuilder(
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
             seq_idx_p=seq_idx_p,
+            num_single_chunk_seqs_p=num_single_chunk_seqs_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,

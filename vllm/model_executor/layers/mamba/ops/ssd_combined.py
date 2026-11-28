@@ -18,6 +18,11 @@ from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
+# Batches with at least this many sequences that fit in one chunk take the
+# short-sequence path (see _mamba_chunk_scan_combined_fwd). With fewer, its
+# extra launch arguments cost more host time than the skipped work saves.
+_SHORT_SEQ_PATH_MIN_SEQS = 8
+
 
 def is_int_pow_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
@@ -45,7 +50,16 @@ def _mamba_chunk_scan_combined_fwd(
     state_dtype=None,
     final_states_out=None,
     final_state_indices=None,
+    short_seq_path=None,
+    num_single_chunk_seqs=None,
 ):
+    """The short-sequence path skips the M-blocks of _chunk_scan_fwd past the
+    end of short chunks, and, with a state cache, writes the final state of a
+    sequence that fits in one chunk from _chunk_state_fwd and skips it in
+    _state_passing_fwd. It gives the same results bit for bit. It is taken
+    when `num_single_chunk_seqs` (a host count; if not given, a lower bound
+    from the shapes) reaches _SHORT_SEQ_PATH_MIN_SEQS, or when forced with
+    `short_seq_path` (warmup, tests)."""
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
     _, ngroups, dstate = B.shape
@@ -100,10 +114,33 @@ def _mamba_chunk_scan_combined_fwd(
         dt_limit=dt_limit,
     )
 
+    if short_seq_path is None:
+        if num_single_chunk_seqs is None:
+            # Each sequence has one chunk or at least two.
+            nchunks = cu_chunk_seqlens.shape[0] - 1
+            num_single_chunk_seqs = 2 * last_chunk_indices.shape[0] - nchunks
+        short_seq_path = num_single_chunk_seqs >= _SHORT_SEQ_PATH_MIN_SEQS
+    fuse_final_states = (
+        short_seq_path
+        and final_states_out is not None
+        and not return_intermediate_states
+        and final_states_out.stride()[1:] == (headdim * dstate, dstate, 1)
+        and (initial_states is None or initial_states.is_contiguous())
+    )
+
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
     states = _chunk_state_fwd(
-        B, x, dt, dA_cumsum, cu_chunk_seqlens, states_in_fp32=True
+        B,
+        x,
+        dt,
+        dA_cumsum,
+        cu_chunk_seqlens,
+        states_in_fp32=True,
+        seq_idx=seq_idx,
+        initial_states=initial_states,
+        final_states=final_states_out if fuse_final_states else None,
+        final_state_indices=final_state_indices,
     )
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
@@ -122,6 +159,7 @@ def _mamba_chunk_scan_combined_fwd(
         if final_states_out is not None
         else None,  # (num_slots, nheads, headdim*dstate)
         final_state_indices=final_state_indices,
+        skip_single_chunk_seqs=fuse_final_states,
     )
     states = states.unflatten(-1, (headdim, dstate))
 
@@ -151,6 +189,7 @@ def _mamba_chunk_scan_combined_fwd(
         D=D,
         z=z,
         initial_states=initial_states,
+        skip_empty_m_blocks=short_seq_path,
     )
 
     if return_intermediate_states:
@@ -183,6 +222,8 @@ def mamba_chunk_scan_combined_varlen(
     state_dtype=None,
     final_states_out=None,
     final_state_indices=None,
+    short_seq_path=None,
+    num_single_chunk_seqs=None,
 ):
     """Argument:
         x: (seqlen, nheads, headdim)
@@ -205,6 +246,9 @@ def mamba_chunk_scan_combined_varlen(
         state_dtype: The data type of the ssm state
         final_states_out: (num_slots, nheads, headdim, dstate) state cache
         final_state_indices: (batch,) slot receiving each final state
+        short_seq_path: force (True/False) or pick (None) the short-sequence
+            path, see _mamba_chunk_scan_combined_fwd
+        num_single_chunk_seqs: host count of sequences with one chunk
     Return:
         varlen_states: (batch, nheads, headdim, dstate), or None if written
     """
@@ -234,6 +278,8 @@ def mamba_chunk_scan_combined_varlen(
         state_dtype=state_dtype,
         final_states_out=final_states_out,
         final_state_indices=final_state_indices,
+        short_seq_path=short_seq_path,
+        num_single_chunk_seqs=num_single_chunk_seqs,
     )
     if final_states_out is not None:
         if varlen_states is not None:

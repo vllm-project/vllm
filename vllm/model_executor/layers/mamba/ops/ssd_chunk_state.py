@@ -201,7 +201,11 @@ def _chunk_cumsum_fwd_kernel(
     ],
     key=["hdim", "dstate", "chunk_size", "USE_TD"],
 )
-@triton.jit
+# The strides of the final-state write vary with the cache layout and the
+# slot table; specializing on their values would compile at serving time.
+@triton.jit(
+    do_not_specialize=["stride_final_states_slot", "stride_final_state_indices"]
+)
 def _chunk_state_fwd_kernel(
     # Pointers to matrices
     x_ptr,
@@ -240,6 +244,12 @@ def _chunk_state_fwd_kernel(
     # sm90+, 2D block IO on Intel); the pointer-path branches are then
     # compiled out.
     USE_TD: tl.constexpr = False,
+    # Final-state write (see _chunk_state_fwd): (seq_idx, initial_states or
+    # None, final_states, final_state_indices). Launches without it compile
+    # as before; one tuple instead of four pointers costs them less host time.
+    final_states=None,
+    stride_final_states_slot: tl.int64 = 0,
+    stride_final_state_indices: tl.int64 = 0,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -325,6 +335,35 @@ def _chunk_state_fwd_kernel(
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
+    if final_states is not None:
+        # A chunk that is a whole sequence holds that sequence's final state:
+        # write exp(dA_cs_last) * initial state + chunk state, the update
+        # _state_passing_fwd_kernel would apply, straight into its cache slot.
+        seq_idx_ptr, initstates_ptr, final_states_ptr, final_state_indices_ptr = (
+            final_states
+        )
+        seq = tl.load(seq_idx_ptr + pid_c)
+        seq_prev = tl.load(seq_idx_ptr + pid_c - 1, mask=pid_c > 0, other=-1)
+        seq_next = tl.load(
+            seq_idx_ptr + pid_c + 1, mask=pid_c + 1 < tl.num_programs(1), other=-1
+        )
+        if (seq != seq_prev) and (seq != seq_next):
+            # Initial and final states have the layout of states.
+            offs = (
+                pid_h * stride_states_head
+                + offs_m[:, None] * stride_states_hdim
+                + offs_n[None, :] * stride_states_dstate
+            )
+            mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
+            if initstates_ptr is not None:
+                init = tl.load(initstates_ptr + seq * stride_states_chunk + offs, mask)
+                # An explicit fma, as the compiler contracts the update there
+                acc = tl.fma(fast_exp(dA_cs_last), init.to(tl.float32), acc)
+            slot = tl.load(final_state_indices_ptr + seq * stride_final_state_indices)
+            final_states_ptr += slot.to(tl.int64) * stride_final_states_slot
+            tl.store(final_states_ptr + offs, acc, mask=mask)
+            return
+
     states = acc.to(states_ptr.dtype.element_ty)
 
     states_ptr += pid_c * stride_states_chunk + pid_h * stride_states_head
@@ -399,8 +438,23 @@ def _chunk_cumsum_fwd(
 
 
 def _chunk_state_fwd(
-    B, x, dt, dA_cumsum, cu_chunk_seqlens, states=None, states_in_fp32=True
+    B,
+    x,
+    dt,
+    dA_cumsum,
+    cu_chunk_seqlens,
+    states=None,
+    states_in_fp32=True,
+    seq_idx=None,
+    initial_states=None,
+    final_states=None,
+    final_state_indices=None,
 ):
+    """With `final_states`, a chunk that is a whole sequence writes that
+    sequence's final state to `final_states[final_state_indices[seq]]` instead
+    of its entry in `states`; `_state_passing_fwd(..., skip_single_chunk_seqs=
+    True)` then skips the sequence. Initial and final states must have the
+    layout of `states` (contiguous; for final_states, within a slot)."""
     seqlen, nheads, headdim = x.shape
     _, nchunks, chunk_size = dt.shape
     _, ngroups, dstate = B.shape
@@ -431,9 +485,19 @@ def _chunk_state_fwd(
         nchunks,
         nheads,
     )
+    variant = None
+    if final_states is not None:
+        assert final_states.stride()[1:] == states.stride()[1:]
+        assert initial_states is None or initial_states.is_contiguous()
+        variant = dict(
+            final_states=(seq_idx, initial_states, final_states, final_state_indices),
+            stride_final_states_slot=final_states.stride(0),
+            stride_final_state_indices=final_state_indices.stride(0),
+        )
     launch_autotuned(
         _chunk_state_fwd_kernel,
         grid,
+        variant,
         x_ptr=x,
         b_ptr=B,
         states_ptr=states,

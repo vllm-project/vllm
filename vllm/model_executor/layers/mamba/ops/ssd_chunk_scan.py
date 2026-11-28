@@ -244,6 +244,9 @@ def _chunk_scan_fwd_kernel(
     # sm90+, 2D block IO on Intel); the pointer-path branches are then
     # compiled out.
     USE_TD: tl.constexpr = False,
+    # Return at once from M-blocks past the end of a short chunk, which would
+    # store nothing.
+    SKIP_EMPTY_M_BLOCKS: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -253,6 +256,9 @@ def _chunk_scan_fwd_kernel(
     cb_ptr += pid_c * stride_cb_chunk + (pid_h // nheads_ngroups_ratio) * stride_cb_head
     chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
     chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
+    if SKIP_EMPTY_M_BLOCKS:  # noqa: SIM102 (a constexpr test, compiled out)
+        if pid_m * BLOCK_SIZE_M >= chunk_seqlen_end - chunk_seqlen_start:
+            return
     x_ptr += chunk_seqlen_start * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_c * stride_dt_chunk + pid_h * stride_dt_head
     dA_cumsum_ptr += pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
@@ -551,6 +557,7 @@ def _chunk_scan_fwd(
     D=None,
     z=None,
     initial_states=None,
+    skip_empty_m_blocks=False,
 ):
     assert seq_idx is not None, "this implementation requires seq_idx"
 
@@ -601,6 +608,7 @@ def _chunk_scan_fwd(
     launch_autotuned(
         _chunk_scan_fwd_kernel,
         grid,
+        {"SKIP_EMPTY_M_BLOCKS": True} if skip_empty_m_blocks else None,
         cb_ptr=cb,
         x_ptr=x,
         z_ptr=z,

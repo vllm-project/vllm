@@ -6,6 +6,8 @@
 
 # ruff: noqa: E501
 
+from typing import Any
+
 import torch
 
 from vllm.model_executor.layers.mamba.ops.triton_helpers import (
@@ -24,7 +26,7 @@ from vllm.triton_utils import tl, triton
         triton.Config({"BLOCK_SIZE": 1024}),
         triton.Config({"BLOCK_SIZE": 2048}),
     ],
-    key=["dim"],
+    key=["dim", "SKIP_SINGLE_CHUNK_SEQS"],
 )
 @triton.jit(do_not_specialize_on_alignment=["final_state_indices_ptr"])
 def _state_passing_fwd_kernel(
@@ -60,6 +62,7 @@ def _state_passing_fwd_kernel(
     HAS_INITSTATES: tl.constexpr,
     HAS_FINAL_STATES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    SKIP_SINGLE_CHUNK_SEQS: tl.constexpr = False,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -70,6 +73,9 @@ def _state_passing_fwd_kernel(
     chunk_start = (
         tl.load(last_chunk_indices_ptr + pid_b - 1, mask=pid_b > 0, other=-1) + 1
     )
+    if SKIP_SINGLE_CHUNK_SEQS:  # noqa: SIM102 (a constexpr test, compiled out)
+        if chunk_end - chunk_start == 1:
+            return
 
     # Offset pointers to this sequence's first chunk
     states_ptr += chunk_start * stride_states_chunk + pid_h * stride_states_head
@@ -130,9 +136,13 @@ def _state_passing_fwd(
     out_dtype=None,
     final_states=None,
     final_state_indices=None,
+    skip_single_chunk_seqs=False,
 ):
     """`final_states` (num_slots, nheads, dim), if given, receives each
-    sequence's final state at slot `final_state_indices[b]`."""
+    sequence's final state at slot `final_state_indices[b]`. With
+    `skip_single_chunk_seqs`, sequences with one chunk are skipped: their final
+    state came from `_chunk_state_fwd(..., final_states=...)`."""
+    assert not skip_single_chunk_seqs or final_states is not None
     nchunks, nheads, dim = states.shape
     chunk_size = dA_cumsum.shape[-1]
     batch = last_chunk_indices.shape[0]
@@ -155,6 +165,10 @@ def _state_passing_fwd(
         else (0, 0, 0)
     )
 
+    # Passed only when set, so the other launches keep their autotune key.
+    skip: dict[str, Any] = (
+        {"SKIP_SINGLE_CHUNK_SEQS": True} if skip_single_chunk_seqs else {}
+    )
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), batch, nheads)
     launch_autotuned(
         _state_passing_fwd_kernel,
@@ -188,5 +202,6 @@ def _state_passing_fwd(
         ),
         HAS_INITSTATES=initial_states is not None,
         HAS_FINAL_STATES=final_states is not None,
+        **skip,
     )
     return out

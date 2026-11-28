@@ -361,12 +361,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common: M,
         common_attn_metadata: CommonAttentionMetadata,
         checkpoint_offsets_p: list[int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, int]:
         """Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p,
-        checkpoint_chunk_idx_p). The last is None unless a row checkpoints;
-        it has one entry per prefill row, holding the logical chunk that ends
-        on the checkpoint, and 0 for rows that decline.
+        checkpoint_chunk_idx_p, num_single_chunk_seqs_p).
+        checkpoint_chunk_idx_p is None unless a row checkpoints; it has one
+        entry per prefill row, holding the logical chunk that ends on the
+        checkpoint, and 0 for rows that decline. num_single_chunk_seqs_p counts
+        the prefill rows with exactly one chunk, on the host (no device sync).
         """
         num_prefills = common.num_prefills
 
@@ -404,7 +406,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             if any(idx >= 0 for idx in ckpt_idxs)
             else None
         )
-        return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, ckpt_idx_p
+        # A row spans the chunks after the previous row's last one.
+        num_single_chunk_seqs_p = sum(
+            last - prev == 1
+            for prev, last in zip([-1, *last_chunk_indices], last_chunk_indices)
+        )
+        return (
+            cu_chunk_seqlen_p,
+            seq_idx_p,
+            last_chunk_indices_p,
+            ckpt_idx_p,
+            num_single_chunk_seqs_p,
+        )
 
     def _compute_common_metadata(
         self,

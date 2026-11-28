@@ -17,6 +17,8 @@ from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
     _chunk_scan_fwd_kernel,
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+    _SHORT_SEQ_PATH_MIN_SEQS,
+    _mamba_chunk_scan_combined_fwd,
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.triton_helpers import _autotuned_configs
@@ -1013,3 +1015,204 @@ def test_chunk_scan_fwd_every_config_matches(monkeypatch):
                 rtol=2e-2,
                 msg=lambda m, config=config: f"{config}: {m}",
             )
+
+
+def _spy_short_seq_variants(monkeypatch) -> dict[str, list[bool]]:
+    """Whether each launch of the three kernels with a short-sequence variant
+    took it (spies on `launch_autotuned`, which every launch goes through)."""
+    calls: dict[str, list[bool]] = {}
+    for module, kernel, flag in (
+        (ssd_chunk_state, ssd_chunk_state._chunk_state_fwd_kernel, None),
+        (ssd_state_passing, ssd_state_passing._state_passing_fwd_kernel, "SKIP"),
+        (ssd_chunk_scan, _chunk_scan_fwd_kernel, None),
+    ):
+        name = kernel.fn.__name__
+        calls[name] = []
+
+        def spy(
+            k,
+            grid,
+            variant=None,
+            _launch=module.launch_autotuned,
+            _kernel=kernel,
+            _calls=calls[name],
+            _flag=flag,
+            **kwargs,
+        ):
+            if k is _kernel:
+                used = kwargs.get("SKIP_SINGLE_CHUNK_SEQS", False) if _flag else variant
+                _calls.append(bool(used))
+            return _launch(k, grid, variant, **kwargs)
+
+        monkeypatch.setattr(module, "launch_autotuned", spy)
+    return calls
+
+
+@pytest.mark.parametrize("chunk_size", [8, 256])
+@pytest.mark.parametrize("has_initial_states", [False, True])
+@pytest.mark.parametrize("short_seq_path", [None, False, True])
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_mamba_chunk_scan_final_states_out(
+    chunk_size, has_initial_states, short_seq_path, state_dtype, monkeypatch
+):
+    """Writing each sequence's final state into a state cache (final_states_out)
+    must give exactly the states the kernels return, with the short-sequence
+    path picked from the batch (None) or forced on or off, and normal
+    autotuning: its variants reuse the configs of the plain launches. The
+    batch mixes sequences that fit in one chunk, whose final state
+    _chunk_state_fwd writes itself, with longer ones. Asking for every chunk's
+    state as well must still return all of them."""
+    set_random_seed(0)
+    seqlens = (5, 300, 1, 40, 256, 513, 7, 8, 8, 8)
+    nheads, headdim, ngroups, dstate = 8, 32, 2, 64
+    dtype = torch.bfloat16
+    batch, seqlen = len(seqlens), sum(seqlens)
+    cu_seqlens = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
+    cu_seqlens[1:] = torch.tensor(seqlens, device=DEVICE).cumsum(0)
+    cu_chunk_seqlens, last_chunk_indices, seq_idx_chunks = (
+        compute_varlen_chunk_metadata(cu_seqlens, chunk_size)
+    )
+
+    x = torch.randn(seqlen, nheads, headdim, dtype=dtype, device=DEVICE)
+    dt = torch.randn(seqlen, nheads, dtype=dtype, device=DEVICE)
+    A = -torch.rand(nheads, device=DEVICE)
+    B = torch.randn(seqlen, ngroups, dstate, dtype=dtype, device=DEVICE)
+    C = torch.randn(seqlen, ngroups, dstate, dtype=dtype, device=DEVICE)
+    D = torch.randn(nheads, device=DEVICE)
+    dt_bias = torch.randn(nheads, device=DEVICE)
+    initial_states = (
+        torch.randn(batch, nheads, headdim, dstate, dtype=state_dtype, device=DEVICE)
+        if has_initial_states
+        else None
+    )
+
+    def run(**kwargs):
+        out = torch.empty_like(x)
+        states = _mamba_chunk_scan_combined_fwd(
+            x,
+            dt,
+            A,
+            B,
+            C,
+            chunk_size,
+            out,
+            D=D,
+            dt_bias=dt_bias,
+            initial_states=initial_states,
+            seq_idx=seq_idx_chunks,
+            cu_seqlens=cu_seqlens,
+            cu_chunk_seqlens=cu_chunk_seqlens,
+            last_chunk_indices=last_chunk_indices,
+            dt_softplus=True,
+            state_dtype=state_dtype,
+            **kwargs,
+        )
+        return out, states
+
+    out_ref, chunk_states_ref = run(
+        return_intermediate_states=True, short_seq_path=False
+    )
+    states_ref = chunk_states_ref[last_chunk_indices]
+
+    # Slots in reverse order with unused slots around them, which must not change.
+    # As in the mamba metadata builder, the prefill slots are column 0 of a 2-D
+    # table (a strided view); the other columns point at unused slots.
+    slots = torch.arange(batch, device=DEVICE, dtype=torch.int32).flip(0) + 2
+    slot_table = torch.stack(
+        [slots, torch.zeros_like(slots), torch.ones_like(slots)], 1
+    )
+    slots = slot_table[:, 0]
+    assert slots.stride(0) == 3
+    unused = torch.ones(batch + 3, dtype=torch.bool, device=DEVICE)
+    unused[slots.long()] = False
+    for return_intermediate_states in (False, True):
+        # Leave NaNs in freed memory, so a read of a chunk state that was not
+        # written shows up instead of finding the reference run's values.
+        torch.full(
+            chunk_states_ref.shape, float("nan"), dtype=torch.float32, device=DEVICE
+        )
+        cache = torch.randn(
+            batch + 3, nheads, headdim, dstate, dtype=state_dtype, device=DEVICE
+        )
+        cache_before = cache.clone()
+        with monkeypatch.context() as m:
+            calls = _spy_short_seq_variants(m)
+            out, ret = run(
+                final_states_out=cache,
+                final_state_indices=slots,
+                return_intermediate_states=return_intermediate_states,
+                short_seq_path=short_seq_path,
+            )
+        torch.testing.assert_close(out, out_ref, atol=0, rtol=0)
+        torch.testing.assert_close(cache[slots.long()], states_ref, atol=0, rtol=0)
+        assert torch.equal(cache[unused], cache_before[unused])
+        if return_intermediate_states:
+            torch.testing.assert_close(ret, chunk_states_ref, atol=0, rtol=0)
+        else:
+            assert ret is None
+        if short_seq_path is not None:
+            # The final-state write needs the per-sequence states not returned.
+            fused = short_seq_path and not return_intermediate_states
+            assert calls["_chunk_state_fwd_kernel"] == [fused]
+            assert calls["_state_passing_fwd_kernel"] == [fused]
+            assert calls["_chunk_scan_fwd_kernel"] == [short_seq_path]
+
+
+SHORT = _SHORT_SEQ_PATH_MIN_SEQS
+
+
+@pytest.mark.parametrize(
+    "seqlens, num_single_chunk_seqs, short",
+    [
+        ((64,) * (SHORT - 1), None, False),
+        ((64,) * SHORT, None, True),
+        # From the shapes alone, the long sequence could hide a short one.
+        ((600,) + (64,) * SHORT, None, False),
+        ((600,) + (64,) * SHORT, SHORT, True),
+        ((64,) * SHORT, SHORT - 1, False),
+    ],
+)
+def test_short_seq_path_gate(seqlens, num_single_chunk_seqs, short, monkeypatch):
+    """The short-sequence path is taken from _SHORT_SEQ_PATH_MIN_SEQS sequences
+    that fit in one chunk, counted by the caller or bounded from the shapes,
+    and gives the same bits as the plain launches."""
+    set_random_seed(0)
+    nheads, headdim, ngroups, dstate, chunk_size = 4, 16, 1, 16, 256
+    batch, seqlen = len(seqlens), sum(seqlens)
+    cu_seqlens = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
+    cu_seqlens[1:] = torch.tensor(seqlens, device=DEVICE).cumsum(0)
+    cu_chunk_seqlens, last_chunk_indices, seq_idx = compute_varlen_chunk_metadata(
+        cu_seqlens, chunk_size
+    )
+    inputs = dict(
+        x=torch.randn(seqlen, nheads, headdim, device=DEVICE, dtype=torch.bfloat16),
+        dt=torch.randn(seqlen, nheads, device=DEVICE, dtype=torch.bfloat16),
+        A=-torch.rand(nheads, device=DEVICE),
+        B=torch.randn(seqlen, ngroups, dstate, device=DEVICE, dtype=torch.bfloat16),
+        C=torch.randn(seqlen, ngroups, dstate, device=DEVICE, dtype=torch.bfloat16),
+        chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        cu_chunk_seqlens=cu_chunk_seqlens,
+        last_chunk_indices=last_chunk_indices,
+        seq_idx=seq_idx,
+        dt_softplus=True,
+        final_state_indices=torch.arange(batch, device=DEVICE, dtype=torch.int32),
+    )
+    results = []
+    # The first launch runs before any config is cached for these kernels.
+    for kwargs in (
+        dict(num_single_chunk_seqs=num_single_chunk_seqs),
+        dict(short_seq_path=False),
+    ):
+        out = torch.empty_like(inputs["x"])
+        cache = torch.empty(batch, nheads, headdim, dstate, device=DEVICE)
+        with monkeypatch.context() as m:
+            calls = _spy_short_seq_variants(m)
+            mamba_chunk_scan_combined_varlen(
+                **inputs, out=out, final_states_out=cache, **kwargs
+            )
+        results.append((out, cache))
+        if "num_single_chunk_seqs" in kwargs:
+            assert all(v == [short] for v in calls.values()), calls
+    for got, want in zip(*results):
+        torch.testing.assert_close(got, want, atol=0, rtol=0)
