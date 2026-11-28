@@ -167,7 +167,8 @@ class DeepseekV32Attention(MLAAttention):
             scaling = scaling * mscale * mscale
 
         layer_id = extract_layer_index(prefix)
-        skip_topk = layer_id in compute_skip_topk_layers(config)
+        skip_topk_layers = compute_skip_topk_layers(config)
+        skip_topk = layer_id in skip_topk_layers
 
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
@@ -210,8 +211,13 @@ class DeepseekV32Attention(MLAAttention):
             index_group_builder=index_group_builder,
             attn_backend=attn_backend,
             # MTP draft steps reuse each token slot's top-k, which ShardQ's
-            # compact per-rank layout would break.
-            shardq_eligible=not is_mtp_layer,
+            # compact per-rank layout would break. Under DCP only indexer layers
+            # gather their MLA context, so shared-top-k models keep the DCP path.
+            shardq_eligible=not is_mtp_layer
+            and (
+                vllm_config.parallel_config.decode_context_parallel_size == 1
+                or not skip_topk_layers
+            ),
         )
 
         self.num_local_heads = num_local_heads
@@ -605,33 +611,59 @@ class DeepseekV32Attention(MLAAttention):
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
         shardq = attn_metadata.shardq
+        gathered_context = None if shardq is None else shardq.gathered_context
         mqa_metadata = attn_metadata
+        mqa_kv_cache = kv_cache
+        if gathered_context is not None:
+            # A DCP ShardQ step's prefill tokens attend a gathered copy of
+            # their context, which still lacks the step's new tokens; every
+            # rank writes all of them.
+            assert kv_c is not None and k_pe is not None
+            num_dcp_decode_tokens = gathered_context.num_decode_tokens
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                kv_c[num_dcp_decode_tokens:],
+                k_pe[num_dcp_decode_tokens:],
+                gathered_context.mla_view(kv_cache),
+                gathered_context.slot_mapping,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
             if isinstance(mqa_q_arg, tuple):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             mqa_q_arg = get_tp_group().all_gather(mqa_q_arg, dim=1)
         elif not self.use_pcp and self.impl.dcp_world_size > 1:
-            assert self.dcp_manager is not None
-            if isinstance(mqa_q_arg, tuple):
-                mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
-            assert self.dcp_manager.query_gather is not None
-            mqa_q_arg = self.dcp_manager.query_gather(mqa_q_arg)
+            # A DCP ShardQ step exchanges the local heads' query (shard_q)
+            # instead of gathering it.
+            if gathered_context is None:
+                assert self.dcp_manager is not None
+                if isinstance(mqa_q_arg, tuple):
+                    mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
+                assert self.dcp_manager.query_gather is not None
+                mqa_q_arg = self.dcp_manager.query_gather(mqa_q_arg)
         if shardq is not None:
             decode_q, mqa_q_arg = shard_q(mqa_q_arg, shardq)
             decode_out = None
-            if decode_q.shape[0]:
+            if decode_q.shape[0] and gathered_context is not None:
+                # Decode tokens keep the DCP path.
+                decode_out = self._forward_dcp_decode(
+                    decode_q, kv_cache, attn_metadata, gathered_context
+                )
+            elif decode_q.shape[0]:
                 # Decode tokens attend head-sharded.
                 decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
                     decode_q, kv_cache, attn_metadata, self
                 )
             mqa_metadata = shardq.attn_metadata
+            if gathered_context is not None:
+                mqa_kv_cache = gathered_context.mla_view(kv_cache)
         attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            mqa_q_arg, kv_cache, mqa_metadata, self
+            mqa_q_arg, mqa_kv_cache, mqa_metadata, self
         )
         if shardq is not None:
             attn_out = unshard_out(attn_out, shardq, decode_out)
 
-        if self.impl.dcp_world_size > 1:
+        if self.impl.dcp_world_size > 1 and gathered_context is None:
             assert lse is not None and self.dcp_manager is not None
             seq_lens: torch.Tensor | None
             query_start_loc: torch.Tensor | None
