@@ -395,6 +395,33 @@ class DeepseekV4DecoderLayer(nn.Module):
             ampere_mhc_max_tokens() if self.ampere_mhc else MHC_OVERLAP_MAX_TOKENS
         )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        # Replicated mixer: attention runs whole on every TP rank, no reduce after it.
+        self.replicate_mixer = envs.VLLM_DSV41_REPLICATE_MIXER
+        if self.replicate_mixer:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
+
+            # A sort fixes the order of the selected indices, not which ties
+            # the atomic top-k keeps: replicated ranks need the canonical set.
+            from vllm.model_executor.layers.canonical_topk import (
+                require_deterministic_sparse_topk,
+            )
+
+            require_deterministic_sparse_topk("VLLM_DSV41_REPLICATE_MIXER")
+        pc = vllm_config.parallel_config
+        if self.replicate_mixer and (
+            self.use_sequence_parallel
+            or vllm_config.lora_config is not None
+            or pc.enable_expert_parallel
+            or pc.decode_context_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "VLLM_DSV41_REPLICATE_MIXER is not supported with expert parallelism "
+                "(including MegaMoE), context parallelism or LoRA."
+            )
 
         self.engram: Engram | None = None
         if engram_layout is not None:
@@ -421,6 +448,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
             candidate_block_buffer=candidate_block_buffer,
+            replicate=self.replicate_mixer,
         )
         if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
@@ -764,7 +792,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=self.ffn_norm.weight,
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
-            reduce_results=self.fuse_mhc_all_reduce,
+            # A replicated attention output is already complete on every rank.
+            reduce_results=self.fuse_mhc_all_reduce and not self.replicate_mixer,
             boundary_weight=self.hc_ffn_boundary_weight,
         )
         if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):

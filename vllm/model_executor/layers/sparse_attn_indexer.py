@@ -41,9 +41,11 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.model_executor.layers.canonical_topk import canonicalize_topk_
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
+    deterministic_sparse_topk,
     get_indexer_topk,
     is_deep_select_supported,
 )
@@ -660,6 +662,17 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
+    deterministic = deterministic_sparse_topk()
+    if deterministic:
+        if topk_backend == "deep_select":
+            # Approximate (BF16) ranking: canonicalize the exact top-k instead.
+            topk_backend = "auto"
+        if dcp_world_size != 1:
+            logger.warning_once(
+                "VLLM_DETERMINISTIC_SPARSE_TOPK does not cover the decode context "
+                "parallel top-k merge; its result keeps the merge's order."
+            )
+    # Off under VLLM_DETERMINISTIC_SPARSE_TOPK (see use_fused_mqa_topk).
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens,
@@ -1080,6 +1093,10 @@ def sparse_attn_indexer(
                             topk_indices[rows],
                             topk_tokens,
                         )
+                        # Rows index their own columns [0, row_ends) here; XPU's
+                        # absolute columns are not canonicalized.
+                        if deterministic and row_starts is None:
+                            canonicalize_topk_(logits, topk_indices[rows], row_ends)
 
             if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
