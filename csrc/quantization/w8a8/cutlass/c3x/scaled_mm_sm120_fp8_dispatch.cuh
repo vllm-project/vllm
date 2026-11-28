@@ -143,6 +143,7 @@ template <typename InType, typename OutType,
 inline void cutlass_gemm_sm120_fp8_dispatch(torch::stable::Tensor& out,
                                             torch::stable::Tensor const& a,
                                             torch::stable::Tensor const& b,
+                                            int max_swizzle_size,
                                             EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   STD_TORCH_CHECK(a.scalar_type() ==
@@ -175,8 +176,14 @@ inline void cutlass_gemm_sm120_fp8_dispatch(torch::stable::Tensor& out,
   using Cutlass3xGemmDefault =
       typename sm120_fp8_config_default<InType, OutType,
                                         Epilogue>::Cutlass3xGemm;
-  return cutlass_gemm_caller<Cutlass3xGemmDefault>(
-      out, a, b, std::forward<EpilogueArgs>(args)...);
+  // CTA rasterization: max_swizzle_size > 1 groups nearby output tiles in the
+  // tile scheduler's raster so the shared operand tiles are re-read from the
+  // L2 instead of DRAM. Bit-identical to the default order (each output
+  // tile's K-reduction is unchanged).
+  typename Cutlass3xGemmDefault::GemmKernel::TileSchedulerArguments scheduler{};
+  scheduler.max_swizzle_size = max_swizzle_size;
+  return c3x::cutlass_gemm_caller_with_scheduler<Cutlass3xGemmDefault>(
+      scheduler, out, a, b, std::forward<EpilogueArgs>(args)...);
 }
 
 template <typename InType, typename OutType,
@@ -204,6 +211,7 @@ template <template <typename, typename, typename> typename Epilogue,
 void cutlass_scaled_mm_sm120_fp8_epilogue(torch::stable::Tensor& out,
                                           torch::stable::Tensor const& a,
                                           torch::stable::Tensor const& b,
+                                          int max_swizzle_size,
                                           EpilogueArgs&&... epilogue_args) {
   STD_TORCH_CHECK(a.scalar_type() ==
                   torch::headeronly::ScalarType::Float8_e4m3fn);
@@ -213,12 +221,14 @@ void cutlass_scaled_mm_sm120_fp8_epilogue(torch::stable::Tensor& out,
   if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::bfloat16_t, Epilogue>(
-        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+        out, a, b, max_swizzle_size,
+        std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
     STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::half_t, Epilogue>(
-        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+        out, a, b, max_swizzle_size,
+        std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
 

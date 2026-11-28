@@ -62,11 +62,13 @@ void cutlass_gemm_caller(
   CUTLASS_CHECK(status);
 }
 
+// Same as cutlass_gemm_caller below, with explicit tile scheduler arguments
+// (e.g. max_swizzle_size / raster_order of the persistent tile scheduler).
 template <typename Gemm, typename... EpilogueArgs>
-void cutlass_gemm_caller(torch::stable::Tensor& out,
-                         torch::stable::Tensor const& a,
-                         torch::stable::Tensor const& b,
-                         EpilogueArgs&&... epilogue_params) {
+void cutlass_gemm_caller_with_scheduler(
+    typename Gemm::GemmKernel::TileSchedulerArguments scheduler,
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
   using ElementD = typename Gemm::ElementD;
@@ -104,7 +106,16 @@ void cutlass_gemm_caller(torch::stable::Tensor& out,
       c_ptr, c_stride, c_ptr, d_stride};
 
   cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                  epilogue_args);
+                                  epilogue_args, scheduler);
+}
+
+template <typename Gemm, typename... EpilogueArgs>
+void cutlass_gemm_caller(torch::stable::Tensor& out,
+                         torch::stable::Tensor const& a,
+                         torch::stable::Tensor const& b,
+                         EpilogueArgs&&... epilogue_params) {
+  cutlass_gemm_caller_with_scheduler<Gemm>(
+      {}, out, a, b, std::forward<EpilogueArgs>(epilogue_params)...);
 }
 
 }  // namespace vllm::c3x
