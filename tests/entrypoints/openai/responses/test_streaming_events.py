@@ -11,6 +11,7 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseStreamEvent,
 )
+from openai.types.responses.response_output_text import Logprob
 from openai_harmony import Message, Role
 from pydantic import TypeAdapter
 
@@ -146,6 +147,18 @@ def _run_through_processor(
 
 
 class TestProcessorCompoundDeltas:
+    def test_empty_content_logprobs_are_attached_to_next_text_delta(self):
+        processor = SimpleStreamingEventProcessor()
+        pending = Logprob(token="partial", logprob=-1.0, top_logprobs=[])
+        visible = Logprob(token="🪿", logprob=0.0, top_logprobs=[])
+
+        processor.queue_content_logprobs([pending])
+        events = _run_through_processor(processor, DeltaMessage(content="🪿"))
+
+        delta = next(e for e in events if e.type == "response.output_text.delta")
+        assert [lp.token for lp in delta.logprobs] == ["partial", "🪿"]
+        assert processor.state.pending_logprobs == []
+
     def test_all_three_states(self):
         tc = _make_tool_call(0, name="f", arguments="{}")
         delta = DeltaMessage(reasoning="r", content="c", tool_calls=[tc])
