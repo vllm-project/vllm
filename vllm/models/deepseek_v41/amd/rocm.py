@@ -7,18 +7,34 @@ from typing import Any, ClassVar, cast
 
 import torch
 
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
+    get_tp_group,
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+)
+from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+    AiterCustomAllreduce,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_connector_may_load_foreign_kv,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
@@ -701,6 +717,18 @@ class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
         return DeepseekV41ROCMAiterSparseSWAMetadataBuilder
 
 
+def _wo_b_gather_min_rows(tp_size: int) -> int:
+    """The row count from which a step all-gathers wo_b's MXFP8 input and runs
+    the whole wo_b on every rank, instead of all-reducing its bf16 output.
+
+    Per row, each rank contributes (K / TP) * 33 / 32 bytes to the gather,
+    including scales. The all-reduce input is 2 * hidden_size bytes per row.
+    The gather also needs a second collective for scales and a full GEMM on
+    each rank. These thresholds are the measured crossovers on gfx950.
+    """
+    return 256 if tp_size == 2 else 1024
+
+
 class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4.1."""
 
@@ -730,6 +758,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        # Every rank's copy of the whole wo_b, for steps that gather its input.
+        self.wo_b_full = self._make_wo_b_full(vllm_config)
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -767,6 +797,61 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
+
+    def _make_wo_b_full(self, vllm_config: VllmConfig) -> ReplicatedLinear | None:
+        tp_size = get_tensor_model_parallel_world_size()
+        self._wo_b_gather_min_rows = _wo_b_gather_min_rows(tp_size)
+        input_size = self.n_groups * self.o_lora_rank
+        if not (
+            tp_size in (2, 4)
+            and _ON_GFX950
+            # The path depends on the step's row count.
+            and not envs.VLLM_BATCH_INVARIANT
+            # An adapter on wo_b reads the unquantized input.
+            and vllm_config.lora_config is None
+            and not self.use_pcp
+            and self._o_proj_block_size == 32
+            # AITER gathers 16-byte-aligned rows, including the E8M0 scale
+            # row with one byte for every 32 local input channels.
+            and (input_size // tp_size) % (32 * 16) == 0
+            # Both microbatches must make the same all-reduce hand-offs.
+            and not vllm_config.parallel_config.use_ubatching
+            and vllm_config.scheduler_config.max_num_batched_tokens
+            >= self._wo_b_gather_min_rows
+        ):
+            return None
+        # These thresholds assume AITER. The ROCm communicator falls back
+        # when either PyNccl or the AITER collective is unavailable.
+        comm = get_tp_group().device_communicator
+        pynccl = getattr(comm, "pynccl_comm", None)
+        aiter = getattr(comm, "aiter_ar_comm", None)
+        if (
+            not getattr(comm, "use_aiter_tp_all_gather", False)
+            or pynccl is None
+            or pynccl.disabled
+            or aiter is None
+            or aiter.disabled
+        ):
+            return None
+        wo_b_full = ReplicatedLinear(
+            input_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            return_bias=False,
+            # wo_b's own name: a quantization config that leaves wo_b out
+            # (ignored_layers) leaves the copy out too, and the kernel check
+            # below then keeps the all-reduce.
+            prefix=f"{self.prefix}.wo_b",
+        )
+        # The copy takes the gathered rows as they are only on wo_b's kernel.
+        kernel = getattr(getattr(wo_b_full, "quant_method", None), "kernel", None)
+        if (
+            type(kernel) is not RocmDotScaledMxfp8LinearKernel
+            or get_input_quant_key(wo_b_full) != kMxfp8Dynamic
+        ):
+            return None
+        return wo_b_full
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -1128,7 +1213,46 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         return self._wo_b_after_wo_a(z.flatten(1))
 
+    def wo_b_gathers(self, num_rows: int) -> bool:
+        """Whether a step of `num_rows` rows gathers wo_b's input: its
+        attention output is then already the sum over the ranks."""
+        return self.wo_b_full is not None and num_rows >= self._wo_b_gather_min_rows
+
+    def _wo_b_gathered(self, zf: torch.Tensor) -> torch.Tensor:
+        """The reduced wo_b output from every rank's quantized input."""
+        assert self.wo_b_full is not None
+        x_q, x_scale = mxfp8_e4m3_quantize(zf)
+        num_rows = x_q.shape[0]
+        # AITER's all-gather takes this many gathered bytes a call.
+        piece = max(
+            1,
+            AiterCustomAllreduce.effective_max_size() // self.wo_b_full.weight.shape[1],
+        )
+        outs = []
+        for start in range(0, num_rows, piece):
+            # AITER's all-gather takes 16-bit elements.
+            data = tensor_model_parallel_all_gather(
+                x_q[start : start + piece].view(torch.bfloat16), dim=-1
+            ).view(torch.float8_e4m3fn)
+            scale = tensor_model_parallel_all_gather(
+                x_scale[start : start + piece].view(torch.bfloat16), dim=-1
+            ).view(torch.uint8)
+            outs.append(
+                self.wo_b_full(
+                    QuantizedActivation(
+                        data=data,
+                        scale=scale,
+                        orig_dtype=zf.dtype,
+                        orig_shape=data.shape,
+                        quant_key=kMxfp8Dynamic,
+                    )
+                )
+            )
+        return outs[0] if len(outs) == 1 else torch.cat(outs)
+
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
+        if self.wo_b_gathers(zf.shape[0]):
+            return self._wo_b_gathered(zf)
         if self._wo_b_scale is not None and zf.dim() == 2:
             return self._bpre_attn_gemm(
                 self.wo_b.weight, self._wo_b_scale, zf, self.wo_b.reduce_results

@@ -148,6 +148,7 @@ steps:
       - tests/models/test_deepseek_v41_replay_batch.py
       - tests/models/test_deepseek_v41_pcp.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
+      - tests/models/test_deepseek_v41_amd_wo_b_gather.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_dspark_packed_mapping.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
@@ -207,6 +208,7 @@ steps:
         models/test_deepseek_v41_replay_batch.py
         models/test_deepseek_v41_pcp.py
         models/test_deepseek_v41_amd_replay_forward.py
+        models/test_deepseek_v41_amd_wo_b_gather.py
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_dspark_packed_mapping.py
         models/test_deepseek_v4_rocm_wo_a.py
