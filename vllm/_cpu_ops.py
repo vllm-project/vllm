@@ -1026,6 +1026,33 @@ def cpu_attention_with_kv_cache(
     )
 
 
+def ultraquant_store(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rotation: torch.Tensor,
+    constant_c: float,
+) -> None:
+    torch.ops._C.ultraquant_store(
+        key, value, kv_cache, slot_mapping, rotation, constant_c
+    )
+
+
+def ultraquant_decode_attention(
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    out: torch.Tensor,
+    scale: float,
+    sinks: torch.Tensor | None,
+) -> None:
+    torch.ops._C.ultraquant_decode_attention(
+        query, kv_cache, block_table, seq_lens, out, scale, sinks
+    )
+
+
 def cpu_mla_decode(
     query: torch.Tensor,
     k_buffer: torch.Tensor,
