@@ -240,9 +240,17 @@ repos:
     name: Check auto-label rules still match real files
     language: python
     entry: python tools/pre_commit/check_label_rules.py
-    files: ^\.github/mergify\.yml$
+    always_run: true
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-issue-model-labels
+    name: Check issue model label examples
+    language: node
+    language_version: 24.22.1
+    entry: node .github/workflows/scripts/test_model_labels.cjs
+    files: ^(\.github/workflows/(issue_autolabel\.yml|scripts/test_model_labels\.cjs)|tools/pre_commit/model_label_cases\.json|\.pre-commit-config\.yaml)$
+    pass_filenames: false
+    additional_dependencies: [yaml]
   - id: check-agent-files
     name: Check agent instruction files and skills
     language: python
