@@ -1041,6 +1041,41 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
 
 
 @pytest.mark.asyncio
+async def test_streaming_deepseek_r1_reasoning_usage():
+    model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    args = [
+        "--reasoning-parser",
+        "deepseek_r1",
+        "--load-format",
+        "dummy",
+        "--max-model-len",
+        "256",
+        "--enforce-eager",
+    ]
+    with RemoteOpenAIServer(model, args) as server:
+        async with server.get_async_client() as client:
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "What is 2 + 2?"}],
+                stream=True,
+                stream_options={"include_usage": True},
+                max_tokens=2,
+                temperature=0,
+                extra_body={"allowed_token_ids": [42]},
+            )
+            chunks = [chunk async for chunk in stream]
+
+    assert any(
+        choice.finish_reason == "length" for chunk in chunks for choice in chunk.choices
+    )
+    usage = chunks[-1].usage
+    assert usage is not None
+    assert usage.completion_tokens == 2
+    assert usage.completion_tokens_details is not None
+    assert usage.completion_tokens_details.reasoning_tokens == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("n", [1, 2])
 @pytest.mark.parametrize("include_reasoning", [True, False])
 @pytest.mark.parametrize("include_details", [True, False])

@@ -286,3 +286,45 @@ def test_reasoning(
     else:
         content_ids = parser.extract_content_ids(output)
         assert content_ids == []
+
+
+@pytest.mark.parametrize(
+    "prompt, output, expected_counts",
+    [
+        pytest.param(
+            [start_token],
+            ["K", "K", start_token, "K", end_token, "K"],
+            [0, 1, 2, 2, 3, 3, 3],
+            id="generated-start-before-close",
+        ),
+        pytest.param(
+            [start_token],
+            ["K", "K", end_token, "K", start_token, "K", end_token, "K"],
+            [0, 1, 2, 2, 2, 2, 3, 3, 3],
+            id="close-and-reopen",
+        ),
+        pytest.param(
+            [start_token],
+            [start_token, "K", end_token, "K"],
+            [0, 0, 1, 1, 1],
+            id="generated-start-first",
+        ),
+        pytest.param(
+            [start_token, end_token],
+            ["K", start_token, "K", end_token, "K"],
+            [0, 0, 0, 1, 1, 1],
+            id="closed-in-prompt",
+        ),
+    ],
+)
+def test_count_reasoning_tokens_from_prompt(
+    deepseek_r1_qwen_tokenizer, prompt, output, expected_counts
+):
+    tokenizer = deepseek_r1_qwen_tokenizer
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    parser.set_prompt_token_ids(tokenizer.convert_tokens_to_ids(prompt))
+    output_ids = tokenizer.convert_tokens_to_ids(output)
+    assert [
+        parser.count_reasoning_tokens(output_ids[:length])
+        for length in range(len(output_ids) + 1)
+    ] == expected_counts
