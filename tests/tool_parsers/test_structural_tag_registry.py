@@ -1855,6 +1855,71 @@ def test_glm47_non_plain_object_schemas_keep_free_arguments(parameters, key):
     assert _is_grammar_accept_string(grammar, call)
 
 
+@pytest.mark.parametrize(
+    "bad_prop",
+    [
+        "x",
+        ["string"],
+        True,
+        1,
+        None,
+        {"enum": []},
+        {"enum": 123},
+        {"type": [{}]},
+    ],
+)
+def test_glm47_non_dict_property_schemas_fall_back_permissively(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_prop: Any,
+):
+    """Non-dict/malformed property schemas must not crash GLM-4.7 tags."""
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": bad_prop},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=tools,
+        tool_choice="auto",
+    )
+    parser = TestParser(MagicMock(), tools=None)
+    parser._reasoning_parser = MagicMock(
+        adjust_request=lambda req: req,
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    tag = out.structured_outputs.structural_tag
+    assert isinstance(tag, str)
+    parsed = StructuralTag.model_validate_json(tag)
+    assert parsed.format.type == "triggered_tags"
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        "<tool_call>get_weather<arg_key>city</arg_key>"
+        "<arg_value>Paris</arg_value></tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, "Sure. " + call)
+    assert not _is_grammar_accept_string(
+        grammar, "Sure. " + call.replace("city", "ctiy")
+    )
+
+
 def _glm47_strict_tools() -> list[ChatCompletionToolsParam]:
     return [
         ChatCompletionToolsParam(
