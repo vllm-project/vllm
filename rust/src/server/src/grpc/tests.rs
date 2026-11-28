@@ -293,11 +293,12 @@ impl ChatRenderer for FakeTextBackend {
 
 struct FakeMultimodalBackend {
     model_info: vllm_chat::multimodal::MultimodalModelInfo,
+    tokenizer: DynTokenizer,
 }
 
 impl TextBackend for FakeMultimodalBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+        Arc::clone(&self.tokenizer)
     }
 
     fn model_id(&self) -> &str {
@@ -345,6 +346,9 @@ fn multimodal_backend_with_limits(
 ) -> Arc<dyn ChatTextBackend> {
     Arc::new(FakeMultimodalBackend {
         model_info: qwen_multimodal_model_info(limit_mm_per_prompt),
+        tokenizer: Arc::new(
+            TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID),
+        ),
     })
 }
 
@@ -942,6 +946,113 @@ async fn generate_without_output_text_skips_detokenization() {
         engine_task.await.expect("mock engine task");
         server_task.abort();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_accepts_rendered_video_markers_in_token_ids() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("config.json");
+    fs::write(
+        &config_path,
+        serde_json::json!({
+            "model_type": "NemotronH_Nano_Omni_Reasoning_V3",
+            "patch_size": 16,
+            "downsample_ratio": 0.5,
+            "force_image_size": 512,
+            "norm_mean": [0.48145466, 0.4578275, 0.40821073],
+            "norm_std": [0.26862954, 0.26130258, 0.27577711],
+            "vision_config": {
+                "args": {"min_num_patches": 1024, "max_num_patches": 13312},
+                "video_target_num_patches": 1024,
+                "video_temporal_patch_size": 2,
+                "video_maintain_aspect_ratio": true
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let tokenizer: DynTokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<image>", 1018)
+            .with_regular_token("<img>", 1019)
+            .with_regular_token("</img>", 1020)
+            .with_regular_token("<SPECIAL_30>", 1030)
+            .with_regular_token("prefix <video>", 1040),
+    );
+    let model_info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "nemotron-test".to_string(),
+        Some("NemotronH_Nano_Omni_Reasoning_V3".to_string()),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
+        Arc::clone(&tokenizer),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .unwrap();
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeMultimodalBackend {
+        model_info,
+        tokenizer: Arc::clone(&tokenizer),
+    });
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    for (stream, prompt) in [(false, "prefix <video>\n"), (true, "prefix <SPECIAL_30>\n")] {
+        let captured = Arc::clone(&observed);
+        let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
+            b"engine-grpc-rendered-video",
+            vec![(vec![b'a' as u32], Some(EngineCoreFinishReason::Stop))],
+            Arc::clone(&backend),
+            move |request| {
+                let features = request.mm_features.as_ref().unwrap();
+                assert_eq!(features.len(), 1);
+                assert_eq!(features[0].modality, MmModality::Video);
+                captured.lock().unwrap().push(decode_prompt_token_ids(request).unwrap());
+            },
+        )
+        .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference,
+            control,
+            health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        let request = pb::GenerateRequest {
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: tokenizer.encode(prompt, false).unwrap(),
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Video as i32,
+                source: Some(pb::media_item::Source::RawBytes(
+                    include_bytes!("testdata/solid-red.mp4").to_vec(),
+                )),
+                ..Default::default()
+            }],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        if stream {
+            let mut response = client.generate_stream(request).await.unwrap().into_inner();
+            while response.message().await.unwrap().is_some() {}
+        } else {
+            client.generate(request).await.unwrap();
+        }
+        engine_task.await.unwrap();
+        server_task.abort();
+    }
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0], observed[1]);
+    let prompt = tokenizer.decode(&observed[0], false).unwrap();
+    assert!(prompt.starts_with("prefix Frame "));
+    assert!(!prompt.contains("<video>") && !prompt.contains("<SPECIAL_30>"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

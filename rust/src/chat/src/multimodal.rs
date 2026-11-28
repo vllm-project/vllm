@@ -255,6 +255,8 @@ struct ResolvedPlaceholder {
     token: String,
     /// The token IDs emitted for `token` in the rendered prompt.
     marker_token_ids: Vec<u32>,
+    /// Standalone token IDs of the spec's rendered marker, if it declares one.
+    rendered_marker_ids: Vec<u32>,
     /// The model-declared embed token ID marked in `is_embed` masks.
     embed_token_id: u32,
 }
@@ -278,10 +280,20 @@ impl ResolvedPlaceholder {
             .filter(|token_ids| !token_ids.is_empty())
             .ok_or_else(|| multimodal!("placeholder `{token}` could not be tokenized"))?;
         let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
+        let rendered_marker_ids = raw
+            .rendered_marker_for(modality)
+            .map(|marker| {
+                context.tokenizer().encode(marker, false).map_err(|error| {
+                    multimodal!("rendered marker `{marker}` could not be tokenized: {error}")
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Self {
             token,
             marker_token_ids,
+            rendered_marker_ids,
             embed_token_id,
         })
     }
@@ -770,16 +782,10 @@ impl MultimodalModelInfo {
         }
     }
 
-    /// Rewrite the text a chat template writes for each media item to the
-    /// modality's placeholder token, for specs that declare one (Nemotron's
-    /// `<video>`). Such text cannot be matched as a multi-token marker: its
-    /// tokens depend on the text around it. Like Python, at most one
-    /// occurrence per item is rewritten.
-    fn rewrite_rendered_markers(
-        &self,
-        mut prompt: String,
-        media_parts: &[MediaContentPart],
-    ) -> String {
+    fn rendered_markers<'a>(
+        &'a self,
+        media_parts: &'a [MediaContentPart],
+    ) -> impl Iterator<Item = (&'static str, &'a ResolvedPlaceholder, usize)> {
         let lanes = [
             (
                 self.image.as_ref().map(|support| (&support.spec, &support.placeholder)),
@@ -794,20 +800,86 @@ impl MultimodalModelInfo {
                 MmModality::Audio,
             ),
         ];
-        for (lane, modality) in lanes {
-            let Some((spec, placeholder)) = lane else {
-                continue;
-            };
-            let Some(marker) = spec.raw.rendered_marker_for(spec.modality) else {
-                continue;
-            };
+        lanes.into_iter().filter_map(move |(lane, modality)| {
+            let (spec, placeholder) = lane?;
+            let marker = spec.raw.rendered_marker_for(spec.modality)?;
             let items = media_parts
                 .iter()
                 .filter(|part| media_part_limit_modality(part) == Some(modality))
                 .count();
+            (items > 0).then_some((marker, placeholder, items))
+        })
+    }
+
+    /// Rewrite one template marker per media item before tokenization, where
+    /// the surrounding text cannot change whether the marker matches.
+    fn rewrite_rendered_markers(
+        &self,
+        mut prompt: String,
+        media_parts: &[MediaContentPart],
+    ) -> String {
+        for (marker, placeholder, items) in self.rendered_markers(media_parts) {
             prompt = prompt.replacen(marker, &placeholder.token, items);
         }
         prompt
+    }
+
+    fn rewrite_tokenized_markers(
+        &self,
+        token_ids: &mut Vec<u32>,
+        media_parts: &[MediaContentPart],
+    ) -> Result<()> {
+        for (marker, placeholder, items) in self.rendered_markers(media_parts) {
+            let existing = token_ids
+                .windows(placeholder.marker_token_ids.len())
+                .filter(|window| *window == placeholder.marker_token_ids.as_slice())
+                .take(items)
+                .count();
+            let missing = items.saturating_sub(existing);
+            if missing == 0 {
+                continue;
+            }
+
+            let rendered_ids = &placeholder.rendered_marker_ids;
+            let mut matches = Vec::new();
+            let mut end = 0;
+            if !rendered_ids.is_empty() {
+                while let Some(offset) = token_ids[end..]
+                    .windows(rendered_ids.len())
+                    .position(|window| window == rendered_ids.as_slice())
+                {
+                    let start = end + offset;
+                    matches.push(start);
+                    end = start + rendered_ids.len();
+                    if matches.len() == missing {
+                        break;
+                    }
+                }
+            }
+            if matches.len() == missing {
+                let mut rewritten = Vec::with_capacity(token_ids.len());
+                let mut start = 0;
+                for offset in matches {
+                    rewritten.extend_from_slice(&token_ids[start..offset]);
+                    rewritten.extend_from_slice(&placeholder.marker_token_ids);
+                    start = offset + rendered_ids.len();
+                }
+                rewritten.extend_from_slice(&token_ids[start..]);
+                *token_ids = rewritten;
+                continue;
+            }
+
+            // Like Python, retry from the original prompt when a marker merged with adjacent text.
+            let tokenizer = self.context.tokenizer();
+            let prompt =
+                tokenizer.decode(token_ids, false).map_err(|error| multimodal!("{error}"))?;
+            let rewritten = prompt.replacen(marker, &placeholder.token, missing);
+            if rewritten != prompt {
+                *token_ids =
+                    tokenizer.encode(&rewritten, false).map_err(|error| multimodal!("{error}"))?;
+            }
+        }
+        Ok(())
     }
 
     fn vision_preprocessing_context(
@@ -1155,6 +1227,7 @@ impl MultimodalModelInfo {
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
+        self.rewrite_tokenized_markers(prompt_token_ids, &media_parts)?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
@@ -1967,6 +2040,73 @@ mod tests {
             info.rewrite_rendered_markers(prompt.clone(), &[png_640x480()]),
             prompt
         );
+    }
+
+    #[test]
+    fn tokenized_video_markers_expand_despite_context_dependent_tokenization() {
+        let mut info = nemotron_omni_info();
+        info.context.tokenizer = TokenizerResolver(Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<image>", 1018)
+                .with_regular_token("<SPECIAL_30>", 1030)
+                .with_regular_token("prefix <video>", 1040),
+        ));
+        let tokenizer = info.context.tokenizer();
+        for (prompt, count, expected) in [
+            ("prefix <video>\n", 1, "prefix <image><image>\n"),
+            (
+                "prefix <video> and <video>",
+                2,
+                "prefix <image><image> and <image><image>",
+            ),
+            (
+                "prefix <SPECIAL_30> and <video>",
+                2,
+                "prefix <image><image> and <image><image>",
+            ),
+            (
+                "exact <video> literal <video>",
+                1,
+                "exact <image><image> literal <video>",
+            ),
+        ] {
+            let prepared = PreparedMedia {
+                modality: Modality::Video,
+                placeholder: info.video.as_ref().unwrap().placeholder.clone(),
+                replacements: (0..count)
+                    .map(|_| PromptReplacement::repeated(Modality::Video, "<SPECIAL_30>", 1018, 2))
+                    .collect(),
+                items: Vec::new(),
+            };
+            let mut tokens = tokenizer.encode(prompt, false).unwrap();
+            let media = (0..count)
+                .map(|_| MediaContentPart::VideoUrl {
+                    url: "https://example.com/clip.mp4".to_owned().into(),
+                    uuid: None,
+                    fps: None,
+                    max_long_side_pixel: None,
+                })
+                .collect::<Vec<_>>();
+            info.rewrite_tokenized_markers(&mut tokens, &media).unwrap();
+            let ranges = expand_prompt_token_ids(&mut tokens, &[prepared]).unwrap();
+            assert_eq!(tokenizer.decode(&tokens, false).unwrap(), expected);
+            assert_eq!(ranges[&Modality::Video].len(), count);
+            assert!(ranges[&Modality::Video].iter().all(|range| range.length == 2));
+        }
+
+        // The byte tokenizer cannot round-trip an isolated non-UTF-8 byte.
+        let marker = tokenizer.encode("<video>", false).unwrap();
+        assert!(marker.len() > 1);
+        let mut tokens = vec![255];
+        tokens.extend_from_slice(&marker);
+        let media = [MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned().into(),
+            uuid: None,
+            fps: None,
+            max_long_side_pixel: None,
+        }];
+        info.rewrite_tokenized_markers(&mut tokens, &media).unwrap();
+        assert_eq!(tokens, [255, 1030]);
     }
 
     /// Prepare a full-size 640x480 image after 100 text tokens, then append
