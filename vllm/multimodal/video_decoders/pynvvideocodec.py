@@ -675,7 +675,9 @@ class PyNvVideoCodecVideoBackendMixin:
             check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = loader_cls._prepare_source(gpu_source.source)
             frame_idx = loader_cls.compute_frames_index_to_sample(
-                source=source, target=target, **kwargs
+                source=source,
+                target=target,
+                **{**kwargs, "frame_size": (gpu_source.width, gpu_source.height)},
             )
             if keyframe_sampling is not None:
                 frame_idx = _sample_nearest_keyframes(

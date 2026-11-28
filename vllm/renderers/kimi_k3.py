@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cached_property
 from typing import Any, cast
 
 from transformers import PreTrainedTokenizerBase
@@ -19,7 +20,10 @@ from vllm.renderers.chat_utils.chat_message import (
     parse_chat_message_content_mm_part,
 )
 from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
-from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
+from vllm.transformers_utils.processors.kimi_k3 import (
+    KIMI_K3_VIDEO_PLACEHOLDER,
+    encode_k3_text_prompt,
+)
 from vllm.utils.async_utils import make_async
 
 from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
@@ -38,8 +42,19 @@ _K31_THINKING_EFFORTS = ("low", "medium", "high", "max")
 
 def _merge_k3_media_io_kwargs(
     media_io_kwargs: dict[str, dict[str, Any]] | None,
+    video_defaults: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]] | None:
-    return merge_media_io_kwargs(_K3_MEDIA_IO_DEFAULTS, media_io_kwargs)
+    defaults = _K3_MEDIA_IO_DEFAULTS
+    if video_defaults:
+        defaults = {**defaults, "video": video_defaults}
+    merged = merge_media_io_kwargs(defaults, media_io_kwargs)
+    if merged and video_defaults:
+        # The frame plan must use the checkpoint config, not a request's.
+        merged["video"] = {
+            **merged["video"],
+            "media_proc_cfg": video_defaults["media_proc_cfg"],
+        }
+    return merged
 
 
 def _dump_k3_template_value(value: Any) -> Any:
@@ -99,7 +114,8 @@ def _keep_k3_content_parts(
 
     The encoder renders and tokenizes each part in order with no separator.
     Parsing joins the text parts of a tool message with newlines, so those are
-    taken from the request instead.
+    taken from the request instead. The encoder has no video part, so a video
+    becomes a text part holding its placeholder.
     """
     for request_message, message in zip(messages, conversation, strict=True):
         content = message.get("content")
@@ -114,6 +130,8 @@ def _keep_k3_content_parts(
             message["content"] = [  # type: ignore[typeddict-item]
                 {"type": "text", "text": part["name"]}
                 if part["type"] == "tool_reference"
+                else {"type": "text", "text": KIMI_K3_VIDEO_PLACEHOLDER}
+                if part["type"] == "video"
                 else part
                 for part in content
             ]
@@ -217,6 +235,13 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
             self._apply_chat_template, executor=self._executor
         )
 
+    @cached_property
+    def _video_media_io_defaults(self) -> dict[str, Any] | None:
+        if self.mm_processor is None:
+            return None
+        get_kwargs = getattr(self.mm_processor.info, "get_video_loader_kwargs", None)
+        return get_kwargs() if get_kwargs is not None else None
+
     def _apply_chat_template(
         self,
         conversation: list[dict[str, Any]],
@@ -277,7 +302,9 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
             messages,
             self.model_config,
             content_format="openai",
-            media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
+            media_io_kwargs=_merge_k3_media_io_kwargs(
+                params.media_io_kwargs, self._video_media_io_defaults
+            ),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
@@ -302,7 +329,9 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
             messages,
             self.model_config,
             content_format="openai",
-            media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
+            media_io_kwargs=_merge_k3_media_io_kwargs(
+                params.media_io_kwargs, self._video_media_io_defaults
+            ),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
