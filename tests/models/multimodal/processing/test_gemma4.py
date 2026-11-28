@@ -569,6 +569,28 @@ def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
     assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)
 
 
+def test_encoder_cudagraph_video_output_drops_frame_padding():
+    model = _gemma4_for_encoder_cudagraph()
+    # Two videos of 2 and 1 frames, padded to 70-token rows
+    mm_kwargs = {
+        "pixel_values_videos": torch.zeros(3, 630, 768),
+        "pixel_position_ids_videos": torch.zeros(3, 630, 2, dtype=torch.long),
+        "video_frame_counts": torch.tensor([2, 1]),
+        "video_num_soft_tokens": [torch.tensor([66, 60]), torch.tensor([70])],
+    }
+
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    assert [spec.output_tokens for spec in specs] == [126, 70]
+    assert [spec.get_path_output_tokens("default") for spec in specs] == [140, 70]
+
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [1, 0])
+    replay = model.prepare_encoder_cudagraph_replay_buffers(selected)
+    expected = torch.cat(
+        [torch.arange(0, 70), torch.arange(70, 136), torch.arange(140, 200)]
+    )
+    torch.testing.assert_close(replay.values["gather_indices"], expected)
+
+
 @pytest.mark.parametrize(
     "mm_processor_kwargs",
     [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],

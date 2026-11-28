@@ -712,6 +712,106 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
         assert isinstance(output_text, str)
 
 
+def _check_encoder_outputs_match_eager(worker, batches):
+    """Run each batch through the real manager and compare every item with
+    `embed_multimodal`, which never replays encoder graphs."""
+    import torch
+
+    from vllm.multimodal.utils import group_and_batch_mm_kwargs
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    counts = []
+    with torch.inference_mode():
+        for i, (modality, items) in enumerate(batches):
+            [(_, num_items, kwargs)] = group_and_batch_mm_kwargs(
+                [(modality, item) for item in items], device=runner.device
+            )
+            before = manager.get_cumulative_stats()
+            actual = manager.execute(kwargs)
+            after = manager.get_cumulative_stats()
+            expected = runner.model.embed_multimodal(**kwargs)
+            assert len(actual) == len(expected) == num_items
+            for output, reference in zip(actual, expected):
+                # The placeholders take the leading rows of each item.
+                assert output.shape[0] >= reference.shape[0], f"batch {i}"
+                # The encoder batch shape alone moves single values of the video
+                # by up to 0.6 (eager with 6 vs 16 frames per chunk), so compare
+                # each row's direction: a row of another token points elsewhere.
+                cos = torch.nn.functional.cosine_similarity(
+                    output[: reference.shape[0]].float(), reference.float(), dim=-1
+                )
+                assert cos.mean() > 0.999 and cos.min() > 0.9, (
+                    f"batch {i} ({modality}): row cosine mean {cos.mean().item()}, "
+                    f"min {cos.min().item()}"
+                )
+            counts.append(
+                (
+                    after["graph_hits"] - before["graph_hits"],
+                    after["graph_misses"] - before["graph_misses"],
+                )
+            )
+    return counts
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+def test_gemma4_vit_cudagraph_outputs_match_eager(
+    vllm_runner, image_assets, video_assets, monkeypatch
+):
+    """Frames and images are padded to their rows, but the replayed graphs and
+    the eager fallback must still match the placeholders."""
+    from vllm.multimodal import MULTIMODAL_REGISTRY
+
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["gemma4"]
+    video = sample_frames_with_video_metadata(
+        (video_assets[0].np_ndarrays, video_assets[0].metadata),
+        config.num_video_frames,
+    )
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+        compilation_config=get_compilation_config(config),
+    ) as model:
+        model_config = model.llm.llm_engine.vllm_config.model_config
+        processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+        def process(modality, data, placeholder):
+            processed = processor(
+                placeholder,
+                mm_items=processor.info.parse_mm_data({modality: data}),
+                hf_processor_mm_kwargs={},
+            )
+            return processed["mm_kwargs"].require_data()[modality][0]
+
+        images = [
+            process("image", asset.pil_image, "<|image|>") for asset in image_assets
+        ]
+        batches = [
+            # 16 frames of 66 tokens, each padded to 70
+            ("video", [process("video", video, "<|video|>")]),
+            ("image", images[:1]),
+            # Over `encoder_cudagraph_max_vision_items_per_batch`, so eager
+            ("image", images),
+        ]
+        results = model.llm.collective_rpc(
+            partial(_check_encoder_outputs_match_eager, batches=batches)
+        )
+    for counts in results:
+        assert counts == [(1, 0), (1, 0), (0, 2)]
+
+
 def _check_eonly_encoder_outputs(worker, batches):
     """Compare real E-only replay with eager, retaining outputs across replay."""
     import torch

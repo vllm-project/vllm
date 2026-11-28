@@ -199,6 +199,11 @@ def _get_do_resize(merged_kwargs: Mapping[str, object], default: bool) -> bool:
     return bool(do_resize)
 
 
+def _video_frame_soft_tokens(mm_kwargs: Mapping[str, Any]) -> list[list[int]]:
+    """Soft tokens of each frame of each video, without the frame padding."""
+    return [[int(n) for n in video] for video in mm_kwargs["video_num_soft_tokens"]]
+
+
 # ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
@@ -2038,12 +2043,17 @@ class Gemma4ForConditionalGeneration(
                 else list(video_frame_counts)
             )
             np_patches = pixel_values_videos.shape[1]
+            # Frames are padded to `np_patches`, but the placeholders, and so
+            # the output, hold only each frame's soft tokens.
             return [
                 EncoderItemSpec(
                     input_size=fc * np_patches,
-                    output_tokens=fc * (np_patches // pool_ratio),
+                    output_tokens=sum(frame_tokens),
+                    path_output_tokens={"default": fc * (np_patches // pool_ratio)},
                 )
-                for fc in fc_list
+                for fc, frame_tokens in zip(
+                    fc_list, _video_frame_soft_tokens(mm_kwargs)
+                )
             ]
         raise ValueError(f"Unknown modality: {modality}")
 
@@ -2098,6 +2108,7 @@ class Gemma4ForConditionalGeneration(
             video_frame_counts = mm_kwargs["video_frame_counts"]
             axis_keys = (pixel_values_videos.shape[1] // pool_ratio,)
 
+            video_num_soft_tokens = mm_kwargs["video_num_soft_tokens"]
             if len(indices) == 0:
                 is_fc_tensor = isinstance(video_frame_counts, torch.Tensor)
                 return {
@@ -2106,6 +2117,7 @@ class Gemma4ForConditionalGeneration(
                     "video_frame_counts": (
                         video_frame_counts[:0] if is_fc_tensor else []
                     ),
+                    "video_num_soft_tokens": [],
                     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
 
@@ -2141,6 +2153,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values_videos": selected_pv,
                 "pixel_position_ids_videos": selected_pp,
                 "video_frame_counts": selected_fc,
+                "video_num_soft_tokens": [video_num_soft_tokens[i] for i in indices],
                 ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         raise ValueError(f"Unknown modality: {modality}")
@@ -2275,31 +2288,18 @@ class Gemma4ForConditionalGeneration(
                 )
                 dst_offset += safe_n_tok
         elif modality == "video":
-            video_frame_counts = mm_kwargs["video_frame_counts"]
-            fc_list = (
-                video_frame_counts.tolist()
-                if isinstance(video_frame_counts, torch.Tensor)
-                else list(video_frame_counts)
+            # Drop each frame's padding, as the eager path does: a video's
+            # placeholders hold its frames' soft tokens back to back.
+            frame_tokens = itertools.chain.from_iterable(
+                _video_frame_soft_tokens(mm_kwargs)
             )
-            vision_cfg = self.vision_tower.config
-            pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
-            np_patches = pixel_values.shape[1]
-            frame_output_tokens = np_patches // pool_ratio
-            safe_frame_output_tokens = min(frame_output_tokens, per_item_output)
-
             dst_offset = 0
-            frame_idx = 0
-            for fc in fc_list:
-                for f in range(fc):
-                    src_start = (frame_idx + f) * per_item_output
-                    src_end = src_start + safe_frame_output_tokens
-                    gather_indices[
-                        dst_offset : dst_offset + safe_frame_output_tokens
-                    ] = torch.arange(
-                        src_start, src_end, dtype=torch.long, device=device
-                    )
-                    dst_offset += safe_frame_output_tokens
-                frame_idx += fc
+            for frame_idx, n_tok in enumerate(frame_tokens):
+                src_start = frame_idx * per_item_output
+                gather_indices[dst_offset : dst_offset + n_tok] = torch.arange(
+                    src_start, src_start + n_tok, dtype=torch.long, device=device
+                )
+                dst_offset += n_tok
 
         return EncoderCudaGraphReplayBuffers(
             values={
@@ -2366,6 +2366,13 @@ class Gemma4ForConditionalGeneration(
             image_input = self._parse_and_validate_image_input(**mm_kwargs)
             assert image_input is not None
             embeddings = self._process_image_input_local(image_input)
+            # The manager splits the output by the item specs, which count each
+            # image's padded tokens, as the graphs return them.
+            specs = self.get_encoder_cudagraph_item_specs(mm_kwargs)
+            embeddings = [
+                nn.functional.pad(emb, (0, 0, 0, spec.output_tokens - emb.shape[0]))
+                for emb, spec in zip(embeddings, specs)
+            ]
         elif modality == "video":
             video_input = self._parse_and_validate_video_input(**mm_kwargs)
             assert video_input is not None
