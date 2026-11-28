@@ -633,6 +633,9 @@ Supported models:
 Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
 optional `<think>` block. Pair it with `--reasoning-parser ripple`.
 
+Once non-whitespace answer content starts, later `<think>` and `</think>`
+markers are preserved as literal text.
+
 Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
 ### Models with Pythonic Tool Calls (`pythonic`)

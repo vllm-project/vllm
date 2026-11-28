@@ -21,13 +21,14 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
-from vllm.parser.engine.events import EventType
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
     Transition,
 )
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.utils import extract_json_member_object
 
 if TYPE_CHECKING:
@@ -101,8 +102,42 @@ def ripple_config() -> ParserEngineConfig:
     )
 
 
+class RippleStreamingParserEngine(StreamingParserEngine):
+    def reset(self, initial_state: ParserState | None = None) -> None:
+        super().reset(initial_state)
+        self._content_started = False
+
+    def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        # A tool call forwarded as text by the reasoning pass is not the answer.
+        if (
+            not self._content_started
+            and self.state is ParserState.CONTENT
+            and not self._in_skipped_tool_span
+            and text.strip()
+        ):
+            self._content_started = True
+        return super()._emit_for_state(text, token_count)
+
+    def _on_terminal(
+        self, terminal: str, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
+        if (
+            self._content_started
+            and self.state is ParserState.CONTENT
+            and terminal in ("THINK_START", "THINK_END")
+        ):
+            return self._emit_for_state(value, token_count)
+        content_started = self._content_started
+        events = super()._on_terminal(terminal, value, token_count)
+        if self.skip_tool_parsing and terminal in self._tool_terminals:
+            # Forwarded tool-call markers are not answer content either.
+            self._content_started = content_started
+        return events
+
+
 class RippleParser(ParserEngine):
     CONFIG_NAME = "ripple"
+    _streaming_engine_cls = RippleStreamingParserEngine
 
     def __init__(
         self,

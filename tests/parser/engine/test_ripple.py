@@ -67,6 +67,43 @@ CASES = {
         ["Paris", "Rome"],
     ),
     "truncated_reasoning": ("<think>\nStill thinking", "Still thinking", "", []),
+    "literal_think_tag": (
+        "The template opens reasoning with <think> before thinking. DONE",
+        "",
+        "The template opens reasoning with <think> before thinking. DONE",
+        [],
+    ),
+    "literal_reasoning_pair": (
+        "Write `<think>\nquoted\n</think>` literally.",
+        "",
+        "Write `<think>\nquoted\n</think>` literally.",
+        [],
+    ),
+    "reasoning_then_literal_tags": (
+        "<think>\nCompute.\n</think>\nThe tag <think> is literal.</think> DONE",
+        "Compute.",
+        "The tag <think> is literal.</think> DONE",
+        [],
+    ),
+    "leading_whitespace_reasoning": (
+        " \n<think>\nCompute.\n</think>\nThe answer is 391.",
+        "Compute.",
+        " \nThe answer is 391.",
+        [],
+    ),
+    "literal_reasoning_then_tool": (
+        "Use <think> and </think> as text." + _call("Paris"),
+        "",
+        "Use <think> and </think> as text.",
+        ["Paris"],
+    ),
+    # A tool call is not answer text, so reasoning after it is still parsed.
+    "reasoning_after_tool": (
+        _call("Paris") + "\n<think>\nLater.\n</think>",
+        "Later.",
+        "",
+        ["Paris"],
+    ),
     # Text before a tool call keeps its whitespace in both parse paths.
     "extra_newline_before_tool_content": (
         "<think>\nNeed the tool.\n</think>\n\nChecking now." + _call("Paris"),
@@ -113,7 +150,7 @@ def test_parse(parser_cls, tokenizer, case):
     assert all(tc.name == "get_weather" for tc in tool_calls or [])
 
 
-@pytest.mark.parametrize("chunk_size", [1, 3])
+@pytest.mark.parametrize("chunk_size", [1, 3, None])
 @pytest.mark.parametrize("case", CASES)
 def test_streaming_matches_parse(parser_cls, tokenizer, case, chunk_size):
     text, reasoning, content, cities = CASES[case]
@@ -122,7 +159,7 @@ def test_streaming_matches_parse(parser_cls, tokenizer, case, chunk_size):
         replay_streaming(
             parser_cls(tokenizer),
             tokens,
-            chunk_size=chunk_size,
+            chunk_size=chunk_size or len(tokens),
             finished_on_last=True,
             tools=TOOLS,
         )
@@ -132,7 +169,10 @@ def test_streaming_matches_parse(parser_cls, tokenizer, case, chunk_size):
     assert [json.loads(tc["arguments"])["city"] for tc in output.tool_calls] == cities
 
 
-@pytest.mark.parametrize("case", ["direct_answer", "reasoning"])
+@pytest.mark.parametrize(
+    "case",
+    ["direct_answer", "reasoning", "literal_think_tag", "reasoning_then_literal_tags"],
+)
 def test_streaming_without_tool_parser(tokenizer, case):
     # Without --enable-auto-tool-choice no tool parser is composed, so the
     # reasoning parser alone must still split out <think> while streaming.
@@ -156,3 +196,19 @@ def test_structured_output_applies_from_first_token(tokenizer):
     # "</think>" the model may never emit.
     parser = RippleParser(tokenizer)
     assert parser.is_reasoning_end([1, ord("u"), 2, 1])
+
+
+def test_parse_resets_content_state(parser_cls, tokenizer):
+    parser = parser_cls(tokenizer)
+    request = _test_request(TOOLS)
+    parser.parse("A direct answer.", request)
+
+    reasoning, content, tool_calls = parser.parse(
+        "<think>\nCompute.\n</think>\nThe answer is 391.", request
+    )
+
+    assert (reasoning, content, tool_calls) == (
+        "Compute.",
+        "The answer is 391.",
+        [],
+    )
