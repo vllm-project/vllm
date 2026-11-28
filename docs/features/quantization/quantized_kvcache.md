@@ -183,3 +183,53 @@ if __name__ == "__main__":
 ```
 
 For more detailed and up-to-date examples, see the [`llm-compressor` official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples/quantization_kv_cache).
+
+## OSCAR KV Cache (TurboQuant backend)
+
+`--kv-cache-dtype turboquant_k3v3_oscar | turboquant_k3v2_oscar | turboquant_k2v2_oscar`
+stores K and V as 3- or 2-bit codes and keeps each request's most recent
+tokens at higher precision. It runs on the TurboQuant attention backend and
+supports `head_dim` 128 and 256.
+
+Per head and token, K and V are each Hadamard-rotated, clipped at a per-row
+`|x|` quantile, quantized to asymmetric uniform codes, and stored with an
+fp16 scale/min that also folds in a row-norm correction. Decode attends
+quantized tokens without dequantizing them (the codes are fed to the tensor
+cores directly). The last `recent` tokens of every request are attended from
+an int8 copy instead, which removes most of the quantization error that
+matters for the next token.
+
+| Preset | Bytes / token / KV head (head_dim 256) | Recent window |
+|---|---|---|
+| `turboquant_4bit_nc` (reference) | 262 | — |
+| `turboquant_k3v3_oscar` | 200 | 256 |
+| `turboquant_k3v2_oscar` | 168 | 1024 |
+| `turboquant_k2v2_oscar` | 136 | 1024 |
+
+Notes:
+
+- The recent-window copy is kept per physical KV page and is validated
+  against the quantized record before use, so prefix caching, block reuse and
+  KV offloading (`OffloadingConnector`) stay correct; when the copy is
+  missing or stale the quantized value is used.
+- The window copy is a fixed cost per KV cache group: about
+  `windows x (recent + sink) x layers x kv_heads x 2 x head_dim` bytes, for up to
+  8 concurrent windows (fewer with a small `--max-num-seqs`). It is capped at 10%
+  of the free GPU memory at startup and allocated before the KV cache is sized;
+  requests beyond the cap use the quantized values. On small GPUs this fixed
+  cost can cancel the capacity gain.
+- On hybrid (Mamba/GDN + attention) models a smaller KV page raises the
+  attention block size chosen to match the Mamba page size, which makes
+  prefix-cache hits coarser.
+- The first 16 tokens of each request are also kept in the window
+  (attention sinks), which matters for models such as Qwen3.
+- Accuracy of the 2-bit keys is strongly model dependent. Validate
+  `turboquant_k2v2_oscar` on your model before using it:
+
+| Model | `turboquant_4bit_nc` | `k3v3_oscar` | `k3v2_oscar` | `k2v2_oscar` |
+|---|---|---|---|---|
+| Qwen3-4B, GSM8K (bf16 KV: 0.861) | 0.824 | 0.831 | 0.763 | 0.204 |
+| Ternary-Bonsai-2-27B, long-context retrieval (144 q) | 141 | — | 138 | 135–137 |
+
+Bonsai was measured with `oscar_sink` set to 0; GSM8K prompts (~1K tokens)
+mostly fit in the 1024-token window of the `k3v2`/`k2v2` presets.
