@@ -593,6 +593,36 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         assert not top_block_selected(actual[0])
 
 
+@pytest.mark.parametrize(
+    "cdna_version,num_cus,base_programs,expected",
+    [
+        # MI350P: one (block_n, splits, warps) per program band.
+        (4, 128, 15, None),
+        (4, 128, 16, (128, 16, 2)),
+        (4, 128, 24, (32, 16, 4)),
+        (4, 128, 47, (64, 16, 1)),
+        (4, 128, 64, (64, 8, 1)),
+        (4, 128, 383, (32, 4, 1)),
+        (4, 128, 384, (128, 1, 1)),
+        (4, 128, 1 << 20, (128, 1, 1)),
+        (4, 80, 64, (64, 8, 1)),
+        # MI355X and gfx942 keep the shared FP8 rule.
+        (4, 256, 64, None),
+        (3, 128, 64, None),
+        (3, 304, 64, None),
+    ],
+)
+def test_qsa_fp8_few_cus_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    num_cus: int,
+    base_programs: int,
+    expected: tuple[int, int, int] | None,
+) -> None:
+    monkeypatch.setattr(qsa_ops, "_num_compute_units", lambda: num_cus)
+    assert qsa_ops._fp8_few_cus_profile(base_programs, cdna_version) == expected
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize("cdna_version", [3, 4])
 @pytest.mark.parametrize("use_fp8", [False, True])
@@ -603,8 +633,10 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         # group to 16 rows. From 32 programs it takes its splits from the
         # program count (on CDNA4, up to 128 programs use more splits and
         # four warps), and from 2048 programs one split writes the output
-        # directly. FP8 keeps the shared profiles; past 512 programs it uses
-        # one warp.
+        # directly. FP8 pads the same way and runs FP8 dots: 32-wide tiles
+        # under 32 programs, then 64-wide on CDNA3, and on CDNA4 32-wide up
+        # to 128 programs and 64-wide past them. CDNA3 widens K/V instead for
+        # a full head group under 32 programs (tp1_p2, tp2_p16).
         pytest.param(1, 24, 2, 1792, id="tp1_p2"),
         pytest.param(257, 24, 2, 1792, id="tp1_p514"),
         pytest.param(16, 12, 1, 1792, id="tp2_p16"),
@@ -628,6 +660,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_kv_heads: int,
     page_size: int,
     use_fp8: bool,
+    query_gain: float = 1.0,
 ) -> None:
     # Every CDNA version's launch profile runs on any ROCm GPU.
     monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: cdna_version)
@@ -640,9 +673,9 @@ def test_qsa_sparse_paged_attention_matches_reference(
     indexer_budget = 2048
     indexer_compress_ratio = 4
     selection_width = indexer_budget + indexer_compress_ratio - 1
-    q = torch.randn(
-        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
+    q = (
+        torch.randn(num_rows, num_query_heads, head_dim, device="cuda") * query_gain
+    ).bfloat16()
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
@@ -651,6 +684,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
+    kv_cache[..., :head_dim] /= query_gain
     if use_fp8:
         fp8_dtype = current_platform.fp8_dtype()
         # The kernel's contract is that the cache already holds values in
@@ -724,6 +758,38 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("cdna_version", [3, 4])
+@pytest.mark.parametrize(
+    "num_rows,num_query_heads,num_kv_heads,page_size",
+    [
+        pytest.param(8, 6, 1, 1024, id="tp4_p8"),
+        pytest.param(513, 6, 1, 1024, id="tp4_p513"),
+    ],
+)
+def test_qsa_sparse_paged_attention_fp8_large_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    num_rows: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    page_size: int,
+) -> None:
+    # Query row maxima of about 900 exceed both e4m3 maxima (240 fnuz, 448 fn);
+    # the keys shrink by the same gain, so the scores are as at gain 1. Fails
+    # if the query is cast to e4m3 unscaled.
+    test_qsa_sparse_paged_attention_matches_reference(
+        monkeypatch,
+        cdna_version,
+        num_rows,
+        num_query_heads,
+        num_kv_heads,
+        page_size,
+        use_fp8=True,
+        query_gain=256.0,
+    )
 
 
 @requires_qsa_kernels

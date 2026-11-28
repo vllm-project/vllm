@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import torch
@@ -19,6 +20,38 @@ _TOPK_WORKSPACE_BYTES = 1024 * 1024
 # row by row. Up to max rows this beats the tiled kernel; measured with the
 # 168-page decode table on MI300X and MI325X (CDNA3) and MI355X (CDNA4).
 _ROWS_KERNEL_PROFILES = {3: (32, 32, 4), 4: (128, 128, 2)}
+
+
+# FP8 K/V sparse attention on 128-CU CDNA4 (MI350P): (programs below, block_n,
+# splits, warps) by programs before splitting; under 16 programs the CDNA4 profile.
+_FP8_FEW_CUS_PROFILES = (
+    (16,),
+    (24, 128, 16, 2),
+    (32, 32, 16, 4),
+    (48, 64, 16, 1),
+    (64, 32, 16, 2),
+    (96, 64, 8, 1),
+    (128, 32, 8, 2),
+    (192, 32, 8, 1),
+    (256, 32, 4, 2),
+    (384, 32, 4, 1),
+    (math.inf, 128, 1, 1),
+)
+
+
+@functools.cache
+def _num_compute_units() -> int:
+    return current_platform.num_compute_units()
+
+
+def _fp8_few_cus_profile(
+    base_programs: int, cdna_version: int
+) -> tuple[int, ...] | None:
+    """(block_n, splits, warps) for FP8 dots on 128-CU CDNA4, else None."""
+    if cdna_version != 4 or _num_compute_units() > 128:
+        return None
+    profile = next(p for limit, *p in _FP8_FEW_CUS_PROFILES if base_programs < limit)
+    return tuple(profile) or None
 
 
 @triton.jit
@@ -355,6 +388,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
+    FP8_DOTS: tl.constexpr,
+    FP8_PV: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    P_SCALE: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -374,11 +411,24 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         mask=head_offsets[:, None] < GROUP_SIZE,
         other=0.0,
     )
+    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
+    score_scale = tl.full((BLOCK_M,), softmax_scale_log2, dtype=tl.float32)
+    fp8_dtype: tl.constexpr = k_cache_ptr.dtype.element_ty
+    query_lo = query
+    if FP8_DOTS:
+        # e4m3 keeps 3 mantissa bits. Scale each query row to the e4m3 max and
+        # split it into hi + lo parts: about 7 bits, and it cannot overflow.
+        query_f32 = query.to(tl.float32)
+        query_scale = tl.max(tl.abs(query_f32), axis=1) / FP8_MAX
+        query_scale = tl.maximum(query_scale, 1.0e-30)
+        query_f32 = query_f32 / query_scale[:, None]
+        query = query_f32.to(fp8_dtype)
+        query_lo = (query_f32 - query.to(tl.float32)).to(fp8_dtype)
+        score_scale = query_scale * softmax_scale_log2
 
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
-    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
 
     # Dynamic bounds avoid padded main-loop iterations for uneven splits.
     split_tile_start = split_id * NUM_TILES // NUM_SPLITS
@@ -427,31 +477,45 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
-        if IS_FP8:
+        if IS_FP8 and not FP8_DOTS:
             # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an fp8
             # QK dot measured slower and less accurate on the NVIDIA port).
             keys = keys.to(query.dtype)
+        if IS_FP8 and not FP8_PV:
             # Dequant V to fp16 for the PV dot: P <= 1 (online softmax) so
             # fp16 has the range, its wider mantissa is more accurate, and
             # the fp8->fp16 upcast with an fp16 PV dot is faster.
             values = values.to(tl.float16)
         scores = tl.dot(query, keys)
+        if FP8_DOTS:
+            scores = tl.dot(query_lo, keys, acc=scores)
         # Scaling scores avoids re-quantizing a scaled query to BF16.
-        scores *= softmax_scale_log2
+        scores *= score_scale[:, None]
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
         alpha = tl.math.exp2(max_value - next_max)
         probabilities = tl.where(
             valid[None, :], tl.math.exp2(scores - next_max[:, None]), 0.0
         )
-        accumulator = tl.dot(
-            probabilities.to(values.dtype),
-            values,
-            acc=accumulator * alpha[:, None],
-        )
+        if FP8_PV:
+            # The same hi + lo split for P; P_SCALE keeps small P out of the
+            # e4m3 subnormals and is divided out after the loop.
+            p_scaled = probabilities * P_SCALE
+            p_hi = p_scaled.to(fp8_dtype)
+            p_lo = ((p_scaled - p_hi.to(tl.float32)) * 16.0).to(fp8_dtype)
+            accumulator = tl.dot(p_hi, values, acc=accumulator * alpha[:, None])
+            accumulator += tl.dot(p_lo, values) * 0.0625
+        else:
+            accumulator = tl.dot(
+                probabilities.to(values.dtype),
+                values,
+                acc=accumulator * alpha[:, None],
+            )
         normalizer = normalizer * alpha + tl.sum(probabilities, axis=1)
         max_value = next_max
 
+    if FP8_PV:
+        accumulator = accumulator * (1.0 / P_SCALE)
     has_values = normalizer > 0
     normalized_output = tl.where(
         has_values[:, None],
@@ -1080,12 +1144,40 @@ def qsa_sparse_paged_attention(
     base_programs = q.shape[0] * k_cache.shape[2]
     cdna_version = get_cdna_version()
     cdna_bf16 = cdna_version in (3, 4) and k_cache.dtype == torch.bfloat16
-    if cdna_bf16:
+    # With FP8 K/V on CDNA3/4 the QK dot runs as FP8 MFMA on hi + lo e4m3
+    # parts of the query, and K is never widened. On CDNA4 the PV dot does the
+    # same with P; on CDNA3 those two dots cost more than widening V to FP16.
+    # A full head group under 32 programs runs faster on CDNA3 with K/V widened.
+    fp8_dots = (
+        cdna_version in (3, 4)
+        and is_fp8
+        and not (cdna_version == 3 and base_programs < 32 and block_m >= 16)
+    )
+    fp8_pv = fp8_dots and cdna_version == 4
+    if cdna_bf16 or fp8_dots:
         # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    if cdna_bf16 and base_programs >= 32:
+    few_cus_profile = (
+        _fp8_few_cus_profile(base_programs, cdna_version) if fp8_dots else None
+    )
+    if few_cus_profile:
+        block_n, target_splits, partial_warps = few_cus_profile
+    elif fp8_dots and base_programs < 32:
+        block_n, partial_warps = 32, 4
+        target_splits = 64 if base_programs <= small_profile_limit else 32
+    elif fp8_dots and cdna_version == 3:
+        # 64-wide tiles and one warp, with enough splits for about 1024 programs.
+        block_n, partial_warps = 64, 1
+        target_splits = min(16, triton.next_power_of_2(-(-1024 // base_programs)))
+    elif fp8_dots and base_programs <= 128:
+        block_n, partial_warps = 32, 2
+        target_splits = triton.next_power_of_2(-(-1024 // base_programs))
+    elif fp8_dots:
+        block_n, partial_warps = 64, 1
+        target_splits = min(4, triton.next_power_of_2(-(-2048 // base_programs)))
+    elif cdna_bf16 and base_programs >= 32:
         # Narrow tiles, one warp, and enough splits for about 2048 programs.
         # CDNA4 decode prefers about 1024 programs with four warps.
         block_n = 16
@@ -1107,9 +1199,6 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
-        if cdna_version in (3, 4):
-            # FP8 K/V on CDNA3 and CDNA4 is faster with one warp per program.
-            partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
@@ -1172,6 +1261,10 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
+        FP8_DOTS=fp8_dots,
+        FP8_PV=fp8_pv,
+        FP8_MAX=torch.finfo(k_cache.dtype).max if fp8_dots else 1.0,
+        P_SCALE=128.0 if fp8_pv else 1.0,
         num_warps=partial_warps,
         num_stages=partial_stages,
     )
