@@ -12,7 +12,11 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     deserialize_mem_descriptor,
     serialize_mem_descriptor,
 )
-from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+from vllm.distributed.nixl_utils import (
+    NixlWrapper,
+    nixl_agent_config,
+    nixlInvalidParamError,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -129,14 +133,21 @@ class NixlDataTransport(DataTransport):
                 f"({len(local_indices)} vs {len(remote_indices)})"
             )
         remote_handle = self._peer_handles[agent_name]
-        handle = self._nixl.make_prepped_xfer(
-            "READ",
-            self._local_xfer_handle,
-            local_indices,
-            remote_handle,
-            remote_indices,
-            notif_msg=notif_msg,
-        )
+        try:
+            handle = self._nixl.make_prepped_xfer(
+                "READ",
+                self._local_xfer_handle,
+                local_indices,
+                remote_handle,
+                remote_indices,
+                notif_msg=notif_msg,
+            )
+        except Exception as error:
+            if nixlInvalidParamError is not None and isinstance(
+                error, nixlInvalidParamError
+            ):
+                raise ValueError("NIXL rejected the EC READ descriptors") from error
+            raise
         self._nixl.transfer(handle)
         return handle
 

@@ -169,6 +169,24 @@ def test_post_read_calls_make_prepped_xfer_and_transfer():
     assert handle == 999
 
 
+def test_post_read_reports_nixl_invalid_descriptors_before_submission():
+    class InvalidParameterError(RuntimeError):
+        pass
+
+    transport = _make_transport()
+    descriptor = serialize_mem_descriptor([(0, 64, 0)])
+    agent = transport.add_remote_peer(b"meta", descriptor)
+    transport._nixl.make_prepped_xfer.side_effect = InvalidParameterError
+
+    with (
+        patch(f"{_NIXL_PATH}.nixlInvalidParamError", InvalidParameterError),
+        pytest.raises(ValueError, match="NIXL rejected the EC READ descriptors"),
+    ):
+        transport.post_read([0], agent, [0], notif_msg=b"sid")
+
+    transport._nixl.transfer.assert_not_called()
+
+
 # ── release_xfer_handle / deregister ─────────────────────────────────────────
 
 

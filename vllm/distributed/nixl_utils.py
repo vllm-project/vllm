@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 NixlWrapper: Any
 nixl_agent_config: Any
 nixl_thread_sync_t: Any
+nixlInvalidParamError: Any
 nixlRemoteDisconnectError: Any
 nixlXferTelemetry: Any
 
@@ -45,7 +46,11 @@ def _get_nixl_package_name() -> str:
 
 def _get_nixl_module_name(name: str) -> str:
     package_name = _get_nixl_package_name()
-    if name in ("nixlXferTelemetry", "nixlRemoteDisconnectError"):
+    if name in (
+        "nixlInvalidParamError",
+        "nixlRemoteDisconnectError",
+        "nixlXferTelemetry",
+    ):
         return f"{package_name}._bindings"
     return f"{package_name}._api"
 
@@ -55,6 +60,7 @@ def _load_nixl_attr(name: str) -> Any:
         "NixlWrapper": "nixl_agent",
         "nixl_agent_config": "nixl_agent_config",
         "nixl_thread_sync_t": "nixl_thread_sync_t",
+        "nixlInvalidParamError": "nixlInvalidParamError",
         "nixlRemoteDisconnectError": "nixlRemoteDisconnectError",
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
@@ -134,6 +140,7 @@ __all__ = [
     "NixlWrapper",
     "nixl_agent_config",
     "nixl_thread_sync_t",
+    "nixlInvalidParamError",
     "nixlRemoteDisconnectError",
     "nixlXferTelemetry",
     "is_nixl_available",
