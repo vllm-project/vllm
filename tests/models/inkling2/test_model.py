@@ -11,6 +11,8 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.models.inkling2.configs import (
     Inkling2DSparkConfig,
     Inkling2LoopMMConfig,
@@ -95,6 +97,38 @@ TINY_LOOP_CONFIG: dict[str, Any] = {
         "target_layer_ids": [3, 8],
     },
 }
+
+
+@register_model_loader("inkling2_zero_head")
+class ZeroHeadDummyLoader(DummyModelLoader):
+    """A shared zero head makes draft/target logits equal before quantization."""
+
+    @torch.no_grad()
+    def load_weights(self, model, model_config) -> None:
+        super().load_weights(model, model_config)
+        if hasattr(model, "get_language_model"):
+            model.get_language_model().lm_head.weight.zero_()
+
+
+def _int8_draft_is_active(worker, quantize_layers: bool) -> bool:
+    draft = worker.model_runner.speculator.model
+    projections = {
+        "self_attn.qkv_proj",
+        "self_attn.kv_proj_ctx",
+        "self_attn.o_proj",
+        "mlp.gate_up_proj",
+        "mlp.down_proj",
+    }
+    return (
+        draft.lm_head_q8 is not None
+        and draft.lm_head_q8[0].dtype == torch.int8
+        and draft.model.markov_head.fold_q8 is not None
+        and all(
+            {name for name, mod in layer.named_modules() if getattr(mod, "q8", None)}
+            == (projections if quantize_layers else set())
+            for layer in draft.model.layers
+        )
+    )
 
 
 def _tiny_looped_llm(tmp_path, text_overrides: dict[str, Any]) -> LLM:
@@ -230,46 +264,73 @@ def test_portable_fp16_kv_config(tmp_path, looped):
 
 @pytest.mark.parametrize("looped", [False, True])
 @pytest.mark.parametrize(
-    "draft_sample_method,kv_cache_dtype,moe_backend",
+    "draft_sample_method,kv_cache_dtype,moe_backend,draft_weight_quantization",
     [
-        (None, "auto", "auto"),
-        ("greedy", "auto", "auto"),
-        ("probabilistic", "auto", "auto"),
+        (None, "auto", "auto", None),
+        ("greedy", "auto", "auto", None),
+        ("probabilistic", "auto", "auto", None),
+        ("greedy", "auto", "auto", "int8"),
+        ("probabilistic", "auto", "auto", "int8"),
     ]
     + (
         [
-            (None, "float16", "auto"),
-            (None, "fp8_e4m3", "auto"),
-            ("greedy", "fp8_e4m3", "auto"),
-            ("probabilistic", "fp8_e4m3", "auto"),
-            (None, "fp8_e4m3", "humming"),
-            ("greedy", "fp8_e4m3", "humming"),
+            (None, "float16", "auto", None),
+            (None, "fp8_e4m3", "auto", None),
+            ("greedy", "fp8_e4m3", "auto", None),
+            ("probabilistic", "fp8_e4m3", "auto", None),
+            (None, "fp8_e4m3", "humming", None),
+            ("greedy", "fp8_e4m3", "humming", None),
         ]
         if current_platform.is_device_capability_family(120)
         else []
     ),
 )
 def test_tiny_model_generates(
-    tmp_path, draft_sample_method, kv_cache_dtype, moe_backend, looped
+    tmp_path,
+    enable_pickle,
+    monkeypatch,
+    draft_sample_method,
+    kv_cache_dtype,
+    moe_backend,
+    looped,
+    draft_weight_quantization,
 ):
     """One local and one full layer load (dummy weights) and decode with the
     paged KV and conv-state caches and CUDA graphs, optionally speculating
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
     config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
+    draft_path = None
+    overrides = {}
+    quantize_layers = draft_sample_method == "greedy"
+    if draft_weight_quantization is not None:
+        # The custom dummy loader is registered only in this process.
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        if quantize_layers:
+            overrides["dspark_weight_quantization"] = draft_weight_quantization
+        else:
+            # Keep the separate draft's INT8 heads and override only the layers.
+            draft_path = tmp_path / "draft"
+            draft_path.mkdir()
+            draft = {**config, "dspark_weight_quantization": draft_weight_quantization}
+            (draft_path / "config.json").write_text(json.dumps(draft))
+            del config["mtp_config"]
+            overrides["dspark_quantize_layers"] = False
     (tmp_path / "config.json").write_text(json.dumps(config))
     llm = LLM(
+        hf_overrides=overrides,
         speculative_config=(
             None
             if draft_sample_method is None
             else {
                 "method": "dspark",
+                "model": str(draft_path) if draft_path else None,
                 "num_speculative_tokens": 7,
                 "draft_sample_method": draft_sample_method,
             }
         ),
         model=str(tmp_path),
-        load_format="dummy",
+        load_format="inkling2_zero_head" if draft_weight_quantization else "dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
         kv_cache_dtype=kv_cache_dtype,
@@ -317,6 +378,11 @@ def test_tiny_model_generates(
         )
         assert drafted > 0
         assert 0 <= accepted <= drafted
+        if draft_weight_quantization is not None:
+            assert accepted > 0
+            assert all(
+                llm.collective_rpc(_int8_draft_is_active, args=(quantize_layers,))
+            )
 
 
 def _record_moe_routing(model: torch.nn.Module) -> None:

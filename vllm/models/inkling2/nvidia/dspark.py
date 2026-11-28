@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# INT8 draft projections adapted from sxuff/inkling-2-mini-spark (Apache-2.0).
 """Inkling2 DSpark draft (`mtp.safetensors`): an anchor plus mask block run
 through a small dense transformer over DFlare-mixed target-feature K/V, then a
 recurrent (`rnn_hidden`) Markov head. Numerics follow the reference
@@ -21,6 +22,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
+    LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -47,7 +49,17 @@ from .ops.dspark import (
     rope_,
     silu_and_mul,
 )
+from .ops.gemv_q8 import MAX_M as Q8_MAX_M
+from .ops.gemv_q8 import gemv_q8, quantize_rows
 from .ops.linear import linear
+
+
+def _draft_linear(x: torch.Tensor, module: nn.Module) -> torch.Tensor:
+    """Project with the draft's INT8 copy at low M, otherwise its BF16 weight."""
+    q8 = getattr(module, "q8", None)
+    if q8 is not None and 0 < x.numel() // x.shape[-1] <= Q8_MAX_M:
+        return gemv_q8(x, *q8)
+    return linear(x, module.weight)
 
 
 class _RMSNorm(nn.Module):
@@ -194,7 +206,7 @@ class Inkling2DraftSelfAttention(nn.Module):
     def forward(
         self, positions: torch.Tensor, x: torch.Tensor, cos_sin_cache: torch.Tensor
     ) -> torch.Tensor:
-        qkv = linear(x, self.qkv_proj.weight)
+        qkv = _draft_linear(x, self.qkv_proj)
         qk_norm_rope_(
             qkv,
             positions,
@@ -244,7 +256,7 @@ class Inkling2DraftSelfAttention(nn.Module):
                 window=self.window,
                 num_splits=num_splits,
             )
-        return linear(out, self.o_proj.weight)
+        return _draft_linear(out, self.o_proj)
 
     def store_context_kv(
         self,
@@ -253,7 +265,7 @@ class Inkling2DraftSelfAttention(nn.Module):
         cos_sin_cache: torch.Tensor,
         slot_mapping: torch.Tensor | None,
     ) -> None:
-        k, v = linear(context, self.kv_proj_ctx.weight).split(
+        k, v = _draft_linear(context, self.kv_proj_ctx).split(
             [self.kv_size, self.kv_size], -1
         )
         k = self.k_norm_ctx(k.reshape(-1, self.head_dim))
@@ -282,8 +294,8 @@ class Inkling2DraftMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = silu_and_mul(linear(x, self.gate_up_proj.weight))
-        return linear(x, self.down_proj.weight)
+        x = silu_and_mul(_draft_linear(x, self.gate_up_proj))
+        return _draft_linear(x, self.down_proj)
 
 
 class Inkling2DraftLayer(nn.Module):
@@ -343,6 +355,7 @@ class Inkling2MarkovHead(nn.Module):
         self.fold_weight: torch.Tensor | None = None
         self.fold_bias: torch.Tensor | None = None
         self.rnn_bias: torch.Tensor | None = None
+        self.fold_q8: tuple[torch.Tensor, torch.Tensor] | None = None
 
     @torch.no_grad()
     def fold(self, lm_head_weight: torch.Tensor) -> None:
@@ -382,6 +395,8 @@ class Inkling2MarkovHead(nn.Module):
         weight = self.rnn_proj.weight[:, : 2 * self.markov_rank]
         raw = torch.addmm(context, inputs, weight.T, out_dtype=torch.float32)
         state, latent = markov_gate(raw, state)
+        if self.fold_q8 is not None and latent.shape[0] <= Q8_MAX_M:
+            return state, gemv_q8(latent, *self.fold_q8, bias=self.fold_bias)
         return state, torch.addmm(self.fold_bias, latent, self.fold_weight.T)
 
 
@@ -481,6 +496,8 @@ class Inkling2DSparkModel(nn.Module):
             config, vllm_config.model_config.max_model_len, f"{prefix}model"
         )
         self.lm_head: nn.Module | None = None
+        # 8-bit copy of the shared LM head for the draft's base logits.
+        self.lm_head_q8: tuple[torch.Tensor, torch.Tensor] | None = None
 
     @torch.no_grad()
     def attach_target(self, target_model: nn.Module) -> None:
@@ -502,6 +519,14 @@ class Inkling2DSparkModel(nn.Module):
         head = self.model.markov_head
         assert head.rnn_bias is not None
         head.fold(self.lm_head.weight)
+        if self.config.draft_weight_quantization is not None:
+            self.lm_head_q8 = quantize_rows(self.lm_head.weight, self.lm_head_q8)
+            assert head.fold_weight is not None
+            head.fold_q8 = quantize_rows(head.fold_weight, head.fold_q8)
+            if self.config.draft_quantize_layers:
+                for mod in self.model.layers.modules():
+                    if isinstance(mod, LinearBase):
+                        mod.q8 = quantize_rows(mod.weight, getattr(mod, "q8", None))
         head.rnn_bias.copy_(head.rnn_proj.bias)
         self.model.fuse_alpha.copy_(
             torch.softmax(self.model.fuse_weight.float(), dim=-1)
@@ -542,8 +567,10 @@ class Inkling2DSparkModel(nn.Module):
         return self.model(input_ids, positions)
 
     def compute_base_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """TP-local bf16 base logits (bf16 GEMM, as the reference)."""
+        """Return TP-local BF16 draft vocabulary logits."""
         assert self.lm_head is not None
+        if self.lm_head_q8 is not None and 0 < hidden_states.shape[0] <= Q8_MAX_M:
+            return gemv_q8(hidden_states, *self.lm_head_q8)
         return linear(hidden_states, self.lm_head.weight)
 
     def markov_step(

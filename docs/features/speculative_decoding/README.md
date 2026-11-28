@@ -305,6 +305,27 @@ can occur due to following factors:
 
 For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../../usage/faq.md).
 
+## Inkling 2 Mini INT8 Draft Weights
+
+The DSpark drafter can keep separate INT8 copies of its vocabulary heads,
+folded Markov projection, and attention/MLP projections. This reduces weight
+traffic for small draft batches while the target model continues to verify
+with its original weights. The default remains BF16. Enable INT8 with:
+
+```bash
+vllm serve thinkingmachines/Inkling-2-Mini \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7}' \
+  --hf-overrides '{"dspark_weight_quantization":"int8"}'
+```
+
+Set `dspark_quantize_layers` to `false` in the same overrides to quantize only the draft
+vocabulary and Markov heads. The INT8 kernels serve at most 64 rows per
+projection; larger batches use the original BF16 weights. Extra weight copies
+use additional GPU memory and may reduce the available KV cache. Weight
+refreshes update the copies in place to preserve CUDA graph addresses.
+Acceptance rates and performance depend on the workload; benchmark both
+settings with your sampling parameters and concurrency.
+
 ## Known Feature Incompatibility
 
 1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
