@@ -246,3 +246,28 @@ def test_cached_hit_does_not_reset_newer_failures(
     finally:
         server.join(10)
     assert not server.is_alive()
+
+
+@pytest.mark.parametrize("lookup_service", [3], indirect=True)
+def test_get_failure_feedback_invalidates_hits_and_needs_get_recovery(lookup_service):
+    client, peer = lookup_service
+
+    def serve():
+        for _ in range(2):
+            peer.recv_multipart()
+            peer.send(encode_lookup_response(MooncakeLookupResult(16)))
+
+    server = threading.Thread(target=serve)
+    server.start()
+    try:
+        assert _resolve_lookup(client, "cached", "async").hit_length == 16
+        client.record_read_outcomes(1, 0)
+        assert client.lookup("fresh", 128, []).hit_length == 16
+        client.record_read_outcomes(2, 0)
+        assert client.circuit_breaker.is_open
+        assert client.lookup("cached", 128, [], non_block=True).hit_length == 0
+        client.record_read_outcomes(0, 1)
+        assert not client.circuit_breaker.is_open
+    finally:
+        server.join(3)
+    assert not server.is_alive()

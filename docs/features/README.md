@@ -3,6 +3,7 @@
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
+- [MooncakeStoreConnector](mooncake_store_connector_usage.md)
 
 ## Compatibility Matrix
 
