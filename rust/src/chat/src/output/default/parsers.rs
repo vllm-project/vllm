@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 
@@ -156,7 +156,16 @@ impl ResolvedParsers {
                     ToolParsing::Parser(name.to_owned())
                 }
                 None if matches!(tool_call_parser, ParserSelection::None) => ToolParsing::Disabled,
-                None => ToolParsing::Unavailable,
+                None => {
+                    warn!(
+                        model_id,
+                        "`--tool-call-parser auto` found no tool parser for this model; requests \
+                         with tools are rejected unless `tool_choice` is `none`. Pass \
+                         `--tool-call-parser <name>` to parse tool calls, or \
+                         `--tool-call-parser none` to turn tool parsing off"
+                    );
+                    ToolParsing::Unavailable
+                }
             };
             if let Some(name) = reasoning_name {
                 ReasoningParserFactory::global().create(name, tokenizer.clone()).map_err(
