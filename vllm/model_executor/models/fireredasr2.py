@@ -67,13 +67,13 @@ logger = init_logger(__name__)
 class FireRedASR2AudioInputs(TensorSchema):
     """Dimensions:
     - b: Batch size
+    - t: Time frames (varies per audio)
     - nmb: Number of mel bins
-    - t: Time frames (M)
     """
 
     input_features: Annotated[
         list[torch.Tensor] | None,
-        TensorShape("b", "nmb", "t"),
+        TensorShape("b", "t", "nmb", dynamic_dims={"t"}),
     ]
     speech_lengths: Annotated[
         list[torch.Tensor] | None,
@@ -439,7 +439,13 @@ class FireRedASR2ForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
 
         speech = audio_input["input_features"]
-        speech_lengths = audio_input["speech_lengths"].to(torch.int32)
+        if isinstance(speech, list):
+            # Audios of different lengths are not stacked by the batched field.
+            speech = nn.utils.rnn.pad_sequence(speech, batch_first=True)
+        speech_lengths = audio_input["speech_lengths"]
+        if isinstance(speech_lengths, list):
+            speech_lengths = torch.stack(speech_lengths)
+        speech_lengths = speech_lengths.to(torch.int32)
         enc_output = self.model.get_encoder_outputs(
             speech=speech, speech_lengths=speech_lengths
         )

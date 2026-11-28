@@ -151,7 +151,9 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         pad_to_multiple_of: int | None = None,
         return_tensors: str | TensorType | None = None,
         return_attention_mask: bool | None = None,
-        padding: str | None = "max_length",
+        # The encoder masks padded frames, so padding to a fixed 30 s window
+        # only wastes compute. `max_length` still truncates.
+        padding: str | None = "longest",
         max_length: int | None = None,
         sampling_rate: int | None = None,
         do_normalize: bool | None = None,
@@ -212,7 +214,6 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
             fake_token_len = torch.clamp(input_lengths, min=1)
             fake_token_lengths.append(fake_token_len)
 
-        feats = torch.stack(feats, dim=0)
         batched_speech = self.pad(
             BatchFeature({"input_features": feats}),
             padding=padding,
