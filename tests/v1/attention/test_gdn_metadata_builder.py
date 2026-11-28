@@ -576,13 +576,20 @@ def _build_replayssm(
     seq_lens: list[int],
     query_lens: list[int],
     is_prefilling: list[bool],
+    prefill_runs_as_decode: list[bool] | None = None,
 ) -> GDNAttentionMetadata:
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     block_size = builder.kv_cache_spec.block_size
     common = create_common_attn_metadata(batch, block_size, DEVICE).replace(
         is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool),
     )
-    return builder.build(common_prefix_len=0, common_attn_metadata=common)
+    return builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        prefill_runs_as_decode=None
+        if prefill_runs_as_decode is None
+        else torch.tensor(prefill_runs_as_decode),
+    )
 
 
 def _assert_plans_into_persistent_buffers(
@@ -605,6 +612,24 @@ def test_replayssm_single_token_prefill_runs_as_decode():
     assert meta.num_decodes == 2
     assert meta.num_prefills == 0
     _assert_plans_into_persistent_buffers(builder, meta, 2)
+
+
+def test_replayssm_prompt_token_run_as_decode_flushes():
+    # The prompt's next prefill chunk starts from the state and resets the
+    # ring, so a prompt token run as a decode must flush.
+    builder = _create_replayssm_gdn_builder(full_cuda_graph=True)
+    meta = _build_replayssm(
+        builder,
+        [106, 100],
+        [1, 1],
+        [False, False],
+        prefill_runs_as_decode=[False, True],
+    )
+
+    assert meta.num_decodes == 2
+    assert meta.force_flush_d is not None
+    assert meta.force_flush_d.tolist() == [0, 1]
+    assert meta.force_flush_d.data_ptr() == builder.decode_force_flush_d.data_ptr()
 
 
 def test_replayssm_first_token_prefill_stays_prefill():

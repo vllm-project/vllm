@@ -45,6 +45,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    prefill_runs_as_decode: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
@@ -64,7 +65,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             ),
         ):
             return {}
-        return {
+        kwargs = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -72,6 +73,11 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        if self.prefill_runs_as_decode is not None and isinstance(
+            attn_metadata_builder, GDNAttentionMetadataBuilder
+        ):
+            kwargs["prefill_runs_as_decode"] = self.prefill_runs_as_decode[:num_reqs]
+        return kwargs
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -266,6 +272,12 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
+        prefill_runs_as_decode = None
+        if input_batch.prefill_runs_as_decode_np is not None:
+            prefill_runs_as_decode = torch.zeros(num_reqs, dtype=torch.bool)
+            prefill_runs_as_decode[: input_batch.num_reqs] = torch.from_numpy(
+                input_batch.prefill_runs_as_decode_np
+            )
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -320,6 +332,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            prefill_runs_as_decode=prefill_runs_as_decode,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
