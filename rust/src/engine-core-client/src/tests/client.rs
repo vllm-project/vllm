@@ -3966,6 +3966,10 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let simple_cpu_offload_stats_hex =
         lines.next().expect("missing SimpleCPUOffload stats fixture line");
     let kv_offload_stats_hex = lines.next().expect("missing kv offload stats fixture line");
+    let inline_packed_logprobs_frames =
+        lines.next().expect("missing inline packed logprobs fixture line");
+    let multipart_packed_logprobs_frames =
+        lines.next().expect("missing multipart packed logprobs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -4181,6 +4185,28 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
     );
+
+    // Sample logprobs batched for transport: each output gets its rows back.
+    for frames in [
+        inline_packed_logprobs_frames,
+        multipart_packed_logprobs_frames,
+    ] {
+        let packed = EngineCoreOutputs::from_frames(&decode_frames(frames)).unwrap();
+        let outputs = &packed.as_request_batch().unwrap().outputs;
+        assert_eq!(outputs.len(), 3);
+        expect_sample_logprobs(outputs[0].new_logprobs.as_ref().expect("packed logprobs unpacked"));
+        assert!(outputs[1].new_logprobs.is_none());
+        let last = &outputs[2].new_logprobs.as_ref().unwrap().positions;
+        assert_eq!(last.len(), 1);
+        assert_eq!(
+            last[0]
+                .entries
+                .iter()
+                .map(|entry| (entry.token_id, entry.logprob, entry.rank))
+                .collect::<Vec<_>>(),
+            vec![(7, 7.0, 3), (8, 8.0, 1), (9, 9.0, 2)]
+        );
+    }
 
     let nixl_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(nixl_stats_hex).unwrap()).unwrap();

@@ -163,6 +163,8 @@ class EngineCoreOutputs(
     wave_complete: int | None = None
     start_wave: int | None = None
     weight_version: str | None = None
+    packed_logprobs: object | None = None
+    packed_logprobs_rows: list[int] | None = None
 
 
 def token_ids(ids: list[int]) -> list:
@@ -450,6 +452,30 @@ multipart_logprobs = engine_outputs_wire(
         ),
     )
 )
+
+
+def packed_logprobs_outputs_wire():
+    # EngineCoreOutputs.pack_for_transport: the outputs' sample logprobs rows
+    # concatenated, and the row count per output (-1 for none).
+    return [
+        0,
+        [engine_output_wire(f"req-{i}") for i in range(1, 4)],
+        None,
+        0.0,
+        None,
+        ["req-1"],
+        None,
+        None,
+        None,
+        (
+            np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.int32),
+            np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.float32),
+            np.array([1, 2, 3], dtype=np.int32),
+            None,
+        ),
+        [2, -1, 1],
+    ]
+
 
 inline_prompt_logprobs = engine_outputs_wire(
     engine_output_wire(
@@ -744,3 +770,10 @@ print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
 print(msgspec.msgpack.encode(simple_cpu_offload_stats).hex())
 print(msgspec.msgpack.encode(kv_offload_stats).hex())
+print(" ".join(frame.hex() for frame in encode_output_frames(packed_logprobs_outputs_wire())))
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(packed_logprobs_outputs_wire(), size_threshold=1)
+    )
+)

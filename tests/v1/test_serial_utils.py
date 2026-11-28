@@ -583,3 +583,52 @@ def test_zero_copy_frames_survive_without_caller_side_references():
         assert torch.equal(decoded.prompt_embeds, expected)
         push.close(linger=0)
         pull.close(linger=0)
+
+
+@pytest.mark.parametrize(
+    ("rows_per_output", "widths", "packed"),
+    [
+        # Mixed: outputs without logprobs, and multi-token (spec decode) outputs.
+        ([1, None, 3, 1, None, 2], [1] * 6, True),
+        ([1, 1, 1], [6, 6, 6], True),
+        # Nothing to batch.
+        ([1], [1], False),
+        ([None, None], [1, 1], False),
+        # Trailing shapes differ within the message: sent per output.
+        ([1, 1], [1, 4], False),
+    ],
+)
+def test_packed_logprobs_roundtrip(rows_per_output, widths, packed):
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+    from vllm.v1.outputs import LogprobsLists
+
+    rng = np.random.default_rng(0)
+    expected = []
+    outputs = []
+    for i, (rows, width) in enumerate(zip(rows_per_output, widths)):
+        lp = None
+        if rows is not None:
+            lp = LogprobsLists(
+                rng.integers(0, 1000, (rows, width), dtype=np.int32),
+                rng.standard_normal((rows, width)).astype(np.float32),
+                rng.integers(0, 10, rows, dtype=np.int32),
+            )
+        expected.append(lp)
+        outputs.append(
+            EngineCoreOutput(request_id=f"r{i}", new_token_ids=[i], new_logprobs=lp)
+        )
+    sent = EngineCoreOutputs(outputs=outputs)
+    sent.pack_for_transport()
+    assert (sent.packed_logprobs is not None) == packed
+
+    received = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(sent))
+    received.unpack_after_transport()
+
+    assert received.packed_logprobs is None
+    for want_lp, output in zip(expected, received.outputs):
+        if want_lp is None:
+            assert output.new_logprobs is None
+            continue
+        for want_arr, got_arr in zip(want_lp[:3], output.new_logprobs[:3]):
+            assert got_arr.dtype == want_arr.dtype
+            np.testing.assert_array_equal(got_arr, want_arr)
