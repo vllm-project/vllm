@@ -27,6 +27,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    convert_to_wna16_moe_kernel_format,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
@@ -40,6 +45,9 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     is_layer_gptq_quantized,
     is_moe_layer_gptq_quantized,
     override_config,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_moe_padded_intermediate,
 )
 from vllm.platforms import current_platform
 
@@ -205,17 +213,19 @@ def _gptq_moe_layer() -> RoutedExperts:
     return layer
 
 
-def _gptq_config(dynamic=None, modules_in_block_to_quantize=None):
+def _gptq_config(
+    dynamic=None, modules_in_block_to_quantize=None, bits=4, group_size=128
+):
     full_config = {
         "quant_method": "gptq",
-        "bits": 4,
-        "group_size": 128,
+        "bits": bits,
+        "group_size": group_size,
         "desc_act": False,
         "sym": True,
     }
     return AutoGPTQConfig(
-        4,
-        128,
+        bits,
+        group_size,
         False,
         True,
         False,
@@ -396,3 +406,175 @@ def test_routed_experts_loads_per_expert_biases():
     assert torch.equal(w13_bias, torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
     assert torch.equal(w2_bias, torch.arange(9, 13, dtype=torch.float32).reshape(1, 4))
     assert loader._loaded_expert_biases == {"w13_bias", "w2_bias"}
+
+
+def _gptq_marlin_moe_layer(
+    bits: int, group_size: int, intermediate_size: int
+) -> RoutedExperts:
+    num_experts, hidden_size = 64, 2048
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=2,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        intermediate_size_per_partition_unpadded=intermediate_size,
+    )
+    moe_config.moe_backend = "marlin"
+    layer = RoutedExperts(
+        "model.layers.0.mlp.experts",
+        torch.bfloat16,
+        moe_config,
+        _gptq_config(bits=bits, group_size=group_size),
+        expert_map_manager=ExpertMapManager(
+            max_num_batched_tokens=256,
+            top_k=2,
+            global_num_experts=num_experts,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=moe_config.moe_parallel_config,
+            placement_strategy="linear",
+            enable_eplb=False,
+        ),
+    ).cuda()
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    for parameter in layer.parameters():
+        if parameter.dtype == torch.int32:
+            parameter.data.copy_(
+                torch.randint(
+                    0,
+                    2**31 - 1,
+                    parameter.shape,
+                    dtype=torch.int32,
+                    device="cuda",
+                    generator=generator,
+                )
+            )
+        else:
+            parameter.data.copy_(
+                torch.rand(
+                    parameter.shape,
+                    dtype=parameter.dtype,
+                    device="cuda",
+                    generator=generator,
+                )
+            )
+    return layer
+
+
+def _extra_peak_bytes(fn):
+    torch.accelerator.synchronize()
+    allocated_before = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
+    result = fn()
+    torch.accelerator.synchronize()
+    return result, torch.accelerator.max_memory_allocated() - allocated_before
+
+
+def _convert_for_marlin(layer, backend, n_first):
+    names = ("w13_qweight", "w2_qweight", "w13_scales", "w2_scales")
+    names += ("w13_qzeros", "w2_qzeros")
+    w13, w2, w13_scale, w2_scale, w13_qzeros, w2_qzeros = (
+        n_first(getattr(layer, name).data) for name in names
+    )
+    return convert_to_wna16_moe_kernel_format(
+        backend=backend,
+        layer=layer,
+        quant_config=layer.quant_method.quant_config,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+        w13_qzeros=w13_qzeros,
+        w2_qzeros=w2_qzeros,
+    )
+
+
+def _old_n_first(t: torch.Tensor) -> torch.Tensor:
+    return t.transpose(1, 2).contiguous()
+
+
+def _view_n_first(t: torch.Tensor) -> torch.Tensor:
+    return t.transpose(1, 2)
+
+
+def _assert_two_layout_copies_saved(layer, old_extra: int, new_extra: int):
+    # The old path held N-first copies and K-first copies of the packed weights.
+    # One extra layout copy of w2 alone, the smallest regression, exceeds the bound.
+    w2_bytes = layer.w2_qweight.untyped_storage().nbytes()
+    packed_weight_bytes = layer.w13_qweight.untyped_storage().nbytes() + w2_bytes
+    assert new_extra < old_extra - 2 * packed_weight_bytes + w2_bytes * 3 // 4
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MoE repack needs CUDA"
+)
+@pytest.mark.parametrize(
+    "bits, group_size, intermediate_size",
+    [(4, 128, 1024), (8, 128, 1024), (4, -1, 1056)],
+    ids=["int4", "int8", "int4-padded"],
+)
+def test_auto_gptq_moe_marlin_prep_skips_layout_copies(
+    bits, group_size, intermediate_size, default_vllm_config
+):
+    """Marlin prep converts GPTQ MoE weights without full-layer layout copies.
+
+    The old path copied the K-first checkpoint weights to N-first and Marlin
+    copied them straight back, so the layer briefly held two extra copies.
+    The result must match that path exactly, with and without tile padding.
+    """
+    layer = _gptq_marlin_moe_layer(bits, group_size, intermediate_size)
+    method = layer.quant_method
+    assert isinstance(method, AutoGPTQMoEMethod)
+    assert method.wna16_moe_backend == WNA16MoEBackend.MARLIN
+    padded = marlin_moe_padded_intermediate(intermediate_size, group_size)
+    assert (padded != intermediate_size) == (group_size == -1)
+
+    expected, old_extra = _extra_peak_bytes(
+        lambda: _convert_for_marlin(layer, WNA16MoEBackend.MARLIN, _old_n_first)
+    )
+    assert expected is not None
+    _, new_extra = _extra_peak_bytes(
+        lambda: method.process_weights_after_loading(layer)
+    )
+
+    _assert_two_layout_copies_saved(layer, old_extra, new_extra)
+    names = ("w13_qweight", "w2_qweight", "w13_scales", "w2_scales")
+    names += ("w13_qzeros", "w2_qzeros")
+    for name, value in zip(names, expected):
+        assert torch.equal(getattr(layer, name).data, value), name
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MoE repack needs CUDA"
+)
+def test_batched_marlin_converts_gptq_views_without_layout_copies(
+    default_vllm_config,
+):
+    """Batched Marlin shares the Marlin conversion, so views must work there too.
+
+    Batched Marlin is chosen only for batched all-to-all activations, which a
+    single-GPU test cannot build, so the conversion is called directly.
+    """
+    layer = _gptq_marlin_moe_layer(bits=4, group_size=128, intermediate_size=1024)
+    expected, old_extra = _extra_peak_bytes(
+        lambda: _convert_for_marlin(layer, WNA16MoEBackend.BATCHED_MARLIN, _old_n_first)
+    )
+    converted, new_extra = _extra_peak_bytes(
+        lambda: _convert_for_marlin(
+            layer, WNA16MoEBackend.BATCHED_MARLIN, _view_n_first
+        )
+    )
+
+    _assert_two_layout_copies_saved(layer, old_extra, new_extra)
+    for value, reference in zip(converted, expected):
+        if reference is None:
+            assert value is None
+        else:
+            assert torch.equal(value, reference)

@@ -674,16 +674,26 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_bias = None
 
         # Normalize GPTQ K-first layout to canonical N-first format.
-        w13 = layer.w13_qweight.data.transpose(1, 2).contiguous()
-        w2 = layer.w2_qweight.data.transpose(1, 2).contiguous()
-        w13_scale = layer.w13_scales.data.transpose(1, 2).contiguous()
-        w2_scale = layer.w2_scales.data.transpose(1, 2).contiguous()
+        # Marlin transposes back to K-first, so it gets views instead of copies.
+        keep_views = self.wna16_moe_backend in (
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+        )
+
+        def to_n_first(t: torch.Tensor) -> torch.Tensor:
+            t = t.data.transpose(1, 2)
+            return t if keep_views else t.contiguous()
+
+        w13 = to_n_first(layer.w13_qweight)
+        w2 = to_n_first(layer.w2_qweight)
+        w13_scale = to_n_first(layer.w13_scales)
+        w2_scale = to_n_first(layer.w2_scales)
         w13_qzeros = getattr(layer, "w13_qzeros", None)
         w2_qzeros = getattr(layer, "w2_qzeros", None)
         if w13_qzeros is not None:
-            w13_qzeros = w13_qzeros.data.transpose(1, 2).contiguous()
+            w13_qzeros = to_n_first(w13_qzeros)
         if w2_qzeros is not None:
-            w2_qzeros = w2_qzeros.data.transpose(1, 2).contiguous()
+            w2_qzeros = to_n_first(w2_qzeros)
 
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
