@@ -1037,7 +1037,8 @@ class RoutedExperts(PluggableLayer):
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
         mapping_by_expert = _index_expert_mapping(expert_mapping)
-        source_method = getattr(self.quant_method, "requantization_source", None)
+        quant_method = getattr(self, "quant_method", None)
+        source_method = getattr(quant_method, "requantization_source", None)
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
