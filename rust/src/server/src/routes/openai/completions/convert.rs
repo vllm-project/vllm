@@ -82,8 +82,9 @@ pub(super) fn prepare_completion_request(
 ) -> Result<PreparedRequest, ApiError> {
     lora_resolution.model_names.check(request.model.as_deref())?;
     validate::validate_request(&request)?;
-    // Python's message; `prompt_embeds` itself is rejected above. An empty text
-    // prompt is left to tokenization, which may still yield a BOS token.
+    // Python's message; `prompt_embeds` itself is rejected above. A bare empty
+    // text prompt is rejected by `validate_request`; empty strings inside
+    // a prompt list are left to tokenization, which may still yield a BOS token.
     let Some(prompt) = request.prompt else {
         bail_invalid_request!(
             param = "prompt",

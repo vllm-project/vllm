@@ -2823,11 +2823,8 @@ async fn requests_over_a_queue_limit_return_503() {
     engine_task.abort_and_join().await;
 }
 
-/// The render route lowers the same request, so it rejects a missing prompt
-/// too and shows the tokens of the accepted ones. Unlike Python, which rejects
-/// `prompt: ""` before tokenizing, an empty text prompt is left to
-/// tokenization: it is accepted when the tokenizer adds a BOS token, and
-/// otherwise fails as an empty token prompt.
+/// The render route rejects missing and bare empty prompts before tokenization,
+/// as Python does, regardless of whether the tokenizer adds a BOS token.
 #[tokio::test]
 async fn completions_render_checks_prompt_presence() {
     let mut app = test_render_app();
@@ -2849,8 +2846,8 @@ async fn completions_render_checks_prompt_presence() {
     }
     expect_test::expect![[r#"
         {"model":"render-model"} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
-        {"model":"render-model","prompt":""} -> 200 OK [256]
-        {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"token_ids must contain at least one token ID.","type":"BadRequestError","param":"token_ids","code":400}}
+        {"model":"render-model","prompt":""} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
+        {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
         {"model":"render-model","prompt":"hello","prompt_embeds":[]} -> 200 OK [256,104,101,108,108,111]"#]].assert_eq(&results.join("\n"));
 }
 
@@ -8457,6 +8454,29 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
             .as_str()
             .expect("message string")
             .contains("allowed_token_ids should not be empty")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_empty_text_prompt_returns_openai_error() {
+    let (mut app, _engine_task) = test_app().await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(json["error"]["param"], "prompt");
+    assert_eq!(
+        json["error"]["message"],
+        "Either prompt or prompt_embeds must be provided and non-empty."
     );
 }
 

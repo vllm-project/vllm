@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde_json::Value;
+use vllm_text::Prompt;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Validate OpenAI completions protocol invariants and reject unimplemented
@@ -53,6 +54,17 @@ pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiErr
 
     reject_unsupported_fields(request)?;
 
+    // Python rejects a bare empty string, but allows empty strings in a prompt list.
+    if matches!(
+        &request.prompt,
+        Some(CompletionPrompt::Single(Prompt::Text(text))) if text.is_empty()
+    ) {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
+    }
+
     Ok(())
 }
 
@@ -96,6 +108,18 @@ mod tests {
             "stream": true,
         }))
         .expect("parse request")
+    }
+
+    #[test]
+    fn validate_request_rejects_empty_text_prompt() {
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": ""})).expect("parse request");
+        assert!(validate_request(&request).is_err());
+
+        // Python rejects only the empty string, so whitespace is still a prompt.
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": " "})).expect("parse request");
+        assert!(validate_request(&request).is_ok());
     }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> CompletionRequest {
