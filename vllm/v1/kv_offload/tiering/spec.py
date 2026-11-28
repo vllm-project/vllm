@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+from collections.abc import Collection
 from typing import Any
 
 from typing_extensions import override
@@ -64,6 +65,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -331,6 +333,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         )
 
         return metrics
+
+    # The layout adds the handoff trigger when it needs one, so the config
+    # cannot name it. Only the eager trigger has multi-tier support.
+    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = (StoreTrigger.ON_COMPUTE,)
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)

@@ -149,6 +149,7 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
 | `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
+| `store_when` | no | `["on_compute"]` | single-tier | The triggers that offload a chunk, as a non-empty list of `on_compute` or `on_overwrite`. `on_compute` offloads each chunk when it is computed. `on_overwrite` offloads a chunk only when the GPU gives one of its blocks to a new request, which is the lazy store. The connector adds `on_handoff` itself when the KV cache layout hands off state blocks, so the list cannot name it. `on_overwrite` is rejected with `store_threshold` ≥ 2, with `self_describing_kv_events: true`, and for multi-tier. It is rejected for a KV cache that needs zeroing (more than one dtype, or a Mamba hybrid layout), and for a Mamba `align` group whose prefix-cache hits end inside a block. The runner zeroes new blocks, and applies the copy-on-write copies, before it flushes a store, so the store would save the wrong data. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
@@ -235,6 +236,10 @@ Custom policies must implement `insert(self, key, chunk, req_context)`. The requ
 context provides each key's token position through `get_offload_key_position(key)`
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
+
+With `store_when: ["on_overwrite"]`, `req_context` is `None` in `insert` and `on_store_miss`. A lazy
+store happens when the GPU gives a block away, often after its request finished, so no
+request owns it. A policy that reads `req_context` must check for `None` first.
 
 Custom policies must also implement `on_request_finished`, which receives the
 request's keys per KV cache group in head-to-tail order and applies the request's

@@ -100,14 +100,19 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         self.t1[key] = chunk
         self.b1.pop(key, None)
         self.b2.pop(key, None)
-        position = req_context.get_offload_key_position(key)
+        # A request-free store has no running position.
+        position = (
+            None if req_context is None else req_context.get_offload_key_position(key)
+        )
         if position is None:
             return
+        # Only a request gives a position.
+        assert req_context is not None
         state = self._get_running_keys(req_context)
         entry = (position, key)
         if state.entries and entry < state.entries[-1]:
@@ -118,8 +123,20 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def on_request_access(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
+        if req_context is None:
+            # The store runs after the request finished, so no position is
+            # available. A chunk that this tier already holds was in HBM again,
+            # so it was used again: promote it, as a request reuse does. The
+            # keys come deepest first, so the prefix keeps the newest rank.
+            for key in keys:
+                if key in self.t1:
+                    self._release_running(key)
+                    self.t2[key] = self.t1.pop(key)
+                elif key in self.t2:
+                    self.t2.move_to_end(key)
+            return
         for key in keys:
             if key not in self.t1 or key in self._running:
                 continue
@@ -157,7 +174,7 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def on_store_miss(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         for key in reversed(list(keys)):
             self._adapt_to_ghost_hit(key)

@@ -111,14 +111,18 @@ class LRUCachePolicy(CachePolicy):
 
     @override
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         self.chunks[key] = chunk
-        position = req_context.get_offload_key_position(key)
+        position: int | None = None
+        if req_context is not None:
+            position = req_context.get_offload_key_position(key)
         if position is None:
             self._next_rank += 1
             self._ranks[key] = (self._next_rank, 0)
         else:
+            # Only a request gives a position.
+            assert req_context is not None
             self._ranks[key] = (self._get_request_rank(req_context), -position)
         if chunk.ref_cnt == 0:
             self._evictable.add(key)
@@ -134,8 +138,13 @@ class LRUCachePolicy(CachePolicy):
     def on_request_access(
         self,
         keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
     ) -> None:
+        if req_context is None:
+            # The store runs after the request finished, so no position is
+            # available and the chunk becomes the newest.
+            self._update_recency(keys)
+            return
         request_rank = self._get_request_rank(req_context)
         updated_evictable = []
         for key in keys:

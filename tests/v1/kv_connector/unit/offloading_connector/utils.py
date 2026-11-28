@@ -70,6 +70,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.cpu.spec import (
+    CPUOffloadingSpec,
+    parse_store_triggers,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -241,6 +245,11 @@ class MockOffloadingSpec(OffloadingSpec):
             return result
 
         _cm.resolve_device_pointers = _tracking_resolve
+        # The manager is a mock, so give it the triggers of the CPU spec.
+        self.store_triggers = parse_store_triggers(
+            self.extra_config, CPUOffloadingSpec.STORE_TRIGGERS_ALLOWED
+        )
+        self.manager.store_triggers = self.store_triggers
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
@@ -399,18 +408,24 @@ class RequestRunner:
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = uniform_spec(group)
-            assert isinstance(spec, AttentionSpec)
             for layer_name in group.layer_names:
-                # Shape follows FlashAttention layout:
-                # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
-                kv_caches[layer_name] = torch.empty(
-                    num_gpu_blocks,
-                    2,
-                    spec.block_size,
-                    spec.num_kv_heads,
-                    spec.head_size,
-                    dtype=spec.dtype,
-                )
+                if isinstance(spec, AttentionSpec):
+                    # Shape follows FlashAttention layout:
+                    # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
+                    kv_caches[layer_name] = torch.empty(
+                        num_gpu_blocks,
+                        2,
+                        spec.block_size,
+                        spec.num_kv_heads,
+                        spec.head_size,
+                        dtype=spec.dtype,
+                    )
+                elif isinstance(spec, MambaSpec):
+                    kv_caches[layer_name] = torch.empty(
+                        num_gpu_blocks, spec.page_size_bytes, dtype=torch.int8
+                    )
+                else:
+                    raise NotImplementedError(type(spec).__name__)
 
         with set_current_vllm_config(vllm_config):
             self.worker_connector.register_kv_caches(kv_caches)

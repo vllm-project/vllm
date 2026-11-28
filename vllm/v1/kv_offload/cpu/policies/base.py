@@ -71,7 +71,7 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         """Add a newly allocated chunk with the storing request's context.
 
@@ -83,10 +83,12 @@ class CachePolicy(ABC):
         """Remove a chunk (used to clean up after a failed store)."""
 
     def on_store_miss(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         """Observe store misses before their cache entries are inserted.
 
+        req_context is None for a store after the request finishes
+        (StoreTrigger.ON_OVERWRITE).
         Policies may override this hook when a miss has distinct semantics,
         such as ARC adapting to a ghost-list hit.
         """
@@ -95,13 +97,18 @@ class CachePolicy(ABC):
     def on_request_access(
         self,
         keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
     ) -> None:
         """Observe first accesses without allocating new chunks.
 
         Keys first observed here may not yet be resident. This hook can
         maintain prefix order during a request without committing the
         frequency access handled by `on_request_finished`.
+
+        req_context is None for a store that belongs to no request, such as
+        `StoreTrigger.ON_OVERWRITE`, which runs when the KV cache hands a
+        block to a new owner, often after the storing request finished. The
+        policy then gets no position.
         """
         return
 
