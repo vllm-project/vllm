@@ -221,7 +221,7 @@ class TestToolChoice_Plus_ResponseFormat:
                 "type": "json_schema",
                 "json_schema": {
                     "name": "answer",
-                    "schema": {"type": "integer", "multipleOf": 2},
+                    "schema": {"type": "number", "multipleOf": 0.5},
                 },
             },
         )
