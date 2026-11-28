@@ -994,3 +994,56 @@ def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
     for listener in (input_listener, output_listener):
         assert listener.socket.fileno() == -1
         assert not os.path.exists(listener.address.removeprefix("ipc://"))
+
+
+@pytest.mark.skip_global_cleanup
+def test_rust_frontend_raises_fd_limit_before_spawn(monkeypatch):
+    """The Rust child must not inherit the default 1024 soft descriptor limit."""
+    import subprocess as subprocess_mod
+
+    import vllm.v1.utils as v1_utils
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model"]
+    )
+    events = []
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        events.append("popen")
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        v1_utils, "set_ulimit", lambda: events.append("ulimit"), raising=False
+    )
+    monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        v1_utils.RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+        )
+    finally:
+        sock.close()
+
+    assert events == ["ulimit", "popen"]

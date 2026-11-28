@@ -31,7 +31,12 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
-from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.system_utils import (
+    decorate_logs,
+    kill_process_tree,
+    set_process_title,
+    set_ulimit,
+)
 from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
 
 if TYPE_CHECKING:
@@ -464,6 +469,7 @@ class RustFrontendProcessManager:
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._listeners = [input_listener, output_listener]
         try:
+            set_ulimit()
             self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
         except BaseException:
             for listener in self._listeners:
