@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedConfig
 
 from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
@@ -598,3 +599,174 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
+
+
+_MAX_POS_EMBED_CACHE_BYTES = 16 * 1024 * 1024  # 16 MiB per module instance
+_POS_EMBED_CACHE_ALIGN_BYTES = 256
+
+
+def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tensor:
+    """Bicubic-interpolate 2-D patch embeddings while keeping a leading CLS token."""
+    dim = abs_pos.size(-1)
+    abs_pos_new = abs_pos.squeeze(0)
+    cls_token, old_pos_embed = abs_pos_new[:1], abs_pos_new[1:]
+    src_size = int(math.sqrt(abs_pos_new.shape[0] - 1))
+    old_pos_embed = (
+        old_pos_embed.view(1, src_size, src_size, dim)
+        .permute(0, 3, 1, 2)
+        .contiguous()
+        .to(torch.float32)
+    )
+    new_pos_embed = (
+        F.interpolate(
+            old_pos_embed,
+            size=(tgt_grid, tgt_grid),
+            mode="bicubic",
+            antialias=True,
+            align_corners=False,
+        )
+        .to(abs_pos.dtype)
+        .permute(0, 2, 3, 1)
+        .reshape(tgt_grid * tgt_grid, dim)
+    )
+    vision_pos_embed = torch.cat([cls_token, new_pos_embed], dim=0)
+    return vision_pos_embed.view(1, tgt_grid * tgt_grid + 1, dim)
+
+
+class InterpolatedPosEmbedCache(torch.nn.Module):
+    """Pre-allocated per-module cache for interpolated positional embeddings.
+
+    Allocates a fixed non-persistent byte buffer at module initialization so
+    its memory footprint is accounted for during model loading and profiling
+    with zero growth during inference. Safe across weight loading/reloads
+    (`process_weights_after_loading`), encoder graph capture (refreshes slots
+    in place and never evicts live slots), and `torch.compile` (bypasses cache).
+    """
+
+    _buffer: torch.Tensor
+
+    def __init__(self, max_bytes: int = _MAX_POS_EMBED_CACHE_BYTES) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+        self._offset = 0
+        self._buffer_ptr = 0
+        self.register_buffer(
+            "_buffer",
+            torch.empty(max_bytes, dtype=torch.uint8),
+            persistent=False,
+        )
+        # (tgt_size, dtype, device) -> (cached_tensor, weight_data_ptr, weight_version)
+        self._entries: dict[
+            tuple[int, torch.dtype, torch.device],
+            tuple[torch.Tensor, int, int],
+        ] = {}
+
+    def _sync_buffer(self) -> torch.Tensor:
+        buf = self._buffer
+        buf_ptr = buf.data_ptr()
+        if buf_ptr != self._buffer_ptr:
+            self._entries.clear()
+            self._offset = 0
+            self._buffer_ptr = buf_ptr
+        return buf
+
+    def _alloc_slot(
+        self, buf: torch.Tensor, tensor: torch.Tensor
+    ) -> torch.Tensor | None:
+        aligned_offset = (
+            (self._offset + _POS_EMBED_CACHE_ALIGN_BYTES - 1)
+            // _POS_EMBED_CACHE_ALIGN_BYTES
+        ) * _POS_EMBED_CACHE_ALIGN_BYTES
+        nbytes = tensor.nbytes
+        if aligned_offset + nbytes > buf.numel():
+            return None
+        slot = (
+            buf[aligned_offset : aligned_offset + nbytes]
+            .view(tensor.dtype)
+            .view(tensor.shape)
+        )
+        slot.copy_(tensor)
+        self._offset = aligned_offset + nbytes
+        return slot
+
+    def get_or_compute(
+        self,
+        weight: torch.Tensor,
+        tgt_size: int,
+        compute_fn: Callable[[torch.Tensor, int], torch.Tensor],
+    ) -> torch.Tensor:
+        if torch.compiler.is_compiling() or (
+            torch.is_grad_enabled() and weight.requires_grad
+        ):
+            return compute_fn(weight, tgt_size)
+
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
+            return compute_fn(weight, tgt_size)
+
+        key = (tgt_size, weight.dtype, weight.device)
+        ptr = weight.data_ptr()
+        version = weight._version
+        entry = self._entries.get(key)
+        if entry is not None:
+            cached, cached_ptr, cached_version = entry
+            if cached_ptr == ptr and cached_version == version:
+                return cached
+
+        if current_platform.is_current_stream_capturing():
+            return compute_fn(weight, tgt_size)
+
+        # Materialize slot views outside `inference_mode` so `refresh` can
+        # update them in place after weight reloads, keeping graph addresses valid.
+        with torch.inference_mode(False), torch.no_grad():
+            new_pos_embed = compute_fn(weight, tgt_size).contiguous()
+            if entry is not None:
+                cached = entry[0]
+                if cached.shape == new_pos_embed.shape:
+                    cached.copy_(new_pos_embed)
+                    self._entries[key] = (cached, ptr, version)
+                    return cached
+                del self._entries[key]
+
+            slot = self._alloc_slot(buf, new_pos_embed)
+            if slot is not None:
+                self._entries[key] = (slot, ptr, version)
+                return slot
+
+        if new_pos_embed.nbytes > buf.numel():
+            logger.warning_once(
+                "Interpolated positional embedding for size %s (%d bytes) "
+                "exceeds cache buffer size (%d bytes); skipping cache.",
+                tgt_size,
+                new_pos_embed.nbytes,
+                buf.numel(),
+            )
+        return new_pos_embed
+
+    def refresh(
+        self,
+        weight: torch.Tensor,
+        compute_fn: Callable[[torch.Tensor, int], torch.Tensor],
+    ) -> None:
+        """Refresh cached entries in place after weights are loaded or updated."""
+        if not self._entries or weight.device.type == "meta":
+            return
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
+            self._entries.clear()
+            self._offset = 0
+            return
+        ptr = weight.data_ptr()
+        version = weight._version
+        with torch.no_grad():
+            for key, (cached, _, _) in list(self._entries.items()):
+                tgt_size, dtype, device = key
+                if dtype != weight.dtype or device != weight.device:
+                    del self._entries[key]
+                    continue
+                new_pos_embed = compute_fn(weight, tgt_size).contiguous()
+                if cached.shape == new_pos_embed.shape:
+                    cached.copy_(new_pos_embed)
+                    self._entries[key] = (cached, ptr, version)
+                else:
+                    del self._entries[key]

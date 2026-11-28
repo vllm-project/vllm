@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 import torch
@@ -235,6 +235,13 @@ def _small_hyv4_dfly_config(config):
     return config
 
 
+def _small_hyv4_long_config(config):
+    _small_hyv4_dfly_config(config)
+    # ShardQ needs fewer than 16 heads per rank; 16 heads give 8 at TP2.
+    config.update({"num_attention_heads": 16})
+    return config
+
+
 def _small_hyv4_flash_dfly_config(config):
     # Four layers keep a sparse DFly target layer, SWA layers and Engram layer 2.
     config = dummy_hf_overrides(
@@ -272,7 +279,7 @@ class _E2ECase:
     logprob_atol: float
     engine_kwargs: dict
 
-    def runner_kwargs(self, graphs: bool, dfly: bool) -> dict:
+    def runner_kwargs(self, graphs: bool, dfly: bool, tp: int = 1) -> dict:
         return dict(
             load_format="dummy",
             dtype="bfloat16",
@@ -281,6 +288,7 @@ class _E2ECase:
             enable_prefix_caching=False,
             enforce_eager=not graphs,
             disable_log_stats=not dfly,
+            tensor_parallel_size=tp,
             speculative_config={"method": "dfly"} if dfly else None,
             compilation_config=CompilationConfig(
                 mode=CompilationMode.NONE,
@@ -337,6 +345,36 @@ _E2E_CASES = {
             limit_mm_per_prompt={"image": 0, "video": 0},
             seed=0,
         ),
+    ),
+}
+_E2E_CASES["hy4-fp8-ds-mla"] = replace(
+    _E2E_CASES["hy4"],
+    engine_kwargs={**_E2E_CASES["hy4"].engine_kwargs, "kv_cache_dtype": "fp8_ds_mla"},
+)
+_E2E_CASES["hy4-flash-fp8-ds-mla"] = replace(
+    _E2E_CASES["hy4-flash-fp8"],
+    engine_kwargs={
+        **_E2E_CASES["hy4-flash-fp8"].engine_kwargs,
+        "kv_cache_dtype": "fp8_ds_mla",
+    },
+)
+# TP2 only: the long prompt's second chunk has at least IHC_SP_MIN_TOKENS and
+# sparse_mla_shard_q_min_tokens tokens and runs past index_topk, so it engages
+# iHC SP and ShardQ.
+_ALL_CASES = {
+    **_E2E_CASES,
+    "hy4-long": replace(
+        _E2E_CASES["hy4"],
+        hf_overrides=_small_hyv4_long_config,
+        prompts=(
+            *_E2E_CASES["hy4"].prompts,
+            tuple((i * 53) % 241 + 3 for i in range(3100)),
+        ),
+        engine_kwargs={
+            **_E2E_CASES["hy4"].engine_kwargs,
+            "max_model_len": 4096,
+            "max_num_batched_tokens": 2048,
+        },
     ),
 }
 
@@ -430,27 +468,48 @@ def hyv4_recipe_env(monkeypatch, enable_pickle):
 
 
 @pytest.fixture(scope="module")
-def eager_target_outputs() -> dict[str, list]:
-    """Per-module cache of eager target-only greedy outputs, keyed by case."""
+def eager_target_outputs() -> dict[tuple[str, int], list]:
+    """Per-module cache of eager target-only greedy outputs.
+
+    Keyed by `(case_id, tp)`: dummy weights are generated per rank, so each TP
+    size is a different model.
+    """
     return {}
 
 
-def _eager_target(vllm_runner, cache: dict[str, list], case_id: str) -> list:
-    if case_id not in cache:
-        case = _E2E_CASES[case_id]
+def _eager_target(
+    vllm_runner, cache: dict[tuple[str, int], list], case_id: str, tp: int = 1
+) -> list:
+    if (case_id, tp) not in cache:
+        case = _ALL_CASES[case_id]
         with vllm_runner(
-            case.model, **case.runner_kwargs(graphs=False, dfly=False)
+            case.model, **case.runner_kwargs(graphs=False, dfly=False, tp=tp)
         ) as model:
             _reinit_head(model)
-            cache[case_id] = _greedy(model, case)
-    return cache[case_id]
+            cache[case_id, tp] = _greedy(model, case)
+    return cache[case_id, tp]
+
+
+# Flash-FP8 is TP1 only: at TP2 even two eager runs flip FP8 near-tie tokens.
+_TP2 = multi_gpu_marks(num_gpus=2)
+_DFLY_PARAMS = [
+    pytest.param(case_id, graphs, 1, id=f"{graphs_id}-{case_id}")
+    for case_id in _E2E_CASES
+    for graphs, graphs_id in ((False, "eager"), (True, "full-decode-graphs"))
+] + [
+    pytest.param("hy4-long", True, 2, id="tp2-full-decode-graphs-hy4-long", marks=_TP2)
+]
 
 
 @requires_gfx950
-@pytest.mark.parametrize("case_id", list(_E2E_CASES))
-@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full-decode-graphs"])
+@pytest.mark.parametrize("case_id,graphs,tp", _DFLY_PARAMS)
 def test_hyv4_dfly_greedy_matches_target(
-    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str, graphs: bool
+    vllm_runner,
+    hyv4_recipe_env,
+    eager_target_outputs,
+    case_id: str,
+    graphs: bool,
+    tp: int,
 ) -> None:
     """Greedy DFly must reproduce the eager target, run after run.
 
@@ -458,9 +517,9 @@ def test_hyv4_dfly_greedy_matches_target(
     a near tie points at the DFly draft/verify path, or with graphs at stale
     FULL_DECODE_ONLY replay metadata on padded decode batches.
     """
-    case = _E2E_CASES[case_id]
-    expected = _eager_target(vllm_runner, eager_target_outputs, case_id)
-    with vllm_runner(case.model, **case.runner_kwargs(graphs, dfly=True)) as model:
+    case = _ALL_CASES[case_id]
+    expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
+    with vllm_runner(case.model, **case.runner_kwargs(graphs, True, tp)) as model:
         if graphs:
             assert all(n > 0 for n in model.collective_rpc(_num_captured_graphs))
         _reinit_head(model)
@@ -474,17 +533,21 @@ def test_hyv4_dfly_greedy_matches_target(
 
 
 @requires_gfx950
-@pytest.mark.parametrize("case_id", list(_E2E_CASES))
+@pytest.mark.parametrize(
+    "case_id,tp",
+    [pytest.param(case_id, 1, id=case_id) for case_id in _E2E_CASES]
+    + [pytest.param("hy4-long", 2, id="tp2-hy4-long", marks=_TP2)],
+)
 def test_hyv4_full_decode_graphs_match_eager(
-    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str
+    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str, tp: int
 ) -> None:
     """FULL_DECODE_ONLY graph replay must decode like eager for the target."""
-    case = _E2E_CASES[case_id]
-    expected = _eager_target(vllm_runner, eager_target_outputs, case_id)
+    case = _ALL_CASES[case_id]
+    expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
     with vllm_runner(
-        case.model, **case.runner_kwargs(graphs=True, dfly=False)
+        case.model, **case.runner_kwargs(graphs=True, dfly=False, tp=tp)
     ) as model:
-        assert model.collective_rpc(_num_captured_graphs) == [4]
+        assert model.collective_rpc(_num_captured_graphs) == [4] * tp
         _reinit_head(model)
         actual = _greedy(model, case)
 
@@ -536,15 +599,8 @@ def _check_encoder_graph_replay(worker, batches):
     return hits
 
 
-@requires_gfx950
-def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) -> None:
-    """ROCm ViT encoder CUDA graphs (ROCM_AITER_FA varlen attention) replay
-    single and batched images like the eager tower; an image over the largest
-    budget falls back to eager."""
-    from functools import partial
-
-    with vllm_runner(
-        HY4_FLASH_FP8,
+def _encoder_graph_vl_kwargs(num_videos: int) -> dict:
+    return dict(
         load_format="dummy",
         dtype="bfloat16",
         hf_overrides=_small_hyv4_flash_vl_config,
@@ -553,7 +609,7 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
         max_num_batched_tokens=512,
         max_num_seqs=2,
         kv_cache_memory_bytes=512 * 1024 * 1024,
-        limit_mm_per_prompt={"image": 2, "video": 1},
+        limit_mm_per_prompt={"image": 2, "video": num_videos},
         mm_encoder_attn_backend="ROCM_AITER_FA",
         compilation_config=CompilationConfig(
             mode=CompilationMode.NONE,
@@ -562,7 +618,17 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
             encoder_cudagraph_token_budgets=[256, 1024],
             encoder_cudagraph_max_vision_items_per_batch=2,
         ),
-    ) as model:
+    )
+
+
+@requires_gfx950
+def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) -> None:
+    """ROCm ViT encoder CUDA graphs (ROCM_AITER_FA varlen attention) replay
+    single and batched images like the eager tower; an image over the largest
+    budget falls back to eager."""
+    from functools import partial
+
+    with vllm_runner(HY4_FLASH_FP8, **_encoder_graph_vl_kwargs(num_videos=1)) as model:
         results = model.llm.collective_rpc(
             partial(
                 _check_encoder_graph_replay,
@@ -574,3 +640,29 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
             )
         )
     assert results == [[1, 2, 0]]
+
+
+def _encoder_graph_hits(worker) -> int:
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    return manager.get_cumulative_stats()["graph_hits"]
+
+
+@requires_gfx950
+def test_hyv4_flash_vl_image_only_encoder_graphs(vllm_runner, hyv4_recipe_env) -> None:
+    """With videos disabled, as the recipe serves, an image chat request must
+    run through the image encoder CUDA graph."""
+    from PIL import Image
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_pil", "image_pil": Image.new("RGB", (64, 64))},
+                {"type": "text", "text": "Describe the image."},
+            ],
+        }
+    ]
+    with vllm_runner(HY4_FLASH_FP8, **_encoder_graph_vl_kwargs(num_videos=0)) as model:
+        outputs = model.llm.chat(messages, SamplingParams(max_tokens=2))
+        assert len(outputs[0].outputs[0].token_ids) == 2
+        assert model.llm.collective_rpc(_encoder_graph_hits) == [1]

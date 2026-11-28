@@ -5,7 +5,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 flagship multimodal MoE — 774B total / 49B active, 1M context, hy_v4 tool and reasoning parsers, DFly2 speculative decoding"
   date_added: 2026-11-20
-  date_updated: 2026-11-23
+  date_updated: 2026-11-25
   tasks:
     - text
     - multimodal
@@ -192,8 +192,7 @@ guide: |
   required for now: AITER's default sparse MLA decode kernel reads the wrong
   KV rows once a layer's KV cache passes 4 GiB. It can be dropped once vLLM's
   AITER includes [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277).
-  On ROCm the KV cache must stay BF16 (the default); `fp8_ds_mla` is not
-  supported.
+  On ROCm the KV cache may be BF16 (the default) or `fp8_ds_mla`.
 
   ## Context and capacity
 

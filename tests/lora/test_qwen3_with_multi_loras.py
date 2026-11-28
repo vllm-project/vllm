@@ -14,9 +14,9 @@ from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "vllm-project/self_cognition_Alice",
-    "Bob": "vllm-project/self_cognition_Bob",
-    "Cat": "vllm-project/self_cognition_Bob",  # same as Bob
+    "Alice": "vllm/self_cognition_Alice",
+    "Bob": "vllm/self_cognition_Bob",
+    "Cat": "vllm/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}
@@ -174,9 +174,15 @@ def test_multiple_lora_requests(vllm_runner):
             LoRARequest(LORA_NAME + str(idx), idx + 1, LORA_NAME_PATH_MAP[LORA_NAME])
             for idx in range(len(PROMPTS))
         ]
-        # Multiple SamplingParams should be matched with each prompt
-        outputs = runner.llm.generate(PROMPTS, lora_request=lora_request)
+        # Each prompt has its own LoRA request and should return prompt logprobs.
+        outputs = runner.llm.generate(
+            PROMPTS, SamplingParams(prompt_logprobs=0), lora_request=lora_request
+        )
         assert len(PROMPTS) == len(outputs)
+        for output, request in zip(outputs, lora_request):
+            assert output.lora_request == request
+            prompt_logprobs = output.prompt_logprobs
+            assert prompt_logprobs is not None and any(prompt_logprobs)
 
         # Exception raised, if the size of params does not match the size of prompts
         with pytest.raises(VLLMValidationError):

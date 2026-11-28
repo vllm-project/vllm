@@ -172,6 +172,30 @@ def test_image_cache_identity_without_cropping(kwargs_on_init: bool):
     assert results[0]["prompt_token_ids"] == results[2]["prompt_token_ids"]
 
 
+@pytest.mark.parametrize("model", ["baidu/Unlimited-OCR", "baidu/Unlimited-OCR-2"])
+@pytest.mark.parametrize("kwargs", [{"max_crops": 4}, {"crop_mode": False}])
+@pytest.mark.parametrize("num_images", [1, 2])
+def test_request_crop_kwargs_match_processed_image_tokens(model, kwargs, num_images):
+    config = ModelConfig(model=model, limit_mm_per_prompt={"image": 2})
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    images = [Image.new("RGB", (1000, 6000)), Image.new("RGB", (1600, 1200))]
+    images = images[:num_images]
+    prompt = "<image>\n" * num_images
+    hf_processor = processor.info.get_hf_processor(**kwargs)
+    expected = hf_processor(prompt=prompt, images=images, **kwargs)["num_image_tokens"]
+    cache = MultiModalProcessorOnlyCache(config)
+    for _ in range(2):
+        inputs = ProcessorInputs(
+            prompt=processor.info.get_tokenizer().encode(prompt),
+            mm_data_items=processor.info.parse_mm_data({"image": images}),
+            hf_processor_mm_kwargs=kwargs,
+            cache=cache,
+        )
+        result = processor.apply(inputs, TimingContext(enabled=False))
+        lengths = [p.length for p in result["mm_placeholders"]["image"]]
+        assert lengths == expected.tolist()
+
+
 def test_v2_multi_page_request_uses_processor_cache():
     config = ModelConfig(
         model="baidu/Unlimited-OCR-2",

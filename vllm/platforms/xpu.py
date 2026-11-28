@@ -383,6 +383,10 @@ class XPUPlatform(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
+    def is_current_stream_capturing(cls) -> bool:
+        return torch.xpu.is_current_stream_capturing()
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode

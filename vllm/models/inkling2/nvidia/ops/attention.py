@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from packaging import version
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -16,12 +17,15 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _num_warps_bucket,
     bucket_max_seqlen_q,
 )
-from vllm.triton_utils import gl, gluon, tl, tldevice, triton
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, gl, gluon, tl, tldevice, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from . import use_sm100_kernels
 from .attention_sm90 import MODE_GATED, MODE_PARTIAL, rel_attention
+
+TRITON_39 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.9.0"))
 
 # Full-layer FA4 split estimate, fitted on GB200 over uniform and mixed
 # prefill batches (re-fit for other devices): one CTA per 256-row query tile
@@ -284,8 +288,10 @@ def _gate_sink_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = col < H * D
@@ -333,7 +339,7 @@ def gate_sink(
         width // num_heads,
         512,
         enable_fp_fusion=False,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 
@@ -455,6 +461,7 @@ def _rel_decode_combine_kernel(
     BLOCK_S: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GATED: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """Merge the split partials, then apply the output gate and attention sink
     if `GATED`."""
@@ -466,7 +473,8 @@ def _rel_decode_combine_kernel(
         # gate and sink are ready.
         gate = tl.load(Gate + row * stride_gate + head * D + offs_d).to(tl.float32)
         sink = tl.load(Sink + row * stride_sink + head).to(tl.float32)
-    tl.extra.cuda.gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     y_ptrs = Y + row * H * D + head * D + offs_d
     if row >= num_actual_tokens:
         tl.store(y_ptrs, tl.zeros([BLOCK_D], tl.float32))
@@ -629,12 +637,27 @@ def _verify_load(
         )
 
 
-@gluon.jit
-def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
-    """Alias bf16 P over the first half of S buffer `b`."""
-    layout: gl.constexpr = _bw.TensorMemoryLayout((BLOCK_M, 2 * BLOCK_N), col_stride=1)
-    p = s_tmem._reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
-    return p.index(b).slice(0, BLOCK_N)
+if TRITON_39:
+
+    @gluon.jit
+    def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+        """Alias bf16 P over the first half of S buffer `b`."""
+        layout: gl.constexpr = _bw.TensorMemoryLayout(
+            (BLOCK_M, 2 * BLOCK_N), col_stride=1
+        )
+        p = s_tmem.reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
+        return p.index(b).slice(0, BLOCK_N)
+
+else:
+
+    @gluon.jit
+    def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+        """Alias bf16 P over the first half of S buffer `b`."""
+        layout: gl.constexpr = _bw.TensorMemoryLayout(
+            (BLOCK_M, 2 * BLOCK_N), col_stride=1
+        )
+        p = s_tmem._reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
+        return p.index(b).slice(0, BLOCK_N)
 
 
 @gluon.jit
@@ -1295,7 +1318,7 @@ def _decode_attention(
         BLOCK_D=block_d,
         GATED=not draft,
         num_warps=num_warps,
-        launch_pdl=True,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
 
 

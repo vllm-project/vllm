@@ -280,6 +280,12 @@ class _EplbTestModelConfig:
         return {"model": self.model}
 
 
+_EPLB_TEST_MODEL_CONFIGS = (
+    _EplbTestModelConfig("target"),
+    _EplbTestModelConfig("draft"),
+)
+
+
 class _TopologyEncodingPolicy(AbstractEplbPolicy):
     calls: list[tuple[int, int]] = []
 
@@ -345,10 +351,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
-    model_configs = (
-        _EplbTestModelConfig("target"),
-        _EplbTestModelConfig("draft"),
-    )
+    model_configs = _EPLB_TEST_MODEL_CONFIGS
     models = (
         _EplbTestModel(num_experts=4, num_redundant=2),
         _EplbTestModel(num_experts=6, num_redundant=2),

@@ -754,6 +754,7 @@ class RocmPlatform(Platform):
                 AttentionBackendEnum.ROCM_ATTN,
             )
         is_turboquant_run = _uses_turboquant(vllm_config)
+        is_ultraquant_run = _uses_ultraquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
                 invalid_reasons_i = _get_invalid_reasons(
@@ -761,6 +762,7 @@ class RocmPlatform(Platform):
                     device_capability,
                     attn_selector_config,
                     is_turboquant_run=is_turboquant_run,
+                    is_ultraquant_run=is_ultraquant_run,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -1328,6 +1330,10 @@ class RocmPlatform(Platform):
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
+
+    @classmethod
+    def is_current_stream_capturing(cls) -> bool:
+        return torch.cuda.is_current_stream_capturing()
 
     @classmethod
     def stateless_init_device_torch_dist_pg(

@@ -829,6 +829,19 @@ def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0x3080
 
 
+def _vllm_custom_allreduce(device: torch.device) -> car.CustomAllreduce:
+    """The TP group's vLLM CustomAllreduce. When AITER's all-reduce serves the
+    group on ROCm, the group has none, so build one on it directly."""
+    comm = get_tp_group().device_communicator
+    if comm.ca_comm is None and comm.aiter_ar_comm is not None:
+        fa = car.CustomAllreduce(get_tp_group().cpu_group, device)
+    else:
+        assert comm.ca_comm is not None
+        fa = comm.ca_comm
+    assert not fa.disabled, "custom all-reduce is disabled"
+    return fa
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(
     monkeypatch: pytest.MonkeyPatch,
@@ -909,7 +922,7 @@ def eager_allreduce(
         # communicate independently
         num_communication = rank // tp_size + 1
         sz = 1024
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = _vllm_custom_allreduce(device)
         inp = torch.ones(sz, dtype=torch.float32, device=device)
         out = inp
         for _ in range(num_communication):
@@ -942,7 +955,7 @@ def chunked_allreduce(
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = _vllm_custom_allreduce(device)
 
         # Two full chunks plus a partial one.
         dtype = torch.bfloat16
@@ -1033,8 +1046,7 @@ def one_and_two_stage_allreduce(
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-        fa = get_tp_group().device_communicator.ca_comm
-        assert fa is not None and not fa.disabled, "custom all-reduce is disabled"
+        fa = _vllm_custom_allreduce(device)
 
         # Sizes are counts of 16-byte packed elements. They straddle the
         # 512 KiB 1-stage/2-stage threshold, and all but one leave a remainder

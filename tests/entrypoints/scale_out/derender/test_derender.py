@@ -23,7 +23,7 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")

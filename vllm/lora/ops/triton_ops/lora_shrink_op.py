@@ -11,16 +11,14 @@ import torch
 from vllm import envs
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
+    FIXED_SHRINK_SPLIT_K,
     _get_lora_a_ptr,
     get_lora_op_configs,
-    is_batch_invariant,
     supports_pdl,
+    use_lora_kernel_reduction,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
-
-# Batch-invariant shrink splits K into this many fixed partials (no atomics).
-_BI_SPLIT_K = 8
 
 
 @triton.jit
@@ -229,6 +227,7 @@ def _lora_shrink(
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
+    split_k_reduction: str = "atomic",
 ) -> None:
     """Args:
     inputs (torch.Tensor): Input tensor
@@ -253,6 +252,7 @@ def _lora_shrink(
         number of active LoRAs. Stored as a tensor (not int) so
         torch.compile treats it as dynamic rather than a constant.
     scaling (float): Scaling factor.
+    split_k_reduction (str): `atomic` or a separate `kernel` reduction.
 
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -260,13 +260,13 @@ def _lora_shrink(
         # An empty first call has no work to do.
         return
     partials: torch.Tensor | None = None
-    if is_batch_invariant:
+    if use_lora_kernel_reduction(split_k_reduction):
         # Allocated before the no-LoRA return so profiling sees the scratch.
         # Per-call allocation keeps each CUDA graph's scratch in its own pool.
         partials = torch.empty(
             (
                 output_tensor.size(0),
-                _BI_SPLIT_K,
+                FIXED_SHRINK_SPLIT_K,
                 inputs.size(0),
                 output_tensor.size(-1),
             ),
@@ -323,7 +323,7 @@ def _lora_shrink(
     # Every M must keep the same K partition for batch invariance.
     if partials is not None:
         BLOCK_K = 256
-        SPLIT_K = _BI_SPLIT_K
+        SPLIT_K = FIXED_SHRINK_SPLIT_K
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
     # TODO (varun): This grid formulation maximizes parallelization at the

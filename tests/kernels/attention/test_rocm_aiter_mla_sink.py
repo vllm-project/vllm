@@ -489,6 +489,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         max_seq_len=kv.shape[0],
         block_size=block_size,
         topk_tokens=impl.topk_indices_buffer.shape[1],
+        topk_start=0,
         req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device="cuda"),
         block_table=torch.tensor([[0, 1]], dtype=torch.int32, device="cuda"),
         qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32, device="cuda"),

@@ -663,10 +663,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #endif
 
 #ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
-  // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
+  // SM100 only; impl registrations are in
+  // csrc/qwen4_exp/hc_{up_gate_mix,down_silu}.cu.
   ops.def(
       "qwen4_exp_hc_up_gate_mix(Tensor! out, Tensor lowrank, Tensor xn, "
       "Tensor w_up) -> ()");
+  ops.def(
+      "qwen4_exp_hc_down_silu(Tensor! lowrank, Tensor! inj_out, Tensor xn, "
+      "Tensor w_down) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

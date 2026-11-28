@@ -29,7 +29,7 @@ BASE_TRUST_REMOTE_CODE_MODELS = {
 }
 
 BASE_MODELS_TO_TEST = [
-    "vllm-project/mamba2-130m-hf",
+    "vllm/mamba2-130m-hf",
     "mistralai/Mamba-Codestral-7B-v0.1",
     # Excluded: terratorch/torchgeo version mismatch in CPU CI environment
     # (NonGeoDataset import error). Tested in model initialization tests.
@@ -37,7 +37,7 @@ BASE_MODELS_TO_TEST = [
     "Zyphra/Zamba2-7B-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
-    "vllm-project/deepseek_mtp_main_random",
+    "vllm/deepseek_mtp_main_random",
     "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "tiny-random/qwen3-next-moe",
     "zai-org/GLM-4.5",
@@ -53,10 +53,10 @@ BASE_MODELS_TO_TEST = [
 
 # (target_model, draft_model)
 SPECULATIVE_MODELS = [
-    ("vllm-project/deepseek_mtp_main_random", "vllm-project/deepseek_mtp_draft_random"),
-    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random"),
-    ("meta-llama/Meta-Llama-3-8B-Instruct", "vllm-project/EAGLE-LLaMA3-Instruct-8B"),
-    ("meta-llama/Llama-3.1-8B-Instruct", "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"),
+    ("vllm/deepseek_mtp_main_random", "vllm/deepseek_mtp_draft_random"),
+    ("vllm/deepseek-v3-random", "vllm/eagle-deepseek-v3-random"),
+    ("meta-llama/Meta-Llama-3-8B-Instruct", "vllm/EAGLE-LLaMA3-Instruct-8B"),
+    ("meta-llama/Llama-3.1-8B-Instruct", "vllm/EAGLE3-LLaMA3.1-Instruct-8B"),
 ]
 
 

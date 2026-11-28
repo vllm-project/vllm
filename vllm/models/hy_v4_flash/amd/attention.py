@@ -25,6 +25,11 @@ from .compressed_indexer import FlashCompressedIndexer
 from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 
 
+class HYV4FlashMLAAttention(MLAAttention):
+    # Window rows index only live slots, which fp8_ds_mla reads paged.
+    supports_fp8_ds_mla_sliding_window = True
+
+
 class HYV4FlashAttention(HYV4MLAAttention):
     q_a_layernorm: RMSNorm
     q_b_proj: ColumnParallelLinear
@@ -72,9 +77,10 @@ class HYV4FlashAttention(HYV4MLAAttention):
 
         if not on_gfx950():
             raise NotImplementedError("Flash sparse MLA on ROCm requires gfx950")
-        # The ROCm fp8_ds_mla sparse path cannot apply the learnable sink.
-        if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
-            raise ValueError("HYV4 Flash on ROCm requires BF16 KV storage")
+        # Per-tensor fp8 KV is not validated for Flash on ROCm.
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if cache_dtype not in ("auto", "bfloat16", "fp8_ds_mla"):
+            raise ValueError("HYV4 Flash on ROCm requires BF16 or fp8_ds_mla KV cache")
         if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
             raise ValueError("Flash sparse MLA requires latent512 + rotary64 KV")
         if (
@@ -161,7 +167,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             self.num_local_heads, torch.float32
         )
         self._force_sparse_mqa()
-        self.mla_attn = MLAAttention(
+        self.mla_attn = HYV4FlashMLAAttention(
             num_heads=self.num_local_heads,
             scale=self.scaling,
             qk_nope_head_dim=self.qk_nope_head_dim,
