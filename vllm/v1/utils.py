@@ -295,6 +295,20 @@ _RUST_FRONTEND_ENV_ARGS = {
     "max_n_sequences": "VLLM_MAX_N_SEQUENCES",
     "enable_cohere_api": "VLLM_ENABLE_COHERE_API",
     "enable_responses_api_store": "VLLM_ENABLE_RESPONSES_API_STORE",
+    "use_modelscope": "VLLM_USE_MODELSCOPE",
+    "enforce_strict_tool_calling": "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+    "request_body_log_level": "VLLM_REQUEST_BODY_LOG_LEVEL",
+    "lora_resolver_cache_dir": "VLLM_LORA_RESOLVER_CACHE_DIR",
+    "lora_resolver_hf_repo_list": "VLLM_LORA_RESOLVER_HF_REPO_LIST",
+    "media_cache": "VLLM_MEDIA_CACHE",
+    "media_fetch_max_retries": "VLLM_MEDIA_FETCH_MAX_RETRIES",
+    "media_url_allow_redirects": "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
+    "max_image_pixels": "VLLM_MAX_IMAGE_PIXELS",
+    "max_audio_decode_duration_s": "VLLM_MAX_AUDIO_DECODE_DURATION_S",
+    "max_audio_decode_bytes": "VLLM_MAX_AUDIO_DECODE_BYTES",
+    "video_loader_backend": "VLLM_VIDEO_LOADER_BACKEND",
+    "media_connector": "VLLM_MEDIA_CONNECTOR",
+    "max_media_preprocessing_bytes": "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
 }
 
 
@@ -427,9 +441,10 @@ class RustFrontendProcessManager:
             if key in args_dict or not envs.is_set(name):
                 continue
             value = getattr(envs, name)
-            # Like a default, an off value is left out, so the Rust frontend
-            # does not refuse a disabled feature it does not implement.
-            if value is None or value is False or value == "":
+            # An unset value is left out. Every other value is passed as is,
+            # off values included: the Rust frontend's argument types decide
+            # which values it implements.
+            if value is None or value == "":
                 continue
             # JSON has no infinity; Rust reads a too long interval as never.
             if value == math.inf:

@@ -9,8 +9,11 @@
 use std::str::FromStr;
 
 use clap::Args;
+use clap::builder::TypedValueParser as _;
 use serde::Deserialize;
 use vllm_text::backend::hf::{HfToken, ModelFileSources, ModelSource};
+
+use super::unsupported::Fixed;
 
 /// The model and the sources of its tokenizer and config files, mirroring
 /// Python's `ModelConfig`.
@@ -59,6 +62,19 @@ pub struct ModelArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub hf_token: Option<HfTokenArg>,
+
+    /// Download models and tokenizers from ModelScope instead of the Hugging
+    /// Face Hub. Like Python, it is set only through `VLLM_USE_MODELSCOPE`.
+    /// The Rust frontend fetches model files from the Hub only, so only off is
+    /// accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_USE_MODELSCOPE",
+        value_parser = super::parse_truthy_flag.try_map(Fixed::<false>::try_from)
+    )]
+    #[serde(default)]
+    pub use_modelscope: Option<Fixed<false>>,
 }
 
 /// `--hf-token`: Python's `bool | str`, where a bare flag (`true`) means the

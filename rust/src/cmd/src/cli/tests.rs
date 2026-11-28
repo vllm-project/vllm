@@ -274,6 +274,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -284,6 +285,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
@@ -300,11 +302,23 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -329,6 +343,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],
@@ -1350,8 +1366,11 @@ fn args_json_reads_env_only_settings() {
     let args = parse(r#","log_stats_interval":1.7976931348623157e308"#).unwrap();
     assert_eq!(args.log_stats_interval(), None);
 
-    expect!["invalid JSON arguments: http_max_request_body_size: invalid value: integer `-1`, expected usize at line 1 column 62"]
+    expect!["invalid JSON arguments: http_max_request_body_size (VLLM_HTTP_MAX_REQUEST_BODY_SIZE): invalid value: integer `-1`, expected usize at line 1 column 62"]
         .assert_eq(&parse(r#","http_max_request_body_size":-1"#).unwrap_err());
+    // Inside a flattened group such as `ModelArgs`, the field is named too.
+    expect!["invalid JSON arguments: hf_token: hf_token=false is not supported"]
+        .assert_eq(&parse(r#","hf_token":false"#).unwrap_err());
 }
 
 /// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
@@ -1776,6 +1795,42 @@ fn serve_rejects_log_outputs_without_log_requests() {
     let error = config(&["--enable-log-outputs"]).validate().unwrap_err();
     assert!(format!("{error:#}").contains("--enable-log-outputs requires --enable-log-requests"));
     assert!(config(&["--enable-log-outputs", "--enable-log-requests"]).validate().is_ok());
+}
+
+/// The Rust frontend logs no request bodies, so a body log level other than
+/// Python's default DEBUG fails startup where Python would log them: under
+/// `--enable-log-requests`.
+#[test]
+fn request_body_log_level_other_than_debug_fails_under_enable_log_requests() {
+    let config = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+    };
+    let level = |level| ["--enable-log-requests", "--request-body-log-level", level];
+
+    config(&level("debug")).validate().unwrap();
+    config(&["--request-body-log-level", "INFO"]).validate().unwrap();
+    let error = config(&level("INFO")).validate().unwrap_err();
+    expect!["VLLM_REQUEST_BODY_LOG_LEVEL=INFO is not implemented in Rust frontend, which does not log request bodies; only DEBUG is supported with --enable-log-requests"]
+        .assert_eq(&format!("{error:#}"));
+    // Like Python, which only warns, a name that is no logging level logs no
+    // bodies, so it is accepted, with or without request logging.
+    config(&level("OFF")).validate().unwrap();
+    config(&["--request-body-log-level", "OFF"]).validate().unwrap();
+
+    // Python passes the upper-cased name in `--args-json`.
+    let args = parse_runtime_args_json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","request_body_log_level":"WARNING"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        args.api_server_options().request_body_log_level,
+        Some(LogLevel::Warning)
+    );
 }
 
 #[test]
@@ -2468,6 +2523,7 @@ fn frontend_args_accept_json() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2478,6 +2534,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
@@ -2494,11 +2551,23 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -2523,6 +2592,8 @@ fn frontend_args_accept_json() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],
@@ -3143,39 +3214,20 @@ fn frontend_args_json_rejects_unsupported_fields() {
     .unwrap_err();
 
     expect![[r#"
-        error: The following arguments are not implemented in Rust frontend yet:
-        - tool_server
-
-        Remove these arguments to continue.
+        error: invalid JSON arguments: tool_server: argument is not implemented in Rust frontend yet
     "#]]
     .assert_eq(&error.to_string());
-}
 
-#[test]
-fn frontend_args_json_aggregates_multiple_unsupported_fields() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-listener-fd",
-        "999999",
-        "--output-listener-fd",
-        "999998",
-        "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}"#,
-    ])
-    .unwrap_err();
-
-    let actual = error.to_string().replace(": \n", ":\n");
-    expect![[r#"
-        error: The following arguments are not implemented in Rust frontend yet:
-        - response_role
-        - tool_server
-
-        Remove these arguments to continue.
-    "#]]
-    .assert_eq(&actual);
+    // With several failing fields in different flattened groups, the error
+    // names the first key with its own error, though serde fails on
+    // `ModelArgs`' `hf_token` first.
+    expect!["invalid JSON arguments: enable_prompt_embeds: argument is not implemented in Rust frontend yet"]
+        .assert_eq(
+            &parse_runtime_args_json(
+                r#"{"enable_prompt_embeds":true,"hf_token":false,"model_tag":"Qwen/Qwen3-0.6B"}"#,
+            )
+            .unwrap_err(),
+        );
 }
 
 /// Python args that have no meaningful Rust equivalent are accepted on both the
@@ -3317,72 +3369,244 @@ fn unsupported_args_fail_startup() {
         ])
         .unwrap_err()
         .to_string();
-        assert!(error.contains(&format!("- {key}\n")), "{key}: {error}");
+        assert!(
+            error.contains(&format!("{key}: argument is not implemented")),
+            "{key}: {error}"
+        );
     }
 }
 
-/// Python features that an environment variable turns on, and that Rust does
-/// not support yet, fail startup on both the `vllm-rs serve` path, where the
+/// Python settings that an environment variable sets, and that Rust does not
+/// support yet, fail startup on both the `vllm-rs serve` path, where the
 /// variable binds a flag, and the `--args-json` path, where Python passes the
 /// value it resolves from the variable.
 #[test]
-fn unsupported_env_switches_fail_startup() {
+fn unsupported_env_settings_fail_startup() {
+    let serve = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--max-tokenize-tokens",
+            value,
+        ])
+        .map(drop)
+        .map_err(|error| error.to_string())
+    };
+    // Like any `Unsupported` argument, every value is refused.
+    for value in ["0", "4096"] {
+        let error = serve(value).unwrap_err();
+        assert!(error.contains("--max-tokenize-tokens"), "{value}: {error}");
+    }
+    // LoRA resolvers are Python plugins, refused whether or not
+    // `VLLM_ALLOW_RUNTIME_LORA_UPDATING` would consult them.
+    for flag in ["--lora-resolver-cache-dir", "--lora-resolver-hf-repo-list"] {
+        let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, "x"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(flag), "{flag}: {error}");
+    }
+
+    expect!["invalid JSON arguments: max_tokenize_tokens (VLLM_MAX_TOKENIZE_TOKENS): argument is not implemented in Rust frontend yet"].assert_eq(
+        &parse_runtime_args_json(r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":4096}"#)
+            .unwrap_err(),
+    );
+    expect!["invalid JSON arguments: lora_resolver_cache_dir (VLLM_LORA_RESOLVER_CACHE_DIR): argument is not implemented in Rust frontend yet"].assert_eq(
+        &parse_runtime_args_json(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","lora_resolver_cache_dir":"/loras"}"#,
+        )
+        .unwrap_err(),
+    );
+}
+
+/// Python switches that the Rust frontend implements only when off, such as
+/// `VLLM_ENABLE_COHERE_API`, accept the off value and fail startup on, on
+/// both paths.
+#[test]
+fn env_switches_accept_only_the_implemented_position() {
     let serve = |flag: &str, value: &str| {
         Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
             .map(drop)
             .map_err(|error| error.to_string())
     };
+    let json = |key: &str, value: bool| {
+        parse_runtime_args_json(
+            &serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: value }).to_string(),
+        )
+        .map(drop)
+    };
 
-    for (flag, key, name) in [
-        (
-            "--enable-cohere-api",
-            "enable_cohere_api",
-            "VLLM_ENABLE_COHERE_API",
-        ),
-        (
-            "--enable-responses-api-store",
-            "enable_responses_api_store",
-            "VLLM_ENABLE_RESPONSES_API_STORE",
-        ),
-        (
-            "--max-tokenize-tokens",
-            "max_tokenize_tokens",
-            "VLLM_MAX_TOKENIZE_TOKENS",
-        ),
+    for (flag, key) in [
+        ("--enable-cohere-api", "enable_cohere_api"),
+        ("--enable-responses-api-store", "enable_responses_api_store"),
     ] {
-        // Like any `Unsupported` argument, every value is refused, including
-        // the off value `0`.
-        for value in ["0", "1", "true"] {
-            let error = serve(flag, value).unwrap_err();
-            assert!(error.contains(flag), "{flag}={value}: {error}");
+        serve(flag, "0").unwrap();
+        json(key, false).unwrap();
+        // Python parses these as `bool(int(value))`.
+        for value in ["1", "2", "true"] {
+            serve(flag, value).unwrap_err();
         }
-        let args_json = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: 1 }).to_string();
-        let error = parse_runtime_args_json(&args_json).unwrap_err();
-        assert!(
-            error.contains(&format!("- {key} ({name})\n")),
-            "{key}: {error}"
-        );
+        let error = json(key, true).unwrap_err();
+        assert!(error.contains(key), "{key}: {error}");
     }
 
     expect![[r#"
-        error: invalid value '0' for '--enable-cohere-api <ENABLE_COHERE_API>': argument is not implemented in Rust frontend yet
-
-        Remove this argument, or unset the environment variable bound to it, to continue.
+        error: invalid value '1' for '--enable-cohere-api <ENABLE_COHERE_API>': only off is implemented in Rust frontend, not on
 
         For more information, try '--help'.
-    "#]].assert_eq(&serve("--enable-cohere-api", "0").unwrap_err());
-    expect![[r#"
-        The following arguments are not implemented in Rust frontend yet:
-        - enable_cohere_api (VLLM_ENABLE_COHERE_API)
-        - tool_server
+    "#]].assert_eq(&serve("--enable-cohere-api", "1").unwrap_err());
+    expect!["invalid JSON arguments: enable_cohere_api (VLLM_ENABLE_COHERE_API): only off is implemented in Rust frontend, not on at line 1 column 56"].assert_eq(&json("enable_cohere_api", true).unwrap_err());
 
-        Remove these arguments, or unset the environment variables bound to them, to continue."#]]
-    .assert_eq(
-        &parse_runtime_args_json(
-            r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_cohere_api":true,"tool_server":"demo"}"#,
+    // Python parses `VLLM_USE_MODELSCOPE` as
+    // `value.strip().lower() in ("1", "true")`, and `vllm-rs render` loads
+    // model files too.
+    for value in ["0", "false", "yes"] {
+        serve("--use-modelscope", value).unwrap();
+    }
+    for value in ["1", " True "] {
+        serve("--use-modelscope", value).unwrap_err();
+    }
+    Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen3-0.6B",
+        "--use-modelscope",
+        "1",
+    ])
+    .unwrap_err();
+    json("use_modelscope", false).unwrap();
+    expect!["invalid JSON arguments: use_modelscope (VLLM_USE_MODELSCOPE): only off is implemented in Rust frontend, not on"].assert_eq(&json("use_modelscope", true).unwrap_err());
+}
+
+/// The Rust frontend always constrains tool calls, so turning off
+/// `VLLM_ENFORCE_STRICT_TOOL_CALLING` fails startup on both paths.
+#[test]
+fn strict_tool_calling_cannot_be_turned_off() {
+    let serve = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--enforce-strict-tool-calling",
+            value,
+        ])
+        .map(drop)
+        .map_err(|error| error.to_string())
+    };
+    for value in ["1", "true", "TRUE"] {
+        serve(value).unwrap();
+    }
+    for value in ["0", "false", "yes"] {
+        let error = serve(value).unwrap_err();
+        assert!(error.contains("only on is implemented"), "{value}: {error}");
+    }
+    // The render server builds tool grammars too.
+    let render = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "render",
+            "Qwen/Qwen3-0.6B",
+            "--enforce-strict-tool-calling",
+            value,
+        ])
+        .map(drop)
+    };
+    render("1").unwrap();
+    render("0").unwrap_err();
+
+    let json = |value: bool| {
+        parse_runtime_args_json(
+            &serde_json::json!({
+                "model_tag": "Qwen/Qwen3-0.6B",
+                "enforce_strict_tool_calling": value,
+            })
+            .to_string(),
         )
-        .unwrap_err(),
-    );
+        .map(drop)
+    };
+    json(true).unwrap();
+    expect!["invalid JSON arguments: enforce_strict_tool_calling (VLLM_ENFORCE_STRICT_TOOL_CALLING): only on is implemented in Rust frontend, not off at line 1 column 67"].assert_eq(&json(false).unwrap_err());
+}
+
+/// The Rust frontend fetches and decodes media with its own settings, so a
+/// media setting fails startup on both paths unless the Rust frontend does
+/// what its value asks for.
+#[test]
+fn media_settings_fail_startup_unless_rust_matches_them() {
+    let serve = |flags: &[&str]| {
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    for flags in [
+        ["--media-fetch-max-retries", "1"],
+        ["--media-fetch-max-retries", "0"],
+        ["--media-url-allow-redirects", "1"],
+        ["--video-loader-backend", "opencv"],
+        ["--media-connector", "http"],
+        ["--max-media-preprocessing-bytes", "0"],
+        ["--max-media-preprocessing-bytes", "-1"],
+        // Python's off value.
+        ["--media-cache", ""],
+    ] {
+        serve(&flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+    }
+    for flags in [
+        ["--media-cache", "/tmp/media"],
+        // Python's defaults are refused too when set explicitly: the Rust
+        // frontend does not honor them.
+        ["--media-fetch-max-retries", "3"],
+        ["--media-url-allow-redirects", "0"],
+        ["--max-image-pixels", "178956970"],
+        ["--max-audio-decode-duration-s", "600"],
+        ["--max-audio-decode-bytes", "0"],
+        ["--video-loader-backend", "opencv_dynamic"],
+        ["--media-connector", "custom"],
+        ["--max-media-preprocessing-bytes", "715827880"],
+    ] {
+        let error = serve(&flags).unwrap_err();
+        assert!(error.contains(flags[0]), "{flags:?}: {error}");
+    }
+    // Even with no media to fetch.
+    serve(&["--media-cache", "/tmp/media", "--language-model-only"]).unwrap_err();
+
+    let json = |fields: serde_json::Value| {
+        let mut args = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B" });
+        args.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        parse_runtime_args_json(&args.to_string()).map(drop)
+    };
+    json(serde_json::json!({
+        "media_fetch_max_retries": 1,
+        "media_url_allow_redirects": true,
+        "video_loader_backend": "opencv",
+        "media_connector": "http",
+    }))
+    .unwrap();
+    expect!["invalid JSON arguments: media_cache (VLLM_MEDIA_CACHE): a media cache is not implemented in Rust frontend; only an empty value is"]
+        .assert_eq(&json(serde_json::json!({ "media_cache": "/tmp/media" })).unwrap_err());
+    expect!["invalid JSON arguments: media_fetch_max_retries (VLLM_MEDIA_FETCH_MAX_RETRIES): only values up to 1 are implemented in Rust frontend, not 3"]
+        .assert_eq(&json(serde_json::json!({ "media_fetch_max_retries": 3 })).unwrap_err());
+    expect![
+        "invalid JSON arguments: video_loader_backend (VLLM_VIDEO_LOADER_BACKEND): unknown variant `identity`, expected `opencv`"
+    ]
+    .assert_eq(&json(serde_json::json!({ "video_loader_backend": "identity" })).unwrap_err());
+    expect!["invalid JSON arguments: max_image_pixels (VLLM_MAX_IMAGE_PIXELS): argument is not implemented in Rust frontend yet"].assert_eq(&json(serde_json::json!({ "max_image_pixels": 1 })).unwrap_err());
+
+    // The render server fetches media too, and reads the same variables.
+    let render = |flags: &[&str]| {
+        Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    render(&["--media-connector", "http", "--media-cache", ""]).unwrap();
+    for flags in [
+        ["--media-connector", "custom"],
+        ["--media-cache", "/tmp/media"],
+        ["--max-image-pixels", "1"],
+    ] {
+        let error = render(&flags).unwrap_err();
+        assert!(error.contains(flags[0]), "{flags:?}: {error}");
+    }
 }
 
 #[test]
@@ -3636,6 +3860,7 @@ fn serve_args_accept_handshake_aliases() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -3646,6 +3871,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
@@ -3662,11 +3888,23 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media: MediaArgs {
+                            media_cache: None,
+                            media_fetch_max_retries: None,
+                            media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
+                            max_image_pixels: None,
+                            max_audio_decode_duration_s: None,
+                            max_audio_decode_bytes: None,
+                            video_loader_backend: None,
+                            media_connector: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -3691,6 +3929,8 @@ fn serve_args_accept_handshake_aliases() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],
@@ -3985,6 +4225,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4139,6 +4382,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4399,6 +4645,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {

@@ -8,17 +8,13 @@ use std::str::FromStr;
 
 use clap::Args;
 use clap::builder::{TypedValueParser, ValueParserFactory};
-use itertools::Itertools;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 
 /// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes
-/// but does not support yet.
-///
-/// When passed as JSON args, it can be deserialized from any value, and
-/// serializes back to the original value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Unsupported(pub serde_json::Value);
+/// but does not support yet. Parsing any value fails, on the CLI and in JSON
+/// args alike, so it can sit in any argument group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unsupported;
 
 impl FromStr for Unsupported {
     type Err = String;
@@ -31,12 +27,85 @@ Remove this argument, or unset the environment variable bound to it, to continue
     }
 }
 
+impl<'de> Deserialize<'de> for Unsupported {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Err(serde::de::Error::custom(
+            "argument is not implemented in Rust frontend yet",
+        ))
+    }
+}
+
+/// Marker type for a Python switch that the Rust frontend implements only in
+/// one position, `ON`, such as following media URL redirects, which it always
+/// does. Parsing the other position fails, on the CLI and in JSON args alike.
+///
+/// Its CLI value parser is the switch's Python parser mapped through
+/// `try_from`, such as `parse_int_flag.try_map(Fixed::<true>::try_from)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fixed<const ON: bool>;
+
+impl<const ON: bool> TryFrom<bool> for Fixed<ON> {
+    type Error = String;
+
+    fn try_from(value: bool) -> Result<Self, Self::Error> {
+        let position = |on| if on { "on" } else { "off" };
+        (value == ON).then_some(Self).ok_or_else(|| {
+            format!(
+                "only {} is implemented in Rust frontend, not {}",
+                position(ON),
+                position(value)
+            )
+        })
+    }
+}
+
+impl<'de, const ON: bool> Deserialize<'de> for Fixed<ON> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(bool::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Marker type for a Python integer setting that the Rust frontend implements
+/// only up to `MAX`, such as one fetch attempt per media URL. Parsing a larger
+/// value fails, on the CLI and in JSON args alike.
+///
+/// Its CLI value parser is the setting's Python parser mapped through
+/// `try_from`, such as `parse_int.try_map(AtMost::<1>::try_from)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtMost<const MAX: i64>;
+
+impl<const MAX: i64> TryFrom<i64> for AtMost<MAX> {
+    type Error = String;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        (value <= MAX).then_some(Self).ok_or_else(|| {
+            format!("only values up to {MAX} are implemented in Rust frontend, not {value}")
+        })
+    }
+}
+
+impl<'de, const MAX: i64> Deserialize<'de> for AtMost<MAX> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Marker type for no-op arguments that are accepted by the Rust frontend but
 /// have no effect.
 ///
-/// When passed as JSON args, it can be deserialized from any value, but always
-/// serializes back to `null`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// When passed as JSON args, it can be deserialized from any value; the
+/// `--args-json` parser warns about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Noop;
 
 impl<'de> Deserialize<'de> for Noop {
@@ -82,8 +151,7 @@ impl TypedValueParser for NoopValueParser {
 
 /// Frontend-owned Python `serve` arguments that `vllm-rs` recognizes but does
 /// not support yet.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 #[command(next_help_heading = "Options not implemented in Rust frontend yet")]
 pub struct UnsupportedArgs {
     #[command(flatten)]
@@ -98,50 +166,18 @@ pub struct UnsupportedArgs {
 }
 
 impl UnsupportedArgs {
-    /// Check whether any unsupported arguments are set, and if so, return an
-    /// error listing them. Also warn about any no-op arguments that are set
-    /// but will be ignored.
-    pub(crate) fn check(&self) -> Result<(), String> {
-        let value = serde_json::to_value(self).unwrap();
-        let map = value.as_object().unwrap();
+    /// Warn about each no-op argument set in the `--args-json` object `args`,
+    /// as the CLI value parser does. Once `args` has deserialized, every one
+    /// of these arguments it sets is a no-op: an `Unsupported` one fails
+    /// deserialization.
+    pub(crate) fn warn_noops(args: &serde_json::Map<String, serde_json::Value>) {
         let cmd = Self::augment_args(clap::Command::new("unsupported"));
-        let mut unsupported = Vec::new();
-        let mut env_bound = false;
-
-        for (key, value) in map {
-            if value.is_null() {
-                noop_warn(key);
-                continue;
+        for arg in cmd.get_arguments() {
+            let id = arg.get_id().as_str();
+            if args.get(id).is_some_and(|value| !value.is_null()) {
+                noop_warn(id);
             }
-            // Python resolves an environment variable into the argument bound
-            // to it, so name the variable too.
-            let env = (cmd.get_arguments())
-                .find(|arg| arg.get_id() == key)
-                .and_then(|arg| arg.get_env());
-            env_bound |= env.is_some();
-            unsupported.push(match env {
-                Some(env) => format!("{key} ({})", env.to_string_lossy()),
-                None => key.clone(),
-            });
         }
-
-        if !unsupported.is_empty() {
-            unsupported.sort_unstable();
-            let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
-            let remove = if env_bound {
-                "Remove these arguments, or unset the environment variables bound to them, to continue."
-            } else {
-                "Remove these arguments to continue."
-            };
-            return Err(format!(
-                "The following arguments are not implemented in Rust frontend yet:
-{bullets}
-
-{remove}"
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -156,8 +192,7 @@ impl UnsupportedArgs {
 /// or `FrontendArgs`. They live on the `serve` command itself and control
 /// managed-engine / multi-process orchestration rather than the shared frontend
 /// runtime config.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct TopLevelUnsupportedArgs {
     /// How many API server processes to run. Defaults to data_parallel_size if
     /// not specified.
@@ -187,8 +222,7 @@ pub struct TopLevelUnsupportedArgs {
 /// for tokenizer setup, request validation, routing, logging, and other
 /// frontend behavior, so Rust must recognize them rather than treating them as
 /// pure engine passthrough.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct EngineUnsupportedArgs {
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
@@ -320,8 +354,7 @@ pub struct EngineUnsupportedArgs {
 /// frontend / API-server layer itself, for example chat-template configuration,
 /// tool/frontend behavior, TLS / CORS / HTTP server settings, and other
 /// northbound server knobs.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct ServerUnsupportedArgs {
     /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
     /// and `media_io_kwargs`). If False, the server rejects non-empty values
@@ -457,14 +490,16 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_tokenizer_info_endpoint: Option<Unsupported>,
 
-    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
-    /// set only through `VLLM_ENABLE_COHERE_API`.
-    #[arg(long, hide = true, env = "VLLM_ENABLE_COHERE_API")]
-    pub enable_cohere_api: Option<Unsupported>,
+    /// Directory where Python's filesystem LoRA resolver plugin looks for
+    /// adapters that requests name but no one loaded. Like Python, it is set
+    /// only through `VLLM_LORA_RESOLVER_CACHE_DIR`. LoRA resolvers are Python
+    /// plugins, which the Rust frontend cannot load.
+    #[arg(long, hide = true, env = "VLLM_LORA_RESOLVER_CACHE_DIR")]
+    pub lora_resolver_cache_dir: Option<Unsupported>,
 
-    /// Keep Responses API responses in memory for retrieval, `background`, and
-    /// `previous_response_id`. Like Python, it is set only through
-    /// `VLLM_ENABLE_RESPONSES_API_STORE`.
-    #[arg(long, hide = true, env = "VLLM_ENABLE_RESPONSES_API_STORE")]
-    pub enable_responses_api_store: Option<Unsupported>,
+    /// Comma-separated Hugging Face repositories that Python's Hub LoRA
+    /// resolver plugin downloads such adapters from. Like Python, it is set
+    /// only through `VLLM_LORA_RESOLVER_HF_REPO_LIST`.
+    #[arg(long, hide = true, env = "VLLM_LORA_RESOLVER_HF_REPO_LIST")]
+    pub lora_resolver_hf_repo_list: Option<Unsupported>,
 }

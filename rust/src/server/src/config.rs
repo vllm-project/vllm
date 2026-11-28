@@ -24,6 +24,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_llm::AdmissionLimits;
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
+use vllm_tracing::LogLevel;
 
 use crate::fingerprint::FingerprintMode;
 use crate::routes::openai::utils::types::ReasoningEffort;
@@ -111,6 +112,13 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// Level at which Python logs each request's JSON body under
+    /// `enable_log_requests` (`VLLM_REQUEST_BODY_LOG_LEVEL`, default DEBUG),
+    /// or `None` to log no bodies, as Python does for a name that is no
+    /// logging level. Request bodies are not logged yet, so `validate`
+    /// accepts no other level there.
+    #[educe(Default(expression = Some(LogLevel::Debug)))]
+    pub request_body_log_level: Option<LogLevel>,
 }
 
 /// The Decisions API read strategies the Rust frontend implements, named
@@ -495,6 +503,15 @@ impl ServerConfig {
             && !self.api_server_options.enable_log_requests
         {
             bail!("--enable-log-outputs requires --enable-log-requests");
+        }
+        if self.api_server_options.enable_log_requests
+            && let Some(level) = self.api_server_options.request_body_log_level
+            && level != LogLevel::Debug
+        {
+            bail!(
+                "VLLM_REQUEST_BODY_LOG_LEVEL={level} is not implemented in Rust frontend, which \
+                 does not log request bodies; only DEBUG is supported with --enable-log-requests"
+            );
         }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         if matches!(

@@ -8,6 +8,7 @@
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
 mod logging;
+mod media;
 mod model;
 mod ssl;
 mod unsupported;
@@ -19,6 +20,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use clap::builder::TypedValueParser as _;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
@@ -50,9 +52,10 @@ use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
+use crate::cli::media::MediaArgs;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
-use crate::cli::unsupported::UnsupportedArgs;
+use crate::cli::unsupported::{Fixed, UnsupportedArgs};
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
@@ -188,6 +191,17 @@ pub struct RenderArgs {
     /// level applies, else `auto`.
     #[arg(long)]
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether tool calls are constrained to the tool-call format. Like
+    /// Python, it is set only through `VLLM_ENFORCE_STRICT_TOOL_CALLING`. The
+    /// Rust renderer always builds the tool-call grammar, so only on is
+    /// accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        value_parser = parse_truthy_flag.try_map(Fixed::<true>::try_from)
+    )]
+    pub enforce_strict_tool_calling: Option<Fixed<true>>,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -255,6 +269,10 @@ pub struct RenderArgs {
     /// checkpoint configuration before its processor is constructed.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
     mm_processor_kwargs: HashMap<String, Value>,
+    /// Python's media fetching and decoding settings, each set only through
+    /// its environment variable; the render server fetches media too.
+    #[command(flatten)]
+    pub media: MediaArgs,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -409,6 +427,17 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether tool calls are constrained to the tool-call format. Like
+    /// Python, it is set only through `VLLM_ENFORCE_STRICT_TOOL_CALLING`. The
+    /// Rust frontend always constrains them, so only on is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        value_parser = parse_truthy_flag.try_map(Fixed::<true>::try_from)
+    )]
+    #[serde(default)]
+    pub enforce_strict_tool_calling: Option<Fixed<true>>,
     /// Structured outputs configuration as a JSON object. The Rust frontend
     /// reads `backend`, which compiles every constraint (default xgrammar);
     /// the other fields are forwarded to the engine.
@@ -517,6 +546,12 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub mm_processor_kwargs: HashMap<String, Value>,
 
+    /// Python's media fetching and decoding settings, each set only through
+    /// its environment variable.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub media: MediaArgs,
+
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
     /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
@@ -561,6 +596,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub enable_log_requests: bool,
+
+    /// Level at which Python logs each request's JSON body under
+    /// `--enable-log-requests` (default `DEBUG`). Like Python, it is set only
+    /// through `VLLM_REQUEST_BODY_LOG_LEVEL`, and read only when a body is
+    /// logged, so a name that is no logging level is not an error.
+    #[arg(long, hide = true, env = "VLLM_REQUEST_BODY_LOG_LEVEL")]
+    #[serde(default)]
+    pub request_body_log_level: Option<String>,
 
     /// If set to True, log model outputs (generations). Output text and
     /// finish reasons are logged at INFO, while output token IDs are logged at
@@ -783,6 +826,31 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub allow_runtime_lora_updating: bool,
+
+    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
+    /// set only through `VLLM_ENABLE_COHERE_API`. The Rust frontend does not
+    /// serve it, so only off is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENABLE_COHERE_API",
+        value_parser = parse_int_flag.try_map(Fixed::<false>::try_from)
+    )]
+    #[serde(default)]
+    pub enable_cohere_api: Option<Fixed<false>>,
+
+    /// Keep Responses API responses in memory for retrieval, `background`, and
+    /// `previous_response_id`. Like Python, it is set only through
+    /// `VLLM_ENABLE_RESPONSES_API_STORE`. The Rust frontend has no response
+    /// store, so only off is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENABLE_RESPONSES_API_STORE",
+        value_parser = parse_int_flag.try_map(Fixed::<false>::try_from)
+    )]
+    #[serde(default)]
+    pub enable_responses_api_store: Option<Fixed<false>>,
 
     /// Upper bound on a request's `n` (default 16384). Like Python, it is set
     /// only through `VLLM_MAX_N_SEQUENCES`.
@@ -1266,6 +1334,11 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            request_body_log_level: match self.request_body_log_level.as_deref() {
+                None => Some(LogLevel::Debug),
+                // Like Python, a name that is no logging level logs no bodies.
+                Some(name) => name.parse().ok(),
+            },
         }
     }
 
@@ -1476,10 +1549,70 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path; Python passes the settings it
     // resolves from the environment instead.
+    let mut deserializer = serde_json::Deserializer::from_str(value);
     let args: SharedRuntimeArgs =
-        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
-    args.unsupported.check()?;
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = error.path().to_string();
+            let (path, error) = if is_known_path(&path) {
+                (path, error.into_inner())
+            } else if let Some(failure) = failing_key(value) {
+                failure
+            } else {
+                return format!("invalid JSON arguments: {}", error.into_inner().as_report());
+            };
+            // Python resolves an environment variable into the argument bound
+            // to it, so name the variable too.
+            match env_bound_to::<SharedRuntimeArgs>(&path) {
+                Some(env) => {
+                    format!(
+                        "invalid JSON arguments: {path} ({env}): {}",
+                        error.as_report()
+                    )
+                }
+                None => format!("invalid JSON arguments: {path}: {}", error.as_report()),
+            }
+        })?;
+    deserializer
+        .end()
+        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    if let Ok(object) = serde_json::from_str(value) {
+        UnsupportedArgs::warn_noops(&object);
+    }
     Ok(args)
+}
+
+/// The top-level key of the `--args-json` object `value` that fails to
+/// deserialize, with its error, for an error serde reports without a path:
+/// inside a `#[serde(flatten)]` group of `SharedRuntimeArgs`, serde loses it.
+///
+/// Every field but `model_tag` has a default, and serde checks each field on
+/// its own, so each key is deserialized alone next to `model_tag`.
+fn failing_key(value: &str) -> Option<(String, serde_json::Error)> {
+    let object: Map<String, Value> = serde_json::from_str(value).ok()?;
+    let model_tag = object.get_key_value("model_tag")?;
+    // `model_tag` goes first, since every other key is checked next to it.
+    let others = object.iter().filter(|&(key, _)| key != "model_tag");
+    std::iter::once(model_tag).chain(others).find_map(|(key, field)| {
+        let alone = Map::from_iter([
+            (model_tag.0.clone(), model_tag.1.clone()),
+            (key.clone(), field.clone()),
+        ]);
+        let error = serde_json::from_value::<SharedRuntimeArgs>(Value::Object(alone)).err()?;
+        Some((key.clone(), error))
+    })
+}
+
+/// Whether a serde error path names a field, rather than being empty (`.`) or
+/// starting at a field serde could not track (`?`).
+fn is_known_path(path: &str) -> bool {
+    path != "." && !path.starts_with('?')
+}
+
+/// The environment variable bound to the argument `id` of `T`, if any.
+fn env_bound_to<T: Args>(id: &str) -> Option<String> {
+    let cmd = T::augment_args(clap::Command::new("vllm-rs"));
+    let env = cmd.get_arguments().find(|arg| arg.get_id() == id)?.get_env()?;
+    Some(env.to_string_lossy().into_owned())
 }
 
 /// Parser for `--args-json`. Unlike a function value parser, it reports an

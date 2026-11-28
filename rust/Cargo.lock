@@ -5962,6 +5962,7 @@ dependencies = [
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",
+ "vllm-tracing",
  "zeromq",
 ]
 
