@@ -17,6 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.prefetch import (
+    PREFETCH_REQ_ID,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -320,6 +323,10 @@ class OffloadingConnectorWorker:
             if not transfer_result.success:
                 self._connector_worker_meta.mark_completed(job_id, success=False)
                 req_id = self._load_jobs.pop(job_id, None)
+                if req_id == PREFETCH_REQ_ID:
+                    # Nothing waits on a prefetch: no request to resume, and the
+                    # scheduler side decides what a failed reservation means.
+                    continue
                 if is_load and req_id is None:
                     # Its request already ran this step on the unloaded KV,
                     # which failed_recving cannot undo.
@@ -343,7 +350,7 @@ class OffloadingConnectorWorker:
 
             self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)
-            if req_id is not None:
+            if req_id is not None and req_id != PREFETCH_REQ_ID:
                 finished_recving.add(req_id)
 
         return set(), finished_recving

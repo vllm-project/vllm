@@ -102,6 +102,19 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
                 spec, vllm_config, kv_cache_config
             )
 
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """Hand the pool to the scheduler side, where reservations are made.
+
+        A prefetch reserves blocks before any request exists, so the pool has to
+        be reachable from the connector scheduler, not only from the cache
+        manager that owns it.
+        """
+        # A connector can be built without running __init__ (tests that need
+        # one method); such an object has no scheduler side to bind.
+        connector_scheduler = getattr(self, "connector_scheduler", None)
+        if connector_scheduler is not None:
+            connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
