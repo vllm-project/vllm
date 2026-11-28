@@ -97,6 +97,7 @@ steps:
   - tests/models/test_muse_spark_rocm_drafter.py
   - tests/models/hy_v4/test_dfly_config.py
   - tests/models/hy_v4/test_hy_v4_mrope.py
+  - tests/models/test_diffusion_gemma_mm_prefix.py
   commands:
     - >-
       pytest -v -s
@@ -123,6 +124,7 @@ steps:
       models/test_muse_spark_rocm_drafter.py
       models/hy_v4/test_dfly_config.py
       models/hy_v4/test_hy_v4_mrope.py
+      models/test_diffusion_gemma_mm_prefix.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
