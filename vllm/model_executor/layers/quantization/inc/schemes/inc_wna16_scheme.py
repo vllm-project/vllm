@@ -55,6 +55,26 @@ def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> No
         )
 
 
+def _dispatch_xpu_onednn_linear_method(
+    layer_config: "INCLayerConfig",
+    prefix: str,
+    backend: str,
+) -> INCLinearMethod:
+    """Dispatch linear layer to oneDNN / linear-kernel backend for XPU."""
+    from .inc_w4a8_linear import INCXPUW4A8LinearMethod
+    from .inc_wna16_linear import INCXPULinearMethod
+
+    if layer_config.bits != 4:
+        raise NotImplementedError(
+            f"VLLM_XPU_INC_WNA16_BACKEND={backend} only supports "
+            f"int4, got int{layer_config.bits}. Layer: {prefix}."
+        )
+    if backend == "w4a8":
+        _check_xpu_w4a8_supported(layer_config, prefix)
+        return INCLinearMethod(INCXPUW4A8LinearMethod(layer_config))
+    return INCLinearMethod(INCXPULinearMethod(layer_config))
+
+
 class INCWna16Scheme(INCScheme):
     @staticmethod
     def can_handle(layer_config: "INCLayerConfig") -> bool:
@@ -79,15 +99,9 @@ class INCWna16Scheme(INCScheme):
 
                 backend = envs.VLLM_XPU_INC_WNA16_BACKEND
                 if backend in XPU_ONEDNN_BACKENDS:
-                    if layer_config.bits != 4:
-                        raise NotImplementedError(
-                            f"VLLM_XPU_INC_WNA16_BACKEND={backend} only supports "
-                            f"int4, got int{layer_config.bits}. Layer: {prefix}."
-                        )
-                    if backend == "w4a8":
-                        _check_xpu_w4a8_supported(layer_config, prefix)
-                        return INCLinearMethod(INCXPUW4A8LinearMethod(layer_config))
-                    return INCLinearMethod(INCXPULinearMethod(layer_config))
+                    return _dispatch_xpu_onednn_linear_method(
+                        layer_config, prefix, backend
+                    )
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
                 if backend == "ark" and not is_ark_available:
@@ -112,7 +126,9 @@ class INCWna16Scheme(INCScheme):
                     prefix,
                     ark_error or "unknown error",
                 )
-                return INCLinearMethod(INCXPULinearMethod(layer_config))
+                return _dispatch_xpu_onednn_linear_method(
+                    layer_config, prefix, "w4a16"
+                )
             raise NotImplementedError(f"INC on XPU: unsupported config {layer_config}")
 
         if current_platform.is_cpu() and layer_config.is_gptq:
