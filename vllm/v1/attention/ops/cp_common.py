@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.distributed.device_communicators.nvlink_fabric import (
     SymmetricMemoryTopology,
     get_symmetric_memory_topology,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -30,6 +32,77 @@ try:
 except ImportError:
     symm_mem = None  # type: ignore[assignment]
     symm_mem_available = False
+
+# Resolved on first use: their modules import users of this one.
+_breakable_capture: Any = None
+_active_pcp_manager: Any = None
+
+
+def _breakable() -> Any:
+    global _breakable_capture
+    if _breakable_capture is None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        _breakable_capture = BreakableCUDAGraphCapture
+    return _breakable_capture
+
+
+def capturing_run() -> bool:
+    """Whether the calling thread is capturing a CUDA graph.
+
+    True while its stream records a graph, and in the eager regions of a breakable
+    capture: those run for real, on a dummy batch and on buffers that no captured
+    kernel has filled yet.
+    """
+    return torch.cuda.is_current_stream_capturing() or _breakable().is_active()
+
+
+def capturing_breakable_segment() -> bool:
+    """Whether the calling thread is recording a segment of a breakable PIECEWISE
+    graph: its Python runs once, here, and never on replay, while the eager regions
+    between the segments run on every replay."""
+    return (
+        torch.cuda.is_current_stream_capturing()
+        and _breakable().is_active()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
+def scheduled_step() -> bool:
+    """Whether the forward in progress serves a batch the scheduler made, outside
+    any graph capture.
+
+    A capture, warmup or profile forward runs a dummy batch that bypasses the PCP
+    manager and leaves the layout of the last scheduled batch behind; the PCP + DCP
+    overlaps must not act on either.
+    """
+    global _active_pcp_manager
+    if _active_pcp_manager is None:
+        from vllm.v1.worker.gpu.pcp_manager import active_pcp_manager
+
+        _active_pcp_manager = active_pcp_manager
+    manager = _active_pcp_manager()
+    return manager is not None and manager.scheduled_batch and not capturing_run()
+
+
+def dcp_scheduled_step() -> bool:
+    """Whether the forward in progress may run DCP-only async overlaps.
+
+    Under PCP + DCP, delegates to `scheduled_step()` so dummy forwards that
+    bypass the PCP manager fall back to serial. Under pure TP + DCP (no active
+    PCP manager), only CUDA graph capture (including eager regions of a
+    breakable capture) is excluded because the forward reads `attn_metadata`
+    directly without PCP side-state.
+    """
+    global _active_pcp_manager
+    if _active_pcp_manager is None:
+        from vllm.v1.worker.gpu.pcp_manager import active_pcp_manager
+
+        _active_pcp_manager = active_pcp_manager
+    manager = _active_pcp_manager()
+    if manager is not None:
+        return manager.scheduled_batch and not capturing_run()
+    return not capturing_run()
 
 
 @functools.cache

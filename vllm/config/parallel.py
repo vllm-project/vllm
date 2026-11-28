@@ -582,6 +582,45 @@ class ParallelConfig:
     in the group.
     """
 
+    dcp_kv_prefetch: bool = False
+    """Under DCP prefill (`decode_context_parallel_size > 1`), prefetch
+    historical KV shards from the other DCP ranks with the hardware copy engines
+    over symmetric memory while the main stream computes attention and layer
+    projections, instead of all-gathering serially before attention.
+
+    Supports both:
+    - **Dense MLA (`MLAAttention`) under TP + DCP (and PCP + DCP)**: overlaps
+      chunked-context KV gathers across chunks and layers (including layer 0
+      chunk 0 with new-token projections and suffix attention) for unquantized
+      BF16/FP16, `fp8_ds_mla`, and FP8 KV caches, across single- and
+      multi-request batches.
+    - **Sparse MLA (`FlashMLASparseImpl`) under PCP + DCP** with `fp8_ds_mla`:
+      transfers raw 656 B FP8 cache rows in <=16 MiB chunks, upconverts on the
+      receiver, and stages the current chunk's new rows locally; layers reusing
+      an index group's shared top-k fetch only the union of selected historical
+      rows (layer 0 keeps the serial all-gather). Under pure TP + DCP
+      (`PCP = 1`), sparse MLA attends local shards directly without a KV
+      gather.
+
+    Requires symmetric memory across the DCP group and a single micro-batch;
+    acts in eager mode and under piecewise/breakable CUDA graphs, falling back
+    to the serial all-gather whenever a step is not eligible."""
+
+    pcp_dcp_indexer_k_replica: bool = False
+    """Under PCP + DCP prefill for DeepSeek V3.2-style sparse attention, keep
+    each indexer layer's whole-context FP8 K (values and scales) resident on
+    every rank in token order and append each chunk's new K rows directly,
+    avoiding the per-chunk DCP K all-gather and de-interleave before top-k.
+    Requests whose earlier rows are missing from the replica (prefix cache hit
+    or resumed request) rebuild it once via the serial gather.
+
+    Allocates `(max_model_len + 4096) * (index_head_dim + 4)` bytes per indexer
+    layer on every rank at model load time (taken from KV cache capacity). Acts
+    in eager mode and under a breakable CUDA graph; disabled automatically when
+    a KV connector is configured. Requires both
+    `prefill_context_parallel_size > 1` and `decode_context_parallel_size > 1`.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -768,6 +807,17 @@ class ParallelConfig:
                 "axis, or span the full TP x PCP axis. "
                 f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
                 f"{sorted({1, pcp, tp * pcp})}."
+            )
+        if self.dcp_kv_prefetch and dcp == 1:
+            raise ValueError(
+                "dcp_kv_prefetch requires decode_context_parallel_size > 1, "
+                f"got DCP={dcp}."
+            )
+        if self.pcp_dcp_indexer_k_replica and (pcp == 1 or dcp == 1):
+            raise ValueError(
+                "pcp_dcp_indexer_k_replica requires both "
+                "prefill_context_parallel_size > 1 and "
+                f"decode_context_parallel_size > 1, got PCP={pcp}, DCP={dcp}."
             )
 
         return self

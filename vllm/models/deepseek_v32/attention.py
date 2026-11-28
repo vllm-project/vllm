@@ -39,9 +39,15 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
+from vllm.v1.attention.ops.cp_common import scheduled_step
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
+)
+from vllm.v1.attention.ops.pcp_dcp_k_replica import (
+    IndexerKReplica,
+    k_replica_for_layer,
+    set_indexer_k_replica,
 )
 from vllm.v1.attention.ops.shardq import shard_q, unshard_out
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
@@ -243,6 +249,17 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
+
+        self._k_replica_layer_id = layer_id
+        self._k_replica = k_replica_for_layer(
+            parallel_config.pcp_dcp_indexer_k_replica,
+            layer_id,
+            indexer,
+            self.use_pcp,
+            parallel_config.prefill_context_parallel_size,
+            parallel_config.decode_context_parallel_size,
+            vllm_config.model_config.max_model_len,
+        )
 
         # Remaining MLA projections (registered on this module).
         self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
@@ -503,6 +520,10 @@ class DeepseekV32Attention(MLAAttention):
             assert index_weights_out is not None
             if self.use_pcp:
                 assert index_k is not None
+            if self._k_replica is not None:
+                set_indexer_k_replica(
+                    IndexerKReplica(self._k_replica, self._k_replica_layer_id)
+                )
             sparse_attn_indexer(
                 q_c,
                 self.indexer.k_cache.prefix,
@@ -560,6 +581,25 @@ class DeepseekV32Attention(MLAAttention):
                     pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 )
             )
+            skip_scale = self._k_scale_float == 1.0 and self.kv_cache_dtype in (
+                "fp8",
+                "fp8_e4m3",
+                "fp8_e5m2",
+            )
+            kv_ce_overlap = getattr(self.impl, "kv_ce_overlap", None)
+            if kv_ce_overlap is not None:
+                # Every rank's new rows, for the region the KV prefetch gathers.
+                kv_ce_overlap.stage_new_rows(
+                    self.layer_name,
+                    get_forward_context(),
+                    kv_for_cache,
+                    kpe_for_cache,
+                    kv_cache,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                    skip_scale,
+                    scheduled=scheduled_step(),
+                )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_for_cache,
                 kpe_for_cache,
@@ -567,8 +607,7 @@ class DeepseekV32Attention(MLAAttention):
                 cache_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
-                self._k_scale_float == 1.0
-                and self.kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"),
+                skip_scale,
             )
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]

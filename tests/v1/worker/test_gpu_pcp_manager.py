@@ -302,6 +302,70 @@ def test_capture_uses_pcp_persistent_inputs():
         assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
 
 
+def test_a_dummy_batch_hides_the_layout_of_the_last_scheduled_batch():
+    """A capture, warmup or profile batch bypasses `partition_batch` and leaves
+    the last scheduled batch's layout behind: nothing may take it for the layout
+    of the forward in progress."""
+    manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    assert not manager.scheduled_batch
+    # What a scheduled batch of one request left behind.
+    manager._scheduled_batch = True
+    manager._hidden_restore_idx = torch.arange(4)
+    manager._global_batch = SimpleNamespace(
+        num_reqs=1,
+        num_computed_tokens_np=np.array([8]),
+        num_scheduled_tokens=np.array([4]),
+    )
+    assert manager.hidden_restore_idx is manager._hidden_restore_idx
+    assert manager.single_request_end == 12
+    dummy_batch = InputBatch.make_dummy(
+        num_reqs=4,
+        num_tokens=4,
+        input_buffers=InputBuffers(4, 8, torch.device("cpu")),
+        max_query_len=1,
+    )
+    manager.prepare_inputs_for_capture_or_profile(dummy_batch)
+    assert not manager.scheduled_batch
+    assert manager.hidden_restore_idx is None
+    assert manager.single_request_end is None
+
+
+@pytest.mark.parametrize(
+    ("scheduled", "prefilling", "expected"),
+    [
+        # Long enough for two chunks on each of the two ranks.
+        ([64], [True], (100, 164)),
+        ([4], [True], (100, 104)),
+        # Too short to split under DCP: every rank gets the whole query.
+        ([3], [True], None),
+        ([1], [False], None),
+        ([64, 1], [True, False], None),
+        ([64, 64], [True, True], None),
+    ],
+)
+def test_only_a_single_split_prefill_is_a_split_prefill_request(
+    scheduled, prefilling, expected
+):
+    """What the PCP + DCP KV prefetch plans a step from: the same on every rank,
+    and None for a batch `partition_batch` did not lay out."""
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        dcp_world_size=2,
+    )
+    manager._global_batch = SimpleNamespace(
+        num_reqs=len(scheduled),
+        num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
+        num_computed_tokens_np=np.full(len(scheduled), 100, dtype=np.int32),
+        is_prefilling_np=np.array(prefilling, dtype=np.bool_),
+    )
+    assert manager.split_prefill_request is None
+    manager._scheduled_batch = True
+    assert manager.split_prefill_request == expected
+
+
 def test_block_table_rebind_updates_interleave():
     manager, block_tables = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
     final_block_tables = SimpleNamespace(**vars(block_tables))
@@ -841,3 +905,76 @@ def test_parallel_config_manages_decode_sharding(
     )
 
     assert parallel_config.pcp_shard_decode_requests is expected
+
+
+def _make_global_prefill_batch(
+    num_computed_tokens: list[int],
+    num_scheduled_tokens: list[int],
+    buffers: InputBuffers,
+    device: torch.device,
+) -> InputBatch:
+    """A prefill global batch as `prepare_inputs` would build it."""
+    computed = np.asarray(num_computed_tokens, dtype=np.int32)
+    scheduled = np.asarray(num_scheduled_tokens, dtype=np.int32)
+    num_reqs = len(scheduled)
+    seq_lens_np = computed + scheduled
+    query_start_loc_np = np.concatenate([[0], np.cumsum(scheduled)]).astype(np.int32)
+
+    base = InputBatch.make_dummy(num_reqs, int(scheduled.sum()), buffers)
+    buffers.seq_lens[:num_reqs] = torch.from_numpy(seq_lens_np).to(device)
+    buffers.query_start_loc[: num_reqs + 1] = torch.from_numpy(query_start_loc_np).to(
+        device
+    )
+    return replace(
+        base,
+        num_scheduled_tokens=scheduled,
+        query_start_loc_np=query_start_loc_np,
+        seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_np.copy()),
+        num_computed_tokens_np=computed,
+        prefill_len_np=seq_lens_np,
+        is_prefilling_np=np.ones(num_reqs, dtype=np.bool_),
+        has_prefill=True,
+    )
+
+
+def _partition_prefill(
+    pcp_rank: int, num_computed_tokens: list[int], num_scheduled_tokens: list[int]
+) -> InputBatch:
+    device = torch.device("cuda:0")
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=pcp_rank,
+        device=device,
+        shard_decode_requests=False,
+        max_num_reqs=4,
+        max_num_tokens=64,
+        dcp_world_size=2,
+        dcp_rank=0,
+    )
+    global_batch = _make_global_prefill_batch(
+        num_computed_tokens, num_scheduled_tokens, InputBuffers(4, 64, device), device
+    )
+    return manager.partition_batch(
+        global_batch,
+        BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=sum(num_scheduled_tokens),
+            num_reqs=None,
+        ),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs GPU kernels")
+def test_partition_hands_dcp_each_request_context_start():
+    """The PCP + DCP KV prefetch splits a layer's shard where the request's earlier
+    context ends; a start past it would read rows the chunk is still writing."""
+    computed = [100, 0]
+    local_batch = _partition_prefill(0, computed, [32, 16])
+
+    assert local_batch.pcp is not None
+    starts = local_batch.pcp.dcp_request_context_starts_cpu
+    assert starts is not None
+    num_local_reqs = local_batch.num_reqs
+    expected = np.asarray(computed)[local_batch.idx_mapping_np]
+    assert starts[:num_local_reqs].tolist() == expected.tolist()
+    assert (starts[num_local_reqs:] == 0).all()

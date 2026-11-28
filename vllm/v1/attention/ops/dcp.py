@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
     from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.v1.attention.ops.mla_dcp_prefetch import ChunkedDCPKVPrefetch
 
 
 # LSE/output combine
@@ -1688,6 +1689,9 @@ class MLADCPManager:
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
+        self.dcp_kv_prefetch = parallel_config.dcp_kv_prefetch
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        self.kv_prefetch: ChunkedDCPKVPrefetch | None = None
         self.padded_num_heads = padded_num_heads
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.num_heads = num_heads
@@ -1885,6 +1889,8 @@ class MLADCPManager:
         self,
         workspace: torch.Tensor,
         max_gathered_tokens: int,
+        *,
+        enable_kv_prefetch: bool = False,
     ) -> None:
         world_size = self.group.world_size
         assert max_gathered_tokens > 0
@@ -1895,6 +1901,28 @@ class MLADCPManager:
             max_gathered_tokens + max_gathered_tokens // world_size
         )
         assert workspace.shape[1] > 0
+
+        if enable_kv_prefetch and self.dcp_kv_prefetch and self.num_ubatches == 1:
+            from vllm.v1.attention.ops.mla_dcp_prefetch import (
+                get_chunked_dcp_kv_prefetch,
+            )
+
+            self.kv_prefetch = get_chunked_dcp_kv_prefetch(
+                group=self.group,
+                device=workspace.device,
+                max_gathered_tokens=max_gathered_tokens,
+                row_dim=workspace.shape[1],
+                out_dtype=workspace.dtype,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+            if self.kv_prefetch is not None:
+                # Skip allocating DirectDCPKVGatherWorkspace's extra symmetric
+                # buffer; the rare serial fallback uses standard all_gather.
+                self._kv_gather = functools.partial(
+                    torch.distributed.all_gather_into_tensor,
+                    group=self.group.device_group,
+                )
+                return
 
         direct_workspace = get_direct_dcp_kv_gather_workspace(
             self.group,
