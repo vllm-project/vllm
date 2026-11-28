@@ -4,6 +4,7 @@
 import gc
 import json
 from contextlib import nullcontext
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,7 @@ import torch
 
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM
+from vllm.device_allocator.alloc_conf import expandable_segments_enabled
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -269,6 +271,107 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
         pass
     snapshot.assert_not_called()
     set_settings.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "live_expandable,settings,limited",
+    [
+        (True, "expandable_segments:True", False),
+        # Unreadable live state: fall back to the live settings string.
+        (None, "expandable_segments:True", False),
+        # The live state wins over the settings string.
+        (False, "expandable_segments:True", True),
+        (None, "", True),
+    ],
+)
+def test_profile_run_skips_max_split_under_expandable_segments(
+    monkeypatch, live_expandable, settings, limited
+):
+    """With expandable segments, empty_cache() releases the free pages the split
+    limit protects, and the limit would only block reuse of freed blocks."""
+    applied: list[str] = []
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(torch.cuda.memory, "get_allocator_backend", lambda: "native")
+    monkeypatch.setattr(
+        torch._C, "_accelerator_getAllocatorSettings", lambda: settings, raising=False
+    )
+    monkeypatch.setattr(torch._C, "_accelerator_setAllocatorSettings", applied.append)
+    live = {} if live_expandable is None else {"expandable_segments": live_expandable}
+    monkeypatch.setattr(
+        torch.cuda.memory, "_snapshot", lambda: {"allocator_settings": live}
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext()
+    )
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+
+    class Profiled(Exception):
+        pass
+
+    def profile_run(**kwargs):
+        raise Profiled
+
+    worker = SimpleNamespace(
+        vllm_config=None,
+        randomize_dummy_inputs=False,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
+        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        init_snapshot=None,
+    )
+    worker._scoped_allocator_max_split = partial(
+        gpu_worker.Worker._scoped_allocator_max_split, worker
+    )
+    with pytest.raises(Profiled):
+        gpu_worker.Worker.determine_available_memory(worker)
+
+    limit = f"max_split_size_mb:{gpu_worker._MAX_SPLIT_SIZE_MB}"
+    scoped = f"{settings},{limit}" if settings else limit
+    assert applied == ([scoped, settings] if limited else [])
+
+    # Opt-in per call: load_model keeps its limit.
+    applied.clear()
+    with worker._scoped_allocator_max_split(gpu_worker._MAX_SPLIT_SIZE_MB):
+        assert applied == [scoped]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+@create_new_process_for_each_test("spawn")
+def test_scoped_max_split_blocks_reuse_under_expandable_segments():
+    """Under expandable segments the split limit keeps a freed block from
+    serving smaller requests, so they map fresh memory beside it."""
+    mib = 1024 * 1024
+    torch._C._accelerator_setAllocatorSettings("expandable_segments:True")
+    if not expandable_segments_enabled():
+        pytest.skip("torch does not support expandable segments here")
+
+    def grown_beside_freed_block(skip_if_expandable: bool) -> int:
+        torch.accelerator.empty_cache()
+        with gpu_worker.Worker._scoped_allocator_max_split(
+            SimpleNamespace(), gpu_worker._MAX_SPLIT_SIZE_MB, skip_if_expandable
+        ):
+            buf = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
+            # Not at the segment's end, where the allocator would extend it.
+            pin = torch.empty(2 * mib, dtype=torch.uint8, device="cuda")
+            del buf
+            before = torch.accelerator.memory_reserved()
+            tensors = [
+                torch.empty(16 * mib, dtype=torch.uint8, device="cuda")
+                for _ in range(8)
+            ]
+            grown = torch.accelerator.memory_reserved() - before
+            del pin, tensors
+        return grown
+
+    assert grown_beside_freed_block(skip_if_expandable=False) >= 64 * mib
+    assert grown_beside_freed_block(skip_if_expandable=True) == 0
 
 
 @pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
