@@ -55,6 +55,14 @@ applies, else [layerwise reload](layerwise.md).
 | [ModelExpress](engines/modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
 | [Connex](engines/connex.md) | One-sided RDMA reads with tree fan-out | Elastic rollout pools where engines join, leave or fail during updates |
 
+!!! warning
+    Weight updates and `reload_weights` cannot target a model managed by Expert
+    Parallel Load Balancing (EPLB). Checkpoint loading uses the initial expert
+    placement, and pending rebalances can overwrite updated weights. Disable EPLB
+    to update an EPLB-managed model. Updates to a dense main or draft model remain
+    supported when only the other model uses EPLB. Expert parallelism without
+    EPLB remains supported.
+
 ## Quickstart
 
 ### Inference Side
