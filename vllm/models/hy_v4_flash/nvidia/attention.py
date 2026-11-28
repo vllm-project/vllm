@@ -24,8 +24,13 @@ from vllm.models.hy_v4.common.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionBackend
 
 from .compressed_indexer import FlashCompressedIndexer
+from .flashinfer_sparse import (
+    HYV4FlashInferSparseBackend,
+    HYV4FlashInferSWABackend,
+)
 from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 
 
@@ -78,10 +83,8 @@ class HYV4FlashAttention(HYV4MLAAttention):
         self.gated_mla = config.gated_mla
         self.learnable_sink = config.learnable_sink
         capability = current_platform.get_device_capability()
-        if capability is None or capability.major not in (9, 10):
-            raise NotImplementedError(
-                "Flash MLA requires Hopper or Blackwell data-center GPUs"
-            )
+        if capability is None or capability.major not in (9, 10, 12):
+            raise NotImplementedError("Flash MLA requires Hopper or Blackwell GPUs")
         if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
             raise ValueError("Flash sparse MLA requires latent512 + rotary64 KV")
         if (
@@ -169,6 +172,14 @@ class HYV4FlashAttention(HYV4MLAAttention):
             self.num_local_heads, torch.float32
         )
         self._force_sparse_mqa()
+        sparse_backend: type[AttentionBackend]
+        window_backend: type[AttentionBackend]
+        if capability.major == 12:
+            sparse_backend = HYV4FlashInferSparseBackend
+            window_backend = HYV4FlashInferSWABackend
+        else:
+            sparse_backend = FlashSparseBackend
+            window_backend = FlashSWABackend
         self.mla_attn = HYV4FlashMLAAttention(
             num_heads=self.num_local_heads,
             scale=self.scaling,
@@ -184,9 +195,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             use_sparse=True,
             indexer=self.indexer,
             topk_indices_buffer=self.indexer.topk_indices_buffer,
-            attn_backend=FlashSWABackend
-            if self.is_window_layer
-            else FlashSparseBackend,
+            attn_backend=window_backend if self.is_window_layer else sparse_backend,
             sliding_window=config.sliding_window if self.is_window_layer else None,
             sinks=self.learnable_sink_param,
         )
