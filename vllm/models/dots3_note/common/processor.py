@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 
 from vllm.config.multimodal import (
     MultiModalDummyOptions,
@@ -152,8 +153,7 @@ class Dots3NoteImageProcessor:
         target_height: int | None = None,
         target_width: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not isinstance(image, Image.Image):
-            raise TypeError(f"Expected a PIL image, got {type(image)}")
+        image = to_pil_image(image)
         if image.mode == "RGBA":
             background = Image.new("RGB", image.size, (255, 255, 255))
             background.paste(image, mask=image.getchannel("A"))

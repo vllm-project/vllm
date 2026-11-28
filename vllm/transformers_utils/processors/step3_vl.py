@@ -14,6 +14,7 @@ from transformers import (
     ProcessorMixin,
     TensorType,
 )
+from transformers.image_transforms import to_pil_image
 
 from vllm.tokenizers import TokenizerLike
 
@@ -296,6 +297,7 @@ class Step3VLImageProcessor(ImageProcessingMixin):
     ) -> BatchFeature:
         if not isinstance(images, list):
             images = [images]
+        images = [to_pil_image(img) for img in images]
 
         split_images_data = self._split_images(images)
         pixel_values_lst = []

@@ -14,6 +14,7 @@ import torch
 from PIL import Image
 from transformers import InklingConfig, InklingProcessor
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.image_transforms import to_pil_image
 
 from vllm.config.multimodal import (
     MultiModalDummyOptions,
@@ -201,7 +202,9 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
             frac = image_processor.rescale_image_frac or DEFAULT_RESCALE_IMAGE_FRAC
             max_long_edge = image_processor.rescale_image_max_upscaled_long_edge
             # Resize with PIL: torchvision LANCZOS does not match the reference
-            images = [_rescale_image(img, frac, max_long_edge) for img in images]
+            images = [
+                _rescale_image(to_pil_image(img), frac, max_long_edge) for img in images
+            ]
             img_feat = image_processor(
                 images, rescale_image_frac=None, return_tensors="pt"
             )
