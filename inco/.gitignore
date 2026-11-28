@@ -1,0 +1,8 @@
+results/
+*.png
+__pycache__/
+.pytest_cache/
+.coverage
+patches/
+reap/
+speculators/

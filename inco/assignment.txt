@@ -1,0 +1,99 @@
+Take-Home Challenge: LLM Inference Performance
+The take-home is the primary technical milestone in our interview process and the
+stage where we ask you to invest the most focused effort. Subsequent interview rounds
+are more conversational and center on system design, your past work, and culture.
+Overview
+Inco AI is operating at the frontier of inference for the token economics of tomorrow delivering
+ultra-eﬃciency across the stack purpose-built for each workload. The take-home is intended to
+enable you to highlight your unique abilities to contribute to our mission.
+Goal. The goal in this stage is to deliver a meaningful, measurable improvement in performance
+or operational behavior for a particular layer of the inference stack (see assigned track).
+Deliverable. Deliverables are a pull request (or diff) on your fork or your own repo, and a short
+written report or presentation in any format you like, including before and after benchmarking
+results.
+This is not just a coding question with a single right answer. Instead, we care about the style of
+the work, the creativity, and the approach. Use of any material is both allowed and encouraged
+(LLMs, agents, papers, blogs, colleagues, etc.). Tell us what you used.
+Time budget: Aim for 2–3 days of focused work. If you hit a reasonable blocker that needs
+more time, just let us know - extensions are fine.
+GPU and token budget. You will receive a virtual credit card which has been pre-loaded with
+$100 to spend on compute or tokens. We recommend signing up for Modal which includes $30
+of free credits; Modal also uses per-second instant pricing helping you to maximize your credits.
+However, you may use any vendor on the allowed list: Modal, AWS, Google AI Studio, Google
+Cloud, Google Colab, Lambda, Lightning AI, Azure, Vast.AI, and runpod.io. Please reach out if
+you need additional resources or assistance.
+Evaluation criteria (not exhaustive): creativity, problem-solving approach, introspection
+(especially for ideas that didn't work), ability to ingest and learn new materials; delivering actual
+performance improvements is only secondary. Negative results with an insightful presentation
+can be as meaningful as performance improvements.
+Inco AI CONFIDENTIAL & PROPRIETARY — DO NOT DISTRIBUTE 1 of 3
+Pick a project path
+Choose one project paths:
+- Path 1: New project.
+Complete a new project using the suggested workflow below.
+- Path 2: Recent relevant project.
+You may use a recent project you completed, e.g., research or an open-source
+contribution, if it is directly related to your assigned track and roughly followed the same
+core steps outlined below. You must be able to share the work openly with us,
+including the source code, implementation details, benchmarks or results, and
+any other context needed for a deep technical discussion. Prepare a one-hour
+presentation and also consider running additional experiments or adopting your work to
+the specifics of the take-home challenge as outlined in the workflow.
+Suggested workflow
+1. Pick a concrete workload and state it precisely: model plus input/output lengths, the
+task set, or the cluster topology and sustained traffic profile.
+2. Set up a benchmark you trust before you change anything: use it as a repeatable
+baseline to ground your work. Make sure your baseline is already at a reasonable level.
+Optimizing over a trivial baseline is not the goal.
+3. Analyze the workload: optimizations can take many different shapes or forms. Try to
+understand the workload more deeply and formulate some hypotheses for optimization.
+4. Implement at least one meaningful optimization. This is the core step. Be creative
+and try different ideas.
+5. Re-measure with the benchmark and check quality or operational safety.
+Understand the impact of your optimization. Note that some optimizations may also be
+lossy, which can be acceptable if the cost-accuracy tradeoff justifies it.
+Deliverables
+- A PR (or diff/patch): your engine fork, scripts that produce the optimized model, harness
+repo, or cluster configuration and deployment code.
+- Your benchmark or evaluation harness and the exact commands, so we could re-run it.
+- A short report or presentation covering how you scoped the project within your assigned
+track, how you set up benchmarking, what your analysis showed, what you tried, what
+worked and what didn't, before/after results, and a quality, reliability, or safety
+sanity-check. Whatever format you like and makes you feel most comfortable covering in
+a one-hour presentation.
+Looking forward to seeing what you come up with.
+Inco AI CONFIDENTIAL & PROPRIETARY — DO NOT DISTRIBUTE 2 of 3
+Track A: Engine & Model
+Setup
+Fork vLLM or SGLang (easiest starting points; TensorRT-LLM is fine if you prefer it). Pick a
+small, mainstream, single-GPU model, e.g., Gemma 4, Qwen3.5, Phi-4. This helps save GPU
+resources. A less well-known model is also fine, and may be less optimized, i.e. more
+headroom. Get the server running and confirm the standard perf features, such as CUDA
+graphs and overlap scheduler, are enabled.
+Benchmark
+vLLM server + aiperf, or your engine's equivalent. Produce a Pareto curve across
+concurrencies: x-axis tokens/s/user (latency), y-axis tokens/s/gpu (throughput). Easiest setup:
+launch the server once at max concurrency / max batch size, then sweep concurrency in the
+client. If you touch the model itself, also baseline a quality eval up front (MMLU-Pro, GSM8K,
+HumanEval, IFEval, or your own task set) and report the trade-off explicitly, e.g. "−0.4pp on eval
+X for 1.8× throughput and 45% less memory."
+Profile
+nsys traces, to see what the model is actually doing on the GPU. Useful trick for forcing a sync
+somewhere obvious: drop in something like t.sum().item() (you'll likely need to disable CUDA
+graphs for that). Swapping kernels also gives good insight into how to read traces.
+Potential Directions
+- Kernel fusion in Triton or Cuda.
+- Hunting GPU bubbles: syncs, PyTorch dispatch overhead, anything leaving the GPU
+idle.
+- Compiler and graph features: whether torch.compile or piecewise CUDA graphs can
+be turned on for prefill, and what the model needs to support them.
+- Runtime improvements: scheduler heuristics, chunked prefill tuning, prefix caching,
+KV-cache layout and paging, batching policy, attention backend selection per shape,
+async CPU/GPU overlap, multi-modal data flow.
+- Quantization: weight-only (AWQ / GPTQ), FP8, MXFP4 / NVFP4, or KV-cache; which
+layers you keep in high precision, how you pick the calibration set, and whether the
+quantized kernel is actually faster at your batch size.
+- Speculative decoding: a draft model, an EAGLE or MTP head, or cheap n-gram /
+prompt lookup; report acceptance rate alongside speedup.
+- Post-training: distillation or a LoRA fine-tune of a smaller model to match the big one on
+your target task; pruning, layer dropping, KV-head sharing.
