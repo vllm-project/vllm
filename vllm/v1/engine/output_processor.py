@@ -180,6 +180,7 @@ class StreamingUpdate:
     prompt_token_ids: list[int] | None
     arrival_time: float
     final: bool = False
+    skip_special_tokens: bool | None = None
 
 
 class RequestState:
@@ -260,6 +261,8 @@ class RequestState:
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
+        if self.detokenizer is not None and update.skip_special_tokens is not None:
+            self.detokenizer.set_skip_special_tokens(update.skip_special_tokens)
         # TODO also include relevant output tokens in new prompt here
         #     (match scheduler behavior).
         if update.prompt:
@@ -747,10 +750,12 @@ class OutputProcessor:
                 req_state.streaming_input = False
             return
 
+        assert request.sampling_params is not None
         update = StreamingUpdate(
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             arrival_time=request.arrival_time,
+            skip_special_tokens=request.sampling_params.skip_special_tokens,
         )
 
         # Apply request updates now if the last input already completed.

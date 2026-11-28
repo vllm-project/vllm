@@ -10,6 +10,8 @@ import numpy as np
 import prometheus_client
 import pytest
 import torch
+from tokenizers import AddedToken, Tokenizer, decoders, models
+from transformers import AutoTokenizer, TokenizersBackend
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -40,6 +42,10 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
+)
+from vllm.v1.engine.detokenizer import (
+    FastIncrementalDetokenizer,
+    SlowIncrementalDetokenizer,
 )
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
@@ -1784,16 +1790,17 @@ async def test_streaming_input_collector_preserves_chunk_boundary():
 
 
 def _make_streaming_input_request(
-    request_id: str, prompt_token_ids: list[int]
+    request_id: str,
+    prompt_token_ids: list[int],
+    sampling_params: SamplingParams | None = None,
 ) -> EngineCoreRequest:
     """One chunk of a streaming-input (resumable) request."""
     return EngineCoreRequest(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
-        sampling_params=SamplingParams(
-            detokenize=False, output_kind=RequestOutputKind.DELTA
-        ),
+        sampling_params=sampling_params
+        or SamplingParams(detokenize=False, output_kind=RequestOutputKind.DELTA),
         pooling_params=None,
         arrival_time=0,
         lora_request=None,
@@ -1802,6 +1809,168 @@ def _make_streaming_input_request(
         resumable=True,
         external_req_id=f"{request_id}-ext",
     )
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+@pytest.mark.parametrize("skip_per_chunk", [(False, True, False), (True, False, True)])
+def test_streaming_input_skip_special_tokens(
+    queued: bool, output_kind: RequestOutputKind, skip_per_chunk: tuple[bool, ...]
+):
+    """Each chunk's decoding setting takes effect only when that chunk starts."""
+    raw_tokenizer = Tokenizer(models.WordLevel({"x": 0, "<marker>": 1}, unk_token="x"))
+    raw_tokenizer.decoder = decoders.Fuse()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=raw_tokenizer, additional_special_tokens=["<marker>"]
+    )
+    processor = OutputProcessor(tokenizer, collect_stats=False)
+    requests = [
+        _make_streaming_input_request(
+            "stream-req",
+            [0],
+            SamplingParams(
+                skip_special_tokens=skip, max_tokens=1, output_kind=output_kind
+            ),
+        )
+        for skip in skip_per_chunk
+    ]
+    processor.add_request(requests[0], None)
+    if queued:
+        for request in requests[1:]:
+            processor.add_request(request, None)
+
+    cumulative = output_kind == RequestOutputKind.CUMULATIVE
+    cumulative_text = ""
+    for index, skip in enumerate(skip_per_chunk):
+        if index and not queued:
+            processor.add_request(requests[index], None)
+        processed = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="stream-req",
+                    new_token_ids=[1],
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ]
+        )
+        request_output = processed.request_outputs[0]
+        assert isinstance(request_output.outputs, list)
+        output = request_output.outputs[0]
+        text = "" if skip else "<marker>"
+        cumulative_text += text
+        assert output.token_ids == [1] * (index + 1 if cumulative else 1)
+        assert output.text == (cumulative_text if cumulative else text)
+
+
+@pytest.mark.parametrize(
+    "tokenizer_name", ["gpt2", "vllm-project/tiny-random-LlamaForCausalLM"]
+)
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("initial_skip", [False, True])
+def test_skip_special_tokens_change_preserves_pending_text(
+    tokenizer_name: str, fast: bool, initial_skip: bool
+):
+    """Changing special-token handling must preserve incomplete UTF-8 output."""
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    output_ids = tokenizer.encode("你好😀", add_special_tokens=False)
+    request = _make_streaming_input_request(
+        "decode-setting",
+        tokenizer.encode("Hello", add_special_tokens=False),
+        SamplingParams(skip_special_tokens=initial_skip),
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    for split in range(1, len(output_ids)):
+        decoder = decoder_class(tokenizer, request)
+        reference = decoder_class(tokenizer, request)
+        observed = ""
+        expected = ""
+        for chunk_index, chunk in enumerate([output_ids[:split], output_ids[split:]]):
+            if chunk_index:
+                decoder.set_skip_special_tokens(not initial_skip)
+            decoder.update(chunk, stop_terminated=False)
+            reference.update(chunk, stop_terminated=False)
+            observed += decoder.get_next_output_text(finished=True, delta=True)
+            expected += reference.get_next_output_text(finished=True, delta=True)
+        assert observed == expected
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize(
+    ("initial_skip", "stop_terminated"),
+    [(True, False), (False, True)],
+)
+def test_skip_special_tokens_change_preserves_bytes_across_hidden_eos(
+    fast: bool, initial_skip: bool, stop_terminated: bool
+):
+    """Skipped or excluded EOS cannot split pending UTF-8 bytes after a toggle."""
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    eos = tokenizer.eos_token_id
+    assert eos is not None
+    assert tokenizer.decode([19526, 254, 0]) == "你!"
+    request = _make_streaming_input_request(
+        "decode-setting", [], SamplingParams(skip_special_tokens=initial_skip)
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    decoder = decoder_class(tokenizer, request)
+    decoder.update([19526, eos], stop_terminated=stop_terminated)
+    first = decoder.get_next_output_text(finished=True, delta=True)
+    decoder.set_skip_special_tokens(not initial_skip)
+    decoder.update([254, 0], stop_terminated=False)
+    second = decoder.get_next_output_text(finished=True, delta=True)
+    assert first + second == "你!"
+    assert decoder.output_token_ids == [19526, eos, 254, 0]
+
+
+def test_skip_special_tokens_change_preserves_spacing():
+    """Toggling preserves spaces_between_special_tokens=False."""
+    raw = Tokenizer(
+        models.WordLevel({"hello": 0, "<s1>": 1, "<s2>": 2}, unk_token="hello")
+    )
+    raw.decoder = decoders.Sequence([decoders.WordPiece(prefix="##")])
+    raw.add_special_tokens(
+        [AddedToken("<s1>", special=True), AddedToken("<s2>", special=True)]
+    )
+    fast = FastIncrementalDetokenizer(
+        TokenizersBackend(tokenizer_object=raw),
+        _make_streaming_input_request(
+            "decode-spacing",
+            [],
+            SamplingParams(
+                skip_special_tokens=False, spaces_between_special_tokens=False
+            ),
+        ),
+    )
+    fast.update([1], stop_terminated=False)
+    p1 = fast.get_next_output_text(finished=True, delta=True)
+    fast.set_skip_special_tokens(True)
+    fast.update([2], stop_terminated=False)
+    fast.set_skip_special_tokens(False)
+    fast.update([1], stop_terminated=False)
+    assert p1 + fast.get_next_output_text(finished=True, delta=True) == "<s1><s1>"
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_skip_special_tokens_change_handles_invalid_ids(fast: bool):
+    """Toggling tolerates prior out-of-range token IDs."""
+    raw = Tokenizer(models.WordLevel({"!": 0, "<eos>": 1}, unk_token="!"))
+    raw.decoder = decoders.Fuse()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=raw, additional_special_tokens=["<eos>"]
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    decoder = decoder_class(
+        tokenizer,
+        _make_streaming_input_request(
+            "decode-invalid", [], SamplingParams(skip_special_tokens=True)
+        ),
+    )
+    decoder.update([-1, 0], stop_terminated=False)
+    assert decoder.get_next_output_text(finished=True, delta=True) == "!"
+    decoder.set_skip_special_tokens(False)
+    decoder.update([1, 0], stop_terminated=False)
+    assert decoder.get_next_output_text(finished=True, delta=True) == "<eos>!"
 
 
 def _add_streaming_request_with_queued_chunk(

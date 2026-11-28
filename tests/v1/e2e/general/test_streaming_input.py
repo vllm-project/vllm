@@ -522,6 +522,44 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize("first_skip", [False, True])
+async def test_streaming_input_per_chunk_skip_special_tokens(
+    engine: AsyncLLM, first_skip: bool
+):
+    """Real inference honors both directions of a per-input decoding change."""
+    tokenizer = engine.input_processor.get_tokenizer()
+    special_id = tokenizer.eos_token_id
+    assert special_id is not None
+    special_text = tokenizer.decode([special_id], skip_special_tokens=False)
+    assert (
+        special_text and tokenizer.decode([special_id], skip_special_tokens=True) == ""
+    )
+    params = get_sampling_params(max_tokens=1)
+    params.allowed_token_ids = [special_id]
+
+    async def inputs() -> AsyncGenerator[StreamingInput, None]:
+        for skip in (first_skip, not first_skip):
+            chunk_params = params.clone()
+            chunk_params.skip_special_tokens = skip
+            yield StreamingInput(prompt="Hello", sampling_params=chunk_params)
+
+    outputs, _ = await collect_outputs(
+        engine.generate(inputs(), params, f"skip-special-{first_skip}")
+    )
+    choices = [
+        choice
+        for output in outputs
+        for choice in output.outputs
+        if choice.finish_reason == "length" and choice.token_ids
+    ]
+    assert [list(choice.token_ids) for choice in choices] == [[special_id]] * 2
+    assert [choice.text for choice in choices] == [
+        "" if first_skip else special_text,
+        special_text if first_skip else "",
+    ]
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_empty_generator(engine: AsyncLLM):
     """Test behavior when the input generator yields nothing.
 
