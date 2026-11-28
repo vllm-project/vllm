@@ -1432,10 +1432,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
-        max_transformers_version="5.19",
+        min_transformers_version="5.25.0",
         transformers_version_reason={
-            "hf": "HF SmolVLM inputs_merger splits image features by patch_size in "
-            "5.20, fixed by https://github.com/huggingface/transformers/pull/49725"
+            "hf": "SmolVLMProcessor._get_num_multimodal_tokens is added by "
+            "https://github.com/huggingface/transformers/pull/50671 "
+            "(released in Transformers 5.25.0)"
         },
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
