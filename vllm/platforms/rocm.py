@@ -388,12 +388,14 @@ def get_cdna_version() -> int:
     return 0
 
 
-def get_rdna_version() -> int:
+def get_rdna_version() -> float:
     if on_rdna4():
-        return 4
+        return 4.0
+    if on_gfx115x():
+        return 3.5
     if on_gfx11():
-        return 3
-    return 0
+        return 3.0
+    return 0.0
 
 
 def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:

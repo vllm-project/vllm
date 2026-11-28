@@ -50,7 +50,7 @@ from vllm.v1.worker.workspace import (
 def _kernel_tier() -> str:
     from vllm.platforms.rocm import get_cdna_version, get_rdna_version
 
-    if get_rdna_version() == 3:
+    if 3 <= get_rdna_version() < 4:
         return "wmma"
     if get_cdna_version() == 3:
         return "mfma"
@@ -122,7 +122,7 @@ class RocmOctaveAttentionBackend(AttentionBackend):
 
         # DeviceCapability is unreliable on ROCm; use the gcnArchName.
         return current_platform.is_rocm() and (
-            get_rdna_version() == 3 or get_cdna_version() == 3
+            3 <= get_rdna_version() < 4 or get_cdna_version() == 3
         )
 
     @classmethod
