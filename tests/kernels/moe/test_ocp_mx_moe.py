@@ -2658,6 +2658,8 @@ def test_moe_activation_override_wins_over_checkpoint(monkeypatch, override):
         ("marlin", True, {"MARLIN"}, "MARLIN"),
         # A BF16 checkpoint never gets its activations quantized.
         ("auto", False, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "MARLIN"),
+        # TRITON_UNFUSED is offered for BF16 activations.
+        ("auto", False, {"TRITON_UNFUSED", "EMULATION"}, "TRITON_UNFUSED"),
     ],
 )
 def test_select_mxfp4_moe_backend_respects_checkpoint_activation(

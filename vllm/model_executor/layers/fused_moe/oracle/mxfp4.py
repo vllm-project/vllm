@@ -439,9 +439,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
-        # TRITON_UNFUSED has bug with MTP support
-        # TODO re-enable after kernel is fixed
-        # TRITON_UNFUSED
+        Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.HUMMING,
@@ -457,11 +455,12 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         # run but their 99KB shared memory budget caps them at small tiles, so
         # MARLIN prefills ~10% faster at equal decode throughput. Jetson Thor
         # (SM110): MARLIN stays the default as it has not been benchmarked.
-        _AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.TRITON)
-        _AVAILABLE_BACKENDS.insert(
-            _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.BATCHED_MARLIN) + 1,
-            Mxfp4MoeBackend.TRITON,
-        )
+        for backend in (Mxfp4MoeBackend.TRITON_UNFUSED, Mxfp4MoeBackend.TRITON):
+            _AVAILABLE_BACKENDS.remove(backend)
+            _AVAILABLE_BACKENDS.insert(
+                _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.BATCHED_MARLIN) + 1,
+                backend,
+            )
     return prioritize_humming(_AVAILABLE_BACKENDS)
 
 
