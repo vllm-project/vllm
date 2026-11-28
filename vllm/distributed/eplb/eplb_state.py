@@ -432,12 +432,21 @@ class EplbState:
         model: MixtureOfExperts,
         expert_buffer: list[torch.Tensor] | None,
         group_coordinator: GroupCoordinator,
+        prev_communicator: EplbCommunicator | None = None,
     ) -> EplbCommunicator:
-        """Create the communicator used by a model's EPLB transfers."""
+        """Create the communicator used by a model's EPLB transfers.
+
+        `prev_communicator` is the one being replaced on a reconfiguration, so a
+        backend can reuse its resources. It is None on the first creation.
+        """
         backend = self.parallel_config.eplb_config.communicator
         assert backend is not None
         return create_eplb_communicator(
-            group_coordinator, backend, model.expert_weights, expert_buffer
+            group_coordinator,
+            backend,
+            model.expert_weights,
+            expert_buffer,
+            prev_communicator=prev_communicator,
         )
 
     def create_policy(self) -> AbstractEplbPolicy:
@@ -1359,7 +1368,10 @@ class EplbState:
     ) -> EplbCommunicator:
         model_state = self.model_states[hash_config_cached(model_config)]
         return self.create_model_communicator(
-            model_state.model, model_state.expert_buffer, group_coordinator
+            model_state.model,
+            model_state.expert_buffer,
+            group_coordinator,
+            prev_communicator=model_state.communicator,
         )
 
     def update_communicator(
@@ -1367,7 +1379,10 @@ class EplbState:
         model_config: ModelConfig,
         communicator: EplbCommunicator,
     ) -> None:
-        self.model_states[hash_config_cached(model_config)].communicator = communicator
+        model_state = self.model_states[hash_config_cached(model_config)]
+        previous = model_state.communicator
+        model_state.communicator = communicator
+        communicator.on_activated(previous)
 
 
 @dataclass(slots=True)
