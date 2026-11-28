@@ -51,9 +51,14 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
 _DUMMY_REQUEST = ChatCompletionRequest(messages=[], model="test")
-# Minimal request for the engine driver: tool_choice=None falls through to
-# auto extraction without triggering "tools must be set" validation.
-_ENGINE_REQUEST = ChatCompletionRequest(messages=[], model="test", tool_choice=None)
+# Minimal request for the engine driver. Auto extraction needs tools: without
+# them tool_choice is normalized to "none" and tool calls are stripped.
+_ENGINE_REQUEST = ChatCompletionRequest(
+    messages=[],
+    model="test",
+    tools=[{"type": "function", "function": {"name": "noop"}}],
+    tool_choice="auto",
+)
 
 
 @pytest.fixture(scope="module")
