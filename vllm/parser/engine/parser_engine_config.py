@@ -41,6 +41,11 @@ class ParserState(Enum):
     TOOL_PREAMBLE = auto()
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
+    TOOL_PARAM_NAME = auto()
+    TOOL_PARAM_VALUE = auto()
+    TOOL_PARAM_VALUE_NESTED = auto()
+    TOOL_PARAM_VALUE_FUNC = auto()
+    TOOL_PARAM_VALUE_FUNC_NESTED = auto()
     TOOL_BETWEEN = auto()
 
 
@@ -83,6 +88,11 @@ class ParserEngineConfig:
             ParserState.REASONING: EventType.REASONING_CHUNK,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            ParserState.TOOL_PARAM_NAME: EventType.ARG_VALUE_CHUNK,
+            ParserState.TOOL_PARAM_VALUE: EventType.ARG_VALUE_CHUNK,
+            ParserState.TOOL_PARAM_VALUE_NESTED: EventType.ARG_VALUE_CHUNK,
+            ParserState.TOOL_PARAM_VALUE_FUNC: EventType.ARG_VALUE_CHUNK,
+            ParserState.TOOL_PARAM_VALUE_FUNC_NESTED: EventType.ARG_VALUE_CHUNK,
         },
     )
 
