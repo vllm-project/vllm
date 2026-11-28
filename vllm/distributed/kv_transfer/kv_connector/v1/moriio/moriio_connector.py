@@ -717,6 +717,7 @@ class MoRIIOConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        self._has_sliding_window = any(bps != 0 for bps in self.blocks_per_sw)
         # Per-group block size over transfer_groups (matching blocks_per_sw and
         # the connector's block payload), used to clamp each full-attention group
         # to its prompt length on the WRITE save path.
@@ -729,7 +730,7 @@ class MoRIIOConnectorScheduler:
         if (
             self.mode == MoRIIOMode.WRITE
             and vllm_config.speculative_config is not None
-            and any(bps != 0 for bps in self.blocks_per_sw)
+            and self._has_sliding_window
         ):
             raise NotImplementedError(
                 "MoRIIO with speculative decoding is not yet supported for "
@@ -895,9 +896,9 @@ class MoRIIOConnectorScheduler:
 
         """
         if self.is_producer:
-            # The P-side prompt truncation for hybrid models happens in
-            # on_new_request, before the scheduler looks the request up in the
-            # prefix cache.
+            # The P-side prompt truncation (hybrid, or READ sliding-window)
+            # happens in on_new_request, before the scheduler looks the
+            # request up in the prefix cache.
             return 0, False
 
         num_prompt_tokens = request.num_prompt_tokens
@@ -929,20 +930,28 @@ class MoRIIOConnectorScheduler:
         there shortens a prompt whose cache hit was already measured against
         the full length. On a full hit that leaves `num_computed_tokens ==
         num_tokens` and trips the scheduler's `num_new_tokens > 0` assert.
+
+        READ sliding-window producers truncate too: finishing all N tokens
+        frees the out-of-window blocks before the block table is published,
+        including the one holding the oldest position the decoder's
+        recomputed token N - 1 still reads.
         """
-        if not (self.is_producer and self._has_mamba):
+        truncates = self._has_mamba or (
+            self.mode == MoRIIOMode.READ and self._has_sliding_window
+        )
+        if not (self.is_producer and truncates):
             return
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
-            self._truncate_mamba_request_for_prefill(request)
+            self._truncate_request_for_prefill(request)
 
-    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
+    def _truncate_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token so the prefiller computes
-        h(N-1) instead of h(N).
+        N - 1 tokens, matching what the decoder loads.
 
-        The decoder recomputes the last token locally to derive h(N) correctly
-        (see the READ len-1 accounting in get_num_new_matched_tokens). Guarded
-        by `_p_side_truncated` to avoid repeated truncation across a
+        The decoder recomputes the last token locally (see the READ len-1
+        accounting in get_num_new_matched_tokens). Guarded by
+        `_p_side_truncated` to avoid repeated truncation across a
         preemption/reschedule. Mirrors the NIXL scheduler.
         """
         params = request.kv_transfer_params
@@ -1229,7 +1238,9 @@ class MoRIIOConnectorScheduler:
                                 # for attention-only hybrid models while
                                 # accounting for the locally recomputed tail.
                                 local_block_ids = self.get_exchange_clipped_blocks(
-                                    blocks.get_block_ids()
+                                    self._trim_sliding_window_recompute_tail(
+                                        request, blocks.get_block_ids()
+                                    )
                                 )
                                 adjusted_remote_block_ids = []
                                 aligned_local_block_ids: list[list[int]] = []
@@ -1409,6 +1420,30 @@ class MoRIIOConnectorScheduler:
             # Only trigger 1 KV transfer per request.
 
             params["do_remote_prefill"] = False
+
+    def _trim_sliding_window_recompute_tail(
+        self, request: "Request", block_ids: BlockIds
+    ) -> BlockIds:
+        """Drop decode sliding-window blocks past the N - 1 loaded tokens.
+
+        The window clip keeps each group's last blocks, so a block allocated
+        only for the locally recomputed token would shift the decode window
+        one block past the prefill's. Full-attention groups keep their tail
+        for `_align_read_blocks`.
+        """
+        if not (self._is_hma_required and self._has_sliding_window):
+            return block_ids
+        if len(block_ids) == len(self.kv_cache_config.kv_cache_groups):
+            block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        num_loaded_tokens = request.num_prompt_tokens - 1
+        return [
+            list(blocks[: cdiv(num_loaded_tokens, block_size)])
+            if blocks_per_sw
+            else list(blocks)
+            for blocks, blocks_per_sw, block_size in zip(
+                block_ids, self.blocks_per_sw, self._group_block_sizes, strict=True
+            )
+        ]
 
     def _clamp_to_prompt_blocks(self, req: "Request", block_ids: BlockIds) -> BlockIds:
         """Drop trailing speculative-lookahead blocks the consumer never

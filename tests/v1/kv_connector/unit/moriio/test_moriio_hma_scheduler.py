@@ -99,6 +99,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._failed_read_block_ids_to_zero: set[int] = set()
         self._mamba_block_size = 16
         self._is_hma_required = False
+        self._has_sliding_window = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
@@ -1777,7 +1778,7 @@ def test_register_kv_caches_allows_hma_divergent_block_size():
 
 
 # --------------------------------------------------------------------------
-# _truncate_mamba_request_for_prefill
+# _truncate_request_for_prefill
 # --------------------------------------------------------------------------
 def _mk_request(prompt, max_tokens=64, params=None):
     return Request(
@@ -1813,14 +1814,14 @@ def test_truncate_mamba_request_drops_hashes_of_the_last_token(lookahead):
 
     req = request(32 + lookahead)
     assert len(req.block_hashes) == 2
-    sched._truncate_mamba_request_for_prefill(req)
+    sched._truncate_request_for_prefill(req)
     assert req.block_hashes == request(31 + lookahead).block_hashes
 
 
 def test_truncate_mamba_request_pops_last_token_and_caps_tokens():
     sched = _FakeScheduler()
     req = _mk_request([10, 11, 12, 13, 14])
-    sched._truncate_mamba_request_for_prefill(req)
+    sched._truncate_request_for_prefill(req)
 
     assert req.prompt_token_ids == [10, 11, 12, 13]  # last token popped
     assert req._all_token_ids == [10, 11, 12, 13]
@@ -1832,10 +1833,10 @@ def test_truncate_mamba_request_pops_last_token_and_caps_tokens():
 def test_truncate_mamba_request_is_idempotent_across_reschedule():
     sched = _FakeScheduler()
     req = _mk_request([10, 11, 12])
-    sched._truncate_mamba_request_for_prefill(req)
+    sched._truncate_request_for_prefill(req)
     assert req.num_prompt_tokens == 2
     # A second call (e.g. after a preemption) must not truncate again.
-    sched._truncate_mamba_request_for_prefill(req)
+    sched._truncate_request_for_prefill(req)
     assert req.num_prompt_tokens == 2
     assert req.prompt_token_ids == [10, 11]
 
@@ -1843,7 +1844,7 @@ def test_truncate_mamba_request_is_idempotent_across_reschedule():
 def test_truncate_mamba_request_noop_for_single_token_prompt():
     sched = _FakeScheduler()
     req = _mk_request([10])
-    sched._truncate_mamba_request_for_prefill(req)
+    sched._truncate_request_for_prefill(req)
     assert req.num_prompt_tokens == 1
     assert req.prompt_token_ids == [10]
     assert "_p_side_truncated" not in req.kv_transfer_params
@@ -1885,15 +1886,29 @@ def test_write_consumer_matches_full_prompt_unless_hybrid(has_mamba, expected):
 
 
 @pytest.mark.parametrize(
-    "is_producer,has_mamba,expected_prompt_len",
-    [(True, True, 4), (True, False, 5), (False, True, 5)],
+    "is_producer,has_mamba,has_sliding_window,mode,expected_prompt_len",
+    [
+        (True, True, False, MoRIIOMode.READ, 4),
+        (True, False, False, MoRIIOMode.READ, 5),
+        (False, True, False, MoRIIOMode.READ, 5),
+        (True, False, True, MoRIIOMode.READ, 4),
+        (True, False, True, MoRIIOMode.WRITE, 5),
+        (False, False, True, MoRIIOMode.READ, 5),
+    ],
 )
 def test_on_new_request_truncates_only_hybrid_producers(
-    is_producer, has_mamba, expected_prompt_len
+    is_producer, has_mamba, has_sliding_window, mode, expected_prompt_len
 ):
-    """Attention-only prefill (including models run with HMA disabled)
-    computes all N prompt tokens; only a hybrid producer drops the last."""
-    scheduler = _FakeScheduler(is_producer=is_producer, _has_mamba=has_mamba)
+    """Full-attention prefill (including models run with HMA disabled)
+    computes all N prompt tokens. Hybrid producers, and sliding-window ones
+    in READ mode, drop the last so their published KV matches the N - 1
+    tokens the decoder loads."""
+    scheduler = _FakeScheduler(
+        is_producer=is_producer,
+        _has_mamba=has_mamba,
+        _has_sliding_window=has_sliding_window,
+        mode=mode,
+    )
     request = _mk_request([10, 11, 12, 13, 14], params={"do_remote_decode": True})
 
     scheduler.on_new_request(request)
