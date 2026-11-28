@@ -167,6 +167,10 @@ from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_proce
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.sampler_memory import (
+    check_room_for_sampler_state,
+    penalty_state_bytes,
+)
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
@@ -536,6 +540,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "return_sampling_mask": self.model_config.return_sampling_mask,
                 "custom_logits_processors": custom_logits_processors,
             }
+            check_room_for_sampler_state(
+                model_memory_bytes=self.model_memory_usage,
+                free_bytes=torch.accelerator.get_memory_info()[0],
+                penalty_bytes=penalty_state_bytes(self.max_num_reqs, self.vocab_size),
+            )
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
             else:
