@@ -697,6 +697,8 @@ void cpu_fused_moe(
   const int64_t input_stride = input.stride(0);
   TORCH_CHECK_EQ(input_stride, input_size_13);
   const int32_t expert_num = w13.size(0);
+  TORCH_CHECK(expert_num > 0,
+              "cpu_fused_moe: expert_num (w13.size(0)) must be > 0");
   const int32_t output_size_13 = w13.size(1);
   const int32_t input_size_2 = w2.size(2);
   const int32_t output_size_2 = w2.size(1);
