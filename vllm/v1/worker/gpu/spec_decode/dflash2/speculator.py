@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -14,6 +14,9 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.watermarking.spec_decode import DraftWatermarker
 
 
 @triton.jit
@@ -139,27 +142,40 @@ class CandidateSampler:
         draft_tokens: torch.Tensor,
         draft_logits: DraftLogitsCache | None,
         use_fp64: bool,
+        draft_watermarker: "DraftWatermarker | None" = None,
     ) -> None:
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
         idx_mapping = idx_mapping.contiguous()
-        block_k = triton.next_power_of_2(self.top_k)
-        _selector_walk_kernel[(num_reqs,)](
-            scores.contiguous(),
-            candidate_ids.contiguous(),
-            sample_pos,
-            idx_mapping,
-            temperature,
-            seeds,
-            draft_tokens,
-            self.scores,
-            num_steps=self.num_steps,
-            top_k=self.top_k,
-            BLOCK_K=block_k,
-            SAMPLE_PROBABILISTIC=draft_logits is not None,
-            USE_FP64=use_fp64,
-            num_warps=1,
-        )
+        if draft_logits is not None and draft_watermarker is not None:
+            draft_watermarker.sample_candidates(
+                candidate_ids,
+                scores.contiguous(),
+                idx_mapping,
+                temperature,
+                seeds,
+                sample_pos,
+                draft_tokens,
+                self.scores,
+                use_fp64=use_fp64,
+            )
+        else:
+            _selector_walk_kernel[(num_reqs,)](
+                scores.contiguous(),
+                candidate_ids,
+                sample_pos,
+                idx_mapping,
+                temperature,
+                seeds,
+                draft_tokens,
+                self.scores,
+                num_steps=self.num_steps,
+                top_k=self.top_k,
+                BLOCK_K=triton.next_power_of_2(self.top_k),
+                SAMPLE_PROBABILISTIC=draft_logits is not None,
+                USE_FP64=use_fp64,
+                num_warps=1,
+            )
 
         if draft_logits is not None:
             self._cache_draft_logits(
@@ -239,6 +255,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
+            self.draft_watermarker,
         )
         if self.enable_adaptive_verification:
             num_sample = num_reqs * self.num_speculative_steps
