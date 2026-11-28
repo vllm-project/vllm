@@ -80,10 +80,11 @@ _GFX1100_2D_DECODE_CONFIGS = {
 }
 # Split-KV (3D) decode: the segment count per request follows requests x KV heads
 # instead of vLLM's fixed 16.
-# gfx1201: padded head sizes whose segment count follows the batch.
-_GFX1201_3D_HEADS = (64, 128, 256)
+# gfx1201: padded head sizes with a tuned split-KV launch; the segment count follows
+# the batch for all but 512.
+_GFX1201_3D_HEADS = (64, 128, 256, 512)
 # gfx1100: padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
-# next_pow2(T / (requests x KV heads)) segments.
+# next_pow2(T / (requests x KV heads)) segments, never fewer than the default.
 _GFX1100_3D_CONFIGS = {
     64: (512, (16, 2, 1)),
     128: (128, (16, 4, 1)),
@@ -119,8 +120,8 @@ def _gfx1201_split_kv_segments(
 ):
     """gfx1201: segments so that requests x KV heads x segments is about 128 (more
     for small batches; fewer, down to 4, for larger ones with a 16-bit query).
-    Sliding windows < 2048 keep `segments`."""
-    if 0 < sliding_window < 2048:
+    Head size 512 and sliding windows < 2048 keep `segments`."""
+    if head_size_padded == 512 or 0 < sliding_window < 2048:
         return segments
     programs = 64 if fp8_query and head_size_padded == 256 else 128
     while segments < 128 and segments * 2 * grid_fill <= programs:
@@ -138,7 +139,7 @@ def _gfx1201_split_kv_launch(head_size_padded, sliding_window, fp8_query, segmen
             return 32, 1, 1
         return (32, 4, 2) if segments > 16 else None
     if sliding_window == 0 or sliding_window >= 2048:
-        return 16, 2, 1
+        return (16, 4, 1) if head_size_padded == 512 else (16, 2, 1)
     return {64: (32, 1, 1), 128: (16, 1, 1)}.get(head_size_padded)
 
 
@@ -1259,18 +1260,6 @@ def unified_attention(
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
 
-    # gfx1201 decode: switch to the 2D kernel at half the threshold
-    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Multi-token
-    # queries and fp8 KV caches keep the full threshold.
-    if (
-        is_gfx1201
-        and max_seqlen_q == 1
-        and k.element_size() == 2
-        and seq_threshold_3D is not None
-        and not is_batch_invariant
-    ):
-        seq_threshold_3D = max(1, seq_threshold_3D // 2)
-
     # Launch the 2D kernel if
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
     #    rows than query tokens, or
@@ -1370,8 +1359,10 @@ def unified_attention(
                     max_rows
                 ):
                     segments //= 2
-                if segments > num_par_softmax_segments:
-                    num_par_softmax_segments = segments
+                # The tuned launch also runs the default segment count without a
+                # sliding window.
+                if segments > num_par_softmax_segments or sliding_window_val == 0:
+                    num_par_softmax_segments = max(segments, num_par_softmax_segments)
                     TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
                         _GFX1100_3D_CONFIGS[head_size_padded][1]
                     )
