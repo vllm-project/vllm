@@ -66,6 +66,27 @@ def _strip_partial_delim(value: str) -> str:
     return value
 
 
+_BARE_VALUE_STOPS = frozenset(":,[]{} \n\t")
+
+
+def _skip_string(text: str, i: int) -> int:
+    """Return the index after the string that the `STRING_DELIM` at *i* opens.
+
+    A delimiter right after bare value text closes a string whose opening
+    delimiter the model dropped, so it is skipped alone instead of being
+    paired with the next opener.
+    """
+    end = i + _DELIM_LEN
+    if (
+        i > 0
+        and text[i - 1] not in _BARE_VALUE_STOPS
+        and not text.endswith(STRING_DELIM, 0, i)
+    ):
+        return end
+    close = text.find(STRING_DELIM, end)
+    return len(text) if close == -1 else close + _DELIM_LEN
+
+
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     return _parse_gemma4_fields(args_str, partial=partial)[0]
 
@@ -151,9 +172,7 @@ def _parse_gemma4_fields(
             while i < n and depth > 0:
                 if args_str.startswith(STRING_DELIM, i):
                     # Skip over string contents to avoid counting { inside strings
-                    i += _DELIM_LEN
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + _DELIM_LEN
+                    i = _skip_string(args_str, i)
                     continue
                 if args_str[i] == "{":
                     depth += 1
@@ -173,9 +192,7 @@ def _parse_gemma4_fields(
             i += 1
             while i < n and depth > 0:
                 if args_str.startswith(STRING_DELIM, i):
-                    i += _DELIM_LEN
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + _DELIM_LEN
+                    i = _skip_string(args_str, i)
                     continue
                 if args_str[i] == "[":
                     depth += 1
@@ -202,7 +219,7 @@ def _parse_gemma4_fields(
                     i,
                 )
                 break
-            raw_val = args_str[val_start:i].strip()
+            raw_val = args_str[val_start:i].strip().removesuffix(STRING_DELIM)
             if partial and raw_val.endswith("."):
                 # Digits may still arrive (e.g. "108." -> "108.2");
                 # withhold to avoid corrupting the streaming diff.
@@ -238,9 +255,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             i += 1
             while i < n and depth > 0:
                 if arr_str.startswith(STRING_DELIM, i):
-                    i += _DELIM_LEN
-                    nd = arr_str.find(STRING_DELIM, i)
-                    i = nd + _DELIM_LEN if nd != -1 else n
+                    i = _skip_string(arr_str, i)
                     continue
                 if arr_str[i] == "{":
                     depth += 1
@@ -258,9 +273,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             i += 1
             while i < n and depth > 0:
                 if arr_str.startswith(STRING_DELIM, i):
-                    i += _DELIM_LEN
-                    nd = arr_str.find(STRING_DELIM, i)
-                    i = nd + _DELIM_LEN if nd != -1 else n
+                    i = _skip_string(arr_str, i)
                     continue
                 if arr_str[i] == "[":
                     depth += 1
@@ -285,7 +298,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     i,
                 )
                 break
-            raw_val = arr_str[val_start:i].strip()
+            raw_val = arr_str[val_start:i].strip().removesuffix(STRING_DELIM)
             if partial and raw_val.endswith("."):
                 break
             items.append(raw_val)
