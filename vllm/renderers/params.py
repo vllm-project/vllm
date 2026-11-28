@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 import vllm.envs as envs
@@ -195,9 +196,14 @@ class TokenizeParams:
     truncation_side: Literal["left", "right"] | None = None
     """
     Which side to truncate from when `truncate_prompt_tokens` is active:
-    - `"right"` keeps the first N tokens (truncate from the end).
-    - `"left"`  keeps the last  N tokens (truncate from the start).
+    - `"left"`  truncates from the start.
+    - `"right"` truncates from the end.
     - `None`    falls back to the tokenizer default.
+
+    With `"left"` or `"right"`, special tokens that the tokenizer adds to a text
+    prompt take slots within the limit and are kept, unless there are more of
+    them than the limit. Token-ID prompts, multimodal prompts and cross-encoder
+    query/document pairs are sliced without this exception.
     """
 
     do_lower_case: bool = False
@@ -527,6 +533,48 @@ class TokenizeParams:
 
         return slice(0, max_length)
 
+    def _truncation_indices(
+        self, tokenizer: TokenizerLike | None, prompt: dict[str, Any]
+    ) -> list[int] | None:
+        """The indices of the prompt tokens that truncation keeps when it
+        spares the special tokens that the tokenizer added to a text prompt.
+
+        `prompt_special_tokens_mask` marks those tokens. HF-family renderers
+        attach it when the side is explicit and the tokenizer adds special
+        tokens, since an explicit side turns off the tokenizer's own
+        truncation (see `get_encode_kwargs`). As that truncation does, all of
+        them are kept and only the text is truncated.
+
+        `None` means `_truncation_slice` applies as it is: the prompt needs no
+        truncation, the tokenizer added no tokens, or there is no room for
+        them. Multimodal prompts are always sliced, as
+        `BaseRenderer._truncate_expanded_prompt` does again once their
+        placeholders expand.
+        """
+        mask = prompt.get("prompt_special_tokens_mask")
+        if (
+            mask is None
+            or prompt.get("multi_modal_data")
+            or prompt.get("multi_modal_uuids")
+        ):
+            return None
+
+        truncation = self._truncation_slice(tokenizer, len(mask))
+        if truncation is None:
+            return None
+
+        start, stop, _ = truncation.indices(len(mask))
+        added = [i for i, is_added in enumerate(mask) if is_added]
+        num_text = stop - start - len(added)
+        if not added or num_text < 0:
+            return None
+
+        # Only the text is truncated, from the same side as `truncation`. Walk
+        # in from that side and stop once the text that fits is collected.
+        order = range(len(mask)) if start == 0 else reversed(range(len(mask)))
+        text = islice((i for i in order if not mask[i]), num_text)
+        return sorted([*added, *text])
+
     def _tokenizer_truncation_probe(self, num_tokens: int) -> "TokenizeParams | None":
         """Params to re-encode a text prompt with one more token of room.
 
@@ -626,6 +674,15 @@ class TokenizeParams:
 
         This method is run after tokenization occurs.
         """
+        prompt_dict = cast(dict, prompt)
+        # Select what truncation keeps when it must spare the tokens that the
+        # tokenizer added. The prompt then fits, so the slicing below cuts
+        # nothing more.
+        if (kept := self._truncation_indices(tokenizer, prompt_dict)) is not None:
+            for key in ("prompt_token_ids", *_PARALLEL_TO_PROMPT_TOKENS):
+                if (values := prompt_dict.get(key)) is not None:
+                    prompt_dict[key] = [values[i] for i in kept]
+
         if "prompt_token_ids" in prompt:
             prompt["prompt_token_ids"] = self._validate_tokens(
                 tokenizer,
@@ -636,7 +693,6 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
-        prompt_dict = cast(dict, prompt)
         for key in _PARALLEL_TO_PROMPT_TOKENS:
             parallel = prompt_dict.get(key)
             if parallel is None:

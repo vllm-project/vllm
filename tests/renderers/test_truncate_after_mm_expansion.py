@@ -122,6 +122,30 @@ def test_no_truncation_requested_is_noop():
     assert engine_input["prompt_token_ids"] == list(range(147))
 
 
+@pytest.mark.parametrize(
+    "mm_fields",
+    [
+        {"multi_modal_data": {"audio": (np.zeros(16000, dtype=np.float32), 16000)}},
+        {"multi_modal_uuids": {"audio": ["audio-0"]}},
+    ],
+)
+@pytest.mark.parametrize(
+    ("side", "expected"), [("left", [11, 12, 2]), ("right", [1, 10, 11])]
+)
+def test_unexpanded_prompt_spares_no_special_tokens(mm_fields, side, expected):
+    """Unlike a text prompt, the tokens that the tokenizer added are sliced
+    like the rest, as `_truncate_expanded_prompt` slices the expanded prompt."""
+    prompt = {
+        "prompt_token_ids": [1, 10, 11, 12, 2],
+        "prompt_special_tokens_mask": [1, 0, 0, 0, 1],
+        **mm_fields,
+    }
+
+    _params(3, side=side).apply_post_tokenization(None, prompt)
+
+    assert prompt["prompt_token_ids"] == expected
+
+
 def test_mixed_prompt_embeds_truncation_covers_embeds_spans():
     """Bound in _process_singleton, where prompt_embeds spans are already attached."""
     model_config = ModelConfig(

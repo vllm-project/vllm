@@ -10,6 +10,8 @@ from typing import Any
 import pybase64
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
+from transformers import TokenizersBackend
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,9 +19,19 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
-from vllm.renderers.hf import HfRenderer
+from vllm.renderers.cohere import CohereRenderer
+from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
+from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
+from vllm.renderers.hf import HfRenderer, tokenize_prompt
+from vllm.renderers.inkling import InklingRenderer
+from vllm.renderers.inkling_encoding import (
+    OPTIONAL_SPECIAL_TOKENS,
+    SPECIAL_TOKEN_SPELLINGS,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.kimi_k3 import KimiK3Renderer
 from vllm.renderers.registry import RENDERER_REGISTRY
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -98,6 +110,31 @@ class DummyTokenizer:
         return {"input_ids": self.encode(text, **kwargs)}
 
 
+def _cls_sep_tokenizer(*words: str, **kwargs: Any) -> TokenizersBackend:
+    """A real HF tokenizer that wraps every prompt in `[CLS] ... [SEP]`.
+
+    `words` are added to the vocab after `a` to `j`.
+    """
+    vocab = {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2}
+    vocab |= {
+        word: i for i, word in enumerate([*"abcdefghij", *words], start=len(vocab))
+    }
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        **kwargs,
+    )
+    return get_cached_tokenizer(tokenizer)
+
+
 def _build_renderer(
     model_config: MockModelConfig,
     *,
@@ -170,7 +207,9 @@ def hf_renderer_config(tmp_path):
 @pytest.mark.parametrize(
     ("truncation_side", "limit", "expected"),
     [
-        ("left", 3, "<bos> Hello world"),
+        # Truncation keeps the BOS token that the tokenizer adds, which is not
+        # echoed. The `<bos>` spelled in the prompt is text and can be cut.
+        ("left", 3, "Hello world"),
         ("right", 3, "<bos> Hello"),
         (None, 3, "<bos> Hello"),
         # Fits exactly: not truncated, so the double space is not decoded away.
@@ -566,6 +605,113 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert len(results[0]["prompt_token_ids"]) == 5
         assert results[0]["prompt_token_ids"] == list(range(5))
+
+    @pytest.mark.parametrize("truncation_side", ["left", "right"])
+    @pytest.mark.parametrize(
+        "renderer_cls",
+        [
+            HfRenderer,
+            CohereRenderer,
+            DeepseekV32Renderer,
+            DeepseekV4Renderer,
+            DeepseekV41Renderer,
+            InklingRenderer,
+            KimiK3Renderer,
+        ],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_explicit_side_keeps_special_tokens(self, renderer_cls, truncation_side):
+        """Truncating from an explicit side must keep the tokens that the
+        tokenizer adds, as the tokenizer's own truncation does."""
+        # Inkling looks up its framing tokens in the vocab when it is built.
+        inkling_tokens = [
+            spellings[0]
+            for token, spellings in SPECIAL_TOKEN_SPELLINGS.items()
+            if token not in OPTIONAL_SPECIAL_TOKENS
+        ]
+        renderer = renderer_cls(
+            MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+            tokenizer=_cls_sep_tokenizer(*inkling_tokens),
+        )
+        text = "a b c d e f g h i j"
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side=truncation_side,
+                return_token_offsets=True,
+            ),
+        )
+
+        expected = _cls_sep_tokenizer(truncation_side=truncation_side)(
+            text, truncation=True, max_length=5, return_offsets_mapping=True
+        )
+        # `.get`, as the result is typed as any `TokPrompt` and not every
+        # member of that union has these keys.
+        assert results[0].get("prompt_token_ids") == expected["input_ids"]
+        if renderer._can_produce_offsets():
+            assert results[0].get("prompt_token_offsets") == expected["offset_mapping"]
+
+    @pytest.mark.parametrize(
+        ("truncate_prompt_tokens", "truncation_side", "expected"),
+        [
+            # Room for `[CLS]` (1) and `[SEP]` (2) only: no text is left.
+            (2, "left", [1, 2]),
+            (2, "right", [1, 2]),
+            # Less room than the special tokens need: the plain slice applies.
+            (1, "left", [2]),
+            (1, "right", [1]),
+        ],
+    )
+    def test_explicit_side_special_tokens_at_the_limit(
+        self, truncate_prompt_tokens, truncation_side, expected
+    ):
+        """When the limit only fits the tokens that the tokenizer added, they
+        stay and no text does; when it can't fit them, the prompt is sliced."""
+        renderer = HfRenderer(
+            MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+            tokenizer=_cls_sep_tokenizer(),
+        )
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "a b c d e f g h i j")
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                truncation_side=truncation_side,
+            ),
+        )
+
+        assert results[0].get("prompt_token_ids") == expected
+
+    @pytest.mark.parametrize(
+        ("add_special_tokens", "needs_detokenization", "wants_mask"),
+        [(True, False, True), (False, True, True), (False, False, False)],
+    )
+    def test_explicit_side_requests_mask_only_when_used(
+        self, add_special_tokens, needs_detokenization, wants_mask
+    ):
+        """The mask serves the tokens that the tokenizer adds and the echo.
+        With neither, as on the default chat path, it isn't requested."""
+        params = TokenizeParams(
+            max_total_tokens=100,
+            truncate_prompt_tokens=3,
+            truncation_side="left",
+            add_special_tokens=add_special_tokens,
+            needs_detokenization=needs_detokenization,
+        )
+
+        tokenized = tokenize_prompt(_cls_sep_tokenizer(), {"prompt": "a b c d"}, params)
+
+        assert ("prompt_special_tokens_mask" in tokenized) is wants_mask
 
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.
