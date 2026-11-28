@@ -9,6 +9,7 @@ majority of storage I/O for MoE models (experts typically account for
 """
 
 import regex as re
+from torch import nn
 
 # Matches per-expert weight names like ".experts.42.gate_proj.weight".
 # Does NOT match 3D fused-expert names like ".experts.gate_proj.weight"
@@ -97,6 +98,34 @@ def compute_eplb_local_expert_ids(
         num_experts, num_redundant_experts
     )
     return {initial_map[p] for p in local_physical}
+
+
+def moe_layer_partitions(model: nn.Module) -> set[tuple[int, str]]:
+    """Return the ``(num_logical_experts, placement)`` pairs that the MoE
+    layers of *model* split across EP ranks.
+
+    A layer's count can differ from the model config's, as in a draft model
+    or experts padded to a multiple of the EP size. Only ``RoutedExperts``
+    and ``DeepGemmMegaMoEExperts`` layers are found.
+    """
+    # Lazy: this module is imported by weight_utils.
+    from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+        DeepGemmMegaMoEExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    partitions: set[tuple[int, str]] = set()
+    for module in model.modules():
+        if isinstance(module, RoutedExperts):
+            partitions.add(
+                (
+                    module.moe_config.num_logical_experts,
+                    module.expert_map_manager.placement_strategy,
+                )
+            )
+        elif isinstance(module, DeepGemmMegaMoEExperts):
+            partitions.add((module.num_logical_experts, "linear"))
+    return partitions
 
 
 def should_skip_weight(
