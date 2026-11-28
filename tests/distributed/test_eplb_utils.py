@@ -258,19 +258,20 @@ def test_log_balancedness_from_physical_load(monkeypatch):
         log2phy=torch.full((1, 3, 2), -1, dtype=torch.long),
         logcnt=torch.tensor([[2, 1, 1]]),
     )
-    model_state.expert_load_pass = torch.tensor([[4, 3, 3]])
+    # With physical counts the kernel leaves the logical pass untouched.
+    model_state.expert_load_pass = torch.zeros((1, 3), dtype=torch.long)
     model_state.expert_load_window = torch.zeros((1, 1, 3), dtype=torch.long)
     # Sized to the map buffer, wider than the active map.
-    model_state.physical_load_pass = torch.tensor([[4, 3, 3, 0, 0, 0]])
+    model_state.physical_load_pass = torch.tensor([[4, 3, 3, 1, 0, 0]])
     state.model_states = {"m": model_state}
 
     state.step(log_stats=True)
     state._maybe_log_balancedness()
 
     avg_tokens, max_tokens, balancedness = logger.info.call_args.args[3:6]
-    assert (avg_tokens, max_tokens, balancedness) == (5.0, 7.0, 5.0 / 7.0)
-    assert model_state.expert_load_window[0].tolist() == [[4, 3, 3]]
-    assert not model_state.expert_load_pass.any()
+    assert (avg_tokens, max_tokens, balancedness) == (5.5, 7.0, 5.5 / 7.0)
+    # The window row is the physical counts folded to logical experts.
+    assert model_state.expert_load_window[0].tolist() == [[5, 3, 3]]
     assert not model_state.physical_load_pass.any()
 
 

@@ -1055,8 +1055,10 @@ def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
         assert torch.equal(physical_to_logical[mapped[valid]], logical[valid])
         recorded = valid & unpadded if record else torch.zeros_like(valid)
         expected_load = torch.bincount(logical[recorded], minlength=8)
-        assert torch.equal(load.cpu(), expected_load.to(load.dtype))
-        if physical_load is not None:
+        if physical_load is None:
+            assert torch.equal(load.cpu(), expected_load.to(load.dtype))
+        else:
+            assert not load.any()
             expected_physical = torch.bincount(mapped[recorded], minlength=num_physical)
             assert torch.equal(physical_load.cpu(), expected_physical.to(load.dtype))
     # Tokens spread over the replicas of a replicated expert.

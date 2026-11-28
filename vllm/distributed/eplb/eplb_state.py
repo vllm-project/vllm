@@ -773,9 +773,20 @@ class EplbState:
             should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
                 if should_record:
-                    eplb_model_state.expert_load_window[
+                    window_row = eplb_model_state.expert_load_window[
                         self.expert_load_window_step
-                    ].copy_(eplb_model_state.expert_load_pass)
+                    ]
+                    physical_load = eplb_model_state.physical_load_pass
+                    if physical_load is None:
+                        window_row.copy_(eplb_model_state.expert_load_pass)
+                    else:
+                        # No map commit happened since these loads were recorded.
+                        p2l = eplb_model_state.physical_to_logical_map
+                        window_row.zero_().scatter_add_(
+                            1,
+                            p2l.clamp(min=0).long(),
+                            physical_load[:, : p2l.shape[1]],
+                        )
                     eplb_model_state.reset_load_pass()
 
             if should_record:

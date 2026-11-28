@@ -1167,8 +1167,8 @@ def test_eplb_map_num_unpadded_tokens(
 
 
 def test_eplb_map_records_exact_physical_load():
-    """Logical and physical views count the same unpadded tokens, and the physical
-    view matches where each token was actually routed."""
+    """The physical view matches where each unpadded token was actually routed,
+    and the logical view is left alone when the physical one is given."""
     l2p = torch.tensor([[0, 1], [2, -1], [3, -1]], dtype=torch.int64, device=DEVICE)
     rc = torch.tensor([2, 1, 1], dtype=torch.int64, device=DEVICE)
     load = torch.zeros(3, dtype=torch.int32, device=DEVICE)
@@ -1190,8 +1190,7 @@ def test_eplb_map_records_exact_physical_load():
         physical_load_view=physical_load,
     )
 
-    logical_counts = torch.bincount(ids[:num_unpadded].flatten(), minlength=3)
     physical_counts = torch.bincount(out[:num_unpadded].flatten(), minlength=6)
-    assert torch.equal(load, logical_counts.to(load.dtype))
+    assert not load.any()
     assert torch.equal(physical_load, physical_counts.to(physical_load.dtype))
     assert (physical_load[:2] > 0).all()
