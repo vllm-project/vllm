@@ -9,6 +9,7 @@ model alternates between state space model layers and attention-based layers.
 """
 
 from collections.abc import Iterable
+from functools import partial
 from itertools import cycle
 from typing import Any
 
@@ -47,6 +48,24 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+
+
+def _broadcast_kv_cache_scales(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    attention_indices: dict[str, list[int]],
+    scale_mapper: WeightsMapper,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Give each use of a shared attention block its checkpoint KV scales."""
+    for name, weight in weights:
+        mapped_name = scale_mapper.map_name(name)
+        if mapped_name is not None:
+            prefix, _, scale_name = mapped_name.rpartition(".attn.")
+            if prefix in attention_indices:
+                for index in attention_indices[prefix]:
+                    yield f"{prefix}.dpa_list.{index}.attn.{scale_name}", weight
+                continue
+        yield name, weight
 
 
 class Zamba2LoRA(nn.Module):
@@ -197,6 +216,7 @@ class Zamba2Attention(nn.Module):
                     self.attention_head_dim,
                     self.scale,
                     cache_config=cache_config,
+                    quant_config=quant_config,
                     prefix=f"{prefix}.attn.{j}",
                 )
                 j += 1
@@ -716,6 +736,8 @@ class Zamba2Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        # Lets AutoWeightsLoader map checkpoint KV-cache scale names.
+        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
 
@@ -923,6 +945,32 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.model = Zamba2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+
+        if (quant_config := vllm_config.quant_config) is not None:
+            attention_indices = {
+                name: [
+                    index
+                    for index, layer in enumerate(module.dpa_list)
+                    if isinstance(layer, Attention)
+                ]
+                for name, module in self.named_modules(remove_duplicate=False)
+                if isinstance(module, Zamba2Attention)
+            }
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                weights_transforms=[
+                    partial(
+                        _broadcast_kv_cache_scales,
+                        attention_indices=attention_indices,
+                        scale_mapper=quant_config.get_cache_scale_mapper(),
+                    )
+                ],
+                # Cache-scale regexes run before these name substitutions.
+                orig_to_new_substr={
+                    f".dpa_list.{index}.attn.": f".dpa_list.{index}."
+                    for indices in attention_indices.values()
+                    for index in indices
+                },
+            )
 
         # Initialize language modeling head
         self.lm_head = ParallelLMHead(
