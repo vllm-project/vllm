@@ -15,7 +15,7 @@ from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .server import ServerProcess
-from .utils import sanitize_filename
+from .utils import sanitize_filename, validate_result_paths
 
 try:
     import pandas as pd
@@ -317,6 +317,12 @@ def run_combs(
     dry_run: bool,
     continue_on_error: bool = False,
 ):
+    validate_result_paths(
+        _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
+        for serve_comb in serve_params
+        for bench_comb in bench_params
+        if _comb_is_valid(serve_comb, bench_comb, link_vars)
+    )
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
         try:
