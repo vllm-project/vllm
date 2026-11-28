@@ -4,7 +4,7 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any
@@ -27,6 +27,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
     MambaManager,
+    ShortConvStateManager,
     SlidingWindowManager,
 )
 from vllm.v1.hisparse.layout import (
@@ -136,6 +137,11 @@ def _check_enough_kv_cache_memory(
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
         )
+
+
+def _num_reserved_blocks(groups: Iterable[KVCacheGroup]) -> int:
+    """BlockPool keeps the null block and, for sparse conv writes, one discard block."""
+    return 1 + any(issubclass(g.manager_cls, ShortConvStateManager) for g in groups)
 
 
 def can_share_block_table(layer_configs: dict[str, KVCacheLayerConfig]) -> bool:
@@ -1407,12 +1413,14 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    # Reserve the null block BlockPool permanently holds back, so auto-fit and
-    # the capacity check both plan against usable blocks. Allocation below
-    # still uses the full memory.
+    # Workers share the scheduler's reserved block IDs. Auto-fit and admission
+    # use the remaining blocks; physical allocation below uses the full pool.
+    reserved_blocks = _num_reserved_blocks(global_kv_cache_groups)
     check_memory = [
         (
-            avail_mem - _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+            avail_mem
+            - reserved_blocks
+            * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
             if groups
             else avail_mem
         )
@@ -1618,13 +1626,11 @@ def shrink_kv_cache_configs(
         ]
         groups = kv_cache_config.kv_cache_groups
         if groups:
-            # The null block is held back by the BlockPool, as in the capacity
-            # check of `get_kv_cache_configs`.
             _check_enough_kv_cache_memory(
                 builder,
                 vllm_config,
                 groups,
-                (num_blocks - 1)
+                (num_blocks - _num_reserved_blocks(groups))
                 * _pool_bytes_per_block_from_builder(builder, vllm_config, groups),
                 after_warmup=True,
             )
@@ -1657,8 +1663,11 @@ def finalize_extensible_kv_cache(
         # graphs and warmup took their share; fit it again to the measured one.
         builder = get_kv_cache_config_builder(vllm_config)
         groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
+        reserved_blocks = _num_reserved_blocks(
+            scheduler_kv_cache_config.kv_cache_groups
+        )
         available_memory = [
-            (num_blocks - 1)
+            (num_blocks - reserved_blocks)
             * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
             if groups
             else 0

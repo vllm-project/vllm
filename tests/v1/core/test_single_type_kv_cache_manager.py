@@ -411,6 +411,11 @@ def test_dflash_window_admission_cap_counts_in_flight_tails():
     # The 7-token window below the processed tokens plus 4 in-flight tokens
     # spans at most 4 blocks, as for plain sliding window.
     assert DFlashSlidingWindowManager.max_admission_blocks(config, 4, 4, 1000) == 4
+    # Every request backs its own tails, so no part of the cap is shared.
+    assert (
+        DFlashSlidingWindowManager.shared_in_flight_reserve_blocks(config, 4, 100, 1000)
+        == 0
+    )
 
 
 @pytest.mark.parametrize(("num_tokens", "num_reserved_blocks"), [(5, 2), (200, 12)])

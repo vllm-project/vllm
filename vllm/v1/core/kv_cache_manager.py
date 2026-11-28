@@ -538,6 +538,8 @@ class KVCacheManager:
                 "computed tokens to adopt"
             )
 
+        self.coordinator.set_reachable_boundaries(request)
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
             if self.retained_hit_group_ids:

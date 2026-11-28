@@ -516,8 +516,9 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
-        self._parked_reservations: dict[Request, int] = {}
-        self._parked_reserved_blocks = 0
+        self._parked_reservations: dict[Request, tuple[int, int]] = {}
+        self._parked_resident_blocks = 0
+        self._parked_in_flight_blocks = 0
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
         # None when not tracked (no KV connector, or no stats or load cap).
@@ -3716,13 +3717,15 @@ class Scheduler(SchedulerInterface):
             }
         return delay_free or partial_tail_delay, kv_xfer_params
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to hold its full sequence and be promoted."""
+    def _request_remaining_blocks(self, request: Request) -> tuple[int, int]:
+        """Blocks `request` still needs to hold its full sequence and be promoted,
+        split into its own and those backing its in-flight tokens."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
         num_tokens = full_num_tokens
         if self.num_spec_tokens:
             num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        coordinator = self.kv_cache_manager.coordinator
+        num_blocks = coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -3733,6 +3736,10 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
+        num_in_flight_blocks = min(
+            num_blocks, coordinator.get_num_in_flight_share_blocks(num_tokens)
+        )
+        return num_blocks - num_in_flight_blocks, num_in_flight_blocks
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
         kv_fetch_stages = self._kv_fetch_stages
@@ -3746,9 +3753,18 @@ class Scheduler(SchedulerInterface):
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-        return self._parked_reserved_blocks + sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+        num_resident = self._parked_resident_blocks
+        num_in_flight = self._parked_in_flight_blocks
+        for request in self._inflight_prefills:
+            resident, in_flight = self._request_remaining_blocks(request)
+            num_resident += resident
+            num_in_flight += in_flight
+        # The token budget bounds in-flight tokens across all requests, so
+        # they share one reserve instead of each holding its own.
+        shared_reserve = (
+            self.kv_cache_manager.coordinator.shared_in_flight_reserve_blocks
         )
+        return num_resident + min(num_in_flight, shared_reserve)
 
     def _reserve_parked(self, request: Request) -> None:
         """Cache a parked async KV load's reservation. Set when parked and refreshed
@@ -3757,13 +3773,18 @@ class Scheduler(SchedulerInterface):
             # HiSparse's depends on free host blocks, so it is summed on demand.
             self._inflight_prefills.add(request)
             return
-        blocks = self._request_remaining_blocks(request)
-        cached = self._parked_reservations.get(request, 0)
-        self._parked_reserved_blocks += blocks - cached
-        self._parked_reservations[request] = blocks
+        resident, in_flight = self._request_remaining_blocks(request)
+        cached_resident, cached_in_flight = self._parked_reservations.get(
+            request, (0, 0)
+        )
+        self._parked_resident_blocks += resident - cached_resident
+        self._parked_in_flight_blocks += in_flight - cached_in_flight
+        self._parked_reservations[request] = (resident, in_flight)
 
     def _unreserve_parked(self, request: Request) -> None:
-        self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)
+        resident, in_flight = self._parked_reservations.pop(request, (0, 0))
+        self._parked_resident_blocks -= resident
+        self._parked_in_flight_blocks -= in_flight
 
     def _load_restores_replay_window(self, request: Request) -> bool:
         """Whether the KV connector's load for `request` restores every DSV41

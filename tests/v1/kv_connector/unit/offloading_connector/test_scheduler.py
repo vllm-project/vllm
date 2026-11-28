@@ -76,7 +76,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import DISCARD_BLOCK_ID, BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -96,6 +96,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     HiSparseSourceManager,
+    ShortConvStateManager,
     SlidingWindowManager,
 )
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -7097,6 +7098,64 @@ def test_retention_interval_zero_stores_only_replay_boundaries(
             (1, 14),
             *(() if num_lookahead else ((1, 15),)),
         ),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_short_conv_history_stores_and_loads_only_reachable_tails(
+    request_runner, async_scheduling: bool, enable_prefix_caching: bool
+):
+    spec_kwargs: dict[str, Any] = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=200,
+        async_scheduling=async_scheduling,
+        enable_prefix_caching=enable_prefix_caching,
+        kv_cache_groups=[
+            make_kv_cache_group(["full"], AttentionSpec(block_size=16, **spec_kwargs)),
+            make_kv_cache_group(
+                ["conv"],
+                ShortConvStateManager.layer_config(
+                    AttentionSpec(block_size=4, **spec_kwargs),
+                    sliding_window=4,
+                    max_in_flight_steps=2,
+                ),
+            ),
+        ],
+        retention_interval=0,
+    )
+    stored_keys: set[OffloadKey] = set()
+
+    def store(keys, req_context, trigger):
+        stored_keys.update(keys)
+        return generate_store_output(keys)
+
+    runner.manager.prepare_store.side_effect = store
+    runner.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT if key in stored_keys else LookupResult.MISS
+    )
+    conv_block_ids: list[int] = []
+
+    def record_conv_block_ids():
+        for req_status in runner.connector_scheduler._req_status.values():
+            conv_block_ids.extend(req_status.group_states[1].block_ids)
+
+    prompt = list(range(100))
+    runner.new_request(token_ids=prompt)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(*((0, i) for i in range(6)), (1, 23)),
+        post_step_fn=record_conv_block_ids,
+    )
+    assert 0 in conv_block_ids and DISCARD_BLOCK_ID not in conv_block_ids
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=prompt + list(range(1000, 1040)))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(*((0, i) for i in range(6)), (1, 23)),
+        expected_stored=((0, 6), (0, 7), (1, 31)),
     )
 
 

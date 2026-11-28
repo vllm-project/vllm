@@ -8747,8 +8747,9 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     scheduler.schedule()
 
     assert [call.args[0].request_id for call in remaining.call_args_list] == new_ids
-    parked = scheduler._parked_reservations
-    assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
+    reservations = [remaining(r) for r in scheduler._parked_reservations]
+    assert scheduler._parked_resident_blocks == sum(r for r, _ in reservations) > 0
+    assert scheduler._parked_in_flight_blocks == sum(f for _, f in reservations)
 
 
 def test_failed_load_reservation_keeps_new_async_loads_out():
@@ -8812,7 +8813,8 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     def check_reservations():
         parked = s._parked_reservations
         assert parked == {r: s._request_remaining_blocks(r) for r in parked}
-        assert s._parked_reserved_blocks == sum(parked.values())
+        assert s._parked_resident_blocks == sum(r for r, _ in parked.values())
+        assert s._parked_in_flight_blocks == sum(f for _, f in parked.values())
         if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
             events.add("promoted_load_held")
         # The queues' tally follows every transition too.
