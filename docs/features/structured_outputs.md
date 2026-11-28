@@ -49,6 +49,14 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
+`--structured-outputs-config.disable_any_whitespace=True` makes JSON output
+compact, without any whitespace. It requires
+`--structured-outputs-config.backend` set to `xgrammar` or `guidance`. A single
+request can override it with `{"structured_outputs": {"disable_any_whitespace": true}}`
+(or `false`), or `StructuredOutputsParams(disable_any_whitespace=...)` offline;
+if the field is omitted, the server setting applies. Setting it to
+`true` on a request whose backend is not xgrammar or guidance returns HTTP 400.
+
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code

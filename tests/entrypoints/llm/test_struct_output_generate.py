@@ -1045,3 +1045,42 @@ def test_structured_output_with_structural_tag(backend: str, vllm_runner):
             assert "hello_flag" in generated_text, (
                 f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
             )
+
+
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_request_level_disable_any_whitespace(backend: str, vllm_runner):
+    """Request-level `disable_any_whitespace` overrides the server default.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/48765.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+    }
+    prompt = (
+        "<|im_start|>user\nGive a pretty-printed JSON object for a person "
+        "named John who is 30.<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+    def generate(**kwargs) -> str:
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=100,
+            structured_outputs=StructuredOutputsParams(json=schema, **kwargs),
+        )
+        output = runner.llm.generate(prompt, sampling_params=sampling_params)[0]
+        text = output.outputs[0].text
+        jsonschema.validate(instance=json.loads(text), schema=schema)
+        return text
+
+    with vllm_runner(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        max_model_len=1024,
+        structured_outputs_config=dict(backend=backend, disable_any_whitespace=False),
+    ) as runner:
+        compact = generate(disable_any_whitespace=True)
+        generate()
+
+    outside_strings = re.sub(r'"(?:[^"\\]|\\.)*"', "", compact)
+    assert not re.search(r"\s", outside_strings), compact
