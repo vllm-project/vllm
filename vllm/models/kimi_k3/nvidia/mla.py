@@ -53,6 +53,7 @@ from vllm.model_executor.layers.attention.attention import (
     should_load_quant_weights,
 )
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonMetadataBuilder,
     _get_kv_b_proj_input_dtype,
     accumulate_mla_context_chunk,
     init_mla_context_partial,
@@ -326,6 +327,31 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
+        vllm_config = get_current_vllm_config()
+        # `_forward_prefill_fused` runs a plain fp8 cache only with an fp8 query.
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "fp8_ds_mla"
+            and MLACommonMetadataBuilder.determine_prefill_query_data_type(
+                vllm_config, dtype
+            )
+            != current_platform.fp8_dtype()
+        ):
+            attention_config = vllm_config.attention_config
+            prefill_backend = attention_config.mla_prefill_backend
+            raise ValueError(
+                f"Kimi-K3 with --kv-cache-dtype {self.kv_cache_dtype} needs an "
+                "fp8 prefill query: set use_prefill_query_quantization and an "
+                "MLA prefill backend that takes an fp8 query, such as "
+                "TRTLLM_RAGGED, on an SM100-family GPU. Got "
+                "use_prefill_query_quantization="
+                f"{attention_config.use_prefill_query_quantization}, "
+                "mla_prefill_backend="
+                f"{prefill_backend.name if prefill_backend else 'auto'}. Pass "
+                '--attention-config \'{"use_prefill_query_quantization": true, '
+                '"mla_prefill_backend": "TRTLLM_RAGGED"}\', or use '
+                "--kv-cache-dtype bfloat16."
+            )
         self.attn_backend = get_attn_backend(
             self.head_size,
             dtype,
@@ -370,7 +396,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
 
-        vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         assert parallel_config.prefill_context_parallel_size == 1, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
