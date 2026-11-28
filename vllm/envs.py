@@ -352,6 +352,7 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_XPU_SUPPORT_FP8_QUERY: bool | None = None
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+    VLLM_XPU_USE_CUSTOM_ALLREDUCE: bool = False
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
@@ -2400,6 +2401,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
+    ),
+    # Opt in to the Level Zero IPC all-reduce on XPU for small messages in
+    # single-node 2-rank TP, analogous to CUDA's custom all-reduce. Larger
+    # messages, other collectives and unmet preconditions use oneCCL.
+    "VLLM_XPU_USE_CUSTOM_ALLREDUCE": lambda: bool(
+        int(os.getenv("VLLM_XPU_USE_CUSTOM_ALLREDUCE", "0"))
     ),
     # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
     # "auto" keeps the default preference order (ARK when importable, else the
