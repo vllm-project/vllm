@@ -143,7 +143,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        return self.connector_worker.get_finished(finished_req_ids)
+        finished_sending, finished_recving = self.connector_worker.get_finished(
+            finished_req_ids
+        )
+        finished_sending.update(self._connector_metadata.finished_store_reqs)
+        return finished_sending, finished_recving
 
     def get_transfer_results(
         self, finished_req_ids: set[str]
@@ -219,9 +223,23 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_pending_push_work()
 
+    def has_pending_block_frees(self) -> bool:
+        return self.scheduler.has_pending_block_frees()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.update_connector_output(connector_output)
+        self.scheduler.update_connector_output(connector_output)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        if not self._kv_transfer_config.is_kv_producer:
+            return False
+        return self.scheduler.register_finished_partial_tail(
+            request, block_ids, partial_tail_offloads
+        )
 
     def request_finished(
         self,
@@ -250,8 +268,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return "LBHNC"
 
     def reset_cache(self) -> bool | None:
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.reset_cache()
+        self.scheduler.reset_cache()
         return True
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:

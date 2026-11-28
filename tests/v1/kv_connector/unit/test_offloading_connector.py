@@ -159,6 +159,56 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
         )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_cpu_offloading_finished_partial_tail(monkeypatch):
+    """An aborted producer's partial tail remains usable after GPU cache reset."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    boundary = 16
+    llm = LLM(
+        model="vllm-project/Qwen3.5-0.8B-text-only",
+        max_model_len=512,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
+        async_scheduling=False,
+        skip_tokenizer_init=True,
+        enable_prefix_caching=True,
+        prefix_match_unit=boundary,
+        additional_config={"gdn_prefill_backend": "triton"},
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"cpu_bytes_to_use": 64 << 20},
+        ),
+    )
+    engine = llm.llm_engine
+    prompt = TokensPrompt(prompt_token_ids=list(range(32, 33 + boundary)))
+    params = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
+    try:
+        engine.add_request("producer", prompt, params)
+        assert engine.step() == []
+        engine.abort_request(["producer"])
+        _wait_for_prefix_cache_reset(llm)
+
+        [reloaded] = llm.generate(prompt, params, use_tqdm=False)
+        assert reloaded.num_cached_tokens == boundary
+
+        cold_params = SamplingParams(
+            temperature=0,
+            max_tokens=1,
+            detokenize=False,
+            skip_reading_prefix_cache=True,
+        )
+        [cold] = llm.generate(prompt, cold_params, use_tqdm=False)
+        assert cold.num_cached_tokens == 0
+        assert reloaded.outputs[0].token_ids == cold.outputs[0].token_ids
+    finally:
+        engine.engine_core.shutdown()
+
+
 def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
     # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947

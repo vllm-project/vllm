@@ -43,6 +43,10 @@ from vllm.config import (
 )
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiKVConnectorMetadata,
+    MultiKVConnectorWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
     scheduler as scheduler_module,
 )
@@ -104,9 +108,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
+    KVCacheTensor,
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
     GPULoadStoreSpec,
     LookupResult,
     Medium,
@@ -662,12 +668,11 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -720,6 +725,350 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     )
 
 
+def _make_finished_partial_tail_engine(
+    *,
+    store_threshold: int = 1,
+    worker_count: int = 1,
+    blocks_per_chunk: int = 1,
+    cpu_bytes_to_use: int = 16 << 20,
+    attention_block_size: int = 16,
+    multi_connector: bool = False,
+):
+    offloading_config = {
+        "cpu_bytes_to_use": cpu_bytes_to_use,
+        "store_threshold": store_threshold,
+        "blocks_per_chunk": blocks_per_chunk,
+    }
+    extra_config: dict[str, Any] = offloading_config
+    if multi_connector:
+        extra_config = {
+            "connectors": [
+                {
+                    "kv_connector": "OffloadingConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": offloading_config,
+                }
+                for _ in range(2)
+            ]
+        }
+    config = create_vllm_config(
+        block_size=attention_block_size,
+        kv_connector="MultiConnector" if multi_connector else "OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    config.scheduler_config.async_scheduling = False
+    config.cache_config.prefix_match_unit = 4
+    config.parallel_config.world_size = worker_count
+    caches = _make_mamba_hybrid_kv_cache_config()
+    if attention_block_size != 16:
+        full_group = caches.kv_cache_groups[0]
+        full_spec = replace(
+            full_group.distinct_specs[0], block_size=attention_block_size
+        )
+        caches.kv_cache_groups[0] = make_kv_cache_group(
+            list(full_group.layer_names), full_spec
+        )
+    caches.cache_hit_alignment_tokens = 4
+    caches.num_blocks = 16
+    caches.kv_cache_tensors = [
+        KVCacheTensor(
+            size=group.page_size_bytes * caches.num_blocks,
+            layers=list(group.layer_names),
+            layer_stride=group.page_size_bytes * caches.num_blocks,
+            block_stride=group.page_size_bytes,
+        )
+        for group in caches.kv_cache_groups
+    ]
+    init_none_hash(sha256)
+    return create_scheduler(
+        config, num_blocks=caches.num_blocks, kv_cache_config=caches, hash_block_size=4
+    )
+
+
+def _schedule_partial_tail(
+    engine, *, boundary=12, max_offload_tokens=None, skip_cache_reads=False
+):
+    request = Request(
+        request_id=f"producer-{engine.current_step}",
+        prompt_token_ids=[1] * boundary + [2, 3],
+        sampling_params=SamplingParams(
+            max_tokens=1,
+            skip_reading_prefix_cache=skip_cache_reads,
+            extra_args={
+                "kv_transfer_params": {"max_offload_tokens": max_offload_tokens}
+            },
+        ),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+    engine.add_request(request)
+    step = engine.schedule()
+    assert step.num_scheduled_tokens == {request.request_id: boundary}
+    engine.update_from_output(
+        step, ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]])
+    )
+    blocks = engine.kv_cache_manager.get_blocks(request.request_id).blocks
+    return request, (blocks[0][0], blocks[1][(boundary - 1) // 16])
+
+
+def _report_finished_tail(engine, step, job_id, *, success=True):
+    worker_meta = OffloadingWorkerMetadata()
+    worker_meta.mark_completed(job_id, success=success)
+    engine.update_from_output(
+        step, create_model_runner_output([], kv_connector_worker_meta=worker_meta)
+    )
+
+
+def _ack_finished_tail_release(engine, request, step):
+    metadata = step.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert metadata.finished_store_reqs == {request.request_id}
+    assert request.request_id in engine.requests
+    engine.update_from_output(
+        step,
+        create_model_runner_output([], finished_sending=metadata.finished_store_reqs),
+    )
+    assert request.request_id not in engine.requests
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("attention_block_size", [16, 32])
+def test_finished_partial_tail_is_held_and_reloadable(attention_block_size):
+    boundary = attention_block_size - 4
+    engine = _make_finished_partial_tail_engine(
+        worker_count=2, attention_block_size=attention_block_size
+    )
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    assert connector.scheduler.config.supports_partial_tail
+    request, blocks = _schedule_partial_tail(engine, boundary=boundary)
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    lookup_context = _create_req_context(request, connector.scheduler)
+    keys = [
+        make_offload_key(request.block_hashes[boundary // 4 - 1], g) for g in (0, 1)
+    ]
+    manager = connector.scheduler.manager
+    assert all(manager.lookup(key, lookup_context) is LookupResult.MISS for key in keys)
+    assert request.request_id in engine.requests
+    assert connector.has_pending_block_frees()
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    pool = engine.kv_cache_manager.block_pool
+    allocated = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert {block.block_id for block in blocks}.isdisjoint(
+        block.block_id for block in allocated
+    )
+    pool.free_blocks(allocated)
+
+    step = engine.schedule()
+    metadata = step.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert all(
+        manager.lookup(key, lookup_context) is LookupResult.HIT_PENDING for key in keys
+    )
+    [(job_id, job)] = metadata.store_jobs.items()
+    source = job.src_spec
+    assert isinstance(source, GPULoadStoreSpec)
+    assert source.block_ids.tolist() == [block.block_id for block in blocks]
+    assert source.block_indices == [0, (boundary - 1) // 16]
+    assert source.group_sizes == [1, 1]
+    assert not metadata.finished_store_reqs
+    _report_finished_tail(engine, step, job_id)
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    step = engine.schedule()
+    assert not step.kv_connector_metadata.finished_store_reqs
+    _report_finished_tail(engine, step, job_id)
+    assert connector.has_pending_block_frees()
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    _ack_finished_tail_release(engine, request, engine.schedule())
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+    assert not connector.has_pending_block_frees()
+    assert engine.reset_prefix_cache()
+
+    consumer = create_request(
+        num_tokens=boundary + 2, common_prefix_len=boundary, block_size=4
+    )
+    engine.add_request(consumer)
+    step = engine.schedule()
+    assert consumer.num_computed_tokens == boundary
+    metadata = step.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    [load] = metadata.load_jobs.values()
+    assert load.req_id == consumer.request_id
+    assert isinstance(load.src_spec, BlockIDsLoadStoreSpec)
+    assert isinstance(job.dst_spec, BlockIDsLoadStoreSpec)
+    assert load.src_spec.block_ids.tolist() == job.dst_spec.block_ids.tolist()
+
+
+@pytest.mark.cpu_test
+def test_finished_partial_tail_counts_both_multi_connector_holds():
+    engine = _make_finished_partial_tail_engine(multi_connector=True)
+    request, blocks = _schedule_partial_tail(engine)
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    step = engine.schedule()
+    metadata = step.kv_connector_metadata
+    assert isinstance(metadata, MultiKVConnectorMetadata)
+    assert metadata.extra_async_saves == {request.request_id: 1}
+
+    first, second = metadata.metadata
+    assert isinstance(first, OffloadingConnectorMetadata)
+    assert isinstance(second, OffloadingConnectorMetadata)
+    [first_job] = first.store_jobs
+    [second_job] = second.store_jobs
+    for reports, release_child in (
+        ((OffloadingWorkerMetadata(completed_jobs={first_job: 1}), None), 0),
+        ((None, OffloadingWorkerMetadata(completed_jobs={second_job: 1})), 1),
+    ):
+        engine.update_from_output(
+            step,
+            create_model_runner_output(
+                [], kv_connector_worker_meta=MultiKVConnectorWorkerMetadata(reports)
+            ),
+        )
+        assert [block.ref_cnt for block in blocks] == [1, 1]
+        step = engine.schedule()
+        metadata = step.kv_connector_metadata
+        assert isinstance(metadata, MultiKVConnectorMetadata)
+        for index, child in enumerate(metadata.metadata):
+            assert isinstance(child, OffloadingConnectorMetadata)
+            assert child.finished_store_reqs == (
+                {request.request_id} if index == release_child else set()
+            )
+
+    # The first child's echo was withheld by MultiConnector while the second
+    # store was pending. Core sees the aggregate only after the second echo.
+    engine.update_from_output(
+        step, create_model_runner_output([], finished_sending={request.request_id})
+    )
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+    assert not engine.has_requests()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("config", "max_offload_tokens"),
+    [({}, 0), ({"blocks_per_chunk": 2}, None)],
+    ids=["zero-cap", "unsupported"],
+)
+def test_finished_partial_tail_skips_store_without_holding(config, max_offload_tokens):
+    engine = _make_finished_partial_tail_engine(**config)
+    request, blocks = _schedule_partial_tail(
+        engine, max_offload_tokens=max_offload_tokens
+    )
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in engine.requests
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+    step = engine.schedule()
+    assert not step.kv_connector_metadata.store_jobs
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "config",
+    [{"store_threshold": 2}, {"cpu_bytes_to_use": 1}],
+    ids=["policy-rejection", "no-capacity"],
+)
+def test_finished_partial_tail_releases_when_store_is_declined(config):
+    engine = _make_finished_partial_tail_engine(**config)
+    request, blocks = _schedule_partial_tail(engine)
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+
+    step = engine.schedule()
+    assert not step.kv_connector_metadata.store_jobs
+    _ack_finished_tail_release(engine, request, step)
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+    assert not engine.has_requests()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("already_stored", [False, True])
+def test_finished_partial_tail_does_not_store_duplicate_keys(already_stored):
+    engine = _make_finished_partial_tail_engine()
+    request, blocks = _schedule_partial_tail(engine)
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    step = engine.schedule()
+    [job_id] = step.kv_connector_metadata.store_jobs
+    if already_stored:
+        _report_finished_tail(engine, step, job_id)
+        _ack_finished_tail_release(engine, request, engine.schedule())
+    else:
+        engine.update_from_output(step, create_model_runner_output([]))
+
+    sibling, sibling_blocks = _schedule_partial_tail(engine, skip_cache_reads=True)
+    engine.finish_requests(sibling.request_id, RequestStatus.FINISHED_ABORTED)
+    assert [block.ref_cnt for block in sibling_blocks] == [1, 1]
+    step = engine.schedule()
+    assert not step.kv_connector_metadata.store_jobs
+    _ack_finished_tail_release(engine, sibling, step)
+    assert [block.ref_cnt for block in sibling_blocks] == [0, 0]
+    if not already_stored:
+        assert [block.ref_cnt for block in blocks] == [1, 1]
+        _report_finished_tail(engine, engine.schedule(), job_id)
+        _ack_finished_tail_release(engine, request, engine.schedule())
+        assert [block.ref_cnt for block in blocks] == [0, 0]
+
+
+@pytest.mark.cpu_test
+def test_finished_partial_tail_rejects_an_invalid_source():
+    engine = _make_finished_partial_tail_engine()
+    request, (attention, recurrent) = _schedule_partial_tail(engine)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    request.status = RequestStatus.FINISHED_ABORTED
+    block_ids = ([attention.block_id], [recurrent.block_id])
+    for source in [(1, 0, 12), (1, attention.block_id, 12), (1, recurrent.block_id, 8)]:
+        assert not connector.register_finished_partial_tail(
+            request, block_ids, [source]
+        )
+    assert not connector.register_finished_partial_tail(
+        request, ([], [recurrent.block_id]), [(1, recurrent.block_id, 12)]
+    )
+    out_of_range = engine.kv_cache_manager.block_pool.num_gpu_blocks
+    assert not connector.register_finished_partial_tail(
+        request, ([out_of_range], [recurrent.block_id]), [(1, recurrent.block_id, 12)]
+    )
+    assert [attention.ref_cnt, recurrent.ref_cnt] == [1, 1]
+    assert not connector.has_pending_push_work()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("failure", ["store", "queued-reset", "dispatched-reset"])
+def test_finished_partial_tail_releases_blocks_on_failure(failure):
+    engine = _make_finished_partial_tail_engine()
+    request, blocks = _schedule_partial_tail(engine)
+    engine.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+
+    if failure == "queued-reset":
+        assert engine.reset_connector_cache()
+        release = engine.schedule()
+        metadata = release.kv_connector_metadata
+        assert not metadata.store_jobs
+        assert not metadata.jobs_to_flush
+    else:
+        step = engine.schedule()
+        [job_id] = step.kv_connector_metadata.store_jobs
+        if failure == "dispatched-reset":
+            assert engine.reset_connector_cache()
+            assert [block.ref_cnt for block in blocks] == [1, 1]
+            step = engine.schedule()
+            assert step.kv_connector_metadata.jobs_to_flush == {job_id}
+            assert not step.kv_connector_metadata.finished_store_reqs
+        _report_finished_tail(engine, step, job_id, success=failure != "store")
+        release = engine.schedule()
+
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    _ack_finished_tail_release(engine, request, release)
+    assert [block.ref_cnt for block in blocks] == [0, 0]
+    assert engine.reset_prefix_cache()
+    consumer = create_request(num_tokens=14, common_prefix_len=12, block_size=4)
+    engine.add_request(consumer)
+    assert not engine.schedule().kv_connector_metadata.load_jobs
+
+
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
@@ -730,12 +1079,11 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -1020,12 +1368,11 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
 
     # boundary 44 = last hash boundary of a 46-token prompt: inside the second
     # full-attention block (idx 1) and the third recurrent block (idx 2)
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 44)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 44)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -1064,12 +1411,11 @@ def test_partial_tail_store_skips_aligned_boundary_under_dcp():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
     # 64 is a full-attention chunk boundary: handled by the aligned path only
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 64)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 64)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
     assert len(jobs) == 1
@@ -1094,16 +1440,13 @@ def _dcp_partial_tail_store(
     _as_mock(scheduler.manager.prepare_store).side_effect = (
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
-    return _partial_tail_store_jobs(
-        scheduler,
-        SimpleNamespace(
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"req": handoff},
-            )
-        ),
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": handoff},
     )
+    return _partial_tail_store_jobs(scheduler, output)
 
 
 @pytest.mark.cpu_test
@@ -2672,12 +3015,11 @@ def test_partially_stored_handoff_is_reported():
     req_status.group_states[1].block_ids[:] = [0, 21]
     _as_mock(scheduler.manager.prepare_store).side_effect = _consume_at_most([1])
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -3498,31 +3840,34 @@ def test_req_context_counts_live_until_request_finished(registered):
         num_tokens=80,
     )
     request = RequestStub(
-        request_id="req", kv_transfer_params=None, kv_hints=None, **counts
+        request_id="req",
+        kv_transfer_params=None,
+        kv_hints=None,
+        block_hashes=[],
+        all_token_ids=[],
+        lora_request=None,
+        resumable=False,
+        **counts,
     )
     request_ref = weakref.ref(request)
-    scheduler = object.__new__(OffloadingConnectorScheduler)
-    scheduler.config = SimpleNamespace(kv_group_configs=())
-    scheduler.manager = MagicMock(spec=OffloadingManager)
-    scheduler._events_tracker = SimpleNamespace(on_new_request=lambda *_: None)
-    scheduler._step_region = None
-    scheduler._req_status = {}
+    manager = MagicMock(spec=OffloadingManager)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
 
     def on_new_request(ctx):
         assert {name: getattr(ctx, name) for name in counts} == counts
         return RequestOffloadingContext()
 
-    scheduler.manager.on_new_request.side_effect = on_new_request
+    manager.on_new_request.side_effect = on_new_request
     if registered:
         scheduler.on_new_request(request)
-        ctx = scheduler.manager.on_new_request.call_args.args[0]
+        ctx = manager.on_new_request.call_args.args[0]
         for name in counts:
             counts[name] += 16
             setattr(request, name, counts[name])
         assert {name: getattr(ctx, name) for name in counts} == counts
 
     scheduler.request_finished(request)
-    ctx = scheduler.manager.on_new_request.call_args.args[0]
+    ctx = manager.on_new_request.call_args.args[0]
     for name in counts:
         setattr(request, name, 0)
     assert {name: getattr(ctx, name) for name in counts} == counts
