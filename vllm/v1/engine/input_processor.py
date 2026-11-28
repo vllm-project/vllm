@@ -549,6 +549,7 @@ class InputProcessor:
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
             skip_mm_cache = bool(decoder_input.get("skip_mm_cache", False))
+            metadata_only = decoder_input.get("mm_metadata_only", {})
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -568,6 +569,7 @@ class InputProcessor:
             for modality, idx in sorted_mm_idxs:
                 base_mm_hash = decoder_mm_hashes[modality][idx]
                 mm_item = decoder_mm_inputs[modality][idx]
+                is_metadata_only = idx in metadata_only.get(modality, ())
                 item_skip_mm_cache = skip_mm_cache or (
                     mm_item is not None
                     and any(elem.skip_mm_cache for elem in mm_item.values())
@@ -582,7 +584,8 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
-                        skip_mm_cache=item_skip_mm_cache,
+                        skip_mm_cache=item_skip_mm_cache or is_metadata_only,
+                        is_metadata_only=is_metadata_only,
                     )
                 )
 

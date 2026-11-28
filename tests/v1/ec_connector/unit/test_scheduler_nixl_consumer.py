@@ -13,30 +13,27 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
 from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalSharedField,
+    PlaceholderRange,
 )
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
 _N, _BS, _HID, _ES = 16, 64, 32, 2
 
 
-class _Pos:
-    def __init__(self, offset, length):
-        self.offset, self.length = offset, length
-
-    def get_num_embeds(self):
-        return self.length
-
-
-class _Feature:
-    def __init__(self, mm_hash, length=1, data=None):
-        self.mm_hash = mm_hash
-        self.identifier = mm_hash
-        self.mm_position = _Pos(0, length)
-        self.data = data
-        self.modality = "image"
+def _feature(
+    mm_hash: str, length: int = 1, data: MultiModalKwargsItem | None = None
+) -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=data,
+        modality="image",
+        identifier=mm_hash,
+        mm_position=PlaceholderRange(offset=0, length=length),
+        mm_hash=mm_hash,
+    )
 
 
 class _Request:
@@ -149,7 +146,7 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
     params = _params("h1", 1)
     params["h1"]["size_bytes"] = width * _ES
     params["h1"]["shape"] = [1, width]
-    req = _Request([_Feature("h1", 1)], params=params)
+    req = _Request([_feature("h1")], params=params)
 
     # Step 1: unseen remote item -> read started, request deferred.
     assert s.ensure_cache_available(req, 0) is False
@@ -183,7 +180,7 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
 @pytest.mark.parametrize("params", [None, {"x": 123}])
 def test_no_remote_announcement_is_ready(monkeypatch, params):
     s = _consumer_sched(monkeypatch)
-    assert s.ensure_cache_available(_Request([_Feature("x")], params=params), 0)
+    assert s.ensure_cache_available(_Request([_feature("x")], params=params), 0)
     assert s.take_unavailable_requests() == set()
     s.shutdown()
 
@@ -210,10 +207,10 @@ def test_runner_cache_hit_skips_remote_read(
             )
         }
     )
-    features = [_Feature("cached", data=data), _Feature("local", data=data)]
+    features = [_feature("cached", data=data), _feature("local", data=data)]
     params = _params("cached", 1)
     if missing_remote_item:
-        features.append(_Feature("missing", data=data))
+        features.append(_feature("missing", data=data))
         params.update(_params("missing", 1))
     req = _Request(features, params=params)
     runner_cache = EncoderCacheManager(cache_size=2)
@@ -268,7 +265,7 @@ def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload):
         if payload is not None
         else None
     )
-    req = _Request([_Feature("h1", 1, data)], params=_params("h1", 1))
+    req = _Request([_feature("h1", data=data)], params=_params("h1", 1))
 
     # Step 1: start the read.
     assert s.ensure_cache_available(req, 0) is False
@@ -307,7 +304,7 @@ def test_remote_wait_budget_survives_retries_and_long_steps(monkeypatch, retry):
     monkeypatch.setattr(s, "_start_xfer", start)
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    req = _Request([_Feature("h1")], params=_params("h1", 1))
+    req = _Request([_feature("h1")], params=_params("h1", 1))
     assert not s.ensure_cache_available(req, 0)
     for elapsed in (20, 40, 121):
         now[0] = 1000.0 + elapsed
@@ -337,7 +334,7 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
         return True
 
     monkeypatch.setattr(s, "_start_xfer", _fake_start)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    req = _Request([_feature("h1")], params=_params("h1", 1))
 
     assert s.ensure_cache_available(req, 0) is False
     s.build_connector_meta(scheduler_output=None)
@@ -379,7 +376,7 @@ def test_invalid_announcement_fails_the_request(monkeypatch, fields):
     s = _consumer_sched(monkeypatch)
     announced = {**_params("h1", 1)["h1"], **fields}
     announced = {k: v for k, v in announced.items() if v is not _MISSING}
-    req = _Request([_Feature("h1", 1)], params={"h1": announced})
+    req = _Request([_feature("h1")], params={"h1": announced})
     assert s.ensure_cache_available(req, 0) is False
     assert s.take_unavailable_requests() == {"r1"}
     assert "h1" not in s._in_flight
@@ -392,8 +389,8 @@ def test_deferral_budget_is_per_request(monkeypatch):
     s = _consumer_sched(monkeypatch)
     monkeypatch.setattr(s._cache, "alloc", lambda key, n, shape=None: None)
     params = _params("h1", 1)
-    old = _Request([_Feature("h1", 1)], params=params, req_id="old")
-    new = _Request([_Feature("h1", 1)], params=params, req_id="new")
+    old = _Request([_feature("h1")], params=params, req_id="old")
+    new = _Request([_feature("h1")], params=params, req_id="new")
 
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
@@ -421,7 +418,7 @@ def test_metadata_only_entry_admits_without_transfer(monkeypatch):
     # mismatch.
     s = _consumer_sched(monkeypatch)
     metadata_only = {"h1": {"image_grid_thw": [1, 2, 3]}}
-    req = _Request([_Feature("h1", 1)], params=metadata_only)
+    req = _Request([_feature("h1")], params=metadata_only)
     assert s.ensure_cache_available(req, 0) is True
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
@@ -450,7 +447,7 @@ def test_orphan_not_ready_entry_defers_no_realloc(monkeypatch):
         return real_alloc(key, n)
 
     monkeypatch.setattr(s._cache, "alloc", _spy_alloc)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    req = _Request([_feature("h1")], params=_params("h1", 1))
 
     # Must not raise; the request is deferred while the DMA settles, the
     # orphan entry is untouched, and alloc is never called again.
@@ -475,7 +472,7 @@ def test_already_computed_feature_admits_without_transfer(monkeypatch):
 
     monkeypatch.setattr(s._cache, "alloc", _spy_alloc)
     # Feature spans [0, 4); with num_computed_tokens=4 it is fully computed.
-    req = _Request([_Feature("h1", 4)], params=_params("h1", 4))
+    req = _Request([_feature("h1", length=4)], params=_params("h1", 4))
 
     assert s.ensure_cache_available(req, 4) is True
     assert "h1" not in s._in_flight
@@ -490,7 +487,7 @@ def test_local_ready_entry_admits_without_transfer(monkeypatch):
     entry = s._cache.alloc("h1", 1)
     assert entry is not None
     s._cache.mark_ready("h1")
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    req = _Request([_feature("h1")], params=_params("h1", 1))
 
     assert s.ensure_cache_available(req, 0) is True
     assert "h1" not in s._in_flight
@@ -509,7 +506,7 @@ def test_in_flight_hash_defers_without_second_transfer(monkeypatch):
 
     monkeypatch.setattr(s, "_start_xfer", _spy_start_xfer)
     s._in_flight.add("h1")
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    req = _Request([_feature("h1")], params=_params("h1", 1))
 
     assert s.ensure_cache_available(req, 0) is False
     assert started == []

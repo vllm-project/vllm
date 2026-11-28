@@ -379,6 +379,9 @@ class MultiModalFeatureSpec:
     from the receiver cache.
     """
 
+    is_metadata_only: bool = False
+    """Whether `data` only supplies the layout, not inputs for the encoder."""
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)

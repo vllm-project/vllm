@@ -207,7 +207,13 @@ should split those fields:
 - Encode requests keep `kwargs_data`.
 - Prefill requests may omit `kwargs_data` and send `mm_metadata` only when
   `ec_transfer_params` is also set, so embeddings are loaded by the EC
-  connector. Omitting `kwargs_data` without `ec_transfer_params` is rejected.
+  connector.
+- A separate decode worker using Python Generate can receive the same
+  `token_ids` and `mm_metadata` with the prefill response's
+  `kv_transfer_params` (`do_remote_prefill: true`) instead. The worker must
+  be a multimodal KV consumer. Do not forward EC parameters or media tensors
+  to it for this handoff. If remote KV does not cover an item and its encoder
+  input is missing, the request fails instead of attempting to encode metadata.
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
 
@@ -295,8 +301,9 @@ sequenceDiagram
     P-->>Client: generated output
 ```
 
-`mm_metadata` is always set in this response, so `/inference/v1/generate`
-rejects it without `ec_transfer_params`.
+`mm_metadata` is always set in this response. Include the relevant EC or
+remote prefill transfer parameters when forwarding it to a worker, as
+described above.
 
 #### `"none"`
 
