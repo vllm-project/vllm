@@ -255,7 +255,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
+    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
 
 # setup non-root user for vllm
