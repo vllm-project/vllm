@@ -1021,3 +1021,23 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
         t |= ((nib - 8) & 0xF) << shift
 
     return t
+
+
+def gather_rows(
+    t: torch.Tensor, index: torch.Tensor, block_k: int | None = None
+) -> torch.Tensor:
+    """`t[:, index]` as bytes for a tensor [E, N, K], moving whole rows in the
+    widest word that divides a row. With `block_k`, the result is in block
+    layout [E, K // block_k, N, block_k]."""
+    t = t.view(torch.uint8)
+    if block_k is not None:
+        e, n, k = t.shape
+        t = t.view(e, n, k // block_k, block_k).transpose(1, 2)
+    for word in (torch.int64, torch.int32, torch.int16):
+        if t.shape[-1] % word.itemsize == 0:
+            try:
+                words = t.view(word)
+            except RuntimeError:
+                break  # not viewable (offset or stride); gather bytes
+            return words[..., index, :].view(torch.uint8)
+    return t[..., index, :].contiguous()
