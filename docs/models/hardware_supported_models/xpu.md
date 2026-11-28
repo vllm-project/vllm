@@ -44,6 +44,12 @@ Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features
 | Qwen/Qwen1.5-32B-Chat                           | QwenForCausalLM                                  | BF16/Online FP8       |
 | RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic | LlamaForCausalLM                                 | FP8                   |
 
+#### MiniCPM5-15B-A2.5B specialized decode
+
+MiniCPM5 MoE has an opt-in `--monokernel` decode path for supported Intel
+Battlemage devices. See the [MiniCPM5 XPU README](minicpm5/README.md) for wheel
+requirements, launch options, and validation.
+
 ### Multimodal Language Models
 
 | Model                         | Architecture                         | Dtype           |

@@ -216,6 +216,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     lfm3_vl="Lfm3VlConfig",
     nemotron_labs_diffusion="NemotronLabsDiffusionConfig",
     midashenglm="MiDashengLMConfig",
+    minicpm5_moe="MiniCPM5MoEConfig",
     minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
     ming_v3_asr="MingV3ASRConfig",

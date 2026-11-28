@@ -1,0 +1,50 @@
+# MiniCPM5-15B-A2.5B XPU monokernel
+
+The MiniCPM5 MoE monokernel is available on supported Intel Battlemage devices
+with at least 32 Xe cores at TP1 or TP2. Xe2-enabled `vllm-xpu-kernels` builds
+include the extension by default. Install a compatible wheel that contains the
+MiniCPM5 extension and pass `--monokernel` to enable it at runtime. Set
+`MINICPM5_MONO_KERNELS_ENABLED=OFF` to omit the extension when building from
+source.
+
+The FP16 standard-decode tuning targets 1–8 live requests (`M=1–8`) per step,
+with one query token per request. This count excludes graph padding. The
+serving example selects these decode settings.
+
+For TP2 FP16 standard decode without prefix caching, compatible wheels split
+the four-row decode graph before the attention output projection. The same
+graph supports three live requests with padding. Wheels that lack the
+four-row operator use the full-layer graph for this shape.
+
+## Launch
+
+Set `MODEL_DIR` to a local MiniCPM5 checkpoint directory. Use online per-tensor
+FP8 quantization with FP16 or BF16 activations and a matching KV-cache dtype.
+
+```bash
+vllm serve "$MODEL_DIR" --monokernel --tensor-parallel-size 2 \
+  --dtype float16 --quantization fp8_per_tensor \
+  --max-num-seqs 8 --no-enable-prefix-caching \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+Use `--tensor-parallel-size 1` for one device or `--enforce-eager` for eager
+execution. Weight reload, weight transfer, and sleep mode are unsupported while
+the monokernel is active.
+
+## DSpark decode
+
+Set `DSPARK_DIR` to a local DSpark draft checkpoint compatible with the target
+model. The K7 configuration uses FP16 and seven speculative tokens.
+
+```bash
+vllm serve "$MODEL_DIR" --monokernel --tensor-parallel-size 2 \
+  --dtype float16 --quantization fp8_per_tensor \
+  --max-num-seqs 2 --no-enable-prefix-caching \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --speculative-config '{"method":"dspark","model":"'"$DSPARK_DIR"'","num_speculative_tokens":7}' \
+  --additional-config '{"minicpm5_dspark_split_kv":true,"minicpm5_dspark_mono_draft":true,"minicpm5_dspark_pruned_markov":true}'
+```
+
+Use standard DSpark as a baseline by omitting `--monokernel` and passing
+`{"minicpm5_dspark_split_kv":true}` as the additional configuration.

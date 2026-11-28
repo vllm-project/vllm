@@ -2374,7 +2374,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._get_num_drafted_and_verified(input_batch)
         )
         # Start async output copy here so that it can overlap with speculator proposal.
-        async_output = AsyncOutput(
+        async_output = self._make_async_output(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
@@ -2477,6 +2477,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
+
+    def _make_async_output(self, **kwargs: Any) -> AsyncOutput:
+        return AsyncOutput(**kwargs)
 
     def _get_num_drafted_and_verified(
         self, input_batch: InputBatch

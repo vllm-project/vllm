@@ -634,6 +634,34 @@ steps:
   commands:
   - pytest -v -s models/nemotron_shortcut/
 
+- label: ":computer: (CPU) MiniCPM5 Host Contracts"
+  key: minicpm5-host-contracts-cpu
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 10
+  device: cpu-small
+  source_file_dependencies:
+  - vllm/models/minicpm5_moe/
+  - vllm/model_executor/models/minicpm5_moe.py
+  - vllm/model_executor/models/registry.py
+  - vllm/transformers_utils/config.py
+  - vllm/transformers_utils/configs/minicpm5_moe.py
+  - vllm/v1/attention/backends/flash_attn.py
+  - vllm/v1/worker/xpu_model_runner.py
+  - vllm/v1/worker/xpu_worker.py
+  - tests/models/minicpm5_moe/
+  - tests/models/registry.py
+  - tests/models/test_registry.py
+  - tests/transformers_utils/test_minicpm5_moe_config.py
+  - .buildkite/test_areas/models_basic.yaml
+  commands:
+    - >-
+      VLLM_TARGET_DEVICE=cpu ONEAPI_DEVICE_SELECTOR='!*:*' pytest --noconftest -v -s
+      models/minicpm5_moe/
+      transformers_utils/test_minicpm5_moe_config.py
+      models/test_registry.py::test_hf_registry_coverage
+      'models/test_registry.py::test_registry_imports[MiniCPM5MoEForCausalLM]'
+
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
   automatic_shard: true
