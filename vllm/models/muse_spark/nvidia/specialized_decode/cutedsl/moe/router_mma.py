@@ -43,13 +43,16 @@ from ..draft.fp4_mlp import interleave_gate_up
 HIDDEN, EXPERTS = 8192, 256
 MAX_TOKENS = 8
 TILES = 2 * EXPERTS // 16
-# The pooler GEMM's K split, warp K, accumulators and weight pacing.
-SPLITS, K_PER_WARP, ACCS, PACE_NS = (
+# The pooler GEMM's K split, warp K and accumulators. Weight pacing is NOT
+# aliased from the pooler: the phase-2 microbench (slop-loop iter7) measured
+# pace_ns has no protective effect on the concurrent all-reduce (interference
+# identical at 0 and 300) and costs ~2.4us/call of pure slowdown.
+SPLITS, K_PER_WARP, ACCS = (
     POOLER.splits,
     POOLER.kw,
     POOLER.accs,
-    POOLER.pace_ns,
 )
+PACE_NS = 0
 WARPS = HIDDEN // SPLITS // K_PER_WARP
 BLOCKS = K_PER_WARP // 64
 PARTIAL_ELEMENTS = SPLITS * MAX_TOKENS * EXPERTS
