@@ -309,6 +309,11 @@ def _gumbel_sample_kernel(
     seeds_ptr,
     pos_ptr,
     temp_ptr,
+    # [num_tokens, max_kept], [num_tokens, max_kept], [num_tokens]
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
@@ -319,12 +324,17 @@ def _gumbel_sample_kernel(
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(
-        logits_ptr + token_idx * logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
+    block, logits, mask = load_logits_block(
+        logits_ptr,
+        logits_stride,
+        token_idx,
+        block_idx,
+        vocab_size,
+        kept_ids_ptr,
+        kept_logits_ptr,
+        num_kept_ptr,
+        max_kept,
+        BLOCK_SIZE,
     )
     if HAS_BIAS:
         # Rounded to the logits dtype, as `logits + bias` would be.
@@ -354,9 +364,54 @@ def _gumbel_sample_kernel(
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    token_id = token_at(block, idx, block_idx, BLOCK_SIZE, kept_ids_ptr)
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
+
+
+@triton.jit
+def load_logits_block(
+    logits_ptr,
+    logits_stride,
+    row,
+    block_idx,
+    vocab_size,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Token ids, logits and mask of one vocab block of a logits row.
+
+    With kept tokens (from `top_k_top_p_kept_tokens_triton`), block 0 holds the
+    row's kept tokens and the other blocks are empty. BLOCK_SIZE must then be at
+    least `max_kept`.
+    """
+    if kept_ids_ptr is None:
+        block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
+        logits = tl.load(
+            logits_ptr + row * logits_stride + block, mask=mask, other=float("-inf")
+        )
+    else:
+        offs = tl.arange(0, BLOCK_SIZE)
+        num_kept = tl.minimum(tl.load(num_kept_ptr + row), max_kept)
+        mask = (offs < num_kept) & (block_idx == 0)
+        kept_row = row * max_kept + offs
+        block = tl.load(kept_ids_ptr + kept_row, mask=mask, other=0)
+        logits = tl.load(kept_logits_ptr + kept_row, mask=mask, other=float("-inf"))
+    return block, logits, mask
+
+
+@triton.jit
+def token_at(block, idx, block_idx, BLOCK_SIZE: tl.constexpr, kept_ids_ptr):
+    """Token id at position `idx` of a block from `load_logits_block`."""
+    if kept_ids_ptr is None:
+        token_id = block_idx * BLOCK_SIZE + idx
+    else:
+        token_id = tl.sum(tl.where(tl.arange(0, BLOCK_SIZE) == idx, block, 0))
+    return token_id
 
 
 @triton.jit
@@ -404,6 +459,9 @@ def gumbel_sample(
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
     bias: torch.Tensor | None = None,  # [num_tokens, vocab_size]
+    # The rows' kept tokens from `top_k_top_p_kept_tokens_triton`, sampled from
+    # instead of the logits: (ids, logits, count), [num_tokens, max_kept] each.
+    kept: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -440,6 +498,12 @@ def gumbel_sample(
         logits_cache_source = logits_cache_source.contiguous()
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    kept_ids, kept_logits, num_kept = kept or (None, None, None)
+    max_kept = 0
+    if kept_ids is not None:
+        assert logits_cache is None and bias is None
+        max_kept = kept_ids.shape[1]
+        BLOCK_SIZE, num_blocks = triton.next_power_of_2(max_kept), 1
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
@@ -468,6 +532,10 @@ def gumbel_sample(
         seed,
         pos,
         temperature,
+        kept_ids,
+        kept_logits,
+        num_kept,
+        max_kept,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_DRAFTING=is_drafting,
