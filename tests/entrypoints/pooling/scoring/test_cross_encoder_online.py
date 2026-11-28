@@ -9,9 +9,11 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "half"
+MAX_MODEL_LEN = 100
 input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [0, 3293, 12996, 509, 40881, 136, 204839, 297, 759, 202702, 2]
 
@@ -29,7 +31,7 @@ TEXTS_2 = [
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
+    args = ["--enforce-eager", "--max-model-len", str(MAX_MODEL_LEN), "--dtype", DTYPE]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -339,11 +341,27 @@ async def test_score_api_max_model_len(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "queries": queries,
             "documents": documents,
-            "truncate_prompt_tokens": 101,
+            "truncate_prompt_tokens": MAX_MODEL_LEN + 1,
         },
     )
     assert score_response.status_code == 400
     assert "Please request a smaller truncation size." in score_response.text
+
+    max_chars = MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": "a" * (max_chars + 1),
+            "documents": documents,
+            "max_tokens_per_query": 10,
+            "truncate_prompt_tokens": 50,
+        },
+    )
+    assert score_response.status_code == 400
+    error = score_response.json()["error"]
+    assert error["param"] == "input_text"
+    assert "Scoring query contains" in error["message"]
 
 
 @pytest.mark.asyncio

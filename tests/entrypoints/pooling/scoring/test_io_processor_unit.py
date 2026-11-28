@@ -30,7 +30,7 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
-from vllm.entrypoints.pooling.scoring.types import ScoringData
+from vllm.entrypoints.pooling.scoring.types import ScoreContentPartParam, ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
@@ -38,6 +38,7 @@ from vllm.entrypoints.pooling.types import (
     PoolingEngineInput,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
@@ -53,6 +54,7 @@ from vllm.renderers.chat_utils.item_tracker import (
 )
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -106,7 +108,8 @@ def llm_reranker_processor(tmp_path, scoring_tokenizer):
             enforce_eager=True,
         )
     )
-    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    tokenizer = get_cached_tokenizer(TokenizersBackend.from_pretrained(tmp_path))
+    renderer = HfRenderer(config, tokenizer)
     try:
         yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
     finally:
@@ -474,7 +477,8 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
             enforce_eager=True,
         )
     )
-    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    tokenizer = get_cached_tokenizer(TokenizersBackend.from_pretrained(tmp_path))
+    renderer = HfRenderer(config, tokenizer)
     try:
         yield CrossEncoderIOProcessor(
             config,
@@ -546,15 +550,30 @@ def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
 def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
     multimodal_reranker_processor,
 ):
+    processor = multimodal_reranker_processor
     # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
     for document in (
         "abc",
         [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
     ):
-        prompt, _ = multimodal_reranker_processor.get_score_prompt(
+        prompt, _ = processor.get_score_prompt(
             "a", document, {}, chat_template=_BLOCK_TEMPLATE, max_tokens_per_doc=2
         )
         assert prompt == "query:adocument:ab"
+
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+    split_document: list[ScoreContentPartParam] = [
+        {"type": "text", "text": "a" * (max_chars // 2)},
+        {"type": "text", "text": "b" * (max_chars - max_chars // 2)},
+    ]
+    assert processor.valid_inputs("a", {"content": split_document}).data_2 == [
+        split_document
+    ]
+
+    split_document.append({"type": "text", "text": "b"})
+    with pytest.raises(VLLMValidationError, match="Scoring document contains"):
+        processor.valid_inputs("a", {"content": split_document})
 
 
 @pytest.mark.parametrize("multimodal_reranker_processor", ["qwen3_vl"], indirect=True)
@@ -580,7 +599,19 @@ def test_string_scoring_templates_keep_model_placeholders(
 def test_scoring_detects_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    prompt, _ = multimodal_reranker_processor.get_score_prompt(
+    processor = multimodal_reranker_processor
+    prompt, _ = processor.get_score_prompt(
         "a", "bc", {}, chat_template_content_format="auto"
     )
     assert prompt == "query:adocument:bc"
+
+    document = "bc"
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+    # The inputs fit before the saved template adds the role labels.
+    query = "a" * (max_chars - len(document))
+    assert processor.valid_inputs(query, document).data_1 == [query]
+    with pytest.raises(VLLMValidationError, match="Scoring prompt contains"):
+        processor.get_score_prompt(
+            query, document, {}, chat_template_content_format="auto"
+        )

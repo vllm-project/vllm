@@ -166,6 +166,9 @@ A code example can be found here: [examples/basic/offline_inference/score.py](..
 
 ## Online Serving
 
+If scoring or reranking returns an `input_text` length error, shorten or split
+the input before retrying, even when token truncation is enabled.
+
 ### Score API
 
 Our Score API (`/score`, `/v1/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
