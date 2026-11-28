@@ -32,6 +32,8 @@ def step3p5_config() -> ParserEngineConfig:
             thinking=True,
             name="step3p5",
             turn_boundary_tokens=CHATML_TURN_BOUNDARIES,
+            # The chat template writes `</think>\n` before the answer
+            reasoning_end_separator="\n",
         ),
         strip_trailing_reasoning_whitespace=True,
     )

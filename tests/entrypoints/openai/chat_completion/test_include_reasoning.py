@@ -58,6 +58,8 @@ async def test_include_reasoning_true_non_streaming(client: openai.AsyncOpenAI):
     )
     assert reasoning, "Expected reasoning content when include_reasoning=True"
     assert msg.content, "Expected content in response"
+    # The template's `</think>\n\n` separator is not part of the answer
+    assert not msg.content.startswith("\n"), repr(msg.content[:20])
 
 
 @pytest.mark.asyncio
@@ -154,6 +156,7 @@ async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
 
     assert reasoning_text, "Expected reasoning deltas when include_reasoning=True"
     assert content_text, "Expected content deltas in streaming response"
+    assert not content_text.startswith("\n"), repr(content_text[:20])
 
 
 @pytest.mark.asyncio

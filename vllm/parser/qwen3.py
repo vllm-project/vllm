@@ -196,9 +196,11 @@ def qwen3_config(
     tool_start: str = TOOL_CALL_START,
     tool_end: str = TOOL_CALL_END,
     turn_boundary_tokens: frozenset[str] = frozenset(),
+    reasoning_end_separator: str = "",
 ) -> ParserEngineConfig:
     return ParserEngineConfig(
         name=name,
+        reasoning_end_separator=reasoning_end_separator,
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
         wait_for_reasoning=thinking,
         turn_boundary_tokens=turn_boundary_tokens,
@@ -348,6 +350,8 @@ class Qwen3Parser(ParserEngine):
     TOOL_START = TOOL_CALL_START
     TOOL_END = TOOL_CALL_END
     TURN_BOUNDARIES: frozenset[str] = CHATML_TURN_BOUNDARIES
+    # The chat template writes `</think>\n\n` before the answer.
+    REASONING_END_SEPARATOR = "\n\n"
 
     def __init__(
         self,
@@ -367,6 +371,7 @@ class Qwen3Parser(ParserEngine):
                 tool_start=self.TOOL_START,
                 tool_end=self.TOOL_END,
                 turn_boundary_tokens=self.TURN_BOUNDARIES,
+                reasoning_end_separator=self.REASONING_END_SEPARATOR,
             ),
         )
         super().__init__(

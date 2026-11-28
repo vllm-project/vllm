@@ -749,7 +749,8 @@ def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
     reasoning, content, tool_calls = collect_fields(results)
 
     assert reasoning == "let me think"
-    assert content == "".join(text_chunks).split("</think>", 1)[1]
+    # Qwen3's `</think>\n\n` template separator is not content
+    assert content == "".join(text_chunks).split("</think>", 1)[1].removeprefix("\n\n")
     assert len(tool_calls) == 0
 
 
@@ -760,10 +761,12 @@ def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
         # "<" must be emitted exactly once (the end-of-stream flush skips the
         # reasoning parser once reasoning has ended).
         (["<think>let me think</think>a <"], True, "a <"),
-        # Whitespace-only content after the marker at the end of the stream.
-        (["<think>let me think</think>\n\n"], True, "\n\n"),
+        # Whitespace-only content after the marker at the end of the stream:
+        # the template's `\n\n` separator is consumed, other text is kept.
+        (["<think>let me think</think>\n\n"], True, ""),
+        (["<think>let me think</think>\n"], True, "\n"),
         # Hiding reasoning must not hide the flushed content.
-        (["<think>let me think</think>\n\n", "<b>bold</b>"], False, "\n\n<b>bold</b>"),
+        (["<think>let me think</think>\n\n", "<b>bold</b>"], False, "<b>bold</b>"),
     ],
 )
 def test_engine_reasoning_no_tool_holdback_finished_and_hidden_reasoning(

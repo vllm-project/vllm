@@ -29,3 +29,5 @@ class SeedOssParser(Qwen3Parser):
     TOOL_START = "<seed:tool_call>"
     TOOL_END = "</seed:tool_call>"
     TURN_BOUNDARIES = frozenset(("<seed:bos>", "<seed:eos>"))
+    # The chat template writes `</seed:think>\n` before the answer
+    REASONING_END_SEPARATOR = "\n"

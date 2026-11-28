@@ -14,6 +14,7 @@ import dataclasses
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.replay_harness import _test_request
 from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.parser_engine_config import ParserState
@@ -601,6 +602,87 @@ class TestStreaming:
         )
         assert reasoning == "reasoning"
         assert content == "contentmore"
+
+
+class TestReasoningEndSeparator:
+    """The chat template writes `</think>\\n\\n` before the answer. That
+    separator is not part of the content, like in the Rust parser."""
+
+    @staticmethod
+    def _stream(parser, chunks):
+        def token_ids(chunk):
+            # One text token per character, plus the `</think>` token
+            ids = []
+            for i, part in enumerate(chunk.split("</think>")):
+                if i:
+                    ids.append(_THINK_END_ID)
+                ids += [_TEXT_ID] * len(part)
+            return tuple(ids)
+
+        reasoning, content = simulate_reasoning_streaming(
+            parser, chunks, [token_ids(chunk) for chunk in chunks]
+        )
+        delta = parser.finish_streaming()
+        if delta is not None and delta.content:
+            content += delta.content
+        return reasoning, content
+
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            ("Reasoning.</think>\n\nOK", "OK"),
+            # Only the separator is consumed
+            ("Reasoning.</think>\n\n\nOK", "\nOK"),
+            # Output that doesn't start with the separator is left alone
+            ("Reasoning.</think>\nOK", "\nOK"),
+            ("Reasoning.</think>OK", "OK"),
+        ],
+    )
+    def test_non_streaming(self, parser, output, expected):
+        reasoning, content = parser.extract_reasoning(output, None)
+        assert reasoning == "Reasoning."
+        assert content == expected
+
+    @pytest.mark.parametrize(
+        ("chunks", "expected"),
+        [
+            (["Reasoning.", "</think>", "\n\nOK"], "OK"),
+            # The separator is split across deltas
+            (["Reasoning.", "</think>", "\n", "\n", "OK"], "OK"),
+            (["Reasoning.</think>\n", "\nO", "K"], "OK"),
+            (["Reasoning.", "</think>", "\n", "OK"], "\nOK"),
+            # A partial separator at the end of the output is kept
+            (["Reasoning.", "</think>", "\n"], "\n"),
+        ],
+    )
+    def test_streaming(self, parser, chunks, expected):
+        reasoning, content = self._stream(parser, chunks)
+        assert reasoning == "Reasoning."
+        assert content == expected
+
+    def test_separator_before_tool_call(self, parser):
+        text = (
+            "Reasoning.</think>\n\n<tool_call>\n<function=bash>\n"
+            "<parameter=cmd>ls</parameter>\n</function>\n</tool_call>"
+        )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        reasoning, content, tool_calls = parser.parse(
+            text, _test_request(tools=tools), enable_auto_tools=True
+        )
+        assert reasoning == "Reasoning."
+        assert content is None
+        assert tool_calls is not None and tool_calls[0].name == "bash"
 
 
 class TestTrailingWhitespaceStripping:

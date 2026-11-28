@@ -246,6 +246,9 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="glm47_moe",
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        # The GLM-4.5 / 4.6 chat templates write `</think>\n` before the answer.
+        # GLM-4.7 and later write none, and their output then starts without it.
+        reasoning_end_separator="\n",
         terminals={
             **reasoning_terminals,
             "TOOL_START": TOOL_CALL_START,

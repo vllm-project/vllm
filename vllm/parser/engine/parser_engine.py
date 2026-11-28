@@ -197,6 +197,9 @@ class ParserEngine(Parser):
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
         self._arg_value_extender = parser_engine_config.arg_value_extender
         self._stream_arg_deltas = parser_engine_config.stream_arg_deltas
+        self._reasoning_end_separator = parser_engine_config.reasoning_end_separator
+        self._separator_pending = ""
+        self._separator_held: SemanticEvent | None = None
         self._strip_trailing_reasoning_ws = (
             parser_engine_config.strip_trailing_reasoning_whitespace
         )
@@ -266,7 +269,10 @@ class ParserEngine(Parser):
 
     @property
     def reasoning_ended(self) -> bool:
-        return self._reasoning_ended
+        # Report the end only once `reasoning_end_separator` is resolved:
+        # `DelegatingParser` stops feeding the engine after the transition
+        # and passes later text through as content.
+        return self._reasoning_ended and not self._separator_pending
 
     def initialize_streaming(
         self,
@@ -293,7 +299,7 @@ class ParserEngine(Parser):
         return
 
     def finish_streaming(self) -> DeltaMessage | None:
-        events = self._engine.finish()
+        events = self._finish()
         if events or self._deferred_content:
             return self._events_to_delta(events, finished=True)
         return None
@@ -309,6 +315,8 @@ class ParserEngine(Parser):
         self._deferred_reasoning = ""
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
+        self._separator_pending = ""
+        self._separator_held = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -329,7 +337,61 @@ class ParserEngine(Parser):
         delta_token_ids: Sequence[int],
     ) -> list[SemanticEvent]:
         delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
-        return self._engine.feed(delta_text, delta_token_ids)
+        return self._consume_reasoning_end_separator(
+            self._engine.feed(delta_text, delta_token_ids)
+        )
+
+    def _finish(self) -> list[SemanticEvent]:
+        return self._consume_reasoning_end_separator(
+            self._engine.finish(), finishing=True
+        )
+
+    def _consume_reasoning_end_separator(
+        self,
+        events: list[SemanticEvent],
+        finishing: bool = False,
+    ) -> list[SemanticEvent]:
+        """Drop `reasoning_end_separator` from the start of the content.
+
+        A partial match is held back until more text arrives. A mismatch, a
+        non-text event or the end of the output releases it as content.
+        """
+        if not self._reasoning_end_separator:
+            return events
+        out: list[SemanticEvent] = []
+        for event in events:
+            if event.type == EventType.REASONING_END:
+                self._separator_pending = self._reasoning_end_separator
+                self._separator_held = None
+            elif self._separator_pending and event.type == EventType.TEXT_CHUNK:
+                held = self._separator_held
+                if held is not None:
+                    event = SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        held.value + event.value,
+                        event.tool_index,
+                        held.token_count + event.token_count,
+                    )
+                    self._separator_held = None
+                if event.value.startswith(self._separator_pending):
+                    event.value = event.value[len(self._separator_pending) :]
+                elif self._separator_pending.startswith(event.value):
+                    self._separator_held = event
+                    continue
+                self._separator_pending = ""
+                if not event.value:
+                    continue
+            elif self._separator_pending:
+                self._separator_pending = ""
+                if self._separator_held is not None:
+                    out.append(self._separator_held)
+                    self._separator_held = None
+            out.append(event)
+        if finishing and self._separator_held is not None:
+            out.append(self._separator_held)
+            self._separator_held = None
+            self._separator_pending = ""
+        return out
 
     # ── Schema-aware type correction ─────────────────────────────────
 
@@ -562,7 +624,7 @@ class ParserEngine(Parser):
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
         if finished:
-            events.extend(self._engine.finish())
+            events.extend(self._finish())
         result = self._events_to_delta(events, finished=finished)
         result = self._strip_trailing_reasoning(result)
 
@@ -613,7 +675,7 @@ class ParserEngine(Parser):
     ) -> tuple[str | None, str | None]:
         self._reset()
         events = self._feed(model_output, [])
-        events.extend(self._engine.finish())
+        events.extend(self._finish())
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -849,7 +911,7 @@ class ParserEngine(Parser):
             )
         self._reset(initial_state=initial_state)
         events = self._feed(text, token_ids)
-        events.extend(self._engine.finish())
+        events.extend(self._finish())
 
         self._emit_arg_deltas = False
         try:

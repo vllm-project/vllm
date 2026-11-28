@@ -15,6 +15,7 @@ import dataclasses
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
@@ -344,3 +345,30 @@ class TestStreamedToolArguments:
     )
     def test_no_value_extender_unless_open_value_is_last(self, raw_args):
         assert _glm47_arg_value_extender(raw_args) is None
+
+
+class TestReasoningEndSeparator:
+    """The GLM-4.5 / 4.6 templates write `</think>\\n` before the answer, and
+    that newline is not part of the content. GLM-4.7 and later write no
+    separator, so their output is left as it is."""
+
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            (f"Reasoning.{THINK_END}\nThe answer.", "The answer."),
+            # GLM-4.7+: no separator
+            (f"Reasoning.{THINK_END}The answer.", "The answer."),
+            # Only the separator is consumed
+            (f"Reasoning.{THINK_END}\n\nThe answer.", "\nThe answer."),
+        ],
+    )
+    def test_non_streaming(self, parser, output, expected):
+        assert parser.extract_reasoning(output, None) == ("Reasoning.", expected)
+
+    def test_streaming(self, parser):
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            ["Reasoning.", THINK_END, "\n", "The answer."],
+            [(TEXT,), (THINK_E,), (TEXT,), (TEXT,)],
+        )
+        assert (reasoning, content) == ("Reasoning.", "The answer.")
