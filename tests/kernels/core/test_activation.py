@@ -220,6 +220,22 @@ def test_act_and_mul(
         opcheck(fn, (out, x))
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_swigluoai_and_mul_empty_input(default_vllm_config, dtype: torch.dtype) -> None:
+    """swigluoai_and_mul with zero tokens must not corrupt CUDA state."""
+    device = CUDA_DEVICES[0]
+    layer = SwigluOAIAndMul()
+    d = 128
+    input = torch.randn(4, 2 * d, dtype=dtype, device=device)[:0]
+    out = torch.randn(4, d, dtype=dtype, device=device)[:0]
+    torch.ops._C.swigluoai_and_mul(out, input, layer.alpha, layer.limit)
+    # A zero-sized grid launch leaves a sticky error that surfaces at the next
+    # CUDA API call; sync forces it to be observed here.
+    torch.ones(1, device=device)
+    torch.accelerator.synchronize()
+
+
 SWIGLU_LIMITS = [3.0, 7.0, 15.0]
 
 
