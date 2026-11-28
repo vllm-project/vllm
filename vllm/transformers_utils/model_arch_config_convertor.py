@@ -657,6 +657,11 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 )
             elif getattr(hf_config, "modeling_overrides", None) is not None:
                 hf_config.architectures = ["Qwen3_5ForSlotDecision"]
+        elif getattr(hf_config, "architectures", None) == ["Qwen3_5ForCausalLM"]:
+            # A Drex checkpoint is the text backbone plus ``head.pt``.
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(model_path, "head.pt", revision):
+                hf_config.architectures = ["Qwen3_5ForDrex"]
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
@@ -882,6 +887,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
+    "qwen3_5_text": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_omni_moe_thinker": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,

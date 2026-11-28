@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -48,7 +48,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
-from . import slot_prompt
+from . import drex_prompt, slot_prompt
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -1461,6 +1461,161 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class _DrexRow(NamedTuple):
+    """One packed question: the row, its marker positions, and option order."""
+
+    texts: list[str]
+    order: list[int]
+    ids: list[int]
+    opt_positions: list[int]
+    decide_position: int
+
+
+class DrexStrategy(ReadStrategy):
+    """Drex v1.5 pointer-readout models.
+
+    Each question is one classify read of the causal row `[state][branch]`
+    that `drex_prompt` packs: the state, then the instruction and every option
+    between delimiters, ending at `<decide>`. The model's pooler scores the
+    options with its pointer head; a question's probabilities are the softmax
+    of those scores. The head's temperature is applied by the pooler, so the
+    strategy does not scale again.
+    """
+
+    task = "classify"
+    modalities = frozenset()
+    MAX_OPTIONS = 255
+    MAX_QUESTIONS = 64
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        model_config = context.engine_client.model_config
+        self.max_model_len = model_config.max_model_len
+        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=self.MAX_QUESTIONS,
+            max_options=self.MAX_OPTIONS,
+            labeled=False,
+        )
+
+    def render_state(self, state: Any) -> str:
+        """Render the state the way the checkpoint was trained to read it."""
+        return drex_prompt.render(state)
+
+    def _options(self, q: Question) -> tuple[list[str], list[int]]:
+        try:
+            return drex_prompt.model_options(
+                q.type.name, [(o.name, o.description) for o in q.options]
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"question {q.id!r}: {e}") from e
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if instructions:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions"
+            )
+        if media and any(media.values()):
+            raise StructuredDecisionError(
+                "this model reads text only, so it takes no media"
+            )
+        state = self.render_state(state)
+
+        # The reference server reads a packed row up to its context window, so
+        # serving passes the model window rather than the training caps.
+        rows: list[_DrexRow] = []
+        for q in questions:
+            texts, order = self._options(q)
+            try:
+                ids = drex_prompt.pack(
+                    self.tokenizer,
+                    state,
+                    q.instructions or "",
+                    texts,
+                    max_state=self.max_model_len,
+                    max_branch=self.max_model_len,
+                    max_packed=self.max_model_len,
+                )
+            except ValueError as e:
+                raise StructuredDecisionError(f"question {q.id!r}: {e}") from e
+            if len(ids) > self.max_model_len:
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: the row has {len(ids)} tokens, more "
+                    f"than max_model_len={self.max_model_len}; nothing is truncated"
+                )
+            opt_positions, decide_position = drex_prompt.find_positions(
+                ids, self.tokenizer
+            )
+            rows.append(_DrexRow(texts, order, ids, opt_positions, decide_position))
+
+        try:
+            drex_prompt.check_budget([row.ids for row in rows], self.max_model_len)
+        except ValueError as e:
+            raise StructuredDecisionError(str(e)) from e
+
+        async def read_one(n: int, row: _DrexRow) -> list[float]:
+            result = None
+            async for result in self.context.engine_client.encode(  # noqa: B007
+                tokens_input(row.ids, cache_salt=cache_salt),
+                PoolingParams(
+                    task="classify",
+                    use_activation=False,
+                    extra_kwargs={
+                        "opt_positions": row.opt_positions,
+                        "decide_position": row.decide_position,
+                    },
+                ),
+                f"{request_id}-{n}",
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            ):
+                pass
+            if result is None:
+                raise ValueError("Failed to score the question")
+            if result.error is not None:
+                raise ValueError(
+                    f"Failed to score the question: {result.error.message}"
+                )
+            return result.outputs.data.tolist()
+
+        logits = await asyncio.gather(*(read_one(n, row) for n, row in enumerate(rows)))
+
+        reads = []
+        for row, scores in zip(rows, logits):
+            if len(scores) != len(row.texts):
+                raise ValueError(
+                    f"the pointer head returned {len(scores)} scores for "
+                    f"{len(row.texts)} options"
+                )
+            probs = label_softmax(scores)
+            reads.append(
+                QuestionRead(
+                    probs=drex_prompt.apply_order(probs, row.order),
+                    label_mass=1.0,
+                    argmax_is_label=True,
+                    input_tokens=len(row.ids),
+                    output_tokens=0,
+                )
+            )
+        return reads
+
+
 class SlotLMStrategy(NextTokenStrategy):
     """Slot-readout models: one PrefixLM request per question on `slot_prompt`."""
 
@@ -1645,6 +1800,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Gemma4UnifiedForConditionalGeneration": NextTokenStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
+    "Qwen3_5ForDrex": DrexStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
     "Qwen3_5ForSlotDecision": SlotLMStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,

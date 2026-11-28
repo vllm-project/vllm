@@ -378,6 +378,41 @@ vllm serve vllm-sr/d3
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
 
+### Drex v1.5
+
+[`nace-ai/drex-v1.5`](https://huggingface.co/nace-ai/drex-v1.5) is a Qwen3.5
+backbone with a trained pointer head: the `<decide>` token queries each
+option's closing delimiter, and the head turns those dot products into the
+question's option probabilities. vLLM detects the checkpoint's `head.pt` and
+serves it as a classification model, with no token generation.
+
+```bash
+vllm serve nace-ai/drex-v1.5
+```
+
+- A request is one read per question. The prompt is the packing the
+  checkpoint's `code/kev/model.py` writes: a state row, then the question's
+  instruction and options between the reused Qwen delimiters, ending at
+  `<decide>`. A JSON state is flattened the way `code/kev/api.py` renders it.
+- The pointer head scores each option from the hidden states at its closing
+  delimiter and at `<decide>`, so picks and probabilities match the reference
+  `model.probs()`.
+- A request is read within the model's context window (up to 16,384
+  tokens): the state and the question's row are read in full, and a request
+  that does not fit returns 400. The checkpoint was trained on 384-token
+  states and 1,024-token question rows. A question can have up to 255 options.
+- One request may read two windows' worth of tokens in total, since every
+  question reads the state again; a request that asks for more returns 400.
+- Chunked prefill and prefix caching are disabled for this model: the pointer
+  head reads the hidden state at absolute positions in the full row, which a
+  cached or chunked prefill does not provide.
+- `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
+  has no effect.
+- There are no labels, so `label_mass` is 1 and `confidence` is the chosen
+  option's probability. `usage.input_tokens` counts each question's prompt
+  once, and `output_tokens` is 0.
+- `images`, `audio` and `videos` are not accepted.
+
 ### Liquid d1
 
 [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B

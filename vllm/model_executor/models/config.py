@@ -1844,6 +1844,62 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
             )
 
 
+class Qwen3_5ForDrexConfig(Qwen3_5ForCausalLMConfig):
+    """Apply the contract of a Drex checkpoint with a `head.pt` readout."""
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        scheduler_config = vllm_config.scheduler_config
+        # The readout indexes absolute token positions in the hidden states the
+        # pooler sees, so a prompt must arrive as one unsplit, uncached row.
+        if scheduler_config.enable_chunked_prefill:
+            logger.info("Qwen3.5 Drex: disabling chunked prefill (absolute reads).")
+            scheduler_config.enable_chunked_prefill = False
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info(
+                "Qwen3.5 Drex: disabling prefix caching (the readout sees every token)."
+            )
+            vllm_config.cache_config.enable_prefix_caching = False
+        scheduler_config.long_prefill_token_threshold = 0
+        model_config = vllm_config.model_config
+        if scheduler_config.max_num_batched_tokens < model_config.max_model_len:
+            logger.info(
+                "Raising max_num_batched_tokens from %d to %d: %s prefills "
+                "each prompt in one step",
+                scheduler_config.max_num_batched_tokens,
+                model_config.max_model_len,
+                model_config.architecture,
+            )
+            scheduler_config.max_num_batched_tokens = model_config.max_model_len
+        scheduled = scheduler_config.max_num_scheduled_tokens
+        if scheduled is not None and scheduled < model_config.max_model_len:
+            raise ValueError(
+                f"{model_config.architecture} prefills each prompt in one step, "
+                f"so --max-num-scheduled-tokens ({scheduled}) must be at least "
+                f"--max-model-len ({model_config.max_model_len})"
+            )
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        # Drex packs each question as its own causal row after the state.
+        for config in {
+            id(config): config for config in (hf_config, model_config.hf_text_config)
+        }.values():
+            config.is_causal = True
+        # Options carry no fixed label space; the pointer head scores them.
+        pooler_config = model_config.pooler_config
+        if pooler_config is None:
+            raise ValueError("Qwen3.5 Drex needs a pooler config")
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+        # The reference serves a 16,384-token window.
+        if model_config.original_max_model_len is None:
+            model_config.max_model_len = min(model_config.max_model_len, 16384)
+        if getattr(hf_config, "drex_head_dim", None) is None:
+            hf_config.drex_head_dim = 256
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1951,6 +2007,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
+    "Qwen3_5ForDrex": Qwen3_5ForDrexConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
