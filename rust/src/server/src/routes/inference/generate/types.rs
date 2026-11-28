@@ -16,7 +16,9 @@ use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
-use crate::routes::openai::utils::types::{ChatLogProbs, StreamOptions, StringOrArray, Usage};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, StreamOptions, StringOrArray, ThinkingLoopBreak, Usage,
+};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -48,6 +50,8 @@ pub struct GenerateSamplingParams {
     /// Decode token IDs to replay instead of sampling, gated by
     /// `--enable-trace-replay` in Python. Not supported.
     pub trace_decode_token_ids: Option<Vec<u32>>,
+    /// Per-request control of server-configured reasoning loop breaking.
+    pub thinking_loop_break: Option<ThinkingLoopBreak>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,

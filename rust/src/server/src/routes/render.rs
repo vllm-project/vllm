@@ -116,6 +116,7 @@ fn lower_render_request(
             detokenize: None,
             skip_special_tokens: None,
             trace_decode_token_ids: None,
+            thinking_loop_break: None,
             inner: text_request.sampling_params,
         },
         stream,

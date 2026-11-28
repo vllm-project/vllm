@@ -79,6 +79,16 @@ fn reject_unsupported_fields(request: &CompletionRequest) -> Result<(), ApiError
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
 
+    if request
+        .thinking_loop_break
+        .is_some_and(|loop_break| !loop_break.follows_server_config())
+    {
+        bail_invalid_request!(
+            param = "thinking_loop_break",
+            "thinking_loop_break is not supported."
+        );
+    }
+
     Ok(())
 }
 
@@ -166,6 +176,29 @@ mod tests {
             ..base_request()
         };
         assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_non_default_thinking_loop_break() {
+        for (thinking_loop_break, accepted) in [
+            (json!(null), true),
+            (json!(true), true),
+            (json!(false), false),
+            (json!("force"), false),
+            (json!("ramp"), false),
+        ] {
+            let request: CompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "thinking_loop_break": thinking_loop_break,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request(&request).is_ok(),
+                accepted,
+                "{thinking_loop_break}"
+            );
+        }
     }
 
     #[test]

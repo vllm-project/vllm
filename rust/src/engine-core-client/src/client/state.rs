@@ -308,6 +308,8 @@ impl RequestRegistry {
             lora.phase = match event.r#type {
                 EngineCoreEventType::Queued | EngineCoreEventType::Preempted => LoraPhase::Waiting,
                 EngineCoreEventType::Scheduled => LoraPhase::Running,
+                // A loop break happens while the request runs.
+                EngineCoreEventType::ThinkingLoopBreak => continue,
             };
         }
     }
@@ -752,6 +754,17 @@ mod tests {
         registry.send_output(stream_output(output_with_events(
             "req-lora",
             &[EngineCoreEventType::Queued, EngineCoreEventType::Scheduled],
+            None,
+        )));
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&["adapter-a"]), adapter_names(&[]))
+        );
+
+        // A thinking loop break leaves it running.
+        registry.send_output(stream_output(output_with_events(
+            "req-lora",
+            &[EngineCoreEventType::ThinkingLoopBreak],
             None,
         )));
         assert_eq!(

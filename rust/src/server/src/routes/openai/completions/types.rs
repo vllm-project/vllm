@@ -14,8 +14,8 @@ use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
-    LogProbs, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray, Usage,
-    default_true, deserialize_request_top_k,
+    LogProbs, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
+    ThinkingLoopBreak, Usage, default_true, deserialize_request_top_k,
 };
 
 /// The `prompt` of a completions request: one prompt, or a batch of prompts
@@ -209,6 +209,9 @@ pub struct CompletionRequest {
     /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
+
+    /// Per-request control of server-configured reasoning loop breaking.
+    pub thinking_loop_break: Option<ThinkingLoopBreak>,
 
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
