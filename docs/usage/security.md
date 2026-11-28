@@ -230,8 +230,9 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 ### Cache-Reset Endpoints
 
 Use `--enable-cache-reset` to enable the following operational endpoints without
-enabling developer mode. The flag is disabled by default and is supported by
-the Python and Rust HTTP frontends:
+enabling developer mode. The flag is disabled by default. These endpoints
+require an inference engine and are available on both the Python and Rust HTTP
+frontends:
 
 - `POST /reset_prefix_cache` - Reset the prefix cache.
 - `POST /reset_mm_cache` - Reset the multimodal processor cache.

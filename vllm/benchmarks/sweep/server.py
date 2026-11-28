@@ -6,12 +6,21 @@ import signal
 import subprocess
 import time
 from argparse import ArgumentError, ArgumentParser
+from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO, Self
+from typing import BinaryIO, NoReturn, Self
+from urllib.parse import urlsplit
 
 import requests
 
+from vllm.benchmarks.lib.utils import parse_request_headers
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import join_host_port
+
+
+class _BenchmarkArgsParser(FlexibleArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise ArgumentError(None, message)
 
 
 class ServerProcess:
@@ -103,22 +112,24 @@ class ServerProcess:
             check=True,
         )
 
-    def after_bench(self) -> None:
+    def after_bench(self, bench_cmd: list[str] | None = None) -> None:
         if not self.after_bench_cmd:
-            self.reset_caches()
+            self.reset_caches(bench_cmd)
             return
 
         self.run_subcommand(self.after_bench_cmd)
 
     def _get_vllm_server_address(self) -> str:
         parser = ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
-        parser.add_argument("--host", default="localhost")
+        parser.add_argument("--host", default="127.0.0.1")
         parser.add_argument("-p", "--port", type=int, default=8000)
         try:
             args, _ = parser.parse_known_args(self.server_cmd)
         except ArgumentError as exc:
             raise ValueError(str(exc)) from exc
-        return "http://" + join_host_port(args.host, args.port)
+        # Connect to loopback when the server binds every local interface.
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(args.host, args.host)
+        return "http://" + join_host_port(host, args.port)
 
     @property
     def server_address(self) -> str:
@@ -154,7 +165,45 @@ class ServerProcess:
                 )
             time.sleep(poll_interval)
 
-    def reset_caches(self) -> None:
+    @staticmethod
+    def _get_reset_authorization(
+        bench_cmd: list[str] | None, server_address: str
+    ) -> str | None:
+        if (
+            not bench_cmd
+            or Path(bench_cmd[0]).name != "vllm"
+            or bench_cmd[1:3] != ["bench", "serve"]
+        ):
+            return None
+
+        from vllm.benchmarks.serve import add_cli_args
+
+        parser = _BenchmarkArgsParser(add_help=False, exit_on_error=False)
+        add_cli_args(parser)
+        try:
+            args = parser.parse_args(bench_cmd[3:])
+            headers = parse_request_headers(args.header)
+            if headers is None or "Authorization" not in headers:
+                return None
+
+            server_url = urlsplit(server_address)
+            base_url = args.base_url
+            if base_url is None:
+                base_url = f"http://{join_host_port(args.host, args.port)}"
+            bench_url = urlsplit(f"{base_url}{args.endpoint}")
+            bench_port = 80 if bench_url.port is None else bench_url.port
+            if (
+                bench_url.scheme,
+                bench_url.hostname,
+                bench_port,
+            ) != (server_url.scheme, server_url.hostname, server_url.port):
+                return None
+        except (ArgumentError, ValueError):
+            return None
+
+        return headers["Authorization"]
+
+    def reset_caches(self, bench_cmd: list[str] | None = None) -> None:
         server_cmd = self.server_cmd
 
         # Use `.endswith()` to match `/bin/...`
@@ -162,7 +211,10 @@ class ServerProcess:
             server_address = self.server_address
             print(f"Resetting caches at {server_address}")
             headers = {}
-            if api_key := os.environ.get("OPENAI_API_KEY"):
+            authorization = self._get_reset_authorization(bench_cmd, server_address)
+            if authorization is not None:
+                headers["Authorization"] = authorization
+            elif api_key := os.environ.get("OPENAI_API_KEY"):
                 headers["Authorization"] = f"Bearer {api_key}"
 
             for endpoint in self.VLLM_RESET_CACHE_ENDPOINTS:

@@ -106,7 +106,8 @@ cleanup scope.
     We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
     Between each benchmark run, we call all `/reset_*_cache` endpoints to get a clean slate for the next run.
     The sweep adds `--enable-cache-reset` to `vllm` server commands without enabling developer mode.
-    If the server requires an API key, set `OPENAI_API_KEY` for the sweep so cache-reset requests use the same key as inference requests.
+    When `vllm bench serve` targets the server started by the sweep, cache resets use its explicit
+    `Authorization` header if provided. Otherwise, cache resets use `OPENAI_API_KEY` when set.
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note

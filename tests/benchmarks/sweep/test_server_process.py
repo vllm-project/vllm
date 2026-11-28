@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import contextlib
 import os
 import signal
@@ -7,7 +8,11 @@ import socket
 import sys
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
+from vllm.benchmarks.sweep.param_sweep import ParameterSweepItem
+from vllm.benchmarks.sweep.serve import run_comb
 from vllm.benchmarks.sweep.server import ServerProcess
 
 pytestmark = [
@@ -73,3 +78,107 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(server._server_process.pid, signal.SIGKILL)
                 server._server_process.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "env_key,benchmark_fails,cross_origin",
+    [
+        (None, False, False),
+        ("env-key", False, False),
+        (None, True, False),
+        ("env-key", False, True),
+    ],
+)
+def test_sweep_reset_uses_benchmark_authorization(
+    tmp_path, monkeypatch, env_key, benchmark_fails, cross_origin
+):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("VLLM_USE_RUST_BENCH", "0")
+    if env_key is not None:
+        monkeypatch.setenv("OPENAI_API_KEY", env_key)
+
+    dataset = tmp_path / "prompts.jsonl"
+    if not benchmark_fails:
+        dataset.write_text('{"prompt":"hello"}\n')
+
+    reset_calls = []
+    explicit = "Bearer cli=key"
+    reset_authorization = f"Bearer {env_key}" if cross_origin else explicit
+
+    async def reset(request):
+        reset_calls.append(request.path)
+        if request.headers.getall("Authorization", []) != [reset_authorization]:
+            return web.Response(status=401)
+        return web.Response()
+
+    async def completions(request):
+        if request.headers.getall("Authorization", []) != [explicit]:
+            return web.Response(status=401)
+        return web.Response(
+            content_type="text/event-stream",
+            text=(
+                'data: {"choices":[{"text":"hello"}]}\n\n'
+                'data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    async def sweep():
+        app = web.Application()
+        app.router.add_post("/v1/completions", completions)
+        for path in ServerProcess.VLLM_RESET_CACHE_ENDPOINTS:
+            app.router.add_post(path, reset)
+
+        async with contextlib.AsyncExitStack() as stack:
+            managed = await stack.enter_async_context(TestServer(app))
+            if cross_origin:
+                bench_app = web.Application()
+                bench_app.router.add_post("/v1/completions", completions)
+                target = await stack.enter_async_context(TestServer(bench_app))
+                destination = [f"--base_url={str(target.make_url('')).rstrip('/')}"]
+            else:
+                destination = ["--port", str(managed.port)]
+
+            server = ServerProcess(
+                ["vllm", "--port", str(managed.port)], [], show_stdout=True
+            )
+            bench_cmd = [
+                "vllm",
+                "bench",
+                "serve",
+                *destination,
+                "--model",
+                "stub",
+                "--dataset-name",
+                "custom",
+                "--dataset-path",
+                str(dataset),
+                "--skip-tokenizer-init",
+                "--skip-chat-template",
+                "--num-prompts",
+                "1",
+                "--ready-check-timeout-sec",
+                "0",
+                "--header",
+                "Authorization=Bearer replaced",
+            ]
+            return await asyncio.to_thread(
+                run_comb,
+                server,
+                bench_cmd,
+                serve_comb=ParameterSweepItem(),
+                bench_comb=ParameterSweepItem({"header": f"authorization={explicit}"}),
+                link_vars=[],
+                base_path=tmp_path / "results",
+                num_runs=1,
+                dry_run=False,
+                continue_on_error=benchmark_fails,
+            )
+
+    results = asyncio.run(sweep())
+    assert reset_calls == ServerProcess.VLLM_RESET_CACHE_ENDPOINTS
+    if benchmark_fails:
+        assert results == []
+        assert (tmp_path / "results" / "run=0.failure.json").exists()
+    else:
+        assert results and results[0]["completed"] == 1

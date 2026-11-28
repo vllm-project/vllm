@@ -15,14 +15,16 @@ CACHE_PATHS = ("/reset_prefix_cache", "/reset_mm_cache", "/reset_encoder_cache")
 @pytest.mark.parametrize(
     "enabled,dev_mode", [(False, "0"), (True, "0"), (True, "1"), (False, "1")]
 )
-def test_cache_reset_routes_are_independently_enabled(enabled, dev_mode, monkeypatch):
+@pytest.mark.parametrize("task", ["generate", "embed", "render"])
+def test_cache_reset_routes_are_independently_enabled(
+    enabled, dev_mode, task, monkeypatch
+):
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", dev_mode)
-    app = build_app(
-        FrontendArgs(enable_cache_reset=enabled), supported_tasks=("generate",)
-    )
+    app = build_app(FrontendArgs(enable_cache_reset=enabled), supported_tasks=(task,))
     paths = [route.path for route in app.routes]
+    cache_reset_enabled = task != "render" and (enabled or dev_mode == "1")
     for path in CACHE_PATHS:
-        assert paths.count(path) == int(enabled or dev_mode == "1")
+        assert paths.count(path) == int(cache_reset_enabled)
     assert ("/collective_rpc" in paths) == (dev_mode == "1")
     assert ("/sleep" in paths) == (dev_mode == "1")
     assert ("/server_info" in paths) == (dev_mode == "1")

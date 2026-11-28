@@ -20,6 +20,22 @@ def redact_sensitive_namespace(
     return redacted_args
 
 
+def parse_request_headers(items: list[str] | None) -> dict[str, str] | None:
+    if not items:
+        return None
+
+    headers = {}
+    for item in items:
+        key, separator, value = item.partition("=")
+        if not separator:
+            raise ValueError("Invalid header format. Please use KEY=VALUE format.")
+        key = key.strip()
+        if key.lower() == "authorization":
+            key = "Authorization"
+        headers[key] = value.strip()
+    return headers
+
+
 def extract_field(
     args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
 ) -> str:

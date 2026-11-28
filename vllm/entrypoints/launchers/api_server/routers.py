@@ -43,6 +43,15 @@ def register_api_routers(
 
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
+    if "render" not in supported_tasks and (
+        envs.VLLM_SERVER_DEV_MODE or getattr(args, "enable_cache_reset", False)
+    ):
+        from vllm.entrypoints.serve.dev.cache.api_router import (
+            attach_router as attach_cache_router,
+        )
+
+        attach_cache_router(app)
+
     if envs.VLLM_SERVER_DEV_MODE:
         from vllm.entrypoints.serve import register_vllm_dev_api_routers
 
@@ -51,12 +60,6 @@ def register_api_routers(
         from vllm.entrypoints.rl.factories import register_rl_api_routers
 
         register_rl_api_routers(app)
-    elif getattr(args, "enable_cache_reset", False):
-        from vllm.entrypoints.serve.dev.cache.api_router import (
-            attach_router as attach_cache_router,
-        )
-
-        attach_cache_router(app)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (
