@@ -262,6 +262,52 @@ def physical_to_logical_mapping(
     return physical_to_logical
 
 
+PAGE_OWNER_BITS = 64
+
+
+def page_ownership_tables(
+    physical_to_logical: torch.Tensor, num_words: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-page views of `physical_to_logical` for the batch-invariant mask.
+
+    Indexing `physical_to_logical[q_req, page]` inside a mask_mod changes the
+    generated FlexAttention kernel's reduction order on ROCm (seen on gfx950),
+    which breaks batch invariance
+    (https://github.com/vllm-project/vllm/issues/66460). These tables let the
+    mask look up only by page.
+
+    A live page maps to the same logical block in every request that uses it
+    (it is either private or a shared prefix block), so the per-page logical
+    block is the max over requests. Ownership is a bitmask split into 64-bit
+    words: request `r` owns page `p` iff bit `r % 64` of
+    `page_owner_bits[r // 64, p]` is set.
+
+    Args:
+        physical_to_logical: `[num_reqs, num_pages]` table from
+            `physical_to_logical_mapping`.
+        num_words: Number of 64-bit words; must cover `num_reqs`.
+
+    Returns:
+        `page_to_logical` of shape `[num_pages]` and `page_owner_bits` of
+        shape `[num_words, num_pages]`, both int64.
+
+    """
+    num_reqs, num_pages = physical_to_logical.shape
+    assert num_reqs <= num_words * PAGE_OWNER_BITS
+    page_to_logical = physical_to_logical.amax(dim=0)
+    owned = F.pad(
+        physical_to_logical >= 0,
+        (0, 0, 0, num_words * PAGE_OWNER_BITS - num_reqs),
+    ).view(num_words, PAGE_OWNER_BITS, num_pages)
+    bits = torch.arange(
+        PAGE_OWNER_BITS, device=physical_to_logical.device, dtype=torch.int64
+    )
+    # Distinct powers of two, so the sum is a bitwise OR (bit 63 wraps to the
+    # sign bit, which is still exact in two's complement).
+    page_owner_bits = (owned.to(torch.int64) << bits[:, None]).sum(dim=1)
+    return page_to_logical, page_owner_bits
+
+
 def unique_static_unsorted(
     x: torch.Tensor,
     *,
@@ -404,6 +450,10 @@ class FlexAttentionMetadata:
     # generated tokens. Both must be set to enable.
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    # Request-independent page tables (see page_ownership_tables). When set,
+    # the paged mask avoids request-indexed 2D lookups.
+    page_to_logical: torch.Tensor | None = None
+    page_owner_bits: torch.Tensor | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -433,11 +483,30 @@ class FlexAttentionMetadata:
         # Convert physical KV indices to logical indices
         physical_kv_block = physical_kv_idx // self.block_size
         physical_kv_offset = physical_kv_idx % self.block_size
-        logical_block_idx = self.physical_to_logical[q_req, physical_kv_block]
+        if self.page_to_logical is not None:
+            assert self.page_owner_bits is not None
+            logical_block_idx = self.page_to_logical[physical_kv_block]
+            # Pick the owner word for q_req with a fixed select chain, so every
+            # lookup is indexed by page only.
+            word_idx = q_req // PAGE_OWNER_BITS
+            owner_word = self.page_owner_bits[0][physical_kv_block]
+            for w in range(1, self.page_owner_bits.shape[0]):
+                owner_word = torch.where(
+                    word_idx == w,
+                    self.page_owner_bits[w][physical_kv_block],
+                    owner_word,
+                )
+            owner_bit = torch.ones_like(q_req, dtype=torch.int64) << (
+                q_req % PAGE_OWNER_BITS
+            ).to(torch.int64)
+            owns_block = (owner_word & owner_bit) != 0
+            live_block = (logical_block_idx >= 0) & owns_block
+        else:
+            logical_block_idx = self.physical_to_logical[q_req, physical_kv_block]
+            live_block = logical_block_idx >= 0
         logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset
 
         # Determine valid kv indices
-        live_block = logical_block_idx >= 0
         within_upper_bound = logical_kv_idx < self.seq_lens[q_req]
         within_lower_bound = logical_kv_idx >= 0
         is_valid = live_block & within_upper_bound & within_lower_bound
@@ -922,6 +991,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
         # initialize later when we can access block_table
         self.persistent_physical_to_logical = None
+        self.persistent_page_to_logical: torch.Tensor | None = None
+        self.persistent_page_owner_bits: torch.Tensor | None = None
         self.persistent_kv_indices = None
         self.persistent_rswa_kv_indices = None
 
@@ -1074,6 +1145,31 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
         copy_to_persistent(self.persistent_physical_to_logical, inverse_block_table)
 
+        uses_paged_kv = self.uses_paged_kv
+        direct_build = self.direct_build and uses_paged_kv
+        page_to_logical = page_owner_bits = None
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm() and direct_build:
+            num_words = cdiv(
+                self.vllm_config.scheduler_config.max_num_seqs, PAGE_OWNER_BITS
+            )
+            if self.persistent_page_to_logical is None:
+                self.persistent_page_to_logical = torch.empty(
+                    num_gpu_blocks, dtype=torch.long, device=self.device
+                )
+                self.persistent_page_owner_bits = torch.empty(
+                    num_words, num_gpu_blocks, dtype=torch.long, device=self.device
+                )
+            assert self.persistent_page_owner_bits is not None
+            page_to_logical, page_owner_bits = page_ownership_tables(
+                inverse_block_table, num_words
+            )
+            page_to_logical = copy_to_persistent(
+                self.persistent_page_to_logical, page_to_logical
+            )
+            page_owner_bits = copy_to_persistent(
+                self.persistent_page_owner_bits, page_owner_bits
+            )
+
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
         copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
         copy_to_persistent(self.persistent_query_start_loc, query_start_loc)
@@ -1085,7 +1181,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             copy_to_persistent(self.persistent_rswa_prefix_lens, rswa_prefix_lens)
             rswa_prefix_lens = self.persistent_rswa_prefix_lens
 
-        uses_paged_kv = self.uses_paged_kv
         logical_mask_mod = (
             bidirectional_mask_mod
             if uses_paged_kv and not common_attn_metadata.causal
@@ -1123,7 +1218,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             # FIXME(Isotr0py): direct build has issue to build bidirectional
             # attention block mask for encoder-only models, disable it temporarily.
             # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
-            direct_build=self.direct_build and uses_paged_kv,
+            direct_build=direct_build,
             q_block_size=q_block_size,
             kv_block_size=self.kv_block_size,
             persistent_kv_indices=persistent_kv_indices,
@@ -1132,6 +1227,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             rswa_window=self.rswa_window,
+            page_to_logical=page_to_logical,
+            page_owner_bits=page_owner_bits,
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.

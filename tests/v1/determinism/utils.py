@@ -37,7 +37,7 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
     ),
     "rocm": DeviceConfig(
         available=current_platform.is_rocm() and HAS_TRITON,
-        backends=["TRITON_ATTN"],
+        backends=["TRITON_ATTN", "FLEX_ATTENTION"],
     ),
 }
 

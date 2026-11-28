@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
@@ -463,6 +464,141 @@ def test_physical_to_logical_mapping_handles_reused_blocks():
         block_table=block_table2, seq_lens=seq_lens2, block_size=16, total_blocks=8
     )
     assert out2[0, 2].item() == 1
+
+
+def test_page_ownership_tables():
+    """Per-page tables encode exactly the ownership in `physical_to_logical`.
+
+    Page 1 is shared by requests 0 and 65 but not 1, so a `req % 64` bit
+    alone would wrongly give it to request 1. Request 63 uses the sign bit.
+    """
+    from vllm.v1.attention.backends.flex_attention import page_ownership_tables
+
+    num_reqs, num_words = 70, 3
+    block_table = torch.arange(1, 2 * num_reqs + 1).view(num_reqs, 2)
+    block_table[65, 0] = 1
+    seq_lens = torch.full((num_reqs,), 32)
+    p2l = physical_to_logical_mapping(
+        block_table, seq_lens, block_size=16, total_blocks=2 * num_reqs + 1
+    )
+
+    page_to_logical, page_owner_bits = page_ownership_tables(p2l, num_words)
+
+    assert page_owner_bits.shape == (num_words, p2l.shape[1])
+    assert torch.equal(page_to_logical, p2l.amax(dim=0))
+    reqs = torch.arange(num_reqs)[:, None]
+    owner_bit = (
+        page_owner_bits[reqs // 64, torch.arange(p2l.shape[1])] >> (reqs % 64)
+    ) & 1
+    assert torch.equal(owner_bit.bool(), p2l >= 0)
+    assert not owner_bit[1, 1]
+    assert page_owner_bits[2].eq(0).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    reason="CUDA not available or PyTorch version < 2.9",
+)
+@pytest.mark.parametrize(
+    "batch_spec",
+    [
+        BatchSpec(
+            seq_lens=[200, 150, 64, 97, 33, 120, 81, 256],
+            query_lens=[200, 150, 1, 97, 17, 1, 81, 64],
+            name="mixed",
+        ),
+        BatchSpec(
+            seq_lens=[(17, 40, 64)[i % 3] for i in range(70)],
+            query_lens=[1, 1, 1] + [(17, 40, 64)[i % 3] for i in range(3, 70)],
+            name="over_64_requests",
+        ),
+    ],
+    ids=lambda spec: spec.name,
+)
+@torch.inference_mode()
+def test_flex_attention_paged_mask_batch_invariant(monkeypatch, batch_spec):
+    """Each request's output must not depend on the rest of the batch.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/66460:
+    on gfx950 a request-indexed page lookup in the paged mask_mod changed
+    the kernel's reduction order once a batch held several requests.
+    """
+    from vllm.v1.attention.backends.flex_attention import (
+        flex_attention_compiled,
+        get_kernel_options,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    block_size, num_blocks = 16, 1024
+    num_heads, num_kv_heads, head_size = 16, 8, 128
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        num_gpu_blocks=num_blocks,
+        max_num_seqs=128,
+        max_num_batched_tokens=4096,
+    )
+    with registered_attention_layers(config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config), ["layer"], config, device
+        )
+
+    # Requests share leading blocks with an earlier one (prefix caching); the
+    # rest are private and shuffled. From request 64 on, the source is 63
+    # requests back, so e.g. request 65 shares request 2's prefix while
+    # request 1 (bit 1 too, same q-block as request 2) must not see it.
+    pages = (torch.randperm(num_blocks - 1) + 1).tolist()
+    seq_lens = batch_spec.seq_lens
+    max_blocks = cdiv(max(seq_lens), block_size)
+    block_table = torch.zeros(len(seq_lens), max_blocks, dtype=torch.int32)
+    for r, seq_len in enumerate(seq_lens):
+        shared = src = 0
+        if r >= 3:
+            src = r - 63 if r >= 64 else r - 1
+            shared = min(seq_lens[src], seq_len - 1) // block_size // 2
+        for j in range(cdiv(seq_len, block_size)):
+            block_table[r, j] = block_table[src, j] if j < shared else pages.pop()
+
+    kv_shape = (1, num_kv_heads, num_blocks * block_size, head_size)
+    key = torch.randn(kv_shape, device=device, dtype=torch.bfloat16)
+    value = torch.randn(kv_shape, device=device, dtype=torch.bfloat16)
+    query = torch.randn(
+        1,
+        num_heads,
+        sum(batch_spec.query_lens),
+        head_size,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+
+    def attend(spec, rows, q):
+        common = create_common_attn_metadata(spec, block_size, device)
+        common.block_table_tensor.copy_(
+            block_table[rows, : common.block_table_tensor.shape[1]]
+        )
+        metadata = builder.build(0, common)
+        kernel_options = get_kernel_options(q, block_size, block_size, True)
+        kernel_options["IS_DIVISIBLE"] = False
+        return flex_attention_compiled(
+            q,
+            key,
+            value,
+            block_mask=metadata.block_mask,
+            enable_gqa=True,
+            kernel_options=kernel_options,
+        )
+
+    batched = attend(batch_spec, list(range(len(seq_lens))), query)
+    start = 0
+    for r, (seq_len, query_len) in enumerate(zip(seq_lens, batch_spec.query_lens)):
+        q = query[:, :, start : start + query_len]
+        alone = attend(BatchSpec(seq_lens=[seq_len], query_lens=[query_len]), [r], q)
+        assert torch.equal(batched[:, :, start : start + query_len], alone), (
+            f"request {r} differs when batched"
+        )
+        start += query_len
 
 
 @pytest.mark.skipif(
