@@ -210,6 +210,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         k_norm=SimpleNamespace(weight=torch.ones(1)),
         _k_scale_float=1.0,
         _v_scale_float=1.0,
+        q_dtype=torch.bfloat16,
     )
 
     monkeypatch.setattr(
@@ -237,8 +238,6 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
         main_kv_cache=attn.kv_cache,
-        main_decode_q_out=torch.empty(0, 1, 1),
-        main_prefill_q_out=torch.empty(2, 1, 1),
         block_indices=torch.empty(2, 1, dtype=torch.int32),
     )
 

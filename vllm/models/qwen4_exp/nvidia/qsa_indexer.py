@@ -234,10 +234,8 @@ class QSAIndexer(nn.Module):
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         main_kv_cache: torch.Tensor | None = None,
-        main_decode_q_out: torch.Tensor | None = None,
-        main_prefill_q_out: torch.Tensor | None = None,
         block_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
@@ -247,10 +245,10 @@ class QSAIndexer(nn.Module):
         index).
 
         With `attn.use_fused_qsa_prepare`, the same launch also writes
-        `attn`'s K/V into `main_kv_cache` at `slot_mapping`, its Q into the
-        `main_*_q_out` buffers, and returns its gate as the second element
-        (None otherwise). `qkv`, `slot_mapping` and `main_*` are only read in
-        that mode.
+        `attn`'s K/V into `main_kv_cache` at `slot_mapping` and prepares
+        its Q and gate from `qkv`, returned as the second element (None
+        otherwise). `qkv`, `slot_mapping` and `main_kv_cache` are only
+        read in that mode.
 
         `block_indices` [num_tokens, token_topk // compress_ratio] receives
         the selected compressed blocks before expansion: each row's leading
@@ -297,18 +295,11 @@ class QSAIndexer(nn.Module):
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
 
-        main_gate: torch.Tensor | None = None
+        main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
         if attn.use_fused_qsa_prepare:
-            if (
-                qkv is None
-                or slot_mapping is None
-                or main_kv_cache is None
-                or main_decode_q_out is None
-                or main_prefill_q_out is None
-            ):
+            if qkv is None or slot_mapping is None or main_kv_cache is None:
                 raise ValueError(
-                    "fused QSA prepare requires qkv, slot_mapping, main_kv_cache "
-                    "and the main Q buffers"
+                    "fused QSA prepare requires qkv, slot_mapping and main_kv_cache"
                 )
             q = projected_q.new_empty(
                 num_tokens,
@@ -319,7 +310,7 @@ class QSAIndexer(nn.Module):
             main_kv_cache = main_kv_cache.transpose(1, 2)
             if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
-            main_gate = qsa_prepare(
+            main_outputs = qsa_prepare(
                 projected_q,
                 raw_keys,
                 positions,
@@ -351,8 +342,7 @@ class QSAIndexer(nn.Module):
                 main_slot_mapping=slot_mapping[:num_tokens],
                 main_k_scale=attn._k_scale_float,
                 main_v_scale=attn._v_scale_float,
-                main_decode_q_out=main_decode_q_out,
-                main_prefill_q_out=main_prefill_q_out,
+                main_q_dtype=attn.q_dtype,
             )
         else:
             # Unfused reference path
@@ -415,7 +405,7 @@ class QSAIndexer(nn.Module):
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
-            return out, main_gate
+            return out, main_outputs
 
         if out is None:
             out = torch.empty(
@@ -473,7 +463,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
-        return out, main_gate
+        return out, main_outputs
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

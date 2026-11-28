@@ -19,7 +19,6 @@ from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -84,8 +83,6 @@ from .ops.qsa_flashinfer import (
 )
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
-
-logger = init_logger(__name__)
 
 
 @dataclass
@@ -479,8 +476,7 @@ class Qwen4ExpQSAImpl(
     def forward(
         self,
         layer: torch.nn.Module,
-        decode_query: torch.Tensor,
-        prefill_query: torch.Tensor,
+        query: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: Qwen4ExpQSANvidiaMetadata | Qwen4ExpQSAHiSparseMetadata,
         output: torch.Tensor,
@@ -491,11 +487,7 @@ class Qwen4ExpQSAImpl(
         block_indices: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Run sparse attention over the owner's indexer-selected K/V rows.
-
-        Q comes as the leading decode rows and the prefill rows, the latter in
-        the prefill kernel's dtype.
-        """
+        """Run sparse attention over the owner's indexer-selected K/V rows."""
         num_tokens = attn_metadata.num_actual_tokens
         # No zero fill: the kernel writes every actual row (empty selections
         # included), and padding rows only feed row-wise ops, never sampled
@@ -506,17 +498,16 @@ class Qwen4ExpQSAImpl(
         if topk_buffer is None:
             raise RuntimeError("QSA owner did not provide its top-k buffer")
         selected = topk_buffer[:num_tokens]
+        query = query[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
         out = output[:num_tokens]
         output_gate = output_gate[:num_tokens]
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        assert decode_query.shape[0] == num_decode_tokens
-        assert num_decode_tokens + prefill_query.shape[0] == num_tokens
         if self.index_group is None:
             nvidia_metadata = cast(Qwen4ExpQSANvidiaMetadata, attn_metadata)
+            num_decode_tokens = nvidia_metadata.num_decode_tokens
             self.attend(
                 layer,
-                decode_query,
+                query[:num_decode_tokens],
                 kv_cache,
                 selected[:num_decode_tokens],
                 nvidia_metadata.block_table,
@@ -532,7 +523,7 @@ class Qwen4ExpQSAImpl(
             if flashinfer_prefill is None:
                 self.attend(
                     layer,
-                    prefill_query,
+                    query[prefill_rows],
                     kv_cache,
                     selected[prefill_rows],
                     nvidia_metadata.block_table,
@@ -546,9 +537,8 @@ class Qwen4ExpQSAImpl(
                 if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                     k_scale = cast(float, layer._k_scale_float)
                     v_scale = cast(float, layer._v_scale_float)
-                assert prefill_query.dtype == layer.q_dtype
                 qsa_sparse_paged_prefill(
-                    prefill_query,
+                    query[prefill_rows],
                     kv_cache,
                     nvidia_metadata.block_table,
                     nvidia_metadata.num_decodes,
@@ -571,27 +561,23 @@ class Qwen4ExpQSAImpl(
         group = self.index_group
         metadata = cast(Qwen4ExpQSAHiSparseMetadata, attn_metadata)
         cache = group.cache(0)
+        num_decode_tokens = metadata.num_decode_tokens
         if cache.all_context_pages_resident and num_decode_tokens < num_tokens:
             # The kernel resolves logical indices against the resident view.
             state_indices = cache.runtime.request_state_indices
             assert cache.view is not None and cache.block_table is not None
             assert state_indices is not None
-            req_rows = state_indices[token_to_req]
-            for rows, query in (
-                (slice(0, num_decode_tokens), decode_query),
-                (slice(num_decode_tokens, num_tokens), prefill_query),
-            ):
-                self.attend(
-                    layer,
-                    query,
-                    self.kv_view(cache.view.cache),
-                    selected[rows],
-                    cache.block_table,
-                    req_rows[rows],
-                    use_prefill_config,
-                    out[rows],
-                    output_gate[rows],
-                )
+            self.attend(
+                layer,
+                query,
+                self.kv_view(cache.view.cache),
+                selected,
+                cache.block_table,
+                state_indices[token_to_req],
+                use_prefill_config,
+                out,
+                output_gate,
+            )
             return output
         if num_decode_tokens:
             physical = group.convert_logical_to_physical_topk(
@@ -604,7 +590,7 @@ class Qwen4ExpQSAImpl(
             assert isinstance(physical, torch.Tensor)
             self.attend(
                 layer,
-                decode_query,
+                query[:num_decode_tokens],
                 self.kv_view(group.physical_kv_cache(0)),
                 physical,
                 metadata.block_table,
@@ -623,7 +609,7 @@ class Qwen4ExpQSAImpl(
             )
             self.attend(
                 layer,
-                prefill_query,
+                query[num_decode_tokens:],
                 self.kv_view(staged_cache),
                 selected[num_decode_tokens:],
                 block_table,
@@ -857,8 +843,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
         self.q_dtype = get_q_dtype(self.kv_cache_torch_dtype)
-        self.flashinfer_qsa_supported = index_group is None and (
-            is_flashinfer_qsa_supported(
+        self.flashinfer_qsa_supported = (
+            index_group is None
+            and is_flashinfer_qsa_supported(
                 self.kv_cache_torch_dtype,
                 self.q_dtype,
                 self.indexer.compress_ratio,
@@ -1023,18 +1010,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
-        num_decode_tokens = main_metadata.num_decode_tokens
-        if self.use_fused_qsa_prepare:
-            query = qkv.new_empty(
-                num_tokens, self.num_heads, self.head_dim, dtype=self.q_dtype
-            )
-        assert query is not None
-        if query.dtype != self.q_dtype:
-            # The unfused path writes BF16 Q; unit scale as in qsa_prepare.
-            query = query[:num_tokens].to(self.q_dtype)
-        decode_query = query[:num_decode_tokens]
-        prefill_query = query[num_decode_tokens:num_tokens]
-        selected, main_gate = self.indexer(
+        selected, main_outputs = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
@@ -1042,29 +1018,30 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
-            main_decode_q_out=decode_query,
-            main_prefill_q_out=prefill_query,
             block_indices=block_indices,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if self.index_group is not None:
             self.index_group.set_logical_topk_ready(0)
-        if main_gate is None:
+        if main_outputs is None:
             assert key is not None and value is not None
             num_rows = slot_mapping.shape[0]
             self.impl.do_kv_cache_update(
                 self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
+            assert query is not None
+            if query.dtype != self.q_dtype:
+                # Unit scale, as in qsa_prepare.
+                query = query[:num_tokens].to(self.q_dtype)
         else:
-            output_gate = main_gate
+            query, output_gate = main_outputs
         if self.index_group is not None:
             self.index_group.cache(0).finish_kv_update()
-        assert output_gate is not None
+        assert query is not None and output_gate is not None
         self.impl.forward(
             self,
-            decode_query,
-            prefill_query,
+            query,
             self.kv_cache,
             main_metadata,
             output,

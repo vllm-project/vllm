@@ -107,7 +107,6 @@ def _store_rotated(dst, y, o1, o2, scale):
         "num_state_blocks",
         "num_compressed_blocks",
         "num_k_work",
-        "num_main_decode_tokens",
     ]
 )
 def _qsa_prepare_kernel(
@@ -159,9 +158,7 @@ def _qsa_prepare_kernel(
     main_q_norm_weight_ptr,
     main_k_norm_weight_ptr,
     main_eps,
-    main_decode_q_out_ptr,
-    main_prefill_q_out_ptr,
-    num_main_decode_tokens,
+    main_q_out_ptr,
     main_gate_out_ptr,
     main_cache_ptr,
     main_cache_stride_block,
@@ -234,12 +231,7 @@ def _qsa_prepare_kernel(
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
             # Unit scale for FP8: normalized Q is far inside e4m3's range.
-            if token < num_main_decode_tokens:
-                _store_rotated(main_decode_q_out_ptr + out, y, o1, o2, 1.0)
-            else:
-                prefill_row = token - num_main_decode_tokens
-                prefill_out = (prefill_row * MAIN_HQ + head) * MAIN_D
-                _store_rotated(main_prefill_q_out_ptr + prefill_out, y, o1, o2, 1.0)
+            _store_rotated(main_q_out_ptr + out, y, o1, o2, 1.0)
             gate = tl.load(src + MAIN_D + dims)
             tl.store(main_gate_out_ptr + out + dims, gate)
         return
@@ -539,28 +531,21 @@ def qsa_prepare(
     main_slot_mapping: torch.Tensor,
     main_k_scale: float,
     main_v_scale: float,
-    main_decode_q_out: torch.Tensor,
-    main_prefill_q_out: torch.Tensor,
-) -> torch.Tensor:
+    main_q_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its gate. Main Q is split by row position, not checked: the
-    first `main_decode_q_out.shape[0]` rows (the caller's decodes) go there,
-    the rest to `main_prefill_q_out`, each in its buffer's dtype.
+    and returns its Q (in `main_q_dtype`) and gate.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2
     num_main_kv_heads = main_kv_cache.shape[2]
     num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
     main_gate_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
-    num_main_decode_tokens = main_decode_q_out.shape[0]
-    for buf in (main_decode_q_out, main_prefill_q_out):
-        assert buf.shape[1:] == (num_main_q_heads, main_head_dim)
-        assert buf.is_contiguous()
-    assert num_main_decode_tokens + main_prefill_q_out.shape[0] == num_tokens
+    main_q_out = torch.empty_like(main_gate_out, dtype=main_q_dtype)
     if num_tokens == 0:
-        return main_gate_out
+        return main_q_out, main_gate_out
     num_q_heads, head_dim = q_out.shape[1:]
     assert cos_sin_cache.shape[-1] * 2 == head_dim
     assert q.shape == (num_tokens, num_q_heads * head_dim)
@@ -646,9 +631,7 @@ def qsa_prepare(
         main_q_norm_weight_ptr=main_q_norm_weight,
         main_k_norm_weight_ptr=main_k_norm_weight,
         main_eps=main_eps,
-        main_decode_q_out_ptr=main_decode_q_out,
-        main_prefill_q_out_ptr=main_prefill_q_out,
-        num_main_decode_tokens=num_main_decode_tokens,
+        main_q_out_ptr=main_q_out,
         main_gate_out_ptr=main_gate_out,
         main_cache_ptr=main_kv_cache,
         main_cache_stride_block=main_kv_cache.stride(0),
@@ -663,7 +646,7 @@ def qsa_prepare(
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
         num_warps=1,
     )
-    return main_gate_out
+    return main_q_out, main_gate_out
 
 
 __all__ = ["qsa_prepare"]
