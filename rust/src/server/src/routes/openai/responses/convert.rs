@@ -396,14 +396,13 @@ fn convert_input(
     input: ResponsesInput,
 ) -> Result<(Vec<ChatMessage>, bool), ApiError> {
     let mut messages = Vec::new();
-    if let Some(instructions) = instructions
-        && !instructions.is_empty()
-    {
-        messages.push(ChatMessage::system(instructions.clone()));
-    }
+    let instructions = instructions.as_deref().filter(|text| !text.is_empty());
 
     let items = match input {
         ResponsesInput::Text(text) => {
+            if let Some(instructions) = instructions {
+                messages.push(ChatMessage::system(instructions.to_owned()));
+            }
             messages.push(ChatMessage::user(text));
             return Ok((messages, false));
         }
@@ -411,6 +410,19 @@ fn convert_input(
     };
 
     let continue_final = should_continue_final_message(&items);
+
+    let mut items = items.into_iter().peekable();
+    if let Some(instructions) = instructions {
+        // Merge the system items that directly follow `instructions`, as the Python
+        // frontend does: chat templates such as Qwen3.5's reject a second system message.
+        let mut system = instructions.to_owned();
+        while let Some(text) = items.peek().and_then(system_message_text) {
+            system.push_str("\n\n");
+            system.push_str(&text);
+            items.next();
+        }
+        messages.push(ChatMessage::system(system));
+    }
 
     let mut assistant = AssistantTurn::default();
     for item in items {
@@ -490,6 +502,28 @@ fn convert_input(
     }
 
     Ok((messages, continue_final))
+}
+
+/// The text of a system message item whose parts are all text parts, or `None`.
+fn system_message_text(item: &ResponseInputItem) -> Option<String> {
+    let ResponseInputItem::Message(message) = item else {
+        return None;
+    };
+    if message.role != ResponseInputRole::System {
+        return None;
+    }
+    match &message.content {
+        ResponseMessageContent::Text(text) => Some(text.clone()),
+        ResponseMessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ResponseInputContentPart::InputText { text }
+                | ResponseInputContentPart::OutputText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|texts| texts.join("\n")),
+    }
 }
 
 /// Convert message content into internal chat content.
@@ -1107,6 +1141,75 @@ mod tests {
                 "{input_audio} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn instructions_merge_only_leading_system_items() {
+        let input = serde_json::from_value(json!([
+            {"role": "system", "content": "a"},
+            {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": "b"},
+                    {"type": "input_text", "text": "c"}
+                ]
+            },
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "d"}
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) =
+            convert_input(&Some("inst".to_string()), input).expect("convert Responses input");
+        assert_eq!(
+            messages,
+            [
+                ChatMessage::system("inst\n\na\n\nb\nc".to_string()),
+                ChatMessage::user("hi".to_string()),
+                ChatMessage::system(ChatContent::Text("d".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn instructions_merge_stops_at_a_system_item_with_media() {
+        let input = serde_json::from_value(json!([
+            {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": "a"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+                ]
+            },
+            {"role": "system", "content": "b"},
+            {"role": "user", "content": "hi"}
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) =
+            convert_input(&Some("inst".to_string()), input).expect("convert Responses input");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0], ChatMessage::system("inst".to_string()));
+        assert_eq!(
+            messages[2],
+            ChatMessage::system(ChatContent::Text("b".to_string()))
+        );
+    }
+
+    #[test]
+    fn instructions_precede_text_input() {
+        let input = serde_json::from_value(json!("hi")).expect("deserialize Responses input");
+        let (messages, _) =
+            convert_input(&Some("inst".to_string()), input).expect("convert Responses input");
+        assert_eq!(
+            messages,
+            [
+                ChatMessage::system("inst".to_string()),
+                ChatMessage::user("hi".to_string()),
+            ]
+        );
     }
 
     #[test]
