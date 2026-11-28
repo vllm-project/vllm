@@ -507,8 +507,8 @@ spec:
                     name: accelerators-thanos-querier-datasource
                   # overall iteration tokens/sec if exposed
                   query: >
-                    rate(vllm:iteration_tokens_total_count[$__interval])
-                  seriesNameFormat: 'iteration overall'
+                    sum by (model_name) (rate(vllm:iteration_tokens_total_sum{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}} iteration overall'
 
     "17":
       kind: Panel
