@@ -842,6 +842,7 @@ def rocm_fp8_paged_mqa_logits(
     *,
     compress_ratio: int = 1,
     cache_layout: str | None = None,
+    dcp_world_size: int = 1,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -861,6 +862,8 @@ def rocm_fp8_paged_mqa_logits(
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
         cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
             also takes the Triton path.
+        dcp_world_size: DCP ranks; with next_n > 1 and DCP the per-row lengths
+            are localized per rank, so the call stays on Gluon (see below).
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -895,16 +898,39 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _USE_FUSED_PAGED_MQA_LOGITS:
-            logger.info_once(
-                "Using AITER paged-MQA logits from %s.",
-                aiter_paged_mqa_logits_module.__name__,
-            )
-            deepgemm_fp8_paged_mqa_logits = (
-                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
-            )
             batch_size, next_n, heads, _ = q_fp8.shape
             out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
-            deepgemm_fp8_paged_mqa_logits(
+            preshuffle = indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA
+            if next_n > 1 and dcp_world_size > 1:
+                # Both kernels bound MTP row j by the last per-row length, and
+                # top-k reads each row's own length. DCP localizes those per
+                # rank, so two rows can share one length and top-k reads one
+                # column past the bound. Gluon writes -inf there; FlyDSL
+                # leaves it stale, so keep Gluon until AITER fills it.
+                logger.info_once(
+                    "Using AITER Gluon paged-MQA logits from %s for MTP with DCP.",
+                    aiter_paged_mqa_logits_module.__name__,
+                )
+                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    ChunkK=256,
+                    Preshuffle=preshuffle,
+                    KVBlockSize=block_size,
+                    WavePerEU=2,
+                )
+                return out_logits
+
+            # Picks the kernel and launch knobs per shape.
+            from aiter.paged_mqa_logits import paged_mqa_logits
+
+            logger.info_once("Using AITER paged-MQA logits (aiter.paged_mqa_logits).")
+            paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
                 weights,
@@ -912,10 +938,8 @@ def rocm_fp8_paged_mqa_logits(
                 context_lens,
                 block_tables,
                 max_model_len,
-                ChunkK=256,
-                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
+                Preshuffle=preshuffle,
                 KVBlockSize=block_size,
-                WavePerEU=2,
             )
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
@@ -1744,6 +1768,7 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=decode_max_model_len,
             compress_ratio=compress_ratio,
             cache_layout=cache_layout,
+            dcp_world_size=dcp_world_size,
         )
 
         if candidate_blocks is not None:
