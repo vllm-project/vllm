@@ -92,7 +92,17 @@ class AttentionConfig:
     falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
 
     use_prefill_query_quantization: bool = False
-    """If set, quantize query for attention in prefill."""
+    """If set, quantize query for attention in prefill. On ROCM_AITER_FA
+    (gfx942 and gfx950, FP8 KV cache) this applies to the full-attention
+    layers. As in the attention backends that quantize the query with an FP8
+    KV cache, the query uses the layer's static q scale, 1.0 unless the
+    checkpoint provides one, so values whose magnitude exceeds the FP8 maximum
+    are clipped."""
+
+    use_prefill_exp_free_softmax: bool = False
+    """If set together with `use_prefill_query_quantization`, compute the FP8
+    prefill attention probabilities without evaluating exp2. Only affects
+    ROCM_AITER_FA layers that run the FlyDSL FP8 extend kernel."""
 
     trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
     """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
@@ -236,6 +246,13 @@ class AttentionConfig:
             raise ValueError(
                 "TORCH_SDPA is only supported for multi-modal encoder attention "
                 "and cannot be used as a decoder attention backend."
+            )
+        if self.use_prefill_exp_free_softmax and not (
+            self.use_prefill_query_quantization
+        ):
+            logger.warning(
+                "attention_config.use_prefill_exp_free_softmax has no effect "
+                "without use_prefill_query_quantization."
             )
         # Checked here rather than at indexer selection, which the two CP
         # backends reach separately: bf16 goes to the Triton indexer and fp8

@@ -11,12 +11,14 @@ wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 """
 
 import importlib
+import math
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_mi3xx
+from vllm.platforms.rocm import get_cdna_version, on_mi3xx
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1036,6 +1038,463 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
         sinks=sinks,
     )
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
+# Layers the flag must leave correct: every head shape for full attention, one
+# shape for each layer kind or cache that has its own prefill path. The latter
+# use the test model's own head shape (Qwen3-0.6B), which the metadata builder
+# sizes its BF16 prefill workspace from.
+_FLYDSL = pytest.mark.skipif(get_cdna_version() != 4, reason="gfx950 FlyDSL kernel")
+_PREFILL_QUERY_QUANT_CASES = (
+    [
+        pytest.param(
+            head_size,
+            num_heads,
+            "full_attention",
+            False,
+            False,
+            id=f"full-{head_size}-{nh}",
+        )
+        for head_size in HEAD_SIZES
+        for nh, num_heads in enumerate(NUM_HEADS_PAIRS)
+    ]
+    + [
+        pytest.param(128, (16, 8), case, False, False, id=case)
+        for case in ("sliding_window", "sinks", "bf16_kv_cache", "shuffled_kv_layout")
+    ]
+    + [
+        # gfx950: the FlyDSL kernel (head size 64, 8 query heads per KV head), also
+        # on sliding-window layers and with the exp-free softmax.
+        pytest.param(
+            64,
+            (16, 2),
+            case,
+            True,
+            exp_free,
+            id=f"{case}-64-gqa8-{'exp_free' if exp_free else 'exp2'}",
+            marks=_FLYDSL,
+        )
+        for case in ("full_attention", "sliding_window")
+        for exp_free in (False, True)
+    ]
+)
+
+
+@pytest.mark.skipif(get_cdna_version() not in (3, 4), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize(
+    "head_size, num_heads, layer_kind, flydsl, exp_free", _PREFILL_QUERY_QUANT_CASES
+)
+@pytest.mark.parametrize("q_scale", [1.0, 4.0])
+@pytest.mark.parametrize("prefill_first", [False, True])
+def test_aiter_fa_fp8_query_extend_matches_reference(
+    monkeypatch,
+    head_size,
+    num_heads,
+    layer_kind,
+    flydsl,
+    exp_free,
+    q_scale,
+    prefill_first,
+):
+    """With `use_prefill_query_quantization` on, a batch with a decode, extends
+    and a pure prefill matches the reference attention of the layer: full
+    attention, sliding window, sinks, a BF16 KV cache or the shuffled KV
+    layout. Each extend and prefill matches, by relative L2, a float32
+    reference computed from the BF16 query or from the query quantized to FP8
+    with the layer's static q scale (an FP8 query also rounds the probabilities
+    to FP8, so single elements of rows that attend over a few keys differ by
+    more than an elementwise tolerance would allow). On gfx950, head size 64
+    with 8 query heads per KV head runs the FlyDSL kernel, also for sliding-window
+    layers and with `use_prefill_exp_free_softmax` (then against the query the
+    kernel casts in-kernel)."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    shuffle = layer_kind == "shuffled_kv_layout"
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", shuffle)
+    kv_cache_dtype = "auto" if layer_kind == "bf16_kv_cache" else "fp8"
+    sliding_window = 32 if layer_kind == "sliding_window" else None
+    set_random_seed(0)
+    # A decode, the extends and a pure prefill, which may precede the extends.
+    if prefill_first:
+        batch_spec = BatchSpec(
+            seq_lens=[500, 64, 700, 333, 90], query_lens=[1, 64, 96, 40, 24]
+        )
+    else:
+        batch_spec = BatchSpec(
+            seq_lens=[500, 700, 333, 90, 64], query_lens=[1, 96, 40, 24, 64]
+        )
+    num_blocks = 256
+    num_q_heads, num_kv_heads = num_heads
+    # Sinks comparable to the softmax mass of the real keys.
+    sinks = (
+        torch.randn(num_q_heads, dtype=torch.float32) + 4.0
+        if layer_kind == "sinks"
+        else None
+    )
+    config = create_vllm_config(
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+        hf_config_override={
+            "num_attention_heads": num_q_heads,
+            "num_key_value_heads": num_kv_heads,
+            "head_dim": head_size,
+        },
+    )
+    config.cache_config.cache_dtype = kv_cache_dtype
+    config.attention_config.use_prefill_query_quantization = True
+    config.attention_config.use_prefill_exp_free_softmax = exp_free
+    scale = head_size**-0.5
+
+    with set_current_vllm_config(config):
+        layer = Attention(
+            num_q_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+            sinks=sinks,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), arange_block_indices=True
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+    impl = layer.impl
+    assert isinstance(impl, AiterFlashAttentionImpl)
+    layer._q_scale.fill_(q_scale)
+
+    cache_dtype = (
+        current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
+    )
+    kv_cache = (
+        torch.empty(
+            2, num_blocks, BLOCK_SIZE, num_kv_heads * head_size, dtype=cache_dtype
+        ).transpose(0, 1)
+        if shuffle
+        else torch.empty(
+            num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=cache_dtype
+        )
+    )
+    shape = (num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+    key = torch.randn(shape).to(cache_dtype).to(torch.bfloat16)
+    value = torch.randn(shape).to(cache_dtype).to(torch.bfloat16)
+    # Keys past each request's last token must be masked out of the scores.
+    for i, seq_len in enumerate(batch_spec.seq_lens):
+        last = common.block_table_tensor[i, (seq_len - 1) // BLOCK_SIZE]
+        key[last, (seq_len - 1) % BLOCK_SIZE + 1 :] = 200.0
+    impl.do_kv_cache_update(
+        layer,
+        key.view(-1, num_kv_heads, head_size),
+        value.view(-1, num_kv_heads, head_size),
+        kv_cache,
+        torch.arange(num_blocks * BLOCK_SIZE, dtype=torch.int64),
+    )
+    key_ref, value_ref = key.float(), value.float()
+    # The new tokens' K/V as the forward receives them: what the cache holds.
+    keys, values = [], []
+    for i, (seq_len, query_len) in enumerate(
+        zip(batch_spec.seq_lens, batch_spec.query_lens)
+    ):
+        pos = torch.arange(seq_len - query_len, seq_len)
+        blocks = common.block_table_tensor[i, pos // BLOCK_SIZE]
+        keys.append(key[blocks, pos % BLOCK_SIZE])
+        values.append(value[blocks, pos % BLOCK_SIZE])
+    query = torch.randn(
+        batch_spec.compute_num_tokens(), num_q_heads, head_size, dtype=torch.bfloat16
+    )
+    fp8_dtype = current_platform.fp8_dtype()
+    references = [
+        ref_paged_attn(
+            q,
+            key_ref,
+            value_ref,
+            batch_spec.query_lens,
+            batch_spec.seq_lens,
+            common.block_table_tensor,
+            scale,
+            sliding_window,
+            sinks,
+        )
+        for q in (
+            query.float(),
+            (query.float() / q_scale).to(fp8_dtype).float() * q_scale,
+            *(
+                [_exp_free_query(query, scale, q_scale, exp_free=exp_free)]
+                if flydsl
+                else []
+            ),
+        )
+    ]
+
+    from aiter.ops.triton.unified_attention import unified_attention
+
+    from vllm.v1.attention.ops.flydsl_kernels import fp8_extend
+
+    output = torch.empty_like(query)
+    with (
+        patch(
+            "aiter.ops.triton.unified_attention.unified_attention",
+            wraps=unified_attention,
+        ) as spy,
+        patch.object(
+            fp8_extend, "fp8_extend_attention", wraps=fp8_extend.fp8_extend_attention
+        ) as fly_spy,
+    ):
+        impl.forward(
+            layer, query, torch.cat(keys), torch.cat(values), kv_cache, metadata, output
+        )
+    if layer_kind == "full_attention" or flydsl:
+        # The FP8-query output is within the bound of the BF16-query reference
+        # too, so check that the extends and the prefill took the FP8-query path.
+        fp8_rows = sum(
+            call.kwargs["q"].shape[0]
+            for call in spy.call_args_list
+            if call.kwargs["q"].dtype == fp8_dtype
+        ) + sum(call.args[0].shape[0] for call in fly_spy.call_args_list)
+        assert fp8_rows == sum(batch_spec.query_lens[1:])
+        assert fly_spy.called is flydsl
+    # The decode does not take the flag; it keeps the established FP8-cache
+    # decode tolerance (the shuffled layout's decode kernel needs it).
+    torch.testing.assert_close(
+        output[:1].float(), references[0][:1], atol=6e-2, rtol=1e-1
+    )
+    start = 1
+    for i, query_len in enumerate(batch_spec.query_lens[1:], start=1):
+        rows = slice(start, start + query_len)
+        errors = [
+            ((output[rows].float() - ref[rows]).norm() / ref[rows].norm()).item()
+            for ref in references
+        ]
+        assert min(errors) < FP8_EXTEND_REL_L2[exp_free], (
+            f"request {i}: relative L2 {errors}"
+        )
+        start += query_len
+
+
+# Relative L2 bound per softmax mode of the FlyDSL FP8 extend kernel vs float32
+# attention on the query it sees.
+FP8_EXTEND_REL_L2 = {False: 3e-2, True: 4e-2}
+
+
+def _exp_free_query(
+    query: torch.Tensor,
+    scale: float,
+    q_scale: float = 1.0,
+    k_scale: float = 1.0,
+    exp_free: bool = True,
+) -> torch.Tensor:
+    """The query the kernel sees: cast in-kernel to FP8 pre-multiplied by
+    c = log2(e) scale k_scale (times 8 for exp-free codes) and a power-of-two
+    2^-e (e = ceil(log2(c q_scale))) that the QK MFMA undoes."""
+    c = (8 if exp_free else 1) * math.log2(math.e) * scale * k_scale
+    pre = c * 2.0 ** -math.ceil(math.log2(c * q_scale))
+    cast = (query.float() * pre).clamp(-448, 448).to(torch.float8_e4m3fn)
+    return cast.float() / pre
+
+
+FP8_EXTEND_CASES = [
+    # (q heads, kv heads, page, [(cached, new) per request], window)
+    (32, 4, 32, [(5000, 1000), (0, 777), (123, 1), (12000, 1100)], 0),
+    (32, 4, 16, [(5000, 1000), (0, 777), (123, 1), (12000, 1100)], 2048),
+    (32, 4, 32, [(5000, 1000), (0, 777), (123, 1), (12000, 1100)], 2048),
+    (16, 2, 16, [(33, 300), (12288, 1500)], 2048),
+    (32, 4, 16, [(3000, 517), (0, 300), (77, 5)], 100),
+    (32, 4, 16, [(3000, 517), (0, 40), (77, 5)], 16),
+    (32, 4, 16, [(300, 51), (0, 40)], 1),
+    (32, 4, 32, [(0, 16), (0, 17), (31, 1)], 0),
+    # More than 255 requests (the kernel's request search is sized for the batch).
+    (8, 1, 16, [(i % 37, 1 + i % 19) for i in range(300)], 0),
+]
+
+
+@pytest.mark.skipif(get_cdna_version() != 4, reason="gfx950 FlyDSL kernel only")
+@pytest.mark.parametrize("exp_free", [False, True], ids=["exp2", "exp_free"])
+@pytest.mark.parametrize("q_scale", [1.0, 256.0])
+@pytest.mark.parametrize("case", FP8_EXTEND_CASES)
+def test_rocm_fp8_extend_matches_reference(case, q_scale, exp_free):
+    """The FlyDSL FP8 extend kernel on varlen batches with prefixes and new
+    lengths that are not multiples of 16 or the page, an empty prefix, a
+    1-token extend and sliding windows down to 1. Cache slots past each
+    request's length hold NaN bytes, and with a window every block wholly before
+    a request's first window points at a NaN page, as a freed block would;
+    neither may reach the output. With `q_scale` 256 the queries exceed the
+    FP8 range but not the q scale's (K's scale is 1/256, so the scores keep
+    their distribution); they must not be clipped. V's scale is 0.5 there.
+    Each request matches float32 attention on the query the kernel sees
+    (FP8-quantized by `q_scale`, or the exp-free in-kernel cast) by relative
+    L2."""
+    from vllm.v1.attention.ops import rocm_fp8_extend
+
+    num_q_heads, num_kv_heads, page, reqs, window = case
+    fp8 = torch.float8_e4m3fn
+    set_random_seed(0)
+    head_size = rocm_fp8_extend.HEAD_SIZE
+    scale = head_size**-0.5
+    lens = [p + n for p, n in reqs]
+    num_pages_per_req = [(n + page - 1) // page for n in lens]
+    num_pages = sum(num_pages_per_req) + 64
+    # NaN bytes everywhere; page 0 stands in for unmapped blocks.
+    pool = torch.full(
+        (num_pages, num_kv_heads, page, 2 * head_size), 0x7F, dtype=torch.uint8
+    ).view(fp8)
+    perm = torch.randperm(num_pages - 1) + 1
+    block_table = torch.zeros((len(reqs), max(num_pages_per_req)), dtype=torch.int32)
+    offset = 0
+    for b, seq_len in enumerate(lens):
+        ids = perm[offset : offset + num_pages_per_req[b]]
+        offset += num_pages_per_req[b]
+        kv = torch.randn((seq_len, num_kv_heads, 2 * head_size)).to(fp8)
+        for i, pid in enumerate(ids.tolist()):
+            rows = slice(i * page, min(seq_len, (i + 1) * page))
+            pool[pid, :, : rows.stop - rows.start] = kv[rows].transpose(0, 1)
+        block_table[b, : len(ids)] = ids.to(torch.int32)
+    key_cache = pool[..., :head_size].transpose(1, 2)
+    value_cache = pool[..., head_size:].transpose(1, 2)
+    ref_table = block_table.clone()
+    if window:
+        for b, (cached, _) in enumerate(reqs):
+            first = max(0, cached - (window - 1))
+            block_table[b, : first // page] = 0
+    new = [n for _, n in reqs]
+    cu_seqlens_q = torch.tensor([0, *torch.tensor(new).cumsum(0).tolist()])
+    query = (torch.randn((sum(new), num_q_heads, head_size)) * q_scale).to(
+        torch.bfloat16
+    )
+    one = torch.ones(1)
+    k_scale = 1.0 / q_scale
+    v_scale = 1.0 if q_scale == 1.0 else 0.5
+    output = torch.full_like(query, float("nan"))
+    rocm_fp8_extend.extend(
+        query,
+        key_cache,
+        value_cache,
+        output,
+        cu_seqlens_q.to(torch.int32),
+        torch.tensor(lens, dtype=torch.int32),
+        block_table,
+        one * q_scale,
+        one * k_scale,
+        one * v_scale,
+        scale,
+        window,
+        exp_free,
+    )
+    assert torch.isfinite(output).all()
+    query_ref = _exp_free_query(query, scale, q_scale, k_scale, exp_free)
+    for b, (cached, n) in enumerate(reqs):
+        rows = slice(int(cu_seqlens_q[b]), int(cu_seqlens_q[b + 1]))
+        expected = ref_paged_attn(
+            query_ref[rows],
+            key_cache.float().contiguous() * k_scale,
+            value_cache.float().contiguous() * v_scale,
+            [n],
+            [cached + n],
+            ref_table[b : b + 1],
+            scale,
+            sliding_window=window or None,
+        )
+        diff = output[rows].float() - expected
+        assert diff.norm() < FP8_EXTEND_REL_L2[exp_free] * expected.norm(), (
+            b,
+            diff.norm() / expected.norm(),
+        )
+
+
+def _fp8_extend_single_query(
+    key_rows: torch.Tensor, value_rows: torch.Tensor, window: int, exp_free: bool
+) -> torch.Tensor:
+    """One new token (the last key) over `key_rows` / `value_rows` ([L, 64] float,
+    rounded to FP8 in a 16-token-page cache, 1 KV head, query = e0), returned as
+    the output row of query head 0 (float)."""
+    from vllm.v1.attention.ops import rocm_fp8_extend
+
+    fp8 = torch.float8_e4m3fn
+    seq_len, head_size = key_rows.shape
+    pages = -(-seq_len // 16)
+    pool = torch.zeros((pages, 1, 16, 2 * head_size)).to(fp8)
+    flat = pool.view(pages * 16, 2 * head_size)
+    flat[:seq_len, :head_size] = key_rows.to(fp8)
+    flat[:seq_len, head_size:] = value_rows.to(fp8)
+    query = torch.zeros((1, 8, head_size), dtype=torch.bfloat16)
+    query[..., 0] = 1.0
+    output = torch.empty_like(query)
+    one = torch.ones(1)
+    rocm_fp8_extend.extend(
+        query,
+        pool[..., :head_size].transpose(1, 2),
+        pool[..., head_size:].transpose(1, 2),
+        output,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([seq_len], dtype=torch.int32),
+        torch.arange(pages, dtype=torch.int32)[None],
+        one,
+        one,
+        one,
+        1.0,
+        window,
+        exp_free,
+    )
+    return output[0, 0].float()
+
+
+@pytest.mark.skipif(get_cdna_version() != 4, reason="gfx950 FlyDSL kernel only")
+@pytest.mark.parametrize("exp_free", [False, True], ids=["exp2", "exp_free"])
+@pytest.mark.parametrize("window", [0, 4096], ids=["full", "swa"])
+def test_rocm_fp8_extend_far_keys_by_layer_type(exp_free, window):
+    """Keys 11-13 octaves below the row maximum: full-attention layers drop them
+    (as the FP8-query unified_attention path drops keys about 10 octaves down),
+    sliding-window layers keep them (they replace BF16 attention). One key at the
+    maximum (V = 0) and 2048 far keys (V = 1): the output is the far keys' share
+    of the softmax, about 0.2 with them and 0 without."""
+    set_random_seed(0)
+    far = 2048
+    head_size = 64
+    keys = torch.zeros((far + 2, head_size))
+    values = torch.zeros((far + 2, head_size))
+    # Scores are K[:, 0] (query e0, scale 1); P = 2^((s - m) log2(e)).
+    keys[0, 0] = 16.0
+    octaves = 11.0 + 2.0 * torch.rand(far)
+    keys[1 : far + 1, 0] = 16.0 - octaves / math.log2(math.e)
+    keys[far + 1, 0] = -448.0  # the new token's own key, negligible
+    values[1 : far + 1, 0] = 1.0
+    q0 = _exp_free_query(torch.ones(1), 1.0, exp_free=exp_free).item()
+    scores = q0 * keys.to(torch.float8_e4m3fn).float()[:, 0]
+    p = torch.exp(scores - scores.max())
+    with_far = (p * values[:, 0]).sum() / p.sum()
+    got = _fp8_extend_single_query(keys, values, window, exp_free)[0]
+    assert with_far > 0.1
+    if window:
+        # FP8 rounding of P (exp2) or the codes' approximation of 2^x (exp_free);
+        # the far keys' scores take few distinct FP8 values, so it does not average
+        tol = 0.05
+        torch.testing.assert_close(
+            got.cpu(), with_far.cpu(), atol=tol * with_far, rtol=0
+        )
+    else:
+        assert got.abs() < 1e-3
 
 
 # Decode path test --------------------------------------------------------
