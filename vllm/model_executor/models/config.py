@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 
 from pydantic import Field
 
+from vllm import envs
 from vllm.config import utils as config_utils
 from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
@@ -600,7 +601,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         max_head_dim = max(head_dims.values())
 
-        if is_fa_version_supported(4) and max_head_dim <= 512:
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            and is_fa_version_supported(4)
+            and max_head_dim <= 512
+        ):
             if (
                 vllm_config.attention_config.flash_attn_version is None
                 and vllm_config.attention_config.backend
@@ -638,7 +643,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "%s. FA4 not available, forcing %s backend.",
+                "%s. FA4 is unavailable for this configuration, forcing %s backend.",
                 head_dims,
                 backend.name,
             )
@@ -1595,24 +1600,12 @@ class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
             rope_parameters.pop("mrope_interleaved", None)
 
 
-def _strip_qwen4_exp_mrope(model_config: "ModelConfig") -> None:
-    configs = {
-        id(config): config
-        for config in (
-            getattr(model_config, "hf_config", None),
-            model_config.hf_text_config,
-        )
-        if config is not None
-    }
-    for config in configs.values():
-        rope_parameters = getattr(config, "rope_parameters", None)
-        if rope_parameters is not None:
-            rope_parameters.pop("mrope_section", None)
-            rope_parameters.pop("mrope_interleaved", None)
-
-
 class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConfig):
-    """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp."""
+    """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp.
+
+    M-RoPE is kept under `language_model_only` so the KV layout matches a
+    multimodal prefill.
+    """
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1640,9 +1633,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
             raise NotImplementedError(
                 "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
             )
-        multimodal_config = vllm_config.model_config.multimodal_config
-        if multimodal_config is not None and multimodal_config.language_model_only:
-            _strip_qwen4_exp_mrope(vllm_config.model_config)
         spec_config = vllm_config.speculative_config
         if spec_config is not None and spec_config.method not in {
             "mtp",
@@ -1653,25 +1643,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
                 "Qwen4Exp speculative decoding supports only its native MTP "
                 "checkpoint and linear n-gram proposers"
             )
-
-
-class Qwen4ExpForCausalLMConfig(Qwen4ExpForConditionalGenerationConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-        _strip_qwen4_exp_mrope(vllm_config.model_config)
-
-
-class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
-    """Preserve MRoPE for a VL target and use 1D RoPE for a text target."""
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-        if hasattr(vllm_config.model_config.hf_config, "vision_config"):
-            return
-        _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
@@ -1984,9 +1955,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
-    "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
-    "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
-    "Qwen4ExpMTP": Qwen4ExpMTPConfig,
+    "Qwen4ExpForCausalLM": Qwen4ExpForConditionalGenerationConfig,
+    "Qwen4ExpForConditionalGeneration": Qwen4ExpForConditionalGenerationConfig,
+    "Qwen4ExpMTP": Qwen4ExpForConditionalGenerationConfig,
     "ShieldGemma2ForImageClassification": (ShieldGemma2ForImageClassificationConfig),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,

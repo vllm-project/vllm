@@ -943,7 +943,7 @@ fn extract_media_parts(
                 max_long_side_pixel: None,
             }),
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: Arc::new(input_audio_data_url(data, format.as_deref())?),
+                url: Arc::new(input_audio_data_url(data, *format)),
                 uuid: uuid.clone(),
             }),
             ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
@@ -954,19 +954,26 @@ fn extract_media_parts(
         .collect()
 }
 
+/// Container format of an `input_audio` content block. Serde takes OpenAI's
+/// lowercase names, as the HTTP schema does; `FromStr` ignores case.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum InputAudioFormat {
+    Wav,
+    Mp3,
+}
+
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
-fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
+fn input_audio_data_url(data: &str, format: Option<InputAudioFormat>) -> String {
     let mime_type = match format {
-        Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
-        Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => {
-            return Err(Error::UnsupportedInputAudioFormat {
-                format: format.to_owned(),
-            });
-        }
+        Some(InputAudioFormat::Wav) => "audio/wav",
+        Some(InputAudioFormat::Mp3) => "audio/mpeg",
         None => "application/octet-stream",
     };
-    Ok(format!("data:{mime_type};base64,{data}"))
+    format!("data:{mime_type};base64,{data}")
 }
 
 /// The modality a content part counts against, or `None` for plain text.
@@ -2571,21 +2578,16 @@ mod tests {
     #[test]
     fn input_audio_uses_connector_data_urls() {
         assert_eq!(
-            input_audio_data_url("AAAA", Some("wav")).unwrap(),
+            input_audio_data_url("AAAA", Some(InputAudioFormat::Wav)),
             "data:audio/wav;base64,AAAA"
         );
         assert_eq!(
-            input_audio_data_url("BBBB", Some("MP3")).unwrap(),
+            input_audio_data_url("BBBB", Some(InputAudioFormat::Mp3)),
             "data:audio/mpeg;base64,BBBB"
         );
         assert_eq!(
-            input_audio_data_url("CCCC", None).unwrap(),
+            input_audio_data_url("CCCC", None),
             "data:application/octet-stream;base64,CCCC"
-        );
-        assert!(
-            input_audio_data_url("AAAA", Some("flac"))
-                .unwrap_err()
-                .is_request_validation_error()
         );
     }
 
@@ -2735,7 +2737,7 @@ mod tests {
         );
         // Confirms the HTTP-mapping bug found during implementation stays fixed:
         // this must map to 400, not 500.
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]

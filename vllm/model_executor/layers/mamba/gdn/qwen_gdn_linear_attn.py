@@ -139,7 +139,7 @@ if GDN_AITER_FUSED_DECODE_AVAILABLE:
 
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
+MAX_FUSED_GDN_MTP_TOKENS = 16  # kMaxMtpTokens in csrc/gdn/fused_gdn_decode.h
 # Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
@@ -897,6 +897,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if vllm_config.cache_config.enable_prefix_caching:
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+                # FlashInfer emits states at one stride for the whole batch,
+                # the gcd of the offsets; keeping every offset on the
+                # prefix-cache grid bounds the states emitted.
+                self.requires_grid_checkpoint_alignment = True
             elif (
                 self.gdn_prefill_backend in ("triton", "aiter_flydsl")
                 and current_platform.is_cuda_alike()
@@ -1009,26 +1013,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         return None
 
-    def get_prefill_checkpoint_alignment(self) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
-
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
-        if not self._exports_checkpoints:
-            return None
-        # FlashInfer emits states at one stride for the whole batch, the gcd of
-        # the offsets; keeping every offset on the prefix-cache grid keeps that
-        # stride a multiple of the grid, which bounds the states emitted.
-        return get_mamba_prefill_checkpoint_grid(vllm_config)
 
     @functools.cached_property
     def _exports_checkpoints(self) -> bool:
         # Known only once every layer is built: a Mamba layer that cannot
-        # checkpoint (e.g. Qwen4Exp's PLE short conv) keeps the scheduler
-        # splitting the prefill instead.
-        return (
-            self._checkpoint_alignment is not None
-            and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
-        )
+        # checkpoint keeps the scheduler splitting the prefill instead.
+        return get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
 
     @functools.cached_property
     def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:

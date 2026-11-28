@@ -256,7 +256,10 @@ Use OpenAI Python SDK 3.26.0 or newer for `client.decisions.create`.
 `input` accepts a string or an array of user messages with string content or
 `input_text` parts. Answers retain question order and echo `name`, including
 `null` for unnamed questions. Choice values preserve strings and booleans.
-Scores are probability-weighted averages of zero-based level indices.
+Score questions use the model's native score prompt, as on `/v1/systemone`.
+Each level is rendered in request order as its label or `label - description`
+when a description is supplied. The returned score is the probability-weighted
+average of the zero-based level indices.
 
 The request contract follows the OpenAI OpenAPI schemas retrieved on
 October 7, 2026. This MVP supports 1–64 questions and 2–10 score levels.
@@ -425,5 +428,6 @@ vllm serve baselabs/mammoth-1
   decoding, context parallelism, micro-batching, `--prefix-match-unit` and
   `--scheduler-cls` are refused.
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
-  `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
-  choice and returns 400 for score levels with the same label.
+  `{"enable_thinking": false}`. On these models, `/v1/decisions` accepts score
+  levels with the same label when their descriptions distinguish them. Duplicate
+  level text returns 400.
