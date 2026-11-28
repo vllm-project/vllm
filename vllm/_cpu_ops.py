@@ -237,6 +237,13 @@ def cpu_topk_topp_sampling(
     torch.ops._C.cpu_topk_topp_sampling(logits, k, p)
 
 
+def cpu_topk_topp_exact(
+    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+) -> None:
+    """In-place exact top-k/top-p masking of FP32 logits (x86 CPU only)."""
+    torch.ops._C.cpu_topk_topp_exact(logits, k, p)
+
+
 def gumbel_sample_cpu(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,

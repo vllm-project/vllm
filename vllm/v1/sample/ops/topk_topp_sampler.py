@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON:
+    if HAS_TRITON and not current_platform.is_cpu():
         _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
             _topp_split_stats.register_warmup()
@@ -209,12 +209,13 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON:
+    if HAS_TRITON and not current_platform.is_cpu():
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )
 
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+        CpuArchEnum.X86,
         CpuArchEnum.ARM,
         CpuArchEnum.POWERPC,
         CpuArchEnum.S390X,
@@ -296,8 +297,12 @@ def apply_top_k_top_p_cpu(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
 ) -> torch.Tensor:
-    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
+    """CPU-optimized top-k + top-p. Uses the exact C++ kernel on x86 and C++
+    ternary-search kernels elsewhere."""
     from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._cpu_ops import (
+        cpu_topk_topp_exact as _cpu_topk_topp_exact_op,
+    )
     from vllm._cpu_ops import (
         cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
     )
@@ -315,6 +320,12 @@ def apply_top_k_top_p_cpu(
 
     if p is not None:
         p = p.float().contiguous()
+
+    if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+        # Masks FP32 logits in place, rows at any stride.
+        logits = logits.float()
+        _cpu_topk_topp_exact_op(logits, k, p)
+        return logits
 
     if p is None:
         logits = logits.contiguous()
