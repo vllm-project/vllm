@@ -263,6 +263,14 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
 
 
+def strided_copy(t: torch.Tensor) -> torch.Tensor:
+    """A non-contiguous 2D view holding t's values: the leading columns of a
+    twice-as-wide buffer. `Tensor.clone()` cannot be used for this, it returns
+    a dense tensor."""
+    wide = torch.empty(t.shape[0], 2 * t.shape[1], dtype=t.dtype, device=t.device)
+    return wide[:, : t.shape[1]].copy_(t)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
@@ -365,8 +373,14 @@ class TestFusedAddRMSNorm:
             ir.ops.fused_add_rms_norm, residual_no_weight, residual_unit_weight
         )
 
-    @pytest.mark.parametrize("provider", ["vllm_c"])
-    def test_inplace_semantics(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize(
+        "provider,strided",
+        [("vllm_c", False), ("aiter", False), ("aiter", True)],
+        ids=["vllm_c", "aiter", "aiter-strided"],
+    )
+    def test_inplace_semantics(
+        self, dtype, n_tokens, hidden_size, epsilon, provider, strided
+    ):
         """Test that inplace implementations reuse inputs,
         for maybe_inplace overload but not for default overload."""
         impl = ir.ops.fused_add_rms_norm.impls[provider]
@@ -381,9 +395,26 @@ class TestFusedAddRMSNorm:
             device=current_platform.device_type,
         )
 
+        if strided:
+            # Flattening an activation that is already 2D is free whatever its
+            # strides, so an impl writing into the inputs has to handle ones
+            # that are not dense.
+            if n_tokens == 1:
+                pytest.skip("a single-row column slice is still contiguous")
+            x = strided_copy(x)
+            x_residual = strided_copy(x_residual)
+            assert not x.is_contiguous()
+            assert not x_residual.is_contiguous()
+
+        if not impl.supports_args(x, x_residual, weight, eps, None):
+            pytest.skip(f"{provider} does not support args")
+
+        # Cloning a strided view densifies it, keep the layout under test
+        copy_of = strided_copy if strided else torch.clone
+
         # Test default overload - should NOT modify inputs even with inplace impl
-        x_default = x.clone()
-        x_residual_default = x_residual.clone()
+        x_default = copy_of(x)
+        x_residual_default = copy_of(x_residual)
         x_default_ptr = x_default.data_ptr()
         x_residual_default_ptr = x_residual_default.data_ptr()
 
@@ -399,8 +430,8 @@ class TestFusedAddRMSNorm:
         torch.testing.assert_close(x_residual, x_residual_default, rtol=0.0, atol=0.0)
 
         # Test maybe_inplace overload - should modify inputs with inplace impl
-        x_inplace = x.clone()
-        x_residual_inplace = x_residual.clone()
+        x_inplace = copy_of(x)
+        x_residual_inplace = copy_of(x_residual)
         x_inplace_ptr = x_inplace.data_ptr()
         x_residual_inplace_ptr = x_residual_inplace.data_ptr()
 
