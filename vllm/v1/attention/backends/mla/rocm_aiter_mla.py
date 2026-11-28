@@ -3012,8 +3012,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         self, attn_metadata: AiterMLAMetadata
     ) -> int | None:
         """The asm decode's head count when this step pads the query with
-        get_mla_padded_q's head repeat. Gluon decode/verify and the DCP routes
-        read the unpadded query; non-divisor counts are tiled, not repeated."""
+        get_mla_padded_q's head repeat: the count _forward_mqa pads to. Gluon
+        decode/verify and the DCP routes read the unpadded query; non-divisor
+        counts are tiled, not repeated."""
         decode = attn_metadata.decode
         if (
             decode is None
@@ -3023,7 +3024,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             or self.dcp_world_size > 1
         ):
             return None
-        num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+        num_heads = decode.padded_num_heads or AiterMLAHelper.get_actual_mla_num_heads(
+            self._decode_num_heads
+        )
         return None if num_heads % self._decode_num_heads else num_heads
 
     def _concat_k_nope_k_pe(

@@ -220,6 +220,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     ModelConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -235,6 +236,7 @@ from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
     in_piecewise_cudagraph,
+    is_forward_context_available,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -339,6 +341,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
+
+
+# ForwardContext.additional_kwargs key: layer name -> _DeferredRoPEKVCache.
+_DEFERRED_ROPE_KV_CACHE_KEY = "mla_deferred_rope_kv_cache"
+
+
+@dataclass(slots=True)
+class _DeferredRoPEKVCache:
+    """fused_rope_unified_mla_kv_cache_update inputs that forward_impl's fused
+    decode query kernel needs to do the RoPE and KV-cache write instead."""
+
+    positions: torch.Tensor
+    cos_sin_cache: torch.Tensor
+    is_neox: bool
+    slot_mapping: torch.Tensor
+    k_scale: torch.Tensor
 
 
 def _detect_output_quant_key(
@@ -818,7 +836,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_mla_enabled()
         # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
         # padding, so only the torch.bmm path qualifies.
-        self.is_aiter_fused_decode_query_enabled = (
+        aiter_fused_decode_query_supported = (
             rocm_aiter_ops.is_mla_enabled()
             and not self.is_aiter_triton_fp8_bmm_enabled
             and not self.is_aiter_triton_fp4_bmm_enabled
@@ -827,7 +845,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and getattr(self.impl, "supports_quant_query_input", False)
             and self.impl.dcp_world_size == 1
+        )
+        self.is_aiter_fused_decode_query_enabled = (
+            aiter_fused_decode_query_supported
             and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+                self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
+            )
+        )
+        # The variant that also does the RoPE and the KV-cache write of
+        # fused_rope_unified_mla_kv_cache_update.
+        self.is_aiter_fused_rope_kv_cache_decode_query_enabled = (
+            aiter_fused_decode_query_supported
+            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and not self.impl.is_sparse
+            and not self.use_pcp
+            and not self.use_shardq
+            and self.hisparse_cache is None
+            and rocm_aiter_ops.is_fused_bf16_bmm_rope_cat_quant_pad_cache_mla_tuned(
                 self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
             )
         )
@@ -1144,6 +1178,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output.fill_(0)
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        deferred_rope_kv_cache = (
+            get_forward_context()
+            .additional_kwargs.get(_DEFERRED_ROPE_KV_CACHE_KEY, {})
+            .get(self.layer_name)
+            if self.is_aiter_fused_rope_kv_cache_decode_query_enabled
+            and is_forward_context_available()
+            else None
+        )
 
         num_actual_toks = attn_metadata.num_actual_tokens
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
@@ -1181,6 +1223,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
+        assert deferred_rope_kv_cache is None or (
+            num_mha_tokens == 0 and mqa_q_prepared is None and q_dcp_replicated is None
+        ), "a deferred RoPE + KV-cache write needs a pure decode step"
 
         shardq = getattr(attn_metadata, "shardq", None)
         gathered_context = None if shardq is None else shardq.gathered_context
@@ -1240,7 +1285,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 and gathered_context is None
             )
             mqa_output_slice = output[:num_mqa_tokens]
-            if mqa_q_prepared is not None:
+            if deferred_rope_kv_cache is not None:
+                mqa_q = self._prepare_mqa_query_with_rope_kv_cache(
+                    q[:num_mqa_tokens],
+                    k_c_normed[:num_mqa_tokens],
+                    k_pe[:num_mqa_tokens],
+                    kv_cache,
+                    attn_metadata,
+                    deferred_rope_kv_cache,
+                )
+            elif mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
             elif q_dcp_replicated is not None and gathered_context is None:
                 mqa_q = self._prepare_mqa_query(
@@ -1451,6 +1505,40 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         ):
             return None
         return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
+
+    def _prepare_mqa_query_with_rope_kv_cache(
+        self,
+        mqa_q: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        rope_kv_cache: "_DeferredRoPEKVCache",
+    ) -> torch.Tensor:
+        """The fused AITER decode query of _prepare_mqa_query, which also does
+        the RoPE and the KV-cache write that fused_rope_unified_mla_kv_cache_update
+        deferred to this step."""
+        num_heads = self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
+        assert num_heads is not None
+        num_tokens = mqa_q.shape[0]
+        mqa_q_nope, mqa_q_pe = mqa_q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        return rocm_aiter_ops.fused_bf16_bmm_rope_cat_quant_pad_cache_mla(
+            mqa_q_nope.transpose(0, 1),
+            self.W_UK_T,
+            mqa_q_pe,
+            self._q_scale,
+            kv_c,
+            k_pe.squeeze(1),
+            kv_cache,
+            rope_kv_cache.slot_mapping[:num_tokens],
+            rope_kv_cache.k_scale,
+            rope_kv_cache.positions[:num_tokens],
+            rope_kv_cache.cos_sin_cache,
+            rope_kv_cache.is_neox,
+            num_heads,
+        )
 
     def _prepare_mqa_query(
         self,
@@ -1760,6 +1848,46 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
         )
         return FullAttentionManager.layer_config(spec)
+
+    def defer_rope_kv_cache_update(
+        self,
+        attn_metadata: "MLACommonMetadata | None",
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+    ) -> bool:
+        """Whether forward_impl's fused decode query kernel does this step's RoPE
+        and KV-cache write, so fused_rope_unified_mla_kv_cache_update skips them.
+        Only when both ops run their host code in this forward: eager, or a FULL
+        cudagraph capture. A piecewise or breakable capture bakes the cache
+        update into the graph but runs attention eagerly at each replay."""
+        # The fused query kernel cannot add kv_b_proj adapters.
+        if not self.is_aiter_fused_rope_kv_cache_decode_query_enabled or hasattr(
+            self.kv_b_proj, "apply_mla_absorbed_kv_b_lora"
+        ):
+            return False
+        forward_context = get_forward_context()
+        if not (
+            attn_metadata is not None
+            and forward_context.cudagraph_runtime_mode
+            in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and forward_context.ubatch_slices is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
+            and cos_sin_cache.dtype == torch.bfloat16
+            and cos_sin_cache.shape[-1] == self.qk_rope_head_dim
+            and self.impl.decode_query_padded_num_heads(attn_metadata) is not None  # type: ignore[attr-defined]
+        ):
+            return False
+        deferred = forward_context.additional_kwargs.setdefault(
+            _DEFERRED_ROPE_KV_CACHE_KEY, {}
+        )
+        deferred[self.layer_name] = _DeferredRoPEKVCache(
+            positions, cos_sin_cache, is_neox, slot_mapping, k_scale
+        )
+        return True
 
     def _apply_lora_projection(
         self, x: torch.Tensor, out: torch.Tensor, *, is_query: bool
