@@ -81,6 +81,8 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+_NUMA_SPAWN_LOCK = threading.Lock()
+
 
 class ExceptionWithKVConnectorOutput(Exception):
     """Carries a worker's KV connector output along with its failure."""
@@ -885,7 +887,7 @@ class WorkerProc:
         )
 
         # Apply NUMA binding if configured
-        with numa_utils.configure_subprocess(
+        with _NUMA_SPAWN_LOCK, numa_utils.configure_subprocess(
             vllm_config, local_rank, process_kind="worker"
         ):
             proc.start()
