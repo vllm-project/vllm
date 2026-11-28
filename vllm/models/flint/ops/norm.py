@@ -12,7 +12,8 @@ everything in fp32 with one output rounding:
 - `silu_and_mul`: `bf16(g / (1 + exp(-g)) * u)` (precise `expf` and
   division).
 
-`rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math). The fused
+`rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math) on CUDA and
+`tl.math.rsqrt` elsewhere. The fused
 Flint kernels (`qkv_fused`, the decode MoE block's norm and shared expert, and
 the GEMV SiLU epilogue) follow the same rules; the routed experts use the
 approximate `ex2` / `rcp` SiLU of the TRTLLM MoE (see `moe`).
@@ -21,14 +22,19 @@ approximate `ex2` / `rcp` SiLU of the TRTLLM MoE (see `moe`).
 import torch
 from torch import nn
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
+
+_IS_CUDA = tl.constexpr(current_platform.is_cuda())
 
 
 @triton.jit
 def _rsqrt(x):
-    return tl.inline_asm_elementwise(
-        "rsqrt.approx.ftz.f32 $0, $1;", "=f,f", [x], tl.float32, True, 1
-    )
+    if _IS_CUDA:
+        return tl.inline_asm_elementwise(
+            "rsqrt.approx.ftz.f32 $0, $1;", "=f,f", [x], tl.float32, True, 1
+        )
+    return tl.math.rsqrt(x)
 
 
 @triton.jit
