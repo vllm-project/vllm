@@ -357,6 +357,14 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # An MTP head is loaded as a standalone draft model, so it never goes
+        # through `AutoWeightsLoader`, which is where these mappers are applied.
+        if self.quant_config is not None:
+            weights = (
+                self.quant_config.get_cache_scale_mapper()
+                | self.quant_config.get_checkpoint_weight_mapper()
+            ).apply(weights)
+
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
