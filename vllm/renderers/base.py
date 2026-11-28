@@ -115,6 +115,9 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    supports_reasoning_history: bool = False
+    """Whether prompts keep the reasoning of earlier assistant turns."""
+
     _server_owned_chat_template_kwargs: ClassVar[frozenset[str]] = frozenset()
 
     def validate_request_chat_template(self) -> None:

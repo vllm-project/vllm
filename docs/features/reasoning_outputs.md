@@ -374,6 +374,24 @@ print(response.choices[0].message.reasoning)
 print(response.choices[0].message.content)
 ```
 
+## Top-Level `thinking` Object
+
+Some vendor clients control thinking with a top-level `thinking` object instead of `reasoning_effort`. It is not part of the OpenAI API. The Chat Completions API of the Python frontend accepts it as an extension and lowers it into the controls above:
+
+```python
+response = client.chat.completions.create(
+    model="moonshotai/Kimi-K3",
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    extra_body={"thinking": {"type": "disabled"}},
+)
+```
+
+- `type`: `"enabled"` or `"disabled"`. Sets the `thinking` and `enable_thinking` chat template kwargs and takes precedence over values passed in `chat_template_kwargs`, so it only has an effect on models that read one of those kwargs.
+- `effort`: same values as `reasoning_effort`, and takes precedence over it. The values a model supports are unchanged.
+- `keep`: only `"all"`, and only for models whose renderer keeps the reasoning of earlier turns in the prompt while thinking is enabled (Kimi K3 and K3.1). Other models return HTTP 400.
+
+Omitting the object, or passing `null` or `{}`, changes nothing. Any other field or value (for example `budget_tokens` or `"type": "adaptive"`) returns HTTP 400 instead of being ignored. The Responses and tokenize APIs do not read the object.
+
 ## Suppressing Reasoning Output
 
 You can suppress reasoning content from API responses using the `include_reasoning` parameter. When set to `false`, reasoning tokens are still generated (so model quality is unaffected) but excluded from the response. This reduces network traffic without changing inference behavior.

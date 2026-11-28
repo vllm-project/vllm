@@ -260,6 +260,15 @@ class OnlineRenderer:
         detokenized (text-out).
         """
         render_start = time.perf_counter()
+        if (
+            request.thinking is not None
+            and request.thinking.keep is not None
+            and not self.renderer.supports_reasoning_history
+        ):
+            raise VLLMValidationError(
+                "thinking.keep is not supported by this model",
+                parameter="thinking.keep",
+            )
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None

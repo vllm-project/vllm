@@ -12,6 +12,7 @@ from openai.types.chat.chat_completion_audio import (
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from pydantic import (
+    ConfigDict,
     Field,
     PrivateAttr,
     SerializeAsAny,
@@ -259,6 +260,14 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+class ChatCompletionThinking(OpenAIBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["enabled", "disabled"] | None = None
+    effort: ReasoningEffort | None = None
+    keep: Literal["all"] | None = None
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -408,6 +417,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "Additional keyword args to pass to the template renderer. "
             "Will be accessible by the chat template."
+        ),
+    )
+    thinking: ChatCompletionThinking | None = Field(
+        default=None,
+        description=(
+            "Thinking controls in the form some vendor clients send instead of "
+            "`reasoning_effort`. `type` (`enabled` or `disabled`) overrides the "
+            "`thinking` and `enable_thinking` chat template kwargs, and `effort` "
+            "overrides `reasoning_effort`. `keep` accepts only `all` and only "
+            "for models whose renderer keeps earlier reasoning in the prompt."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
@@ -648,6 +667,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
         return self
 
+    @model_validator(mode="after")
+    def _apply_thinking_effort(self) -> "ChatCompletionRequest":
+        if self.thinking is not None and self.thinking.effort is not None:
+            self.reasoning_effort = self.thinking.effort
+        return self
+
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
@@ -692,7 +717,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # enable_thinking to false). For templates that don't declare the
         # variable, resolve_chat_template_kwargs filters it out harmlessly.
         user_kwargs = self.chat_template_kwargs or {}
-        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+        if self.thinking is not None and self.thinking.type is not None:
+            enabled = self.thinking.type == "enabled"
+            extra_kwargs["thinking"] = enabled
+            extra_kwargs["enable_thinking"] = enabled
+        elif reasoning_effort is not None and "enable_thinking" not in user_kwargs:
             extra_kwargs["enable_thinking"] = reasoning_effort != "none"
 
         return ChatParams(

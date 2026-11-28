@@ -798,6 +798,46 @@ async def test_chat_completion_render_multi_turn(client):
     assert len(data["token_ids"]) > 0
 
 
+async def _render_with_thinking_template(client, **fields):
+    return await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template": "{{ 'off' if enable_thinking is false else 'on' }}",
+            **fields,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_render_applies_thinking_object(client):
+    """A top-level `thinking` object toggles thinking in the rendered prompt."""
+    disabled = await _render_with_thinking_template(
+        client, thinking={"type": "disabled"}
+    )
+    enabled = await _render_with_thinking_template(client, thinking={"type": "enabled"})
+    reference = await _render_with_thinking_template(
+        client, chat_template_kwargs={"enable_thinking": False}
+    )
+
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["token_ids"] == reference.json()["token_ids"]
+    assert enabled.json()["token_ids"] != reference.json()["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "thinking", [{"keep": "all"}, {"type": "enabled", "budget_tokens": 1024}]
+)
+async def test_chat_render_rejects_unsupported_thinking_controls(client, thinking):
+    """Thinking controls the model cannot honor return 400 instead of being dropped."""
+    response = await _render_with_thinking_template(client, thinking=thinking)
+
+    assert response.status_code == 400, response.text
+    assert "thinking" in response.json()["error"]["message"]
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_stream_true(client):
     """Render accepts stream params but still returns JSON (non-streamed)."""

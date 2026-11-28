@@ -66,6 +66,9 @@ def _apply_k3_thinking_kwargs(
     elif reasoning_effort is not None:
         kwargs.setdefault("thinking_effort", reasoning_effort)
 
+    if not kwargs.get("thinking", True):
+        kwargs.pop("thinking_effort", None)
+
     thinking_effort = kwargs.get("thinking_effort")
     if thinking_effort is not None and thinking_effort not in thinking_efforts:
         supported = ", ".join(thinking_efforts)
@@ -203,6 +206,8 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
 
+    supports_reasoning_history = True
+
     _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
@@ -249,7 +254,11 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
-        return tokenizer.apply_chat_template(conversation, **kwargs)
+        try:
+            return tokenizer.apply_chat_template(conversation, **kwargs)
+        except AssertionError as e:
+            # The checkpoint's encoder asserts on request values it rejects.
+            raise VLLMValidationError(str(e)) from e
 
     def _tokenize_prompt(
         self,

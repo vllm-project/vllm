@@ -12,6 +12,7 @@ from transformers import LlamaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
@@ -182,6 +183,52 @@ def test_apply_chat_template_translates_standard_thinking_kwargs():
     assert "thinking_effort" not in kwargs
     assert "enable_thinking" not in kwargs
     assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("thinking", "expected"),
+    [
+        ({"type": "disabled"}, {"thinking": False}),
+        (
+            {"type": "enabled", "keep": "all", "effort": "low"},
+            {"thinking": True, "thinking_effort": "low"},
+        ),
+        # Like the checkpoint's encoder, disabled thinking discards the effort.
+        ({"type": "disabled", "effort": "medium"}, {"thinking": False}),
+    ],
+)
+def test_chat_request_thinking_object_reaches_k3_template(thinking, expected):
+    """A top-level `thinking` object selects K3's thinking mode and effort."""
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        thinking=thinking,
+    )
+
+    renderer._apply_chat_template(
+        [{"role": "user", "content": "hi"}], request.build_chat_params(None, "string")
+    )
+
+    kwargs = tokenizer.calls[-1]
+    assert {k: kwargs.get(k) for k in ("thinking", "thinking_effort")} == {
+        "thinking_effort": None,
+        **expected,
+    }
+
+
+def test_apply_chat_template_reports_encoder_assertion_as_validation_error():
+    """An effort the checkpoint's encoder asserts on is a client error."""
+
+    class AssertingTokenizer(StubTokenizer):
+        def apply_chat_template(self, conversation, **kwargs) -> list[int]:
+            raise AssertionError("Unsupported thinking_effort='medium'")
+
+    renderer = _make_renderer(AssertingTokenizer([]), model_type="kimi_k31")
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": "medium"})
+
+    with pytest.raises(VLLMValidationError, match="Unsupported thinking_effort"):
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
 
 
 @pytest.mark.parametrize("reasoning_effort", ["low", "high", "max"])

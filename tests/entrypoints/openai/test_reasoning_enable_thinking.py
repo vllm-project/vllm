@@ -10,6 +10,7 @@ is injected automatically.
 
 import pytest
 from openai.types.shared import Reasoning
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -97,6 +98,51 @@ class TestChatCompletionReasoningEffort:
         )
         params = request.build_chat_params(None, "auto", {"medium": "low"})
         assert params.chat_template_kwargs["reasoning_effort"] == "medium"
+
+
+class TestChatCompletionThinkingObject:
+    """Chat Completions: top-level vendor-style `thinking` object."""
+
+    @pytest.mark.parametrize(
+        ("mode", "enabled"), [("enabled", True), ("disabled", False)]
+    )
+    def test_type_overrides_template_toggles(self, mode, enabled):
+        request = _build_chat_request(
+            thinking={"type": mode},
+            reasoning_effort="none" if enabled else "high",
+            chat_template_kwargs={
+                "thinking": not enabled,
+                "enable_thinking": not enabled,
+            },
+        )
+        kwargs = request.build_chat_params(None, "auto").chat_template_kwargs
+        assert kwargs["thinking"] is enabled
+        assert kwargs["enable_thinking"] is enabled
+
+    def test_effort_overrides_reasoning_effort(self):
+        """Renderers that read `request.reasoning_effort` see the override too."""
+        request = _build_chat_request(
+            thinking={"effort": "low"},
+            reasoning_effort="max",
+        )
+        kwargs = request.build_chat_params(None, "auto").chat_template_kwargs
+        assert request.reasoning_effort == "low"
+        assert kwargs["reasoning_effort"] == "low"
+        assert kwargs["enable_thinking"] is True
+        assert "thinking" not in kwargs
+
+    def test_empty_object_preserves_existing_behavior(self):
+        request = _build_chat_request(thinking={}, reasoning_effort="high")
+        kwargs = request.build_chat_params(None, "auto").chat_template_kwargs
+        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["enable_thinking"] is True
+        assert "thinking" not in kwargs
+
+    @pytest.mark.parametrize("thinking", [True, {"type": "adaptive"}, {"keep": "none"}])
+    def test_unsupported_controls_are_rejected(self, thinking):
+        """Controls vLLM cannot honor fail validation instead of being dropped."""
+        with pytest.raises(ValidationError):
+            _build_chat_request(thinking=thinking)
 
 
 class TestResponsesReasoningEffort:
