@@ -872,3 +872,90 @@ def test_captured_draft_update_reads_reduced_max_model_len():
     graph.replay()
     assert input_buffers.positions.tolist() == [6, 7]
     assert input_buffers.seq_lens.tolist() == [7, 8]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires a GPU")
+def test_q_only_draft_prefill_keeps_last_token_rows():
+    """A drafter that writes no KV runs draft step 0 on one row per request.
+    Each row must be the one the full target batch would have sampled, also
+    after a rejected draft, as a one-token query with the draft decode steps'
+    `seq_lens` (target `seq_lens` minus rejected tokens)."""
+    device = torch.device("cuda")
+    max_reqs, max_tokens, hidden_size = 4, 16, 8
+    target_buffers = InputBuffers(max_reqs, max_tokens, device)
+    batch = InputBatch.make_dummy(2, 8, target_buffers, is_padding=False)
+    # A 5-token prefill chunk at positions 3..7, then a decode of 1 + 2 drafts
+    # at positions 20..22 whose last draft was rejected.
+    batch.query_start_loc.copy_(torch.tensor([0, 5, 8], device=device))
+    batch.seq_lens.copy_(torch.tensor([8, 23], device=device))
+    batch.input_ids.copy_(
+        torch.tensor([100, 101, 102, 103, 104, 200, 201, 202], device=device)
+    )
+    batch.positions.copy_(torch.tensor([3, 4, 5, 6, 7, 20, 21, 22], device=device))
+    num_rejected = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    buffers = InputBuffers(max_reqs, max_tokens, device)
+    last_token_indices = torch.zeros(max_reqs, dtype=torch.int64, device=device)
+    spec_module.prepare_prefill_inputs(
+        last_token_indices,
+        torch.zeros((), dtype=torch.int64, device=device),
+        buffers,
+        batch,
+        torch.tensor([0, 2], dtype=torch.int32, device=device),
+        num_rejected,
+        torch.tensor([0, 300, 0, 0], device=device),
+        torch.tensor([105, 0, 0, 0], dtype=torch.int32, device=device),
+        max_reqs,
+    )
+    target_hidden_states = torch.arange(
+        8 * hidden_size, dtype=torch.float32, device=device
+    ).view(8, hidden_size)
+    hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
+    rows = last_token_indices[:2].clone()
+    assert rows.tolist() == [4, 6]
+
+    spec_module.compact_prefill_inputs(
+        last_token_indices[:2], buffers, target_hidden_states, hidden_states
+    )
+
+    assert buffers.input_ids[:2].tolist() == [105, 300]
+    assert buffers.positions[:2].tolist() == [7, 21]
+    torch.testing.assert_close(
+        hidden_states[:2], target_hidden_states[rows], rtol=0, atol=0
+    )
+    assert not hidden_states[2:].any()
+    assert buffers.query_start_loc.tolist() == [0, 1, 2, 2, 2]
+    assert buffers.seq_lens[:2].tolist() == (batch.seq_lens - num_rejected).tolist()
+    assert last_token_indices[:2].tolist() == [0, 1]
+
+
+_LAST_TOKEN_PREFILL = dict(
+    advance_draft_positions=False,
+    cg_mode=CUDAGraphMode.PIECEWISE,
+    num_reqs=2,
+    num_tokens=8,
+    dummy_run=False,
+    is_profile=False,
+    dp_size=1,
+    has_pcp=False,
+    has_mm_inputs=False,
+)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"cg_mode": CUDAGraphMode.NONE}, True),
+        ({"cg_mode": CUDAGraphMode.FULL}, False),
+        ({"advance_draft_positions": True}, False),
+        ({"num_tokens": 2}, False),
+        ({"dummy_run": True}, False),
+        ({"is_profile": True}, False),
+        ({"dp_size": 2}, False),
+        ({"has_pcp": True}, False),
+        ({"has_mm_inputs": True}, False),
+    ],
+)
+def test_last_token_draft_prefill_gating(override, expected):
+    kwargs = _LAST_TOKEN_PREFILL | override
+    assert spec_module.use_last_token_draft_prefill(**kwargs) == expected
