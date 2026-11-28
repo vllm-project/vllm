@@ -401,6 +401,15 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
+        # A request that declares no tools cannot legitimately receive a tool
+        # call. `tool_choice` defaults to "none" when the field is omitted, so
+        # without this guard an engine-based parser still consumes
+        # tool-call-shaped text into `tool_calls`; the response builder then
+        # drops those calls (the request never declared tools) and the client
+        # gets `content: null` with `finish_reason: "stop"`.
+        if not request.tools:
+            return [], content
+
         if request.tool_choice == "none":
             if self._engine_based:
                 result = self.extract_tool_calls(content or "", request=request)
@@ -711,6 +720,12 @@ class DelegatingParser(Parser):
     ) -> tuple[DeltaMessage | None, bool]:
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
+
+        # See `_extract_tool_calls`: a tools-less request must not run the tool
+        # parser, so the text is streamed back unchanged instead of being
+        # consumed into `tool_calls` that the response builder drops.
+        if not request.tools:
+            return (DeltaMessage(content=delta_text) if delta_text else None), False
 
         if request.tool_choice == "none":
             if self._engine_based:

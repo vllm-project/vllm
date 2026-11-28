@@ -213,3 +213,91 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
         terminals,
         context=f"parser={parser_name}",
     )
+
+
+_TOOL_CALL_SAMPLES_WITHOUT_REASONING = [
+    (parser_cls, parser_name, sample)
+    for parser_cls, parser_name, sample in _TOOL_CALL_SAMPLES
+    if not sample.expected_reasoning
+]
+
+
+@pytest.mark.parametrize(
+    "parser_cls,parser_name,sample",
+    _TOOL_CALL_SAMPLES_WITHOUT_REASONING,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_parse_without_tools_keeps_text(parser_cls, parser_name, sample):
+    """A request that declares no tools must not run the tool parser.
+
+    `ChatCompletionRequest.tool_choice` defaults to "none" when the field is
+    omitted, so a tools-less request used to reach the engine-based parsing
+    path anyway: the parser consumed the tool-call-shaped text into
+    `tool_calls`, `content` became `None`, and the response builder then
+    dropped those calls because the request declared no tools. The client
+    received `content: null` with `finish_reason: "stop"`.
+
+    Regression for https://github.com/vllm-project/vllm/issues/67425.
+    """
+    tokenizer = make_mock_tokenizer(sample)
+    parser = parser_cls(
+        tokenizer,
+        None,
+        chat_template_kwargs=sample.chat_template_kwargs,
+    )
+
+    request = _test_request(tools=None)
+    assert request.tool_choice == "none", (
+        "an omitted tool_choice must default to none for this test to cover "
+        "the reported path"
+    )
+
+    output = parse_non_streaming(parser, sample, request)
+    full_text = "".join(text for _, text in sample.tokens)
+
+    assert output.tool_calls == [], (
+        f"parser={parser_name} extracted tool calls for a tools-less request"
+    )
+    assert output.content.strip() == full_text.strip(), (
+        f"parser={parser_name} lost the model text:\n"
+        f"  expected: {full_text.strip()!r}\n"
+        f"  actual:   {output.content!r}"
+    )
+
+
+@pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk={c}")
+@pytest.mark.parametrize(
+    "parser_cls,parser_name,sample",
+    _TOOL_CALL_SAMPLES_WITHOUT_REASONING,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_replay_without_tools_keeps_text(
+    parser_cls, parser_name, sample, chunk_size
+):
+    """Streaming twin of `test_delegating_parse_without_tools_keeps_text`."""
+    tokenizer = make_mock_tokenizer(sample)
+    parser = parser_cls(
+        tokenizer,
+        None,
+        chat_template_kwargs=sample.chat_template_kwargs,
+    )
+
+    deltas = replay_streaming(
+        parser,
+        sample.tokens,
+        chunk_size=chunk_size,
+        finished_on_last=True,
+        tools=None,
+        prompt_token_ids=sample.prompt_token_ids,
+    )
+    output = collect_output(deltas)
+    full_text = "".join(text for _, text in sample.tokens)
+
+    assert output.tool_calls == [], (
+        f"parser={parser_name} streamed tool calls for a tools-less request"
+    )
+    assert output.content.strip() == full_text.strip(), (
+        f"parser={parser_name} lost streamed text:\n"
+        f"  expected: {full_text.strip()!r}\n"
+        f"  actual:   {output.content!r}"
+    )
