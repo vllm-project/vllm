@@ -651,6 +651,22 @@ def test_copy_kv_cache_blocks_inplace_cuda_unaligned_blocks():
     torch.testing.assert_close(cache, expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_copy_kv_cache_blocks_inplace_cuda_without_pinned_memory(monkeypatch):
+    """Without pinned memory the copy table reaches the kernel without a staging
+    copy, so it must already be contiguous."""
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    cache = torch.randn(8, 256, 1024, device="cuda")
+    expected = cache.clone()
+    expected[4:] = cache[:4]
+
+    copy_kv_cache_blocks_inplace(
+        [cache], 8, [KVCacheBlockCopy(i, i + 4) for i in range(4)]
+    )
+
+    torch.testing.assert_close(cache, expected)
+
+
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(
