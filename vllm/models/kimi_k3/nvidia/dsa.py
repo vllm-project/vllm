@@ -18,10 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -329,6 +331,41 @@ class KimiK3DSAIndexer(nn.Module):
             num_tokens,
         )
 
+    def produce_key(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """The first half of `forward`, which reads only the layer input:
+        `wkv_index`, then the key insert. Returns `(index_k, index_weights)`;
+        `index_k` is None when the key was already inserted."""
+        wkv = self.wkv_index(hidden_states)[0]
+        index_k, index_weights = wkv.split(
+            [self.index_head_dim, self.index_num_heads], dim=-1
+        )
+        rows = self._shardq_indexer_rows() if self.use_fused_k_insert else None
+        if rows is not None:
+            index_weights = index_weights[rows]
+        if self.use_fused_k_insert:
+            self._fused_k_insert(index_k, hidden_states.shape[0])
+            return None, index_weights
+        return self.k_index_norm(index_k), index_weights
+
+    def score_query(
+        self,
+        hidden_states: torch.Tensor,
+        index_q_input: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """The second half of `forward`: `wq_index`, the query quantization and
+        the scoring op, given `produce_key`'s outputs."""
+        rows = self._shardq_indexer_rows() if self.use_fused_k_insert else None
+        if rows is not None:
+            index_q_input = index_q_input[rows]
+        index_q = self.wq_index(index_q_input)[0].view(
+            -1, self.index_num_heads, self.index_head_dim
+        )
+        return self.score(hidden_states, index_q, index_weights, index_k)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -348,7 +385,8 @@ class KimiK3DSAIndexer(nn.Module):
         index_q = self.wq_index(index_q_input)[0].view(
             -1, self.index_num_heads, self.index_head_dim
         )
-        index_k, index_weights = self.wkv_index(hidden_states)[0].split(
+        wkv = self.wkv_index(hidden_states)[0]
+        index_k, index_weights = wkv.split(
             [self.index_head_dim, self.index_num_heads], dim=-1
         )
         if rows is not None:
@@ -678,6 +716,14 @@ class KimiK3DSAAttention(nn.Module):
             prefix,
             shardq_eligible=True,
         )
+        # VLLM_INDEXER_OVERLAP: FULL CUDA graph decode steps of the wrapper path
+        # run the indexer on the top-k stream (`_forward_deferred_topk`).
+        self.defer_topk = (
+            envs.VLLM_INDEXER_OVERLAP
+            and self.q_lora_rank is not None
+            and vllm_config.speculative_config is None
+            and indexer_overlap.index_group_joins_topk(self.mla_attn.mla_attn.impl)
+        )
 
         # Dense-MHA prefills never read the top-k indices (PCP excluded, as
         # upstream).
@@ -755,6 +801,12 @@ class KimiK3DSAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self._packed is None:
+            layer_name = self.mla_attn.mla_attn.layer_name
+            if (
+                self.defer_topk
+                and indexer_overlap.captured_decode_metadata(layer_name) is not None
+            ):
+                return self._forward_deferred_topk(positions, hidden_states)
             return self.mla_attn(positions, hidden_states)
         # As in the dense Kimi-K3 MLA: the output-gate GEMM overlaps the
         # attention front-end on the aux stream for small batches.
@@ -772,6 +824,57 @@ class KimiK3DSAAttention(nn.Module):
             attn_out = self._fused_attention(hidden_states)
             gate = self.g_proj(hidden_states)[0]
         return self.o_proj(_gate_sigmoid_mul(attn_out, gate))[0]
+
+    def _forward_deferred_topk(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer with the
+        indexer on the top-k stream: while it runs there, this stream issues the
+        work that never reads the kept tokens (kv norm, q_b_proj, output gate,
+        MLA cache insert and query preparation). The index group's conversion
+        waits for the top-k, and attention for the conversion.
+        """
+        attn = cast(Any, self.mla_attn.mla_attn)
+        indexer = self.dsa_indexer
+        main = torch.cuda.current_stream()
+        side = indexer_overlap.topk_stream()
+        # The indexer runs on the top-k stream: wkv_index and the key insert
+        # read only the layer input; wq_index, the query quantization (which
+        # folds in wkv_index's head weights), the scan and the top-k follow
+        # once the query's latent is ready. This stream hands over only q_c.
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            index_k, index_weights = indexer.produce_key(hidden_states)
+        q_c, kv_c, k_pe = self.fused_qkv_a_proj(hidden_states)[0].split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        q_c = self.q_a_layernorm(q_c)
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            indexer_overlap.request_deferred_topk()
+            indexer.score_query(hidden_states, q_c, index_k, index_weights)
+        topk_stream, topk_inputs = indexer_overlap.take_deferred_topk()
+        # q_c is read on the top-k stream: keep it referenced until this
+        # stream has waited for the top-k (through the conversion).
+        topk_inputs = (topk_inputs, q_c, index_weights)
+
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        k_pe = k_pe.unsqueeze(1)
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        gate = None
+        if hasattr(self, "g_proj"):
+            gate = self.g_proj(hidden_states)[0].sigmoid()
+
+        # Ready on the stream that writes the top-k (this one if the indexer joined).
+        with torch.cuda.stream(topk_stream):
+            attn.impl.record_logical_topk_ready()
+        out_shape = (hidden_states.shape[0], self.num_local_heads * self.v_head_dim)
+        attn_out = attn(q, kv_c_normed, k_pe, output_shape=out_shape)
+        # This stream has waited for the top-k: its inputs may be freed.
+        del topk_inputs
+        if gate is not None:
+            attn_out = attn_out * gate
+        return self.o_proj(attn_out)[0]
 
     def _fused_attention(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self.q_lora_rank is not None and self._packed is not None

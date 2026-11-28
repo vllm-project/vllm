@@ -40,6 +40,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -448,6 +449,13 @@ def _decode_chunk_ranges(
         ranges.append((start, end))
         start = end
     return ranges
+
+
+def _decode_candidate_score_dtype(topk_backend: str) -> torch.dtype | None:
+    """The score dtype of the unchunked decode path's candidate selection."""
+    return (
+        torch.float32 if topk_backend in ("auto", "cooperative", "persistent") else None
+    )
 
 
 def _varlen_decode_rows(
@@ -1235,8 +1243,38 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 logits_dtype,
             )
+            q = (padded_q_quant_cast, padded_q_scale)
+            if indexer_overlap.consume_deferred_topk_request():
+                # Defer the stock scan and top-k below (VLLM_INDEXER_OVERLAP).
+                def stock_scan_topk() -> None:
+                    scores = fp8_fp4_paged_mqa_logits(
+                        q,
+                        kv_cache,
+                        decode_weights,
+                        seq_lens,
+                        decode_metadata.block_table,
+                        decode_metadata.schedule_metadata,
+                        max_model_len=max_model_len,
+                        logits_dtype=logits_dtype,
+                        indices=decode_metadata.indices,
+                    )
+                    if not get_indexer_topk(topk_backend).takes_bf16_logits(
+                        scores, topk_tokens, scores.shape[0]
+                    ):
+                        scores = as_fp32_logits(scores, seq_lens.view(-1))
+                    get_indexer_topk(topk_backend)(
+                        scores,
+                        seq_lens,
+                        next_n,
+                        topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_tokens,
+                        attn_metadata_narrowed.max_seq_len,
+                    )
+
+                indexer_overlap.defer_stock_topk(stock_scan_topk, (*q, decode_weights))
+                return topk_indices_buffer
             logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
+                q,
                 kv_cache,
                 decode_weights,
                 seq_lens,
@@ -1262,7 +1300,26 @@ def sparse_attn_indexer(
             row_repeat = next_n if vis.numel() != num_rows else 1
             vis = vis[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
+            if candidate_write and indexer_overlap.candidate_defer_allowed():
+                # Defer the candidate selection and the first consumer's block-id
+                # expansion to the candidate stream (VLLM_INDEXER_OVERLAP).
+                def select_and_expand() -> None:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                        score_dtype=_decode_candidate_score_dtype(topk_backend),
+                    )
+                    indexer_overlap.expand_sparse_decode_rows(
+                        attn_metadata_narrowed, candidate_blocks, candidate_block_size
+                    )
+
+                indexer_overlap.defer_candidates(select_and_expand, (logits, vis))
+            elif candidate_write:
                 _select_candidate_blocks(
                     logits,
                     None,
@@ -1271,11 +1328,7 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                     row_repeat,
-                    score_dtype=(
-                        torch.float32
-                        if topk_backend in ("auto", "cooperative", "persistent")
-                        else None
-                    ),
+                    score_dtype=_decode_candidate_score_dtype(topk_backend),
                 )
             else:
                 _apply_candidate_mask(

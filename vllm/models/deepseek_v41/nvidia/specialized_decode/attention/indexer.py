@@ -48,23 +48,24 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
     select_candidate_blocks,
 )
-from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
-    candidate_blocks_to_sparse_indices,
-)
+from vllm.model_executor.layers.indexer_overlap import CandidateStream
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     as_fp32_logits,
     kv_cache_as_quant_view,
 )
-from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
+from vllm.model_executor.layers.sparse_mqa_indexer import (
+    SparseMQAIndexer,
+    decode_schedule,
+    expand_decode_candidates,
+)
 from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
 from vllm.models.deepseek_v41.common.ops import fused_indexer_q_rope_quant
 from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
     get_paged_mqa_logits_metadata,
-    get_paged_sparse_mqa_logits_metadata,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
 )
@@ -407,42 +408,7 @@ def _selects_from_bf16(
     )
 
 
-def decode_schedule(
-    op: SparseMQAIndexer,
-    rows: SparseMQARowsMetadata,
-    sparse_block_kv: int,
-    scratch: bool = False,
-) -> torch.Tensor:
-    """Expand the decode rows' candidates into `rows.sparse_indices` /
-    `rows.end` and return their DeepGEMM schedule; the same kernels and
-    inputs as the inline step of `sparse_mqa_logits_paged_decode`. With
-    `scratch`, expand zero candidates into private outputs instead."""
-    assert rows.block_table is not None and rows.row_indices is not None
-    candidates = op.candidate_blocks[: rows.row_ke.shape[0]]
-    sparse_indices, end = rows.sparse_indices, rows.end
-    if scratch:
-        candidates = torch.zeros_like(candidates)
-        sparse_indices, end = torch.empty_like(sparse_indices), torch.empty_like(end)
-    candidate_blocks_to_sparse_indices(
-        candidates,
-        rows.row_ks,
-        rows.row_ke,
-        op.candidate_block_size,
-        sparse_block_kv,
-        out=(sparse_indices, end),
-    )
-    return get_paged_sparse_mqa_logits_metadata(
-        rows.row_ke,
-        rows.block_table,
-        rows.row_indices,
-        op.k_cache.kv_cache.shape[1],
-        sparse_indices,
-        torch.int8,
-        sparse_block_kv,
-    )
-
-
-class CandidateOverlap:
+class CandidateOverlap(CandidateStream):
     """The candidate consumers' expansion and schedule on a side stream.
 
     The first candidate consumer of a decode step expands the candidate blocks
@@ -465,11 +431,9 @@ class CandidateOverlap:
     """
 
     def __init__(self, consumer: SparseMQAIndexer) -> None:
+        super().__init__()
         self.consumer = consumer
-        self.stream = torch.cuda.Stream()
-        self.done = torch.cuda.Event()
         self.warmed = False
-        self._forked = False
 
     def _decode_rows(self) -> tuple[SparseMQARowsMetadata, int] | None:
         attn_metadata = get_forward_context().attn_metadata
@@ -485,6 +449,15 @@ class CandidateOverlap:
             return None
         return rows, metadata.sparse_block_kv
 
+    def _expand_and_schedule(
+        self, rows: SparseMQARowsMetadata, sparse_block_kv: int, scratch: bool = False
+    ) -> torch.Tensor:
+        op = self.consumer
+        sparse_indices = expand_decode_candidates(
+            rows, op.candidate_blocks, op.candidate_block_size, sparse_block_kv, scratch
+        )
+        return decode_schedule(op, rows, sparse_block_kv, sparse_indices)
+
     def warm(self) -> None:
         """Create the side stream's schedule workspace from an eager step."""
         found = None if self.warmed else self._decode_rows()
@@ -493,7 +466,7 @@ class CandidateOverlap:
         main = torch.cuda.current_stream()
         self.stream.wait_stream(main)
         with torch.cuda.stream(self.stream):
-            decode_schedule(self.consumer, *found, scratch=True)
+            self._expand_and_schedule(*found, scratch=True)
         main.wait_stream(self.stream)
         self.warmed = True
 
@@ -504,22 +477,6 @@ class CandidateOverlap:
         if found is None or found[0].kernel_metadata is not None:
             return
         rows, sparse_block_kv = found
-        main = torch.cuda.current_stream()
-        self.stream.wait_stream(main)
-        try:
-            with torch.cuda.stream(self.stream):
-                schedule = decode_schedule(self.consumer, rows, sparse_block_kv)
-                self.done.record()
-        except BaseException:
-            # Rejoin so that a capture reports this error, not unjoined work.
-            main.wait_stream(self.stream)
-            raise
-        schedule.record_stream(main)
+        schedule = self.defer(lambda: self._expand_and_schedule(rows, sparse_block_kv))
+        schedule.record_stream(torch.cuda.current_stream())
         rows.kernel_metadata = schedule
-        self._forked = True
-
-    def join(self) -> None:
-        """Make the current stream wait for a pending fork, if any."""
-        if self._forked:
-            torch.cuda.current_stream().wait_event(self.done)
-            self._forked = False

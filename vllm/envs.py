@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
+    VLLM_INDEXER_OVERLAP: bool = False
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
@@ -1128,6 +1129,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB", "2048")
     ),
+    # Overlap the sparse-attention indexer's decode top-k with independent work
+    # of the same layer in FULL CUDA graph decode steps (Kimi K3.1 and
+    # DeepSeek-V4.1). See docs/features/sparse_indexer_locality.md.
+    "VLLM_INDEXER_OVERLAP": lambda: bool(int(os.getenv("VLLM_INDEXER_OVERLAP", "0"))),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
     # Raise it for long-context deployments, where step cost is dominated by
