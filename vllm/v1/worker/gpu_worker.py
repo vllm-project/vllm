@@ -26,7 +26,10 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode
-from vllm.config.profiler import validate_profile_prefix
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -92,6 +95,7 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
+    WorkerProfiler,
     create_graph_capture_profiler,
     create_worker_profiler,
     validate_worker_profiler_config,
@@ -200,6 +204,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.dp_profiler_sync import DPProfilerSync
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -1549,6 +1554,7 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            self._maybe_apply_synced_profile()
             if self.model_runner.is_pooling_model and output is None:
                 output = self.model_runner.pool()
             if isinstance(
@@ -1582,6 +1588,10 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
+    @property
+    def _dp_profiler_sync(self) -> "DPProfilerSync | None":
+        return getattr(self.model_runner, "dp_profiler_sync", None)
+
     def profile(
         self,
         is_start: bool = True,
@@ -1600,48 +1610,39 @@ class Worker(WorkerBase):
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
 
+        sync = self._dp_profiler_sync
         if is_start:
             validate_profile_prefix(profile_prefix)
-
-            # Generate the trace name by combining prefix with comprehensive rank suffix
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-
-            # Build the full trace name
-            if profile_prefix:
-                trace_name = f"{profile_prefix}_{rank_suffix}"
-            else:
-                trace_name = rank_suffix
-
-            # Create the profiler wrapper only on the first start call
-            if self.profiler is None:
-                self.profiler = create_worker_profiler(
-                    self.profiler_config,
-                    worker_name=trace_name,
-                    local_rank=self.local_rank,
-                    profiler_kwargs=profiler_kwargs,
-                )
-
-            self.profiler.set_output_name(trace_name)
-            self.profiler.set_profiler_kwargs(profiler_kwargs)
-            self.profiler.start(
-                delay_iterations=delay_iterations,
-                max_iterations=max_iterations,
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
+            profiler = self._create_profiler(
+                profile_prefix, profiler_kwargs=profiler_kwargs
             )
+            if sync is not None:
+                sync.request_start(profile_prefix, delay_iterations, max_iterations)
+            else:
+                profiler.start(
+                    delay_iterations=delay_iterations,
+                    max_iterations=max_iterations,
+                )
         else:
-            if self.profiler is None:
-                logger.warning("Profiler was not started, nothing to stop.")
-                return
-            try:
-                self.profiler.stop()
-            finally:
-                if self.profiler_config.profiler == "proton" and not (
-                    self.profiler.has_cuda_graph_session
-                ):
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
-                    self.profiler = None
+            if sync is not None:
+                sync.request_stop()
+            else:
+                self._stop_profiler()
+
+    def _stop_profiler(self) -> None:
+        if self.profiler is None:
+            logger.warning("Profiler was not started, nothing to stop.")
+            return
+        try:
+            self.profiler.stop()
+        finally:
+            if self.profiler_config.profiler == "proton" and not (
+                self.profiler.has_cuda_graph_session
+            ):
+                # Proton output names are fixed when the wrapper is constructed.
+                # Recreate it so the next profile_prefix is honored.
+                self.profiler = None
 
     @property
     def randomize_dummy_inputs(self) -> bool:
@@ -1653,11 +1654,66 @@ class Worker(WorkerBase):
 
     @time_dummy_batch  # returns the iteration records that have completed
     def execute_dummy_batch(self) -> None:
+        if self.profiler is not None:
+            self.profiler.step()
         self.model_runner._dummy_run(
             self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
             num_active_loras=0,
+        )
+        self._maybe_apply_synced_profile()
+
+    def _create_profiler(
+        self,
+        profile_prefix: str | None = None,
+        profiler_kwargs: dict | None = None,
+    ) -> WorkerProfiler:
+        """Create the profiler on first use for this trace name."""
+        validate_profile_prefix(profile_prefix)
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+        trace_name = (
+            f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+        )
+
+        profiler = self.profiler
+        if profiler is None:
+            profiler = create_worker_profiler(
+                self.profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+                profiler_kwargs=profiler_kwargs,
+            )
+            self.profiler = profiler
+        profiler.set_output_name(trace_name)
+        profiler.set_profiler_kwargs(profiler_kwargs)
+        return profiler
+
+    def _maybe_apply_synced_profile(self) -> None:
+        """Apply the profiler transition agreed by the DP coordination step."""
+        sync = self._dp_profiler_sync
+        if sync is None:
+            return
+        if sync.consume_stop():
+            if self.profiler is not None:
+                self._stop_profiler()
+            return
+
+        settings = sync.consume_start()
+        if settings is None:
+            return
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            logger.warning(
+                "Synced profile start requested but profiling is not "
+                "configured on this rank; skipping."
+            )
+            return
+        profile_prefix, delay_iterations, max_iterations = settings
+        self._create_profiler(profile_prefix).start(
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
         )
 
     def probe_forward(self) -> str | None:
