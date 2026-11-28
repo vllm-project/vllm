@@ -8,6 +8,7 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.utils import hash_factors
+from vllm.distributed.aux_output_connector.params import prepare_aux_request
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -481,6 +482,7 @@ class InputProcessor:
 
         sampling_params = None
         pooling_params = None
+        cache_salt = decoder_input.get("cache_salt")
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
@@ -497,6 +499,11 @@ class InputProcessor:
                     f"the prompt length ({prompt_len}), inclusive.",
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
+                )
+            aux_config = self.vllm_config.aux_output_config
+            if aux_config.enabled or sampling_params.aux_namespace is not None:
+                cache_salt = prepare_aux_request(
+                    aux_config, sampling_params, prompt_len, resumable, cache_salt
                 )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
@@ -596,7 +603,7 @@ class InputProcessor:
             pooling_params=pooling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            cache_salt=decoder_input.get("cache_salt"),
+            cache_salt=cache_salt,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,

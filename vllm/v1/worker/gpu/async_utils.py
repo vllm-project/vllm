@@ -230,6 +230,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()
             )
+            self.model_runner_output.aux_dropped_objects = (
+                self.pending_aux_output.take_dropped_objects()
+            )
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

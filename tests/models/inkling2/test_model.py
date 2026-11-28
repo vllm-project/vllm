@@ -6,6 +6,7 @@ import copy
 import json
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
@@ -397,6 +398,75 @@ def test_tiny_model_routed_experts(tmp_path, enable_pickle, looped):
     if looped:
         # The passes of a core layer route differently (no row is reused).
         assert not torch.equal(captured[:, 1], captured[:, 3])
+
+
+def _tiny_loop_objects_llm(tmp_path, monkeypatch, async_scheduling):
+    """An in-process engine on the tiny loop model, writing to a dict store
+    that `object_store` names."""
+    from tests.distributed.aux_output_connector.utils import DictObjectStore
+
+    # The engine and its worker run in this process, on the store they create.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(DictObjectStore, "created", [])
+    (tmp_path / "config.json").write_text(json.dumps(TINY_LOOP_CONFIG))
+    llm = LLM(
+        model=str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        tokenizer_mode="hf",
+        gpu_memory_utilization=0.035,
+        max_model_len=2048,
+        max_num_seqs=4,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        async_scheduling=async_scheduling,
+        aux_output_config={
+            "enable_return_routed_experts": True,
+            "object_key_prefix": "job",
+            "object_store": f"{DictObjectStore.__module__}.DictObjectStore",
+            "object_store_extra_config": {"bucket": "b"},
+        },
+        limit_mm_per_prompt={"image": 0},
+    )
+    [store] = DictObjectStore.created
+    assert store.extra_config == {"bucket": "b"}
+    return llm, store
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False], ids=["async", "sync"])
+def test_tiny_loop_model_routed_experts_objects(
+    tmp_path, enable_pickle, monkeypatch, async_scheduling
+):
+    """A namespace request stores a row per layer visit in its objects, as
+    the inline output returns them. The engine runs in-process, so its next
+    step hands the last request's writes to the worker."""
+    from vllm.distributed.aux_output_connector.object_store import read_aux_rows
+
+    llm, store = _tiny_loop_objects_llm(tmp_path, monkeypatch, async_scheduling)
+    num_visits = llm.llm_engine.model_config.hf_text_config.num_layer_visits
+    assert num_visits == 8
+    llm.apply_model(_record_moe_routing)
+    prompt = [{"prompt_token_ids": list(range(2, 202))}]
+
+    def generate(**kwargs):
+        params = SamplingParams(
+            max_tokens=4, temperature=0, ignore_eos=True, detokenize=False, **kwargs
+        )
+        return llm.generate(prompt, params)[0].outputs[0]
+
+    inline = generate().routed_experts
+    listing = generate(aux_namespace="g/1").aux_objects
+    generate()
+    assert inline is not None and listing
+    assert [start for _, start, _ in listing][0] == 0
+    assert all(a[2] == b[1] for a, b in zip(listing, listing[1:]))
+    rows = [
+        read_aux_rows(store, [key], "routed_experts", timeout_s=30)[: end - start]
+        for key, start, end in listing
+    ]
+    objects = np.concatenate(rows)
+    assert objects.shape[1:] == (num_visits, 8)
+    np.testing.assert_array_equal(objects, inline)
 
 
 def _chunked_mixed_run(model: str, enforce_eager: bool) -> list[list[float]]:

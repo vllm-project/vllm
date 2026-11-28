@@ -581,6 +581,7 @@ class GenerateChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+    aux_objects: list[tuple[str, int, int]] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -618,6 +619,7 @@ class GenerateStreamChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None
+    aux_objects: list[tuple[str, int, int]] | None = None
 
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):

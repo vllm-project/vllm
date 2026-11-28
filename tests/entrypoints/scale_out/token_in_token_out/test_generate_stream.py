@@ -2045,3 +2045,37 @@ async def test_stream_derender_logprob_request_override(server_flag, override):
         if placeholders
         else [("é", [195, 169]), ("e", [101])]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_returns_the_final_aux_objects(stream: bool):
+    engine = _mock_engine()
+    objects = [("job/g/0", 0, 16), ("job/g/tail-ab", 16, 20)]
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        final = _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+        final.outputs[0].aux_objects = objects
+        yield final
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=stream,
+    )
+
+    response = await serving.serve_tokens(request)
+    expected = [list(entry) for entry in objects]
+    if stream:
+        parsed = _parse_sse_chunks([chunk async for chunk in response])
+        choices = [c["choices"][0] for c in parsed if c != "[DONE]"]
+        assert [c.get("aux_objects") for c in choices] == [None, expected]
+    else:
+        choice = response.model_dump(mode="json")["choices"][0]
+        assert choice["aux_objects"] == expected

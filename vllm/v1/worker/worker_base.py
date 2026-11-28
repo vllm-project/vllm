@@ -27,9 +27,13 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
+    )
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 else:
+    AuxOutputConnectorMetadata = object
     SchedulerOutput = object
     GrammarOutput = object
     AsyncModelRunnerOutput = object
@@ -190,6 +194,11 @@ class WorkerBase:
         reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
         if callable(reset_fn):
             reset_fn()
+
+    def flush_aux_output(self, metadata: AuxOutputConnectorMetadata) -> None:
+        connector = getattr(self.model_runner, "aux_output_connector", None)
+        if connector is not None:
+            connector.begin_step(metadata)
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         release_fn = getattr(

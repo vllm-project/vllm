@@ -30,6 +30,10 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    finished_aux_objects,
+    flush_aux_output,
+)
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
@@ -1035,6 +1039,8 @@ class EngineCore:
             if clear_cache:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
+            if self.vllm_config.aux_output_config.enabled:
+                flush_aux_output(self.scheduler, self.collective_rpc)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -2606,11 +2612,15 @@ class EngineCoreProc(EngineCore):
         client_index: int,
         finish_reason: FinishReason,
         error: RequestError | None = None,
+        aux_objects: dict[str, list[tuple[str, int, int]]] | None = None,
     ) -> None:
         outputs = [
             EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
+        if aux_objects is not None:
+            for output in outputs:
+                output.aux_objects = aux_objects.get(output.request_id)
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
 
@@ -2631,8 +2641,16 @@ class EngineCoreProc(EngineCore):
             by_client = defaultdict[int, set[str]](set)
             for request in aborted_reqs:
                 by_client[request.client_index].add(request.request_id)
+            aux_objects = None
+            if self.vllm_config.aux_output_config.enabled:
+                aux_objects = finished_aux_objects(aborted_reqs)
             for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+                self._send_finish_outputs_to_client(
+                    list(req_ids),
+                    client_index,
+                    FinishReason.ABORT,
+                    aux_objects=aux_objects,
+                )
 
 
 class DPEngineCoreProc(EngineCoreProc):

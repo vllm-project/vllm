@@ -20,6 +20,8 @@ from pydantic import ValidationError
 
 import vllm.envs as envs
 from vllm import SamplingParams
+from vllm.config import AuxOutputConfig
+from vllm.distributed.aux_output_connector.object_store import aux_namespace_cache_salt
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.beam_search.utils import get_beam_search_score
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -166,15 +168,21 @@ def test_rejected_mm_request_invalidates_sender_cache(monkeypatch):
     assert invalidated == ["a", "b", "c"]
 
 
-@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
-def test_routed_experts_offset_validated_before_engine_submission(offset):
-    """Reject invalid offsets even when routed-expert output is disabled."""
+def _mock_input_processor() -> Mock:
     processor = Mock(spec=InputProcessor)
     processor.tokenizer = None
     processor.generation_config_fields = {}
     processor.renderer = Mock()
     processor.renderer.get_eos_token_id.return_value = None
     processor.vllm_config = Mock()
+    return processor
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
+def test_routed_experts_offset_validated_before_engine_submission(offset):
+    """Reject invalid offsets even when routed-expert output is disabled."""
+    processor = _mock_input_processor()
+    processor.vllm_config.aux_output_config = AuxOutputConfig()
     params = SamplingParams(routed_experts_prompt_start=offset)
     prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
 
@@ -194,15 +202,142 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     )
 
 
+@pytest.mark.parametrize(
+    "start,alias,expected",
+    [
+        (2, 0, 2),
+        (0, 2, 2),
+        (2, 2, 2),
+        (3, 0, 3),
+        (2, 1, "disagree"),
+        (4, 0, "between 0 and"),
+        (0, 4, "between 0 and"),
+        (-1, 0, "between 0 and"),
+        (2**127, 0, "between 0 and"),
+    ],
+    ids=[
+        "start",
+        "alias",
+        "agreeing",
+        "prompt-end",
+        "disagreeing",
+        "past-prompt",
+        "alias-past-prompt",
+        "negative",
+        "huge",
+    ],
+)
+def test_aux_prompt_start_validated_before_engine_submission(start, alias, expected):
+    """The deprecated alias folds into the request's copy of the parameters
+    when auxiliary output is enabled."""
+    processor = _mock_input_processor()
+    processor.vllm_config.aux_output_config = AuxOutputConfig(
+        enable_return_routed_experts=True
+    )
+    params = SamplingParams(aux_prompt_start=start, routed_experts_prompt_start=alias)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    args = (processor, "0", prompt, params, ("generate",))
+
+    if isinstance(expected, str):
+        with pytest.raises(VLLMValidationError, match=expected):
+            InputProcessor.process_inputs(*args)
+        return
+    request = InputProcessor.process_inputs(*args)
+    assert request.sampling_params.aux_prompt_start == expected
+    assert (params.aux_prompt_start, params.routed_experts_prompt_start) == (
+        start,
+        alias,
+    )
+
+
+@pytest.mark.parametrize(
+    "key_prefix,enabled,resumable,stop,skip_clone,error",
+    [
+        ("job", True, False, None, False, None),
+        (None, True, False, None, False, "requires AuxOutputConfig.object_key_prefix"),
+        ("job", False, False, None, False, "enable_return_routed_experts"),
+        ("job", True, True, None, False, "streaming input"),
+        ("job", True, False, ["END"], False, "stop strings"),
+        ("job", True, False, ["END"], True, "stop strings"),
+    ],
+    ids=[
+        "accepted",
+        "no-key-prefix",
+        "aux-disabled",
+        "resumable",
+        "stop-set-after-construction",
+        "stop-set-after-construction-shallow-copy",
+    ],
+)
+def test_aux_namespace_validated_before_engine_submission(
+    key_prefix, enabled, resumable, stop, skip_clone, error
+):
+    processor = _mock_input_processor()
+    processor.vllm_config.aux_output_config = AuxOutputConfig(
+        enable_return_routed_experts=enabled, object_key_prefix=key_prefix
+    )
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3], "cache_salt": "user"}
+    params = SamplingParams(aux_namespace="g/0", skip_clone=skip_clone)
+    if stop is not None:
+        params.stop = stop
+    args = ("request", prompt, params, ("generate",))
+
+    if error is None:
+        request = InputProcessor.process_inputs(processor, *args, resumable=resumable)
+        assert request.sampling_params.aux_namespace == "g/0"
+        assert request.cache_salt == aux_namespace_cache_salt(key_prefix, "g/0", "user")
+        return
+    with pytest.raises(VLLMValidationError, match=error) as exc_info:
+        InputProcessor.process_inputs(processor, *args, resumable=resumable)
+    assert exc_info.value.parameter == "aux_namespace"
+
+
+def test_aux_namespace_cache_salt_separates_namespaces():
+    salts = [None, "user", "a/g", '["a", "g", null]']
+    outputs = salts + [
+        aux_namespace_cache_salt(prefix, namespace, salt)
+        for prefix in ("a", "b")
+        for namespace in ("g", "h", "g/h")
+        for salt in salts
+    ]
+    assert len(set(outputs)) == len(outputs)
+
+
+@pytest.mark.parametrize(
+    "forge,rejected",
+    [
+        (lambda salt: salt, True),
+        (lambda salt: f"prefix-lm:0:{salt}", True),
+        (lambda salt: '["job", "g", null]', False),
+    ],
+    ids=["namespace-salt", "prefix-lm-wrapped", "unmarked-json"],
+)
+def test_request_without_namespace_never_takes_a_namespace_salt(forge, rejected):
+    processor = _mock_input_processor()
+    processor.vllm_config.aux_output_config = AuxOutputConfig(
+        enable_return_routed_experts=True, object_key_prefix="job"
+    )
+    tokens = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    namespace_salt = InputProcessor.process_inputs(
+        processor, "ns", tokens, SamplingParams(aux_namespace="g"), ("generate",)
+    ).cache_salt
+    prompt = {**tokens, "cache_salt": forge(namespace_salt)}
+    args = ("plain", prompt, SamplingParams(), ("generate",))
+    if not rejected:
+        assert InputProcessor.process_inputs(processor, *args).cache_salt not in (
+            namespace_salt,
+            None,
+        )
+        return
+    with pytest.raises(VLLMValidationError, match="must not contain") as exc_info:
+        InputProcessor.process_inputs(processor, *args)
+    assert exc_info.value.parameter == "cache_salt"
+
+
 def _process_inputs_with_max_model_len(
     params: SamplingParams, max_model_len: int = 2048
 ):
-    processor = Mock(spec=InputProcessor)
-    processor.tokenizer = None
-    processor.generation_config_fields = {}
-    processor.renderer = Mock()
-    processor.renderer.get_eos_token_id.return_value = None
-    processor.vllm_config = Mock()
+    processor = _mock_input_processor()
     processor.model_config = Mock()
     processor.model_config.max_model_len = max_model_len
     prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}

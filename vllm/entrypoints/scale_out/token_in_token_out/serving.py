@@ -760,6 +760,7 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                aux_objects=output.aux_objects,
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -1053,6 +1054,7 @@ class ServingTokens(GenerateBaseServing):
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
+                        aux_objects=output.aux_objects,
                     )
                     choice: GenerateStreamChoiceBase
                     if derender_mode:

@@ -445,16 +445,17 @@ class SamplingParams(
 
     # Debugging / RL-specific parameters. Not intended for production serving.
     routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
+    """Deprecated alias of `aux_prompt_start`."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
+    aux_prompt_start: int = 0
+    """Leading prompt positions whose auxiliary outputs are not returned, e.g.
+    the prefix returned in earlier turns."""
+    aux_namespace: str | None = None
+    """Deliver auxiliary outputs as shared objects listed in `aux_objects`;
+    only requests of one namespace share prefix-cache blocks."""
 
     @staticmethod
     def from_optional(

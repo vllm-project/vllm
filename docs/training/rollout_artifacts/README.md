@@ -14,3 +14,5 @@ During RL rollouts and on-policy distillation, the trainer often needs auxiliary
 ## Auxiliary Output Connector (`aux_output_connector`)
 
 For large per-token artifacts such as MoE routed experts, vLLM uses the **aux output connector** (`vllm/distributed/aux_output_connector/`) to store artifact rows per engine in host memory, keyed by KV block hash, on the engine's first tensor-parallel worker. See [Routed Experts Return — Row storage](routed_experts.md#row-storage) for storage layout, replica affinity, cache invalidation on weight updates, and `max_bytes` sizing.
+
+To deliver the rows through a shared object store instead of the response, see [Aux Outputs for RL](aux_outputs.md).
