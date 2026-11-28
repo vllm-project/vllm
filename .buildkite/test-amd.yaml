@@ -799,10 +799,12 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
+  - tools/formal/shm_broadcast
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_broadcast_model.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
