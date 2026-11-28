@@ -1380,8 +1380,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         )
 
     def _split_embeddings(
-        self, embeddings: torch.Tensor, split_sizes: list[int]
+        self, embeddings: torch.Tensor | list[torch.Tensor], split_sizes: list[int]
     ) -> list[torch.Tensor]:
+        # `get_*_features` return one entry per item in Transformers >= 5.25
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.cat(list(embeddings))
         total_expected = sum(split_sizes)
 
         # Flatten to 2D: [total_tokens, hidden_dim]
@@ -1426,6 +1429,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
         return list(torch.split(embeddings, token_split_sizes, dim=0))
 
+    def _get_modality_embeddings(self, modality: str) -> Callable[..., Any]:
+        # The flat `get_*_embeddings` return all items' rows in one tensor. Models
+        # without them (Transformers < 5.25) only have the `get_*_features`
+        names = (f"get_{modality}_embeddings", f"get_{modality}_features")
+        return getattr_iter(self.model, names)
+
     def _process_audio_input(self, **kwargs) -> list[torch.Tensor] | None:
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
         if input_features is None:
@@ -1451,7 +1460,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                     else value
                     for key, value in kwargs.items()
                 }
-                audio_output = self.model.get_audio_features(
+                audio_output = self._get_modality_embeddings("audio")(
                     input_features, return_dict=True, **kwargs
                 )
             return self._split_embeddings(audio_output.pooler_output, split_sizes)
@@ -1461,7 +1470,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padded to match another.
         embeddings: list[torch.Tensor] = []
         for index, features in enumerate(input_features):
-            audio_output = self.model.get_audio_features(
+            audio_output = self._get_modality_embeddings("audio")(
                 features.unsqueeze(0),
                 return_dict=True,
                 **self._select_item_kwargs(kwargs, index, len(input_features)),
@@ -1516,9 +1525,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             if len(vision_embeddings) == len(split_sizes):
                 return list(vision_embeddings)
             # Encoders which return one entry per batch row (Transformers >= 5.20.1)
-            return self._split_embeddings(
-                torch.cat(list(vision_embeddings)), split_sizes
-            )
+            return self._split_embeddings(vision_embeddings, split_sizes)
 
         # Items the processor left un-padded arrive as a list once their
         # shapes differ. Encode them one at a time so that none of them is
@@ -1530,9 +1537,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 item.unsqueeze(0),
                 **self._select_item_kwargs(kwargs, index, len(pixel_values)),
             )
-            # Encoders which return one entry per item return a single entry
-            if not isinstance(features, torch.Tensor):
-                features = torch.cat(list(features))
             embeddings.extend(self._split_embeddings(features, [split_sizes[index]]))
         return embeddings
 
@@ -1569,22 +1573,31 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padding images via boolean-mask indexing, LlavaOnevision
         # branches on per-sample batch counts).
         with gpu_sync_allowed():
-            get_modality_features = getattr(self.model, f"get_{modality}_features")
+            get_modality_features = self._get_modality_embeddings(modality)
             features = get_modality_features(pixel_values, return_dict=True, **kwargs)
+            # The flat `get_*_embeddings` give each item's row count, which the
+            # patch counts we split by otherwise aren't (LlavaOnevision's anyres)
+            split_sizes = getattr(features, "split_sizes", None)
+            if split_sizes is not None:
+                split_sizes = split_sizes.tolist()
         embeddings = features.pooler_output
-        if not self.deepstack_num_levels:
-            return embeddings
         # Carried alongside the embeddings so the encoder cache keeps them together
-        if not (deepstack := getattr(features, "deepstack_features", None)):
+        deepstack = getattr(features, "deepstack_features", None)
+        if self.deepstack_num_levels and not deepstack:
             logger.warning_once(
-                "`get_%s_features` returned no `deepstack_features`, so DeepStack "
+                "The %s encoder returned no `deepstack_features`, so DeepStack "
                 "features will be ignored and outputs may be degraded.",
                 modality,
             )
-            return embeddings
-        if isinstance(embeddings, torch.Tensor):
-            return torch.cat([embeddings, *deepstack], dim=-1)
-        return [torch.cat(item, dim=-1) for item in zip(embeddings, *deepstack)]
+        elif self.deepstack_num_levels and isinstance(embeddings, torch.Tensor):
+            embeddings = torch.cat([embeddings, *deepstack], dim=-1)
+        elif self.deepstack_num_levels:
+            embeddings = [
+                torch.cat(item, dim=-1) for item in zip(embeddings, *deepstack)
+            ]
+        if split_sizes is not None and isinstance(embeddings, torch.Tensor):
+            return list(torch.split(embeddings, split_sizes))
+        return embeddings
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         # Each helper detects its own inputs. We are called once per modality, so the
