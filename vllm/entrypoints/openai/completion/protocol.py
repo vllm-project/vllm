@@ -26,6 +26,10 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.openai.kv_transfer import (
+    completion_engine_input_count,
+    validate_remote_kv_source_fanout,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -675,6 +679,17 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         return data
+
+    @model_validator(mode="after")
+    def check_remote_kv_source_fanout(self):
+        if self.use_beam_search:
+            return self
+        validate_remote_kv_source_fanout(
+            self.kv_transfer_params,
+            input_count=completion_engine_input_count(self.prompt, self.prompt_embeds),
+            n=self.n,
+        )
+        return self
 
 
 class CompletionLogProbs(OpenAIBaseModel):

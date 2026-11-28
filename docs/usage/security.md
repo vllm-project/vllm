@@ -383,6 +383,14 @@ vLLM enforces several configurable limits to prevent this:
 
 Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
 
+A `remote_kv_source` transfer ID identifies one live engine request per peer.
+Within one HTTP request, `/v1/completions`, `/v1/chat/completions`, and
+`/v1/chat/completions/batch` reject prompt or sampling fan-out that would share
+it across engine requests. This validation does not detect reuse across
+separate concurrent HTTP requests. Callers, routers, and proxies must assign a
+distinct `kv_request_id` to every engine request; cross-request reuse can still
+violate the engine invariant.
+
 **Recommendations:**
 
 - **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
