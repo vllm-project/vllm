@@ -883,6 +883,10 @@ class HarmonyContext(ConversationContext):
         return self._messages
 
     def need_builtin_tool_call(self) -> bool:
+        # A message closed by the flush was cut off (e.g. by max_output_tokens),
+        # so its tool call arguments are incomplete.
+        if self.last_append_flush_status:
+            return False
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is None:

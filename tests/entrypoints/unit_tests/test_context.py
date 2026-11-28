@@ -647,6 +647,33 @@ async def test_streaming_message_synchronization():
     assert context.last_append_segments[-1].completed_message is message
 
 
+@pytest.mark.parametrize("flushed", [False, True])
+def test_need_builtin_tool_call_skips_flushed_message(flushed):
+    """A tool call that only flush() closed was cut off (e.g. by
+    max_output_tokens), so it must not be executed."""
+    context, parser = make_harmony_context(available_tools=["python"])
+    message = (
+        Message.from_role_and_content(Role.ASSISTANT, "import shutil\n")
+        .with_channel("analysis")
+        .with_recipient("python")
+    )
+    segments = [Segment("analysis", "python", "", completed_message=message)]
+    if flushed:
+        parser.enqueue_flush_result(segments)
+    else:
+        parser.enqueue_chunk_result(segments)
+
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2, 3], output_token_ids=[4], finished=True
+        )
+    )
+
+    assert context.messages[-1] is message
+    assert context.last_append_flush_status is flushed
+    assert context.need_builtin_tool_call() is not flushed
+
+
 def test_turn_metrics_copy_and_reset():
     """Test TurnMetrics copy and reset methods work correctly."""
     # Create a TurnMetrics with specific values
