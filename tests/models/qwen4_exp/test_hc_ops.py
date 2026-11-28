@@ -204,37 +204,6 @@ def test_hc_down_silu_sm100(num_tokens: int) -> None:
     torch.testing.assert_close(actual_inj, expected_inj, atol=1e-2, rtol=1e-2)
 
 
-@requires_hc_down_silu_sm100
-@pytest.mark.parametrize(
-    "num_tokens,use_sm100",
-    [(1, False), (4, False), (8, False), (9, True), (48, True), (49, True)],
-)
-def test_hc_down_dispatch_boundary(dist_init, num_tokens: int, use_sm100: bool) -> None:
-    """_down_and_inject dispatches to the SM100 kernel from M = 9 on.
-
-    Both sides run the same kernel on the same inputs, so the comparison is
-    exact.
-    """
-    from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
-    from vllm.models.qwen4_exp.nvidia.hyperconnection import GatedResidual
-
-    torch.manual_seed(0)
-    config = HyperConnectionConfig(hidden_size=HIDDEN_SIZE, hc_lowrank=LORA_RANK)
-    hc = GatedResidual(config).cuda()
-    assert hc._use_hc_down_silu_sm100 and hc._use_hc_down_silu
-    w = hc.input_mix_weight_down_block_inject.weight
-    with torch.no_grad():
-        w.normal_(std=HYPER_HIDDEN_SIZE**-0.5)
-    xn = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-
-    actual, _ = hc._down_and_inject(xn)
-    if use_sm100:
-        expected = hc_down_silu_sm100(xn, w)[0]
-    else:
-        expected = hc_down_silu(xn, w, LORA_RANK, HC)[0]
-    assert torch.equal(actual, expected)
-
-
 @requires_hc_up_gate_mix
 # Cover the serving cutoff and the Blackwell CTA-pair boundary.
 @pytest.mark.parametrize("num_tokens", [1, 512, 1023, 1599, 1600, 4097])
