@@ -13933,12 +13933,13 @@ async fn tokenize_allows_prompts_at_or_above_max_model_len() {
     assert_eq!(chat_json["max_model_len"], 4);
 }
 
-/// Like Python's `TokenizeParams` check, chat and completions reject a
-/// requested output budget above the context window before submitting. The
-/// mock engine answers the first request, so a submitted one returns 200.
+/// Like Python's `TokenizeParams` check, chat, completions and responses
+/// reject a requested output budget above the context window before
+/// submitting. The mock engine answers the first request, so a submitted one
+/// returns 200.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn chat_and_completions_reject_max_tokens_above_max_model_len() {
+async fn openai_routes_reject_max_tokens_above_max_model_len() {
     let (mut app, _engine_task) = test_app_with_engine_handle().await;
     let max_tokens = DEFAULT_MOCK_MAX_MODEL_LEN + 1;
 
@@ -13964,6 +13965,10 @@ async fn chat_and_completions_reject_max_tokens_above_max_model_len() {
             "/v1/completions",
             json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "max_tokens": max_tokens}),
         ),
+        (
+            "/v1/responses",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "input": "hello", "max_output_tokens": max_tokens}),
+        ),
     ] {
         let (status, json) = post_json(&mut app, uri, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {json}");
@@ -13972,7 +13977,8 @@ async fn chat_and_completions_reject_max_tokens_above_max_model_len() {
     expect_test::expect![[r#"
         {"error":{"message":"max_completion_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
         {"error":{"message":"max_completion_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
-        {"error":{"message":"max_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
+        {"error":{"message":"max_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_tokens","code":400}}
+        {"error":{"message":"max_output_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_output_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
