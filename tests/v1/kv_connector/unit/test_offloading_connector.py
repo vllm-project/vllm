@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import socket
 import threading
 import time
 
@@ -283,6 +282,7 @@ def test_cpu_offloading(
     attn_backend: str | None,
     cpu_block_size: int | None,
     uses_hma: bool,
+    reserve_ports,
 ) -> None:
     """Tests OffloadingConnector with CPUOffloadingSpec."""
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
@@ -296,10 +296,7 @@ def test_cpu_offloading(
     )
 
     subscriber: MockSubscriber | None = None
-    port: int
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
-        port = s.getsockname()[1]
+    (port,) = reserve_ports(1)
 
     events_endpoint = f"tcp://*:{port}"
     kv_events_config = KVEventsConfig(
@@ -605,7 +602,7 @@ def test_sleep_keeps_offloaded_blocks_unless_reset(
         del llm
 
 
-def test_tiering_offloading() -> None:
+def test_tiering_offloading(reserve_ports) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {
         "cpu_bytes_to_use": 500 << 20,
@@ -619,10 +616,7 @@ def test_tiering_offloading() -> None:
         kv_connector_extra_config=extra_config,
     )
 
-    port: int
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
-        port = s.getsockname()[1]
+    (port,) = reserve_ports(1)
     events_endpoint = f"tcp://*:{port}"
     kv_events_config = KVEventsConfig(
         enable_kv_cache_events=True,
@@ -650,7 +644,7 @@ def test_tiering_offloading() -> None:
         del llm
 
 
-def test_fs_tiering_offloading(tmp_path) -> None:
+def test_fs_tiering_offloading(tmp_path, reserve_ports) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec
     + fs secondary tier."""
     extra_config: dict = {
@@ -665,10 +659,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         kv_connector_extra_config=extra_config,
     )
 
-    port: int
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
-        port = s.getsockname()[1]
+    (port,) = reserve_ports(1)
     events_endpoint = f"tcp://*:{port}"
     kv_events_config = KVEventsConfig(
         enable_kv_cache_events=True,

@@ -1,34 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
-import socket
 import time
 
 import pytest
-
-
-@pytest.fixture
-def reserve_ports():
-    """Return a function that holds free loopback ports until teardown.
-
-    Releasing a probe socket before the P2P tier binds lets any other
-    ephemeral bind or connect (NIXL/UCX, torch.distributed, the other engine)
-    take the port. The held sockets set `SO_REUSEADDR` and never listen, so
-    the kernel skips their ports for ephemeral allocation while libzmq, which
-    also sets `SO_REUSEADDR`, can still bind them.
-    """
-    with contextlib.ExitStack() as stack:
-
-        def reserve(count: int) -> list[int]:
-            ports = []
-            for _ in range(count):
-                sock = stack.enter_context(socket.socket())
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("127.0.0.1", 0))
-                ports.append(sock.getsockname()[1])
-            return ports
-
-        yield reserve
 
 
 @pytest.fixture
