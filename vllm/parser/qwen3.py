@@ -382,11 +382,33 @@ class Qwen3Parser(ParserEngine):
                 _qwen3_arg_value_extender, closed=closed
             )
 
+    def _is_thinking_enabled(
+        self, request: ChatCompletionRequest | ResponsesRequest | None = None
+    ) -> bool:
+        if request is not None:
+            chat_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+            if "enable_thinking" in chat_kwargs:
+                return bool(chat_kwargs["enable_thinking"])
+        return self.thinking_enabled
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        thinking_enabled = self._is_thinking_enabled(request)
+        has_tools = bool(
+            getattr(request, "tools", None)
+            and getattr(request, "tool_choice", None) != "none"
+        )
+        if not thinking_enabled and not has_tools:
+            return request
+        request.skip_special_tokens = False
+        return request
+
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: ChatCompletionRequest | ResponsesRequest | None = None,
     ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
+        if not self._is_thinking_enabled(request):
             return None, model_output
         return super().extract_reasoning(model_output, request)
