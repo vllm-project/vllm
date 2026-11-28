@@ -513,6 +513,74 @@ class TestAttributionHeaderStripping:
         system_msg = result.messages[0]
         assert system_msg["content"] == "You are a helpful assistant."
 
+    def test_billing_header_sharing_system_block_keeps_prompt(self):
+        """When the billing header shares a system text block with the prompt,
+        only the header line is stripped and the remainder is preserved."""
+        header = "x-anthropic-billing-header: cc_version=2.1.220.300; cch=7adab;"
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[
+                {"type": "text", "text": f"{header}\nYou are a Claude agent."},
+            ],
+        )
+        result = _convert(request)
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "You are a Claude agent.",
+        }
+
+    def test_billing_header_sharing_system_string_keeps_prompt(self):
+        """Top-level string system prompt sharing a billing header keeps remainder."""
+        header = "x-anthropic-billing-header: cc_version=2.1.220.300; cch=7adab;"
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=f"{header}\nYou are a Claude agent.",
+        )
+        result = _convert(request)
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "You are a Claude agent.",
+        }
+
+    def test_billing_header_only_system_block_dropped(self):
+        """A header-only system block is removed completely."""
+        header = "x-anthropic-billing-header: cc_version=2.1.220.300; cch=7adab;"
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[{"type": "text", "text": header}],
+        )
+        result = _convert(request)
+        assert len(result.messages) == 1
+        assert result.messages[0]["role"] == "user"
+
+    def test_inline_system_billing_header_sharing_string_keeps_prompt(self):
+        """Inline system string sharing a billing header line keeps the remainder."""
+        header = "x-anthropic-billing-header: cc_version=2.1.220.300; cch=7adab;"
+        request = _make_request(
+            [
+                {"role": "system", "content": f"{header}\nReal system content."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        result = _convert(request)
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "Real system content.",
+        }
+
+    def test_inline_system_billing_header_only_dropped(self):
+        """An inline system string containing only the billing header is dropped."""
+        header = "x-anthropic-billing-header: cc_version=2.1.220.300; cch=7adab;"
+        request = _make_request(
+            [
+                {"role": "system", "content": header},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        result = _convert(request)
+        assert len(result.messages) == 1
+        assert result.messages[0]["role"] == "user"
+
 
 # ======================================================================
 # Thinking block conversion (Anthropic → OpenAI)
