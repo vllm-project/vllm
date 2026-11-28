@@ -239,16 +239,15 @@ def _check_moe_sp(rank: int, config: VllmConfig) -> None:
     torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
 
 
-def _check_compiled_sp_ops() -> None:
-    """Compiled SP collectives stay correct for token counts unseen at trace time."""
-    from vllm.models.qwen4_exp.amd.ops.sequence_parallel import (
-        sp_reduce_scatter,
-        sp_shard,
-    )
+def _check_compiled_sp_ops(module) -> None:
+    """The SP collectives a module binds stay correct for untraced token counts."""
+    # The compile cache is keyed by code and its guards are dropped below, so a
+    # second module would silently reuse the first module's trace.
+    torch._dynamo.reset()
 
     def collectives(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        gathered = sp_all_gather(sp_shard(x) * 2)[: x.shape[0]]
-        reduced = sp_all_gather(sp_reduce_scatter(x))[: x.shape[0]]
+        gathered = sp_all_gather(module.sp_shard(x) * 2)[: x.shape[0]]
+        reduced = sp_all_gather(module.sp_reduce_scatter(x))[: x.shape[0]]
         return gathered, reduced
 
     # vLLM drops Dynamo guards, so one trace must serve every token count.
@@ -287,7 +286,11 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
                 if moe_sp:
                     _check_moe_sp(rank, config)
                 elif compiled_ops:
-                    _check_compiled_sp_ops()
+                    from vllm.models.qwen4_exp.amd import ple_layer
+
+                    # Both modules shard tokens inside the compiled backbone.
+                    for module in (qwen4_model, ple_layer):
+                        _check_compiled_sp_ops(module)
                 else:
                     _check_decoder_ple(rank)
     finally:
@@ -311,5 +314,5 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only SP ops")
 @multi_gpu_test(num_gpus=2)
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
-    """Padding in compiled SP collectives must not specialize on the traced size."""
+    """Compiled SP padding in the model and PLE must not specialize on trace size."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
