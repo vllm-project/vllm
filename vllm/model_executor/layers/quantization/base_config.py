@@ -193,6 +193,11 @@ class QuantizationConfig(ABC):
         """
         return None
 
+    def get_weight_byte_size(self) -> float | None:
+        """Average bytes stored per weight, scales included, for the MFU/MBU
+        estimator. None uses the estimator's table of known methods."""
+        return None
+
     @staticmethod
     def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""
