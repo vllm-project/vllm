@@ -8693,6 +8693,37 @@ async fn non_stream_completions_echo_decodes_token_id_prompt_text() {
     assert_eq!(json["usage"]["completion_tokens"], 3);
 }
 
+/// A token-ID prompt can end inside a character, for example when a client
+/// resumes a generation that hit `max_tokens` mid-character. The output holds
+/// only the generated text, not the prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_token_id_prompt_ending_mid_character_omits_prompt_text() {
+    // "你" is 0xE4 0xBD 0xA0; the prompt carries its first two bytes.
+    let mut prompt = bytes_to_token_ids(b"Say hi in Chinese: ");
+    prompt.extend([0xe4, 0xbd]);
+    let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::new()),
+        vec![
+            (vec![0xa0], None),
+            (vec![b'!' as u32], None),
+            // Stands in for EOS, which is not part of the text.
+            (vec![b'.' as u32], Some(EngineCoreFinishReason::Stop)),
+        ],
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": prompt}),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["choices"][0]["text"], "你!");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_token_id_echo_return_token_ids_keeps_prompt_ids_separate() {
