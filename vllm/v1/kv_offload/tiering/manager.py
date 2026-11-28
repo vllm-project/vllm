@@ -17,6 +17,9 @@ Key Design Principles:
    "data is being promoted, try later"
 5. ref_cnt as eviction protection — primary.prepare_read() increments ref_cnt,
    protecting chunks from eviction until complete_read() is called
+6. Reported HITs are pinned, not trusted — a primary HIT returned by lookup()
+   stays an eviction candidate until the request consumes it, so the manager
+   pins the tracked HITs before any promotion's prepare_write() may evict
 """
 
 import threading
@@ -354,6 +357,19 @@ class TieringOffloadingManager(OffloadingManager):
         # (otherwise a disk or P2P hit would be mislabeled as a host hit).
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
+        # Lookup-hit tracking, one request at a time. lookup() records every
+        # primary HIT it reports; the next allocation that may evict (a
+        # promotion's prepare_write) pins them first, and the request's
+        # consume (prepare_load / create_store_job), the next request's first
+        # lookup, and on_schedule_end() each release them. The scheduler
+        # looks up one request's whole prefix before moving to the next and
+        # consumes its hits before the next request's lookups, so a single
+        # owner suffices; ParentManager documents the same rule for external
+        # requests.
+        self._lookup_hits_owner: ReqContext | None = None
+        self._lookup_hits: set[OffloadKey] = set()
+        self._pinned_lookup_hits: set[OffloadKey] = set()
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
@@ -520,6 +536,9 @@ class TieringOffloadingManager(OffloadingManager):
                 tier.serve_external_requests(self._tier_parents[tier])
         finally:
             self._processed_jobs_this_step = gate
+            # serve_external_requests() pairs its lookups with a consume, but
+            # anything it left tracked must not outlive the round.
+            self._release_lookup_hits()
 
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
@@ -715,6 +734,57 @@ class TieringOffloadingManager(OffloadingManager):
                 detector.stats,
             )
 
+    def _track_hit(self, key: OffloadKey, req_context: ReqContext) -> None:
+        """Record a primary HIT reported to a request's lookup.
+
+        A different req_id means the previous request is done: release its
+        pins before tracking for the new one, so a request that never
+        consumes its hits (aborted, deferred) cannot leak them.
+        """
+        if (
+            self._lookup_hits_owner is None
+            or self._lookup_hits_owner.req_id != req_context.req_id
+        ):
+            self._release_lookup_hits()
+            self._lookup_hits_owner = req_context
+        if key not in self._pinned_lookup_hits:
+            self._lookup_hits.add(key)
+
+    def _pin_lookup_hits(self) -> None:
+        """Pin the tracked HITs before an allocation that may evict.
+
+        A promotion's prepare_write() evicts to make room, and an unpinned
+        HIT is still an eviction candidate while the request it was
+        reported to still expects to load it.
+        """
+        if not self._lookup_hits:
+            return
+        self.primary_tier.prepare_read(self._lookup_hits, self._lookup_hits_owner)
+        self._pinned_lookup_hits.update(self._lookup_hits)
+        self._lookup_hits.clear()
+
+    def _release_lookup_hits(self, req_context: ReqContext | None = None) -> None:
+        """Release every lookup pin the tracked request holds.
+
+        With req_context, release only that request's pins: its consume
+        (prepare_load / create_store_job) holds its own refs by then, so the
+        lookup pin is the last decrement of the temporary 1 -> 2 -> 1.
+        Without it, release unconditionally (next request, schedule end,
+        poll-round end).
+        """
+        if req_context is not None and (
+            self._lookup_hits_owner is None
+            or self._lookup_hits_owner.req_id != req_context.req_id
+        ):
+            return
+        if self._pinned_lookup_hits:
+            self.primary_tier.complete_read(
+                self._pinned_lookup_hits, self._lookup_hits_owner
+            )
+        self._pinned_lookup_hits.clear()
+        self._lookup_hits.clear()
+        self._lookup_hits_owner = None
+
     @override
     def lookup(
         self,
@@ -763,6 +833,7 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            self._track_hit(key, req_context)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -838,6 +909,9 @@ class TieringOffloadingManager(OffloadingManager):
             True if promotion was initiated, False if primary tier is full.
 
         """
+        # Pin the HITs reported so far before allocating: the eviction below
+        # must not drop a chunk a lookup already reported as ready.
+        self._pin_lookup_hits()
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -904,7 +978,9 @@ class TieringOffloadingManager(OffloadingManager):
         step.
 
         This increments ref_cnt on the chunks in the primary tier, protecting
-        them from eviction during the transfer.
+        them from eviction during the transfer. The load takes its own refs,
+        so the lookup pins are released here: ref-count goes 1 -> 2 -> 1,
+        and complete_load() does the final decrement.
 
         Args:
             keys: Chunks to prepare for loading.
@@ -914,7 +990,9 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
 
         """
-        return self.primary_tier.prepare_load(keys, req_context)
+        spec = self.primary_tier.prepare_load(keys, req_context)
+        self._release_lookup_hits(req_context)
+        return spec
 
     @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -1123,7 +1201,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         Calls prepare_read() to increment ref_cnt (protecting chunks
         from eviction during the async transfer), allocates a job ID,
-        and registers the job in _jobs.
+        and registers the job in _jobs. The job takes its own refs, so the
+        lookup pins are released here the same way prepare_load() does:
+        ref-count goes 1 -> 2 -> 1 until the job's completion.
 
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
@@ -1139,6 +1219,7 @@ class TieringOffloadingManager(OffloadingManager):
             req_context=req_context,
         )
         self._register_job(job_metadata, tier_idx)
+        self._release_lookup_hits(req_context)
         return job_metadata
 
     @override
@@ -1243,6 +1324,11 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
+        # Last call of the step: whatever the step's lookups tracked and no
+        # consume took over is released, so the primary tier can evict it
+        # again and reset_cache()'s assert holds.
+        self._release_lookup_hits()
+
         for req_id in context.new_req_ids:
             state = self._req_state.get(req_id)
             if state is None:
@@ -1315,6 +1401,14 @@ class TieringOffloadingManager(OffloadingManager):
         assert not self._deferred_releases, (
             "drain_jobs() returned with deferred releases still pending"
         )
+        # reset_cache() never runs inside a schedule step (every step ends
+        # with on_schedule_end), so lookup-hit tracking must be empty here;
+        # anything else is a pin leak that would silence primary eviction.
+        assert (
+            self._lookup_hits_owner is None
+            and not self._lookup_hits
+            and not self._pinned_lookup_hits
+        ), "lookup-hit tracking outlived the scheduler step that reported it"
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
