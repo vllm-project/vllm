@@ -253,7 +253,7 @@ impl RequestMetrics {
         let request_time_per_output_token_seconds = histogram(BucketFamily::InterTokenLatency);
         registry.register(
             "vllm:request_time_per_output_token_seconds",
-            "Histogram of time_per_output_token_seconds per request.",
+            "Histogram of time_per_output_token_seconds per request, observed only for requests that generate more than one token.",
             request_time_per_output_token_seconds.clone(),
         );
 

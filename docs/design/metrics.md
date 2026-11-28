@@ -52,7 +52,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:prompt_tokens` - Prompt tokens.
 - `vllm:generation_tokens` - Generation tokens.
 - `vllm:inter_token_latency_seconds` - Inter-token latency in seconds, measured between consecutive streamed outputs. It approximates TPOT when each output contains exactly one token, but differs from request-level TPOT when an output contains multiple tokens or when aggregation weights differ.
-- `vllm:request_time_per_output_token_seconds` - Per-request Time Per Output Token (TPOT) in seconds, computed as `(end-to-end latency - TTFT) / (number of output tokens - 1)`. It is recorded as zero for requests that generate no more than one token.
+- `vllm:request_time_per_output_token_seconds` - Per-request Time Per Output Token (TPOT) in seconds, computed as `(end-to-end latency - TTFT) / (number of output tokens - 1)`. Requests that generate no more than one token have no decode interval and are not observed, so its `_count` counts only requests that generate more than one token, not all finished requests.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
@@ -74,9 +74,9 @@ metrics differ when an output bundles multiple tokens (e.g. speculative
 decoding) or when mean ITL and mean per-request TPOT are aggregated over
 differing weights. See [Understanding the latency metrics](../benchmarking/cli.md#understanding-the-latency-metrics)
 for the benchmark definitions. Requests that generate no more than one token
-are recorded with a TPOT of zero, while `vllm bench serve` excludes them from
-its TPOT statistics. Therefore, the Prometheus histogram and benchmark TPOT
-statistics can differ. Use `vllm:request_time_per_output_token_seconds` for
+(for example, prefill-only requests in disaggregated prefill/decode with
+`max_tokens=1`) are not observed, which matches how `vllm bench serve` excludes
+them from its TPOT statistics. Use `vllm:request_time_per_output_token_seconds` for
 request-level TPOT and `vllm:inter_token_latency_seconds` when you specifically
 want the inter-output latency distribution.
 

@@ -484,7 +484,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Per-request Time Per Output Token (TPOT) in seconds, computed as (end-to-end latency - TTFT) divided by the number of output tokens minus one. Requests with no more than one output token are recorded as zero; vllm bench serve excludes these requests from its TPOT statistics.",
+      "description": "Per-request Time Per Output Token (TPOT) in seconds, computed as (end-to-end latency - TTFT) divided by the number of output tokens minus one. Requests with no more than one output token are not observed, matching how vllm bench serve excludes them from its TPOT statistics.",
       "fieldConfig": {
         "defaults": {
           "color": {

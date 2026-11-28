@@ -364,12 +364,12 @@ impl RequestMetricsTracker {
             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
         let decode_time_seconds = diff_or_zero(self.last_token_ts, self.first_token_ts);
-        let time_per_output_token_seconds = if self.num_generation_tokens > 1 {
+        // TPOT needs a decode interval.
+        // A request with fewer than two generated tokens (P/D prefill, max_tokens=1) has none.
+        let time_per_output_token_seconds = (self.num_generation_tokens > 1).then(|| {
             diff_or_zero(self.last_token_ts, self.first_token_ts)
                 / (self.num_generation_tokens - 1) as f64
-        } else {
-            0.0
-        };
+        });
 
         self.handles.request_success.get(&finish_reason).inc();
         if self.is_corrupted {
@@ -406,9 +406,11 @@ impl RequestMetricsTracker {
             .observe(prefill_kv_computed_tokens as f64);
         self.handles.e2e_request_latency_seconds.observe(e2e_latency_seconds);
         self.handles.request_decode_time_seconds.observe(decode_time_seconds);
-        self.handles
-            .request_time_per_output_token_seconds
-            .observe(time_per_output_token_seconds);
+        if let Some(time_per_output_token_seconds) = time_per_output_token_seconds {
+            self.handles
+                .request_time_per_output_token_seconds
+                .observe(time_per_output_token_seconds);
+        }
 
         if let Some(events) = &self.handles.events {
             let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
@@ -585,6 +587,48 @@ mod tests {
     use super::{
         RequestMetricsTracker, RequestTimestamps, diff_or_zero, resolve_request_metric_handles,
     };
+    use crate::FinishReason;
+
+    fn tpot_count(model_name: &str) -> u64 {
+        let rendered = METRICS.render().unwrap();
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("vllm:request_time_per_output_token_seconds_count{")
+                    && line.contains(&format!("model_name=\"{model_name}\""))
+            })
+            .and_then(|line| line.rsplit(' ').next())
+            .map_or(0, |count| count.parse().unwrap())
+    }
+
+    fn finish_after_tokens(model_name: &str, tokens_per_output: &[usize]) {
+        let handles = Arc::new(resolve_request_metric_handles(model_name, 0, true));
+        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 8, Some(16), None, true);
+        for (step, &num_tokens) in tokens_per_output.iter().enumerate() {
+            tracker.observe_output(
+                101.0 + step as f64,
+                101.0 + step as f64,
+                &vllm_engine_core_client::protocol::output::EngineCoreOutput {
+                    request_id: "req".to_string(),
+                    new_token_ids: vec![7; num_tokens],
+                    ..Default::default()
+                },
+            );
+        }
+        tracker.record_finished(110.0, FinishReason::Length);
+    }
+
+    #[test]
+    fn tpot_is_observed_only_for_requests_with_a_decode_interval() {
+        METRICS.request.set_max_model_len(4096);
+        let model_name = "tpot-eligibility";
+        finish_after_tokens(model_name, &[]);
+        finish_after_tokens(model_name, &[1]);
+        assert_eq!(tpot_count(model_name), 0);
+        finish_after_tokens(model_name, &[1, 1]);
+        finish_after_tokens(model_name, &[1, 3]);
+        assert_eq!(tpot_count(model_name), 2);
+    }
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
