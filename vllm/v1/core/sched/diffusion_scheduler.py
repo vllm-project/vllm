@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Canvas-width handling and async read deferral for diffusion requests."""
 
+from collections.abc import Iterable
+
+import torch
+
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.request import Request
+from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.outputs import DraftTokenIds, LogprobsTensors, ModelRunnerOutput
+from vllm.v1.request import Request, RequestStatus
 
 
 def diffusion_canvas_width(request: Request, canvas_length: int) -> int:
@@ -35,6 +40,78 @@ def _read_in_flight(request: Request, width: int) -> bool:
 
 
 class DiffusionScheduler(Scheduler):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._pending_prompt_logprobs: dict[str, LogprobsTensors] = {}
+        self._pending_prompt_token_id_logprobs: dict[str, torch.Tensor] = {}
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> dict[int, EngineCoreOutputs]:
+        if not (
+            self._pending_prompt_logprobs
+            or self._pending_prompt_token_id_logprobs
+            or model_runner_output.prompt_logprobs_dict
+            or model_runner_output.prompt_token_id_logprobs_dict
+        ):
+            return super().update_from_output(scheduler_output, model_runner_output)
+
+        # Diffusion prefills score the prompt without emitting tokens.
+        for req_id, scores in model_runner_output.prompt_logprobs_dict.items():
+            request = self.requests.get(req_id)
+            if (
+                scores is not None
+                and request is not None
+                and not request.is_finished()
+                and not (
+                    request.drop_stale_output and request.num_stale_output_tokens > 0
+                )
+            ):
+                self._pending_prompt_logprobs[req_id] = scores
+        for req_id, scores in model_runner_output.prompt_token_id_logprobs_dict.items():
+            request = self.requests.get(req_id)
+            if (
+                request is not None
+                and not request.is_finished()
+                and not (
+                    request.drop_stale_output and request.num_stale_output_tokens > 0
+                )
+            ):
+                self._pending_prompt_token_id_logprobs[req_id] = scores
+
+        model_runner_output.prompt_logprobs_dict = {}
+        model_runner_output.prompt_token_id_logprobs_dict = {}
+        outputs = super().update_from_output(scheduler_output, model_runner_output)
+        for client_outputs in outputs.values():
+            for output in client_outputs.outputs:
+                output.new_prompt_logprobs_tensors = self._pending_prompt_logprobs.pop(
+                    output.request_id, None
+                )
+                output.prompt_token_id_logprobs = (
+                    self._pending_prompt_token_id_logprobs.pop(output.request_id, None)
+                )
+        return outputs
+
+    def finish_requests(
+        self,
+        request_ids: str | Iterable[str] | None,
+        finished_status: RequestStatus,
+    ) -> list[Request]:
+        finished = super().finish_requests(request_ids, finished_status)
+        for request in finished:
+            self._pending_prompt_logprobs.pop(request.request_id, None)
+            self._pending_prompt_token_id_logprobs.pop(request.request_id, None)
+        return finished
+
+    def _preempt_request(
+        self, request: Request, timestamp: float, drop_stale_output: bool = False
+    ) -> None:
+        self._pending_prompt_logprobs.pop(request.request_id, None)
+        self._pending_prompt_token_id_logprobs.pop(request.request_id, None)
+        super()._preempt_request(request, timestamp, drop_stale_output)
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for i, (req_id, token_ids) in enumerate(
             zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
