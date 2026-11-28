@@ -76,6 +76,8 @@ There are several notable differences when using Ray:
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
 
+Requests that carry a session ID (the `X-Session-ID` header, the `session_id` request field, or `vllm_xargs.session_id`) stay on one DP rank, so the turns of a multi-turn session keep reusing that rank's prefix cache. The rank is derived from a hash of the session ID, so every API server process picks the same one. A request moves to the least-loaded rank only when its session's rank is more than one request busier.
+
 When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
 
 <figure markdown="1">
