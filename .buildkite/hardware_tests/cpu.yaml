@@ -85,6 +85,8 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/cpu/
   - vllm/v1/worker/gpu/spec_decode/
+  - vllm/distributed/pp_transport/
+  - vllm/model_executor/models/interfaces.py
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
   - vllm/models/qwen3_5/
@@ -326,3 +328,20 @@ steps:
         limit: 2
       - exit_status: -10  # Agent was lost
         limit: 2
+
+- label: CPU-PP Tensor Schema Tests
+  key: cpu-pp-tensor-schema-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/distributed/pp_transport/
+  - vllm/models/deepseek_v4/nvidia/model.py
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - tests/distributed/test_pp_transport_schema.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 10m
+      "pytest -v -s
+      tests/distributed/test_pp_transport_schema.py"

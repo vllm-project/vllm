@@ -51,6 +51,9 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     single_pp_stage,
 )
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -267,6 +270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.pp_transport_schema = PPTransportSchema()
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -456,6 +460,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         )
                     self.speculator.free_unused_weights(self.model)
         time_after_load = time.perf_counter()
+
+        self.pp_transport_schema = getattr(
+            self.model, "pp_transport_schema", PPTransportSchema()
+        )
+        if (
+            self.use_pp
+            and self.parallel_config.use_ubatching
+            and self.pp_transport_schema.has_sequence_parallel_tensors
+        ):
+            raise NotImplementedError("SP-sharded PP inputs do not support ubatching")
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
@@ -979,7 +993,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors = None
         if not self.is_first_pp_rank:
             assert self.intermediate_tensors is not None
-            intermediate_tensors = self.intermediate_tensors[:num_tokens]
+            intermediate_tensors = self.pp_transport_schema.prepare_inputs(
+                self.intermediate_tensors, num_tokens
+            )
 
         if num_active_loras is None:
             num_active_loras = (
@@ -2143,18 +2159,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
-                num_tokens = input_batch.num_tokens
-                received = intermediate_tensors.tensors
-                for k, v in self.intermediate_tensors.tensors.items():
-                    # Some PP transports receive into the persistent tensors.
-                    if received[k].data_ptr() != v.data_ptr():
-                        v[:num_tokens].copy_(received[k][:num_tokens])
                 assert self.pp_handler is not None
                 self.pp_handler.receive_positions(
-                    intermediate_tensors, model_inputs["positions"], num_tokens
+                    intermediate_tensors,
+                    model_inputs["positions"],
+                    input_batch.num_tokens,
                 )
             n = input_batch.num_tokens_after_padding
-            model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
+            model_inputs["intermediate_tensors"] = (
+                self.pp_transport_schema.prepare_inputs(
+                    self.intermediate_tensors,
+                    n,
+                    None if dummy_run else intermediate_tensors,
+                    num_received_tokens=input_batch.num_tokens,
+                )
+            )
             del intermediate_tensors
 
         # Update the EPLB meta.
@@ -2262,16 +2281,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if not self.is_last_pp_rank:
-            # Non-last PP rank: return IntermediateTensors for sending. Send only
-            # the unpadded tokens; the next stage pads for its own CUDA graphs.
+            # Full fields can omit padding; SP fields must retain the local rows
+            # corresponding to the padded global batch on both stages.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
             output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
-            return self.pp_handler.send_positions(
+            output_intermediate_tensors = self.pp_handler.send_positions(
                 output_intermediate_tensors, model_inputs["positions"]
-            )[: input_batch.num_tokens]
+            )
+            return self.pp_transport_schema.prepare_outputs(
+                output_intermediate_tensors, input_batch.num_tokens
+            )
         return None
 
     @torch.inference_mode()
