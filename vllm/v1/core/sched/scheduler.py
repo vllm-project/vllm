@@ -267,6 +267,7 @@ class Scheduler(SchedulerInterface):
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
         self.running: list[Request] = []
+        self._admitted_req_ids_to_dispatch: set[str] = set()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -729,6 +730,139 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _request_scheduling_key(self, request: Request) -> tuple[int, float]:
+        priority = request.priority if self.policy == SchedulingPolicy.PRIORITY else 0
+        return priority, request.arrival_time
+
+    def _get_running_insertion_index(self, request: Request) -> int:
+        key = self._request_scheduling_key(request)
+        index = len(self.running)
+        while index and self._request_scheduling_key(self.running[index - 1]) > key:
+            index -= 1
+        return index
+
+    def _has_kv_admission_headroom(self, request: Request) -> bool:
+        # KV-ready admission requires room for the remaining prompt,
+        # even when the normal waiting path allows admission one chunk at a time.
+        required = self._request_remaining_blocks(request)
+        required += self.kv_cache_manager.watermark_blocks
+        return required <= self.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    def _move_waiting_request_to_running(
+        self,
+        request: Request,
+        request_queue: RequestQueue,
+        *,
+        running_index: int | None = None,
+    ) -> None:
+        if request.status not in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
+            raise RuntimeError(f"Invalid request status: {request.status}")
+        if request_queue.peek_request() is request:
+            request_queue.pop_request()
+        else:
+            request_queue.remove_request(request)
+        self.deferred_waiting.discard(request)
+        if running_index is None:
+            self.running.append(request)
+        else:
+            self.running.insert(running_index, request)
+        request.status = RequestStatus.RUNNING
+        request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens - 1
+        self._admitted_req_ids_to_dispatch.add(request.request_id)
+
+    def _admit_ready_kv_requests(self, defer_prefills: bool) -> None:
+        if (
+            self.connector is None
+            or not self.scheduler_config.enable_chunked_prefill
+            or self._pause_state == PauseState.PAUSED_ALL
+            or self.num_sampled_tokens_per_step != 1
+            or self.num_spec_tokens
+            or self.prefix_replay_tokens
+            or self.need_mamba_block_aligned_split
+            or self.kv_cache_config.hisparse_host_num_blocks is not None
+        ):
+            return
+        running_loras = {
+            req.lora_request.lora_int_id
+            for req in self.running
+            if req.lora_request and req.lora_request.lora_int_id > 0
+        }
+        for request in sorted(
+            self.kv_holding_waiting, key=self._request_scheduling_key
+        ):
+            if (
+                len(self.running) + self.num_waiting_for_streaming_input
+                >= self.max_num_active_reqs
+            ):
+                break
+            if (
+                request.resumable
+                or request.mm_features
+                or request.sampling_params is None
+            ):
+                continue
+            if request.num_stale_output_tokens and not request.drop_stale_output:
+                continue
+            if not self._handle_blocked_waiting_request(request):
+                continue
+            if not 0 < request.num_computed_tokens < request.num_tokens:
+                continue
+            if (
+                request.num_tokens + self.num_sampled_tokens_per_step
+                > self.max_model_len
+            ):
+                continue
+            if defer_prefills and request.num_computed_tokens < request.num_tokens - 1:
+                continue
+            if (
+                self.lora_config
+                and request.lora_request
+                and len(running_loras) >= self.lora_config.max_loras
+                and request.lora_request.lora_int_id not in running_loras
+            ):
+                continue
+            index = self._get_running_insertion_index(request)
+            if index == len(self.running) or not self._has_kv_admission_headroom(
+                request
+            ):
+                continue
+            self._move_waiting_request_to_running(
+                request, self.kv_holding_waiting, running_index=index
+            )
+            self._inflight_prefills.add(request)
+            self._unreserve_parked(request)
+            if request.lora_request:
+                running_loras.add(request.lora_request.lora_int_id)
+
+    def _collect_scheduled_new_requests(
+        self,
+        scheduled_new_reqs: list[Request],
+        scheduled_running_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
+        scheduled_timestamp: float,
+    ) -> None:
+        new_req_ids = self._admitted_req_ids_to_dispatch.intersection(
+            num_scheduled_tokens
+        )
+        for request_id, num_tokens in num_scheduled_tokens.items():
+            if request_id not in new_req_ids:
+                continue
+            assert num_tokens > 0
+            request = self.requests[request_id]
+            scheduled_new_reqs.append(request)
+            req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
+            if self.collect_stats:
+                request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
+            self._set_kv_fetch_stage(request, None)
+        if new_req_ids:
+            self._admitted_req_ids_to_dispatch.difference_update(new_req_ids)
+            scheduled_running_reqs[:] = [
+                req
+                for req in scheduled_running_reqs
+                if req.request_id not in new_req_ids
+            ]
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -745,6 +879,7 @@ class Scheduler(SchedulerInterface):
         scheduled_new_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        deferred_kv_admissions: list[Request] = []
 
         iteration_details = None
         if (
@@ -806,6 +941,8 @@ class Scheduler(SchedulerInterface):
             long_prefill_token_threshold = max(
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
+
+        self._admit_ready_kv_requests(defer_prefills)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -912,16 +1049,44 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            is_new_running_request = (
+                request.request_id in self._admitted_req_ids_to_dispatch
+            )
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+                    if is_new_running_request and not self._has_kv_admission_headroom(
+                        request
+                    ):
+                        new_blocks = None
+                    else:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                            reserved_blocks=(
+                                self.kv_cache_manager.watermark_blocks
+                                if is_new_running_request
+                                else 0
+                            ),
+                        )
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        break
+
+                    if is_new_running_request:
+                        # Admission has not reached the workers. Keep the loaded
+                        # KV instead of evicting running work to make it fit.
+                        self.running.pop(req_index)
+                        self._admitted_req_ids_to_dispatch.remove(request.request_id)
+                        self._inflight_prefills.discard(request)
+                        request.status = (
+                            RequestStatus.PREEMPTED
+                            if request.num_preemptions
+                            else RequestStatus.WAITING
+                        )
+                        self._reserve_parked(request)
+                        deferred_kv_admissions.append(request)
                         break
 
                     if (
@@ -998,6 +1163,8 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
+                if request in deferred_kv_admissions:
+                    continue
                 if (
                     self.policy == SchedulingPolicy.PRIORITY
                     and request.status == RequestStatus.PREEMPTED
@@ -1054,6 +1221,8 @@ class Scheduler(SchedulerInterface):
                     (encoder_inputs_to_schedule or []) + external_load_encoder_input,
                     duplicate_encoder_inputs,
                 )
+
+        self.kv_holding_waiting.prepend_requests(reversed(deferred_kv_admissions))
 
         # Record the LoRAs of all running requests, including those not
         # scheduled in this step, which can join a later batch.
@@ -1622,36 +1791,16 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
-                request = request_queue.pop_request()
-                self.deferred_waiting.discard(request)
-                self.running.append(request)
+                request.num_computed_tokens = num_computed_tokens
+                self._move_waiting_request_to_running(request, request_queue)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.collect_stats:
-                    request.record_event(
-                        EngineCoreEventType.SCHEDULED, scheduled_timestamp
-                    )
-                # A resumed request is re-sent in full, like a new one: its
-                # blocks were freed and its worker state dropped at preemption.
-                if request.status not in (
-                    RequestStatus.WAITING,
-                    RequestStatus.PREEMPTED,
-                ):
-                    raise RuntimeError(f"Invalid request status: {request.status}")
-                scheduled_new_reqs.append(request)
-
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
-                    request_id
-                )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
-                request.status = RequestStatus.RUNNING
-                request.num_computed_tokens = num_computed_tokens
-                self._set_kv_fetch_stage(request, None)
                 drafts_needed = drafts_needed or not self._drafts_unused(
                     request, num_computed_tokens, num_new_tokens
                 )
@@ -1697,6 +1846,14 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+
+        self._collect_scheduled_new_requests(
+            scheduled_new_reqs,
+            scheduled_running_reqs,
+            num_scheduled_tokens,
+            req_to_new_blocks,
+            scheduled_timestamp,
+        )
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1885,6 +2042,10 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        was_undispatched = request.request_id in self._admitted_req_ids_to_dispatch
+        if was_undispatched:
+            self._admitted_req_ids_to_dispatch.remove(request.request_id)
+            self._set_kv_fetch_stage(request, None)
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
@@ -1915,7 +2076,8 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
-        self.reset_preempted_req_ids.add(request.request_id)
+        if not was_undispatched:
+            self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -3308,6 +3470,7 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+        self._admitted_req_ids_to_dispatch.discard(request.request_id)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
