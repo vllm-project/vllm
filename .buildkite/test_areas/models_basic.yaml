@@ -234,6 +234,28 @@ steps:
       - pytest -v -s models/hy_v4/test_flash_dp_config.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
+- label: ":nvidia: (L4) HY4 Flash Ada Attention"
+  key: hy4-flash-ada-attention
+  device: l4
+  num_devices: 1
+  working_dir: "/vllm-workspace/tests"
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/models/hy_v4/
+  - vllm/models/hy_v4_flash/
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/v1/attention/backends/mla/triton_mla_sparse.py
+  - vllm/v1/attention/ops/mqa_logits_triton.py
+  - vllm/v1/attention/ops/triton_mla_sparse.py
+  - tests/models/hy_v4_flash/
+  commands:
+  - >-
+    pytest -v -s
+    models/hy_v4_flash/test_ada_attention.py
+    models/hy_v4_flash/test_ada_generate.py
+    models/hy_v4_flash/test_ada_indexpool.py
+
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
   automatic_shard: true
