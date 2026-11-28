@@ -673,6 +673,7 @@ class RocmPlatform(Platform):
         "lut_b_moe",
         "online",
         "gpt_oss_mxfp4",
+        "inkling2",
     ]
 
     @classmethod

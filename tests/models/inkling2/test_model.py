@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end smoke test of a tiny random-weight Inkling2 model (TP=1)."""
 
-import copy
 import json
 from typing import Any
 
@@ -19,13 +18,25 @@ from vllm.models.inkling2.configs import (
 )
 from vllm.platforms import current_platform
 
+_is_rocm = current_platform.is_rocm()
+
 if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
+    or (
+        _is_rocm
+        and (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    )
 ):
-    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
+    pytest.skip(
+        "Inkling2 requires Hopper, Blackwell, gfx942 or gfx950", allow_module_level=True
+    )
 
+NUM_LAYERS = 2
 TINY_CONFIG: dict[str, Any] = {
     "architectures": ["Inkling2ForConditionalGeneration"],
     "model_type": "inkling2",
@@ -33,7 +44,7 @@ TINY_CONFIG: dict[str, Any] = {
     "text_config": {
         "torch_dtype": "bfloat16",
         "hidden_size": 512,
-        "num_hidden_layers": 2,
+        "num_hidden_layers": NUM_LAYERS,
         "local_layer_ids": [0],
         "sliding_window_size": 128,
         "vocab_size": 1024,
@@ -65,6 +76,29 @@ TINY_CONFIG: dict[str, Any] = {
         "target_layer_ids": [1, 2],
     },
 }
+# Experts default to NVFP4; ROCm runs MXFP8 experts only.
+MXFP8_QUANT_CONFIG = {
+    "quant_method": "inkling2",
+    "model": {
+        "parameter_groups": [
+            {
+                "compute_dtype": "mxfp8",
+                "tensors": [
+                    f"model.llm.layers.{layer}.mlp.experts.{name}"
+                    for layer in range(NUM_LAYERS)
+                    for name in ("w13_weight", "w2_weight")
+                ],
+            }
+        ]
+    },
+}
+
+
+def _write_model(path, config: dict[str, Any]) -> str:
+    (path / "config.json").write_text(json.dumps(config))
+    if _is_rocm:
+        (path / "hf_quant_config.json").write_text(json.dumps(MXFP8_QUANT_CONFIG))
+    return str(path)
 
 
 # A looped variant: layer 0 is the prelude, layers 1-2 (one local, one full)
@@ -130,6 +164,7 @@ def _prompt_logprobs(llm: LLM, prompt: list[int]) -> list[float]:
     ]
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 @pytest.mark.parametrize("text_overrides", [{}, {"loop_num_passes": 1}])
 def test_tiny_looped_model_decode_matches_prefill(tmp_path, text_overrides):
     """Each loop pass keeps its own KV and conv-state caches: greedy decode
@@ -159,6 +194,7 @@ def test_tiny_looped_model_decode_matches_prefill(tmp_path, text_overrides):
         assert prefill[token].rank == 1
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 def test_tiny_looped_model_shared_cache(tmp_path):
     """With one KV cache shared by the loop passes, a single prefill (each
     pass writes its K/V before reading them) gives the per-pass caches'
@@ -256,8 +292,9 @@ def test_tiny_model_generates(
     paged KV and conv-state caches and CUDA graphs, optionally speculating
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
-    config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
-    (tmp_path / "config.json").write_text(json.dumps(config))
+    if looped and _is_rocm:
+        pytest.skip("ROCm runs no looped checkpoints")
+    model = _write_model(tmp_path, TINY_LOOP_CONFIG if looped else TINY_CONFIG)
     llm = LLM(
         speculative_config=(
             None
@@ -268,7 +305,7 @@ def test_tiny_model_generates(
                 "draft_sample_method": draft_sample_method,
             }
         ),
-        model=str(tmp_path),
+        model=model,
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
@@ -357,6 +394,7 @@ def _routing_calls(model: torch.nn.Module) -> list[torch.Tensor]:
     return model.routing_calls
 
 
+@pytest.mark.skipif(_is_rocm, reason="routed-experts capture is not supported on ROCm")
 @pytest.mark.parametrize("looped", [False, True])
 def test_tiny_model_routed_experts(tmp_path, enable_pickle, looped):
     """Routed-experts capture keeps a row per layer visit, in execution
@@ -441,9 +479,9 @@ def test_piecewise_graphs_match_eager(tmp_path):
     replayed for any batch of the same token count, so attention must plan
     from the live batch: a chunked prompt prefilling alongside decodes runs
     and matches eager."""
-    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
-    graph = _chunked_mixed_run(str(tmp_path), enforce_eager=False)
-    eager = _chunked_mixed_run(str(tmp_path), enforce_eager=True)
+    model = _write_model(tmp_path, TINY_CONFIG)
+    graph = _chunked_mixed_run(model, enforce_eager=False)
+    eager = _chunked_mixed_run(model, enforce_eager=True)
     for g, e in zip(graph, eager):
         torch.testing.assert_close(torch.tensor(g), torch.tensor(e), rtol=0, atol=1e-2)
 
@@ -501,6 +539,7 @@ def test_released_checkpoint_quant_config(tmp_path, quant_algo):
     ]
 
 
+@pytest.mark.skipif(_is_rocm, reason="the low-M head is CUDA's")
 @pytest.mark.parametrize("tokens", [1, 8, 17])
 def test_sm12x_logits_preserve_softcap_and_vocabulary(tmp_path, dist_init, tokens):
     """The low-M head still applies softcaps and excludes padded vocabulary."""

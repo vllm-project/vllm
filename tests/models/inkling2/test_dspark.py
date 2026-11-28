@@ -11,19 +11,27 @@ import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
 
+_is_rocm = current_platform.is_rocm()
 if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
+    or (
+        _is_rocm
+        and (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    )
 ):
-    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
+    pytest.skip(
+        "Inkling2 requires Hopper, Blackwell, gfx942 or gfx950", allow_module_level=True
+    )
 
-from vllm.models.inkling2.nvidia.dspark import (  # noqa: E402
+from vllm.models.inkling2 import (  # noqa: E402
     Inkling2MarkovHead,
-)
-from vllm.models.inkling2.nvidia.ops.attention import block_decode_attention  # noqa: E402
-from vllm.models.inkling2.nvidia.ops.dspark import (  # noqa: E402
     add_softcap,
+    block_decode_attention,
     markov_gate,
     mix_rmsnorm,
 )
@@ -194,6 +202,11 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
     queue.put((rank, failures, stats))
 
 
+@pytest.mark.skipif(
+    _is_rocm,
+    reason="FlashInfer's fused all-reduce + RMSNorm is CUDA-only (ROCm runs "
+    "all_reduce_add_rmsnorm unfused)",
+)
 @pytest.mark.parametrize("world", [2, 4])
 def test_all_reduce_add_rmsnorm_matches_unfused(world):
     """The fused all-reduce + residual add + RMSNorm keeps the unfused bf16

@@ -2,43 +2,75 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling2 MoE kernels vs. dequantized torch references."""
 
+from importlib import import_module
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 
+_is_rocm = current_platform.is_rocm()
 if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
+    or (
+        _is_rocm
+        and (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    )
 ):
-    pytest.skip("Inkling2 MoE requires Hopper or Blackwell", allow_module_level=True)
+    pytest.skip(
+        "Inkling2 MoE requires Hopper, Blackwell, gfx942 or gfx950",
+        allow_module_level=True,
+    )
 
-import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.moe_sm120 as moe_sm120  # noqa: E402
-import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
-from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
-from vllm.models.inkling2.nvidia.ops.activation import (  # noqa: E402
-    _div_rn,
-    _sigmoid_approx,
-    swiglu_quantize,
-)
 from vllm.models.inkling2.nvidia.ops.block_scales import (  # noqa: E402
     shuffle_rows,
     swizzle_block_scales,
 )
-from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.moe_sm90 import (  # noqa: E402
     HummingExperts,
     select_experts,
 )
-from vllm.models.inkling2.nvidia.ops.mxfp8 import mxfp8_quantize  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.nvfp4 import nvfp4_quantize  # noqa: E402
-from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan  # noqa: E402
-from vllm.triton_utils import tl, triton  # noqa: E402
+from vllm.triton_utils import tl, tldevice, triton  # noqa: E402
+
+if TYPE_CHECKING:
+    from vllm.models.inkling2.nvidia.moe import Inkling2MoE
+    from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan
+
+# The platform's MoE: under `amd/` on ROCm, with a Triton expert GEMM.
+_PACKAGE = "vllm.models.inkling2.amd" if _is_rocm else "vllm.models.inkling2.nvidia"
+moe_module = import_module(f"{_PACKAGE}.moe")
+bmm_module = import_module(
+    f"{_PACKAGE}.ops.triton_bmm" if _is_rocm else f"{_PACKAGE}.ops.trtllm_bmm"
+)
+_activation = import_module(f"{_PACKAGE}.ops.activation")
+_div_rn = _activation._div_rn
+_sigmoid_approx = _activation._sigmoid_approx
+swiglu_quantize = _activation.swiglu_quantize
+linear_k_groups = import_module(f"{_PACKAGE}.ops.linear").linear_k_groups
+route = import_module(f"{_PACKAGE}.ops.moe").route
+mxfp8_quantize = import_module(f"{_PACKAGE}.ops.mxfp8").mxfp8_quantize
+
+# ROCm runs MXFP8 experts only, in the checkpoint's layout (rows not shuffled,
+# weight scales not swizzled), on token tiles of 16 rows or more.
+FORMATS = ["mxfp8"] if _is_rocm else ["nvfp4", "mxfp8"]
+MIN_TILE = 16 if _is_rocm else 8
+TILES = [tile for tile in (8, 16, 32, 64, 128, 256) if tile >= MIN_TILE]
+# Rows per expert; on ROCm also experts spanning several token tiles.
+COUNTS = [[3, 0, 17, 1], [257, 0, 129, 1]] if _is_rocm else [[3, 0, 17, 1]]
+_IS_ROCM = tl.constexpr(_is_rocm)
+requires_nvfp4 = pytest.mark.skipif(
+    _is_rocm, reason="NVFP4 experts and their shuffled rows are CUDA-only"
+)
 
 E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
 
@@ -77,6 +109,7 @@ def random_mxfp8(*shape: int) -> tuple[torch.Tensor, torch.Tensor]:
     return values, scales.to(torch.uint8)
 
 
+@requires_nvfp4
 def test_nvfp4_quantize_picks_better_of_four_and_six():
     """Each 16-block keeps whichever of the 6.0/4.0 scale candidates
     reconstructs it with the smaller absolute error (fouroversix_mae)."""
@@ -138,6 +171,15 @@ def test_softcap_division_rounds_correctly(cap: float):
 
 
 @triton.jit
+def _tanh(x):
+    if _IS_ROCM:
+        return tldevice.tanh(x)
+    return tl.inline_asm_elementwise(
+        "tanh.approx.f32 $0, $1;", "=f,f", [x], dtype=tl.float32, is_pure=True, pack=1
+    )
+
+
+@triton.jit
 def _situ_reference_kernel(
     X, Gammas, Y, N: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr
 ):
@@ -145,22 +187,8 @@ def _situ_reference_kernel(
     cols = tl.program_id(1) * 128 + tl.arange(0, 128)
     gate = tl.load(X + row * 2 * N + 2 * cols).to(tl.float32)
     up = tl.load(X + row * 2 * N + 2 * cols + 1).to(tl.float32)
-    gate_cap = tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        "=f,f",
-        [tl.div_rn(gate, GATE_CAP)],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
-    up_cap = tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        "=f,f",
-        [tl.div_rn(up, UP_CAP)],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    gate_cap = _tanh(tl.div_rn(gate, GATE_CAP))
+    up_cap = _tanh(tl.div_rn(up, UP_CAP))
     y = ((GATE_CAP * gate_cap) * _sigmoid_approx(gate)) * (UP_CAP * up_cap)
     tl.store(Y + row * N + cols, (y * tl.load(Gammas + row)).to(tl.bfloat16))
 
@@ -177,9 +205,10 @@ def _unswizzled_scales(scales: torch.Tensor, rows: torch.Tensor, tile: int):
     return scales.view(torch.uint8).flatten()[offsets]
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
-@pytest.mark.parametrize("tile", [8, 128])
-@pytest.mark.parametrize("n", [1152, 2304])
+@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("tile", [MIN_TILE, 128])
+# ROCm's few-row programs take 256 columns: Small's experts, not Mini's.
+@pytest.mark.parametrize("n", [2304] if _is_rocm else [1152, 2304])
 def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int, n: int):
     """The fused SiTU quantization equals quantizing the bf16 SiTU output:
     bitwise values and scales, and for NVFP4 the row amax times the weight
@@ -195,16 +224,21 @@ def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int, n: int
     nvfp4 = fmt == "nvfp4"
     w_amax = torch.rand(num_experts, device="cuda") + 0.5 if nvfp4 else None
     w_denominator = torch.tensor([2688.0], device="cuda") if nvfp4 else None
-    values, scales, row_scales = swiglu_quantize(
-        x,
-        gammas,
-        4.0,
-        25.0,
-        (routed, num_routed, cta_expert),
-        tile,
-        w_amax,
-        w_denominator,
-    )
+    if _is_rocm:
+        values, scales = swiglu_quantize(
+            x, gammas, 4.0, 25.0, (routed, num_routed), tile
+        )
+    else:
+        values, scales, row_scales = swiglu_quantize(
+            x,
+            gammas,
+            4.0,
+            25.0,
+            (routed, num_routed, cta_expert),
+            tile,
+            w_amax,
+            w_denominator,
+        )
 
     y = torch.empty((num_rows, n), dtype=torch.bfloat16, device="cuda")
     _situ_reference_kernel[(num_rows, n // 128)](
@@ -225,6 +259,7 @@ def test_situ_quantize_matches_separate_quantization(fmt: str, tile: int, n: int
     )
 
 
+@requires_nvfp4
 def test_shuffle_rows_matches_flashinfer():
     from flashinfer import shuffle_matrix_a
 
@@ -234,25 +269,34 @@ def test_shuffle_rows_matches_flashinfer():
 
 
 requires_packed_experts = pytest.mark.skipif(
-    not (use_sm100_kernels() or current_platform.is_device_capability_family(120)),
-    reason="Packed activation expert GEMMs (SM100 or SM12x)",
+    not (
+        _is_rocm
+        or use_sm100_kernels()
+        or current_platform.is_device_capability_family(120)
+    ),
+    reason="Packed activation expert GEMMs (SM100, SM12x or ROCm)",
 )
 
 
 @requires_packed_experts
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
-@pytest.mark.parametrize("tile", [8, 16, 32, 64, 128, 256])
+@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("tile", TILES)
 @pytest.mark.parametrize("n,k", [(256, 1024), (2304, 1152), (1152, 2304)])
-def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
+@pytest.mark.parametrize("counts", COUNTS)
+def test_bmm_matches_dequantized_matmul(
+    fmt: str, tile: int, n: int, k: int, counts: list[int]
+):
     """Expert GEMM over tile-padded expert segments equals an fp64 matmul of
     the dequantized operands, scaled per row (NVFP4) and rounded to bf16."""
     torch.manual_seed(0)
     nvfp4 = fmt == "nvfp4"
-    counts = [3, 0, 17, 1]
     random_q = random_nvfp4 if nvfp4 else random_mxfp8
     weight, weight_scale = random_q(len(counts), n, k)
-    shapes = ((n, k), (n, k))
-    plan = trtllm_bmm.expert_plan(sum(counts), 1, len(counts), nvfp4, shapes, tile)
+    if _is_rocm:
+        plan = bmm_module.expert_plan(sum(counts), 1, len(counts), tile)
+    else:
+        shapes = ((n, k), (n, k))
+        plan = bmm_module.expert_plan(sum(counts), 1, len(counts), nvfp4, shapes, tile)
     act, act_scale = random_q(plan.rows, k)
     row_scale = torch.rand(plan.rows, device="cuda") if nvfp4 else None
     experts, limits, rows, start = [], [], [], 0
@@ -270,23 +314,26 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
         device="cuda",
     )
     swizzle = swizzle_block_scales if tile >= 128 else r8c4_block_scales
-    if use_sm100_kernels():
-        bmm = trtllm_bmm.bmm
-        weight_in = shuffle_rows(weight)
-        scale_in = swizzle_block_scales(shuffle_rows(weight_scale))
+    if _is_rocm:
+        out = bmm_module.bmm(act, swizzle(act_scale), weight, weight_scale, tiles, plan)
     else:
-        bmm, weight_in, scale_in = moe_sm120.bmm, weight, weight_scale
-    out = bmm(
-        act,
-        swizzle(act_scale),
-        row_scale,
-        weight_in,
-        scale_in,
-        torch.ones(len(counts), device="cuda"),
-        tiles,
-        plan,
-        0,
-    )
+        if use_sm100_kernels():
+            bmm = bmm_module.bmm
+            weight_in = shuffle_rows(weight)
+            scale_in = swizzle_block_scales(shuffle_rows(weight_scale))
+        else:
+            bmm, weight_in, scale_in = moe_sm120.bmm, weight, weight_scale
+        out = bmm(
+            act,
+            swizzle(act_scale),
+            row_scale,
+            weight_in,
+            scale_in,
+            torch.ones(len(counts), device="cuda"),
+            tiles,
+            plan,
+            0,
+        )
 
     dequant = dequant_nvfp4 if nvfp4 else dequant_mxfp8
     index = torch.tensor([r for r, _ in rows], device="cuda")
@@ -351,7 +398,7 @@ def test_routing_matches_torch_and_breaks_ties_low(dist_init, tokens: int):
     """Covers the fused (few tokens), tl.topk and k-pass selections (and the
     TMA router GEMM): each (token, slot) row lands in its expert's tiles with
     its routing weight."""
-    moe = _build_moe("nvfp4", _random_moe_weights("nvfp4"))
+    moe = _build_moe(FORMATS[0], _random_moe_weights(FORMATS[0]))
     gate = moe.gate
     # Equal rows and biases tie experts 1-3, which every token then selects.
     gate.weight.data[[2, 3]] = gate.weight.data[1].clone()
@@ -369,6 +416,7 @@ def test_routing_matches_torch_and_breaks_ties_low(dist_init, tokens: int):
     torch.testing.assert_close(weights, ref_weights)
 
 
+@pytest.mark.skipif(_is_rocm, reason="the Hopper router is CUDA's")
 @pytest.mark.parametrize("tokens", [5, 12, 64, 200, 2100])
 def test_select_experts_matches_torch(dist_init, tokens: int):
     """The Hopper router: each (token, slot) has its expert's index among
@@ -397,7 +445,7 @@ def test_routing_is_deterministic(dist_init, tokens: int):
     change between runs; the selected experts, routing weights and the output
     (combined in slot order) must not. The second run competes with a side
     stream for the GPU to perturb the placement order."""
-    moe = _build_moe("nvfp4", _random_moe_weights("nvfp4"))
+    moe = _build_moe(FORMATS[0], _random_moe_weights(FORMATS[0]))
     x = torch.randn(tokens, 512, device="cuda").bfloat16()
     plan = moe.experts.plan(tokens)
 
@@ -419,7 +467,7 @@ def test_routing_is_deterministic(dist_init, tokens: int):
         torch.testing.assert_close(a, b, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tokens", [5, 200, 2100])
 def test_routing_quantizes_tokens_into_their_rows(dist_init, fmt: str, tokens: int):
     """Covers the fused (few tokens) and the scatter routing (single-warp
@@ -430,7 +478,7 @@ def test_routing_quantizes_tokens_into_their_rows(dist_init, fmt: str, tokens: i
     moe = _build_moe(fmt, _random_moe_weights(fmt))
     x = torch.randn(tokens, 512, device="cuda").bfloat16()
     plan = moe.experts.plan(tokens)
-    (src2dst, _, _, tiles), (values, scales, row_scales) = _route(moe, x, plan)
+    (src2dst, _, _, tiles), (values, scales, *row_scales) = _route(moe, x, plan)
     routed = src2dst >= 0
     rows = src2dst[routed].long()
     token = torch.arange(src2dst.numel(), device="cuda")[routed] // 8
@@ -440,7 +488,7 @@ def test_routing_quantizes_tokens_into_their_rows(dist_init, fmt: str, tokens: i
         w_amax = experts.w13_weight_amax[tiles[rows // plan.tile].long()]
         denominator = experts.w13_weight_outer_scale_denominator.item()
         ref_row_scales = (amax[token] * w_amax) * (1.0 / (1536.0 * denominator))
-        torch.testing.assert_close(row_scales[rows], ref_row_scales, atol=0, rtol=0)
+        torch.testing.assert_close(row_scales[0][rows], ref_row_scales, atol=0, rtol=0)
     else:
         ref_values, ref_scales = mxfp8_quantize(x)
     assert torch.equal(
@@ -453,13 +501,11 @@ def test_routing_quantizes_tokens_into_their_rows(dist_init, fmt: str, tokens: i
 
 
 def _route(
-    moe: Inkling2MoE,
+    moe: "Inkling2MoE",
     x: torch.Tensor,
-    plan: ExpertPlan,
+    plan: "ExpertPlan",
     is_padding: torch.Tensor | None = None,
 ):
-    from vllm.models.inkling2.nvidia.ops.moe import route
-
     gate, experts = moe.gate, moe.experts
     return route(
         x,
@@ -471,7 +517,7 @@ def _route(
         gate.route_scale,
         experts.expert_bounds,
         plan,
-        *experts.scales("w13"),
+        *(() if _is_rocm else experts.scales("w13")),
         is_padding,
     )
 
@@ -489,10 +535,11 @@ def test_linear_k_groups_fp32(tokens: int, hidden: int):
 
 
 def _moe_reference(
-    moe: Inkling2MoE, weights: dict[str, torch.Tensor], x: torch.Tensor, cfg
+    moe: "Inkling2MoE", weights: dict[str, torch.Tensor], x: torch.Tensor, cfg
 ) -> torch.Tensor:
     """Per-token loop over the dequantized checkpoint `weights`, with the
-    activations quantized as Blackwell does (Hopper keeps them in bf16)."""
+    activations quantized as Blackwell and ROCm do (Hopper keeps them in
+    bf16)."""
     routing_weights, ids = _torch_select_experts(
         linear_k_groups(x, moe.gate.weight),
         moe.gate.bias,
@@ -500,20 +547,23 @@ def _moe_reference(
         cfg.route_scale,
     )
     exp = moe.experts
+    # ROCm's experts are MXFP8.
+    nvfp4 = not _is_rocm and exp.nvfp4
+    quantize = _is_rocm or exp.sm100 or exp.sm120
 
     def linear(a, name, e):
         prefix = f"experts.{name}_weight"
         w, s = weights[prefix][e], weights[f"{prefix}_scale"][e]
-        if exp.nvfp4:
+        if nvfp4:
             w = dequant_nvfp4(w, s).double()
             amax = weights[f"{prefix}_amax"][e]
             w = w * (amax / weights[f"{prefix}_outer_scale_denominator"]).double()
-            if exp.sm100 or exp.sm120:
+            if quantize:
                 av, as_, aa = nvfp4_quantize(a)
                 a = dequant_nvfp4(av, as_) * (aa / 1536)[:, None]
         else:
             w = dequant_mxfp8(w, s).double()
-            if exp.sm100 or exp.sm120:
+            if quantize:
                 a = dequant_mxfp8(*mxfp8_quantize(a))
         return (a.double() @ w.T).bfloat16()
 
@@ -566,16 +616,19 @@ def _random_moe_weights(fmt: str) -> dict[str, torch.Tensor]:
     return weights
 
 
-def _build_moe(fmt: str, weights: dict[str, torch.Tensor]) -> Inkling2MoE:
+def _build_moe(fmt: str, weights: dict[str, torch.Tensor]) -> "Inkling2MoE":
+    args = (MOE_CONFIG,) if _is_rocm else (MOE_CONFIG, fmt)
     with torch.device("cuda"):
-        moe = Inkling2MoE(MOE_CONFIG, fmt)
+        moe = moe_module.Inkling2MoE(*args)
     for name, param in moe.named_parameters():
         param.weight_loader(param, weights[name])
-    moe.experts.process_weights_after_loading()
+    # ROCm runs the experts in the checkpoint's layout.
+    if not _is_rocm:
+        moe.experts.process_weights_after_loading()
     return moe
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tokens", [5, 33])
 def test_moe_layer_matches_reference(dist_init, fmt: str, tokens: int):
     """Full layer (TP=1) vs. a per-token loop over dequantized experts, with
@@ -605,7 +658,7 @@ def test_humming_nvfp4_preserves_quantized_experts(dist_init, tokens: int):
     for backend in ("auto", "humming"):
         vllm_config = VllmConfig(kernel_config=KernelConfig(moe_backend=backend))
         with set_current_vllm_config(vllm_config), torch.device("cuda"):
-            model = Inkling2MoE(config, "nvfp4")
+            model = moe_module.Inkling2MoE(config, "nvfp4")
             for name, param in model.named_parameters():
                 param.weight_loader(param, weights[name])
             model.experts.process_weights_after_loading()
@@ -656,26 +709,27 @@ def test_gemm_operands_span_128kib(dist_init, monkeypatch, fmt: str):
     for tensor in (t for call in calls for t in call if t is not None):
         offset = tensor.storage_offset() * tensor.element_size()
         backed = tensor.untyped_storage().nbytes() - offset
-        assert backed >= trtllm_bmm.MIN_OPERAND_BYTES, (tensor.shape, backed)
+        assert backed >= bmm_module.MIN_OPERAND_BYTES, (tensor.shape, backed)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tokens", [5, 64])
 def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):
     """Every token tile (R8c4 and R128c4 scales, one or several tiles per
-    expert) gives bitwise the same output."""
+    expert; on ROCm, 256 rows as two 128-row sub-tiles) gives bitwise the
+    same output."""
     weights = _random_moe_weights(fmt)
     weights["gate.bias"][:6] += 1.0
     moe = _build_moe(fmt, weights)
     x = torch.randn(tokens, 512, device="cuda").bfloat16()
 
     def run(tile: int) -> torch.Tensor:
-        monkeypatch.setattr(trtllm_bmm, "_TILES", ((1 << 31, tile),))
-        trtllm_bmm.expert_plan.cache_clear()
+        monkeypatch.setattr(bmm_module, "_TILES", ((1 << 31, tile),))
+        bmm_module.expert_plan.cache_clear()
         return moe(x)
 
-    expected = run(8)
-    for tile in (16, 32, 64, 128, 256):
+    expected = run(TILES[0])
+    for tile in TILES[1:]:
         torch.testing.assert_close(run(tile), expected, atol=0, rtol=0)
 
 
@@ -687,7 +741,7 @@ def _nan_filled(empty):
     return wrapper
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tokens", [64, 4097])
 def test_moe_expert_parallel_matches_single_rank(
     dist_init, monkeypatch, fmt: str, tokens: int
@@ -729,7 +783,7 @@ def test_moe_expert_parallel_matches_single_rank(
     torch.testing.assert_close(actual, expected, atol=4 * 2**-9 * scale, rtol=1e-2)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("tokens, padded", [(5, 8), (33, 48), (200, 256), (2100, 2304)])
 def test_padding_tokens_route_to_no_expert(
     dist_init, monkeypatch, fmt: str, tokens: int, padded: int
@@ -757,6 +811,7 @@ def test_padding_tokens_route_to_no_expert(
     torch.testing.assert_close(out[:tokens], expected, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 @pytest.mark.parametrize("hidden", [512, 2304, 4608])
 def test_combine_supports_mini_hidden_width(hidden):
     """Sum routed rows in slot order, including absent experts and a 256 tail."""

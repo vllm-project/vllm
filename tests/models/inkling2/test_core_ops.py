@@ -12,17 +12,29 @@ import torch.nn.functional as F
 
 import vllm.models.inkling2.nvidia.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
-from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
-from vllm.models.inkling2.nvidia.ops.conv_mix import conv_mix
-from vllm.models.inkling2.nvidia.ops.norm import rms_norm
-from vllm.models.inkling2.nvidia.ops.sconv import (
+from vllm.models.inkling2 import (
     attention_prologue,
+    attn_res,
+    rms_norm,
     shift_rel_proj,
     short_conv,
 )
+from vllm.models.inkling2.nvidia.ops.conv_mix import conv_mix
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+_is_rocm = current_platform.is_rocm()
+
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or (
+        _is_rocm
+        and not (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    ),
+    reason="needs CUDA, gfx942 or gfx950",
+)
 
 DEVICE = "cuda"
 
@@ -38,6 +50,7 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
     torch.testing.assert_close(out, ref.bfloat16(), atol=0, rtol=1e-2)
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 @pytest.mark.parametrize("tokens", [0, 1, 8, 37, 8192])
 @pytest.mark.parametrize("broadcast", [False, True])
 def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
@@ -66,6 +79,26 @@ def test_loop_norm_preserves_stacked_reference_and_graph(tokens, broadcast):
             message.copy_(torch.randn_like(message))
             graph.replay()
             torch.testing.assert_close(out, reference(), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not _is_rocm, reason="CUDA runs flashinfer's fused_add_rmsnorm")
+@pytest.mark.parametrize("rows", [1, 37])
+def test_fused_add_rms_norm_matches_add_then_norm(rows):
+    """In place: `residual += x`, rounded once to bf16, and `x` = the RMSNorm
+    of the fp32 sum."""
+    from vllm.models.inkling2.amd.ops.norm import fused_add_rms_norm
+
+    torch.manual_seed(0)
+    width = 4608
+    x = (torch.randn(rows, width, device=DEVICE) * 3).bfloat16()
+    residual = (torch.randn(rows, width, device=DEVICE) * 3).bfloat16()
+    weight = torch.randn(width, device=DEVICE).bfloat16()
+    total = x.float() + residual.float()
+    ref = total * torch.rsqrt(total.square().mean(-1, keepdim=True) + 1e-6)
+    ref = (ref * weight.float()).bfloat16()
+    fused_add_rms_norm(x, residual, weight, 1e-6)
+    assert torch.equal(residual, total.bfloat16())
+    torch.testing.assert_close(x, ref, atol=0, rtol=1e-2)
 
 
 def _clip(x, threshold, eps=1e-6):
@@ -185,6 +218,8 @@ def test_prologue_shears_rel_logits(is_local, split, monkeypatch):
     """The relative logits land in tml_fa4's sheared layout, padding
     included, for decode, verify, chunked and fresh prefill requests, also
     from the separate q/r launch of large batches (`split`)."""
+    if split and _is_rocm:
+        pytest.skip("ROCm's prologue runs q/r in the K/V conv launch")
     if split:
         monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
     torch.manual_seed(0)
@@ -233,6 +268,7 @@ def test_attn_res_matches_softmax_mix_then_norm(
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-2)
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 @pytest.mark.parametrize("num_stack,with_addend", [(1, False), (3, True)])
 # Small batches keep rows in registers; large ones loop over D chunks.
 @pytest.mark.parametrize("tokens", [29, 300])
@@ -258,6 +294,7 @@ def test_attn_res_without_norm_returns_fp32_mix(num_stack, with_addend, tokens):
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm runs no looped checkpoints")
 @pytest.mark.parametrize("tokens", [1, 300])
 def test_loop_blend_matches_per_stream_controllers(tokens):
     """The stream-batched controllers (shared `dest` and norm weight, as a
@@ -297,7 +334,9 @@ def _dense_conv(x, weight, dyn):
     width = weight.shape[0] if dyn is not None else weight.shape[1]
     padded = torch.cat([x.new_zeros(width - 1, x.shape[1]), x]).float()
     acc = torch.zeros_like(x, dtype=torch.float32)
-    for lag in range(width):
+    # Sum the taps in the kernel's order; the bf16 products are exact in fp32,
+    # so static-weight outputs match bit for bit.
+    for lag in range(width) if dyn is not None else reversed(range(width)):
         value = padded[width - 1 - lag : width - 1 - lag + x.shape[0]]
         if dyn is None:
             w = weight[:, width - 1 - lag].float()
@@ -394,6 +433,9 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
         torch.testing.assert_close(torch.cat(outs[i]), ref, atol=0, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    _is_rocm, reason="conv_mix is a CUDA op (ROCm runs short_conv, then attn_res)"
+)
 @pytest.mark.parametrize(
     "num_stack,num_q,with_last,with_residual",
     [
@@ -472,6 +514,8 @@ def test_attention_prologue_writes_clipped_k_and_normed_v(dynamic, split, monkey
     the paged KV cache at each token's slot; padded tokens (slot -1, as in
     CUDA graph padding) write nothing. `split`: the K/V conv launch of large
     batches (q/r in their own launch)."""
+    if split and _is_rocm:
+        pytest.skip("ROCm's prologue runs q/r in the K/V conv launch")
     if split:
         monkeypatch.setattr(sconv_ops, "_PROLOGUE_SPLIT_MIN_TOKENS", 0)
     width, block, heads, dim, kv_block = 4, 4, 2, 128, 16
@@ -554,6 +598,7 @@ def test_attention_prologue_writes_clipped_k_and_normed_v(dynamic, split, monkey
     assert (cache[..., : 2 * dim] != 0).any(-1).sum() == num_tokens * heads
 
 
+@pytest.mark.skipif(_is_rocm, reason="ROCm stores BF16 KV only")
 @pytest.mark.parametrize("cache_dtype", [torch.float16, torch.float8_e4m3fn])
 def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
     cache_dtype,
@@ -655,6 +700,7 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
         check()
 
 
+@pytest.mark.skipif(_is_rocm, reason="CUDA's linear")
 def test_sm12x_linear_large_batch_fallback():
     """Rows beyond the GEMV tile must retain the complete cuBLAS output."""
     from vllm.models.inkling2.nvidia.ops.linear import linear
