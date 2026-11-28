@@ -43,7 +43,8 @@ def _packed(exponents, n):
     rows = exponents.repeat_interleave(128, 0)  # [n, k / 128]
     shifts = torch.arange(rows.shape[1], device=rows.device) % 4 * 8
     words = (rows << shifts).view(n, -1, 4).sum(-1, dtype=torch.int64).to(torch.int32)
-    return words.T.contiguous().T
+    packed = torch.empty(words.shape[1], n, dtype=words.dtype, device=words.device)
+    return packed.copy_(words.T).T
 
 
 @pytest.mark.parametrize("ue8m0", [False, True])
