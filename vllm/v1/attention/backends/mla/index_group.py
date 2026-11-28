@@ -278,14 +278,17 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any
-    ) -> HiSparsePrefillStagingPlan:
+    ) -> tuple[HiSparsePrefillStagingPlan, torch.Tensor]:
+        """The staging plan and the resident pages its GPU rows index."""
         cache = self.cache(layer_index)
         prefill = attn_metadata.prefill
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
-        cache.ensure_prefill_gpu_sources(plan, attn_metadata.num_decodes)
+        resident_pages = cache.ensure_prefill_gpu_sources(
+            plan, attn_metadata.num_decodes
+        )
         assert plan.gpu_row_ids is not None
-        return plan
+        return plan, resident_pages
 
     def gather_fp8_prefill(
         self,
@@ -298,9 +301,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         attn_metadata: Any,
         request_start: int,
     ) -> torch.Event | None:
-        cache = self.cache(layer_index)
-        plan = self._prefill_gather_plan(layer_index, attn_metadata)
-        assert cache.view is not None and plan.gpu_row_ids is not None
+        plan, resident_pages = self._prefill_gather_plan(layer_index, attn_metadata)
+        assert plan.gpu_row_ids is not None
         row_width = source_cache.shape[-1]
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
@@ -308,7 +310,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill_stream.wait_stream(torch.accelerator.current_stream())
         with prefill_stream:
             ops.cp_gather_and_upconvert_fp8_kv_cache(
-                cache.view.cache,
+                resident_pages,
                 dst,
                 block_table,
                 workspace_starts,

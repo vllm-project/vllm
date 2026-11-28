@@ -58,17 +58,23 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheLayerConfig]:
     """Resolve sparse source and indexer block sizes, derive resident and hot
-    caches, and fit prefix-caching Mamba blocks to the resulting attention blocks."""
+    caches, and fit prefix-caching Mamba blocks to the resulting attention blocks.
+
+    A hybrid model's packed block is kept when its indexer derives its own
+    kernel-block slots (so its device cache can split the block) and every
+    sparse attention backend supports it: its state pages then stay the size
+    of an MLA row."""
     sparse_layers = get_hisparse_source_layers(layer_configs)
     if not sparse_layers:
         return layer_configs
     block_sizes = {lc.spec.block_size for lc in sparse_layers.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
+    scheduler_block_size = block_sizes.pop()
     backends = [attn_layers[name].get_attn_backend() for name in sparse_layers]
     specs = [lc.spec for lc in sparse_layers.values()]
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
+        block_size = select_common_block_size(scheduler_block_size, backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
@@ -80,20 +86,29 @@ def resolve_hisparse_specs(
         if isinstance(lc.spec, MLAAttentionSpec)
         and lc.spec.cache_role is SparseCacheRole.INDEXER
     }
-    indexer_block_size = _largest_exact_kernel_block_size(
-        block_size,
-        [attn_layers[name].get_attn_backend() for name in indexer_specs],
-        list(indexer_specs.values()),
+    sparse_names = [name for name in sparse_layers if name not in indexer_specs]
+    keeps_packed_block = all(
+        not spec.uses_slot_mapping for spec in indexer_specs.values()
+    ) and scheduler_block_size == select_common_block_size(
+        scheduler_block_size,
+        [attn_layers[name].get_attn_backend() for name in sparse_names],
+        [sparse_layers[name].spec for name in sparse_names],
     )
-    sparse_layers = {
-        name: replace(
-            lc,
-            spec=lc.spec.copy_with_new_block_size(
-                indexer_block_size if name in indexer_specs else block_size
-            ),
+    if not keeps_packed_block:
+        indexer_block_size = _largest_exact_kernel_block_size(
+            block_size,
+            [attn_layers[name].get_attn_backend() for name in indexer_specs],
+            list(indexer_specs.values()),
         )
-        for name, lc in sparse_layers.items()
-    }
+        sparse_layers = {
+            name: replace(
+                lc,
+                spec=lc.spec.copy_with_new_block_size(
+                    indexer_block_size if name in indexer_specs else block_size
+                ),
+            )
+            for name, lc in sparse_layers.items()
+        }
     page_layer_configs = get_hisparse_page_layer_configs(vllm_config, sparse_layers)
     return fit_mamba_blocks_to_attention(
         vllm_config, layer_configs | sparse_layers | page_layer_configs, attn_layers

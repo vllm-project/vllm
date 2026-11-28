@@ -3,19 +3,22 @@
 
 from dataclasses import dataclass
 
-# Sealed pages this many positions behind the block-table tail stay pinned so
-# a page written by an in-flight step is never handed out under it.
-ACTIVE_TAIL_PAGES = 2
+# Sealed resident blocks this many positions behind the block-table tail stay
+# pinned so a block written by an in-flight step is never handed out under it.
+ACTIVE_TAIL_BLOCKS = 2
 
 
 @dataclass(frozen=True, slots=True)
 class SparseKVPageTransfer:
-    """Copy one logical KV page between cache-manager and worker-owned tiers."""
+    """Copy one host page between cache-manager and worker-owned tiers.
+
+    The page is the `resident_page`-th of the resident blocks it maps to."""
 
     transfer_id: int
     host_block_id: int
     resident_block_ids: tuple[int, ...]
     restore: bool = False
+    resident_page: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,10 +32,10 @@ class SparseKVRowMirror:
 
 @dataclass(frozen=True, slots=True)
 class SparseKVResidencyUpdate:
-    """GPU block ids of some of a request's resident pages, per resident group.
-    A null block id means the page is read from the host."""
+    """GPU block ids of some of a request's resident blocks, per resident
+    group. A null block id means the block is read from the host."""
 
-    pages: list[int]
+    block_indices: list[int]
     block_ids: tuple[list[int], ...]
 
 
