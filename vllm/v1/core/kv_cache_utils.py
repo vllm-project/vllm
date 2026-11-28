@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -110,6 +111,9 @@ _NON_CRYPTO_HASH_FUNCTIONS = frozenset({xxhash, xxhash_cbor})
 
 # The seed NONE_HASH was derived from, set by init_none_hash.
 _NONE_HASH_SEED: str | None = None
+
+# How long a request block hasher hashes between calls to its `yield_fn`.
+HASH_YIELD_INTERVAL_S = 0.001
 
 
 def resolve_none_hash_seed(hash_fn: Callable[[Any], bytes]) -> str:
@@ -1014,6 +1018,7 @@ def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
     num_hash_lookahead_tokens: int = 0,
+    yield_fn: Callable[[], None] | None = None,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -1028,6 +1033,9 @@ def get_request_block_hasher(
     depends on, so it is emitted only once those tokens exist. The block tokens
     stay the hashed tokens; the extra keys become `(E, *tokens)`, where `E`
     covers the block and those tokens.
+
+    If given, `yield_fn` is called each time `HASH_YIELD_INTERVAL_S` of hashing
+    has passed, e.g. to release the GIL while hashing a long prompt.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
@@ -1053,6 +1061,7 @@ def get_request_block_hasher(
             request.block_hashes[-1] if request.block_hashes else None
         )
         new_block_hashes: list[BlockHash] = []
+        last_yield = time.perf_counter() if yield_fn is not None else 0.0
         while True:
             end_token_idx = start_token_idx + hash_block_size
             if end_token_idx > num_tokens:
@@ -1092,6 +1101,12 @@ def get_request_block_hasher(
             new_block_hashes.append(block_hash)
             start_token_idx += hash_block_size
             prev_block_hash_value = block_hash
+            if (
+                yield_fn is not None
+                and time.perf_counter() - last_yield >= HASH_YIELD_INTERVAL_S
+            ):
+                yield_fn()
+                last_yield = time.perf_counter()
 
         return new_block_hashes
 

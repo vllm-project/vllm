@@ -1255,6 +1255,27 @@ def test_request_block_hasher(hash_fn):
     )
 
 
+@pytest.mark.parametrize(("interval_s", "expected_yields"), [(0.0, 10), (1e9, 0)])
+def test_request_block_hasher_calls_yield_fn(monkeypatch, interval_s, expected_yields):
+    """`yield_fn` runs each time `HASH_YIELD_INTERVAL_S` of hashing has passed,
+    and yielding leaves the hashes unchanged."""
+    monkeypatch.setattr(kv_cache_utils, "HASH_YIELD_INTERVAL_S", interval_s)
+    calls: list[None] = []
+
+    def block_hashes(yield_fn):
+        return Request(
+            request_id="0",
+            prompt_token_ids=list(range(20)),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(2, sha256, yield_fn=yield_fn),
+        ).block_hashes
+
+    assert block_hashes(lambda: calls.append(None)) == block_hashes(None)
+    # 20 prompt tokens hash as 10 full blocks of 2.
+    assert len(calls) == expected_yields
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_continues_from_frontend_block_hashes(hash_fn):
     """Frontend-computed prompt block hashes are used as is, and blocks that

@@ -3,6 +3,7 @@
 """Tests for EngineCoreProc handling inputs while waiting for a step's output."""
 
 import queue
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -124,6 +125,26 @@ def test_future_without_poll_blocks_for_result():
     assert engine._wait_for_output(future) == "output"
     assert handled == []
     assert engine.input_queue.qsize() == 1
+
+
+def test_block_hashing_yields_gil_only_on_input_thread(monkeypatch):
+    """Prompt hashing on the input thread yields the GIL; hashing on the busy
+    loop's thread must not, or the input thread could interrupt a step."""
+    engine, _ = make_engine()
+    yields: list[float] = []
+    monkeypatch.setattr(engine_core.time, "sleep", yields.append)
+    yield_fn = engine._block_hash_yield_fn()
+    assert yield_fn is not None
+
+    def input_thread():
+        engine._input_thread_ident = threading.get_ident()
+        yield_fn()
+
+    thread = threading.Thread(target=input_thread)
+    thread.start()
+    thread.join()
+    yield_fn()
+    assert yields == [0]
 
 
 def test_blocks_for_output_after_spin_period():
