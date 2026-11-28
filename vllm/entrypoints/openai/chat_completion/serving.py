@@ -4,6 +4,7 @@
 import asyncio
 import itertools
 import time
+import zlib
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
@@ -11,6 +12,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -122,6 +124,17 @@ def _make_completion_tokens_details(
     reasoning_tokens: int,
 ) -> CompletionTokenUsageInfo:
     return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
+def _body_session_rank(request: ChatCompletionRequest, dp_size: int) -> int | None:
+    """Map a conversation to a DP rank by hashing its first user message."""
+    for message in request.messages:
+        if message["role"] == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return zlib.crc32(content.encode()) % dp_size
+            return None
+    return None
 
 
 class OpenAIServingChat(GenerateBaseServing):
@@ -345,6 +358,11 @@ class OpenAIServingChat(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        if data_parallel_rank is None and envs.VLLM_DP_BODY_SESSION_AFFINITY:
+            data_parallel_rank = _body_session_rank(
+                request,
+                self.engine_client.vllm_config.parallel_config.data_parallel_size,
+            )
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
