@@ -712,3 +712,14 @@ def test_non_numeric_logprobs_rejected(field_name):
             messages=[{"role": "user", "content": "hello"}],
             **{field_name: "2"},
         )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "top_logprobs"])
+@pytest.mark.parametrize("value", [1.5, -0.5, True, False])
+def test_non_integer_logprobs_rejected(field_name, value):
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field_name: value},
+        )
