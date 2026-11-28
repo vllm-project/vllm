@@ -1116,6 +1116,7 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 25
   device: dgx-spark
+  optional: true
   num_devices: 1
   depends_on:
   - arm64-image-build

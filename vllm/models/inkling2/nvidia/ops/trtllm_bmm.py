@@ -46,7 +46,9 @@ def _module():
     # Loads FlashInfer's MoE module (and its cubin loader), whose batched GEMM
     # runner this module calls into.
     get_trtllm_moe_sm100_module()
-    moe = gen_trtllm_gen_fused_moe_sm100_module()
+    moe = gen_trtllm_gen_fused_moe_sm100_module(
+        enable_rubin=torch.cuda.get_device_capability() == (10, 7)
+    )
     flags = [f for f in moe.extra_cuda_cflags if f.startswith(("-DTLLM", "-DENABLE"))]
     spec = gen_jit_spec(
         "inkling2_trtllm_bmm",
@@ -111,6 +113,96 @@ _KERNELS = {
 }
 
 
+# Rubin has distinct TRT-LLM-gen kernel names and MMA shapes.
+# Keep its selections separate from the Blackwell table.
+_KERNELS_SM107 = {
+    (True, 8): (
+        (
+            "t128x8x512_s5_et128x8_m128x8x128_c1x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (True, 16): (
+        (
+            "t128x16x512_s5_et128x16_m256x16x128_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (True, 32): (
+        (
+            "t128x32x512_s5_et128x32_m256x32x128_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (True, 64): (
+        (
+            "t128x64x512_s4_et128x64_m256x64x128_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (True, 128): (
+        (
+            "t128x128x256_s6_et128x128_m256x128x128_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (True, 256): (
+        (
+            "t128x256x256_s5x5x5x5x1x1_et128x64_m256x256x128_c2x1x1_rM_TN_transOut_"
+            "schPdx3_biasFp32M_fCp_tmOv_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 8): (
+        (
+            "t128x8x512_s3_et128x8_m128x8x64_c1x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 16): (
+        (
+            "t128x16x256_s6_et128x16_m256x16x64_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 32): (
+        (
+            "t128x32x256_s4_et128x32_m256x32x64_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 64): (
+        (
+            "t128x64x256_s4_et128x64_m256x64x64_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 128): (
+        (
+            "t128x128x256_s4_et128x64_m256x128x64_c2x1x1_rM_TN_transOut_schPd2x1x2x3_"
+            "biasFp32M_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+    (False, 256): (
+        (
+            "t128x256x128_s5x5x5x5x1x1_et128x64_m256x256x64_c2x1x1_rM_TN_transOut_"
+            "schPdx3_biasFp32M_fCp_tmOv_bN_rgTma_clmp_dynB_sm107a"
+        ),
+    )
+    * 2,
+}
+
+
 @dataclass(frozen=True)
 class ExpertPlan:
     """Token tile, launched tiles (an upper bound) and the kernel of each
@@ -145,7 +237,10 @@ def expert_plan(
         # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
         return ExpertPlan(tile, max_ctas, (0, 0))
     names = configs(nvfp4, tile)
-    keys = _KERNELS[(nvfp4, tile)]
+    table = (
+        _KERNELS_SM107 if torch.cuda.get_device_capability() == (10, 7) else _KERNELS
+    )
+    keys = table[(nvfp4, tile)]
     kernels = []
     for projection, (n, k) in enumerate(shapes):
         # The projection's kernel, else the other's (an unrolled K loop, say,

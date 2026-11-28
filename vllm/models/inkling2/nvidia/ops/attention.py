@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from packaging import version
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -17,12 +18,14 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import gl, gluon, tl, tldevice, triton
+from vllm.triton_utils import HAS_TRITON, gl, gluon, tl, tldevice, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from . import use_sm100_kernels
 from .attention_sm90 import MODE_GATED, MODE_PARTIAL, rel_attention
+
+TRITON_39 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.9.0"))
 
 # Full-layer FA4 split estimate, fitted on GB200 over uniform and mixed
 # prefill batches (re-fit for other devices): one CTA per 256-row query tile
@@ -634,12 +637,27 @@ def _verify_load(
         )
 
 
-@gluon.jit
-def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
-    """Alias bf16 P over the first half of S buffer `b`."""
-    layout: gl.constexpr = _bw.TensorMemoryLayout((BLOCK_M, 2 * BLOCK_N), col_stride=1)
-    p = s_tmem._reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
-    return p.index(b).slice(0, BLOCK_N)
+if TRITON_39:
+
+    @gluon.jit
+    def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+        """Alias bf16 P over the first half of S buffer `b`."""
+        layout: gl.constexpr = _bw.TensorMemoryLayout(
+            (BLOCK_M, 2 * BLOCK_N), col_stride=1
+        )
+        p = s_tmem.reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
+        return p.index(b).slice(0, BLOCK_N)
+
+else:
+
+    @gluon.jit
+    def _verify_p(s_tmem, b, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+        """Alias bf16 P over the first half of S buffer `b`."""
+        layout: gl.constexpr = _bw.TensorMemoryLayout(
+            (BLOCK_M, 2 * BLOCK_N), col_stride=1
+        )
+        p = s_tmem._reinterpret(gl.bfloat16, [2, BLOCK_M, 2 * BLOCK_N], layout)
+        return p.index(b).slice(0, BLOCK_N)
 
 
 @gluon.jit

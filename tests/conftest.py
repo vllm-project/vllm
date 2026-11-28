@@ -13,11 +13,39 @@ from tblib import pickling_support
 # This should be run before any custom exception subclasses are defined.
 pickling_support.install()
 
+import os
+
+
+def _cgroup_v2_cpu_quota() -> int | None:
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+    except (OSError, ValueError):
+        return None
+    return None if quota == "max" else max(1, int(quota) // int(period))
+
+
+# torch sizes its CPU thread pool from OMP_NUM_THREADS on first use, otherwise
+# from the physical core count, which ignores the container's CPU quota and
+# gets parallel CPU ops throttled. Size it before torch loads and for this
+# process only: torch.set_num_threads() here breaks tests that fork, and a
+# leftover OMP_NUM_THREADS would override how vLLM sizes its own workers.
+_cpu_quota = _cgroup_v2_cpu_quota()
+if (
+    "OMP_NUM_THREADS" not in os.environ
+    and _cpu_quota is not None
+    and _cpu_quota < len(os.sched_getaffinity(0))
+):
+    os.environ["OMP_NUM_THREADS"] = str(_cpu_quota)
+    import torch
+
+    torch.get_num_threads()
+    del os.environ["OMP_NUM_THREADS"]
+
 import http.server
 import json
 import math
 import mimetypes
-import os
 import socket
 import tempfile
 import threading
@@ -69,7 +97,11 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import (
+    _cgroup_cpu_limit,
+    available_cpu_count,
+    set_default_torch_num_threads,
+)
 
 from torch._inductor.utils import fresh_cache
 
@@ -1689,6 +1721,13 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
+
+
+def pytest_report_header(config):
+    return (
+        f"CPUs: cpu_count {os.cpu_count()}, usable {available_cpu_count()}, "
+        f"cgroup quota {_cgroup_cpu_limit()}, torch threads {torch.get_num_threads()}"
+    )
 
 
 @pytest.fixture(scope="session")
