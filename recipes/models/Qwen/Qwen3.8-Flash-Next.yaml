@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_added: 2026-08-26
-  date_updated: 2026-11-17
+  date_updated: 2026-11-19
   tasks:
     - multimodal
     - text
@@ -17,6 +17,7 @@ meta:
   hardware:
     h200: verified
     h100: verified
+    b200: supported
     gb200: verified
     gb300: verified
     mi355x: verified
@@ -289,6 +290,24 @@ guide: |
   To serve BF16, use the `Qwen/Qwen3.8-Flash-Next` checkpoint with the same
   arguments.
 
+  ### 4x B200
+
+  B200 uses the same Blackwell flags as GB300. The NVFP4 and FP8 variants were
+  validated on four GPUs of an 8x B200 node (TEP4 for both, TP4 for FP8) on
+  vLLM `0.34.0rc1.dev849+gb24eda712`. TEP8 on the full node, the default for
+  B200, was not tested. GSM8K is 5-shot over 1,319 questions through chat
+  completions with thinking off; throughput uses SPEED-Bench qualitative
+  prompts with 1k-token outputs.
+
+  | 4x B200 | GSM8K | Output tok/s, concurrency 1 / 16 / 64 |
+  | --- | --- | --- |
+  | NVFP4, TEP4 + MTP3 | 0.965 | 412 / 3110 / 7474 |
+  | FP8, TEP4 + MTP3 | 0.970 | 390 / 2775 / 6067 |
+  | FP8, TP4 + MTP3 | 0.966 | 297 / 2058 / 4899 |
+  | FP8, TEP4 without MTP | 0.969 | 260 / 2043 / 5119 |
+
+  MTP3 accepts about 2.3 tokens per step.
+
   ### Single-GPU deployment on GB200/GB300
 
   The model fits on a single GPU: the FP8 checkpoint on one GB300 (288 GB
@@ -400,7 +419,9 @@ guide: |
 
   The checkpoint advertises a native 262,144-token context, which vLLM uses when
   `--max-model-len` is omitted. Startup and bounded evaluation were validated with
-  this limit configured, but a single 262K-token request was not tested.
+  this limit configured. On 4x B200 (TEP4 + MTP3), a single 260,051-token request
+  (99.2% of the window) answered pass-key retrieval correctly at three depths with
+  both NVFP4 and FP8; other hardware was not tested at this length.
 
   ### MTP speculative decoding
 
