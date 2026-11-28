@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import (
     ChatParams,
@@ -53,7 +54,7 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
         )
 
 
-class TokenizeChatRequest(OpenAIBaseModel):
+class TokenizeChatRequest(FailFastRequestMixin, OpenAIBaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageParam]
 
@@ -229,7 +230,7 @@ class TokenizeResponse(OpenAIBaseModel):
     token_strs: list[str] | None = None
 
 
-class DetokenizeRequest(OpenAIBaseModel):
+class DetokenizeRequest(FailFastRequestMixin, OpenAIBaseModel):
     model: str | None = None
     # TODO: Factor `torch.iinfo` out. `torch.iinfo` pulls torch into a
     # Pydantic protocol file that currently has no torch dependency.

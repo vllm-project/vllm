@@ -16,6 +16,7 @@ from pydantic import (
 import vllm.envs as envs
 from vllm.config.utils import replace
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
@@ -110,7 +111,7 @@ def validate_request_mm_kwargs(
         )
 
 
-class SpeculativeDecodingMetrics(OpenAIBaseModel):
+class SpeculativeDecodingMetrics(FailFastRequestMixin, OpenAIBaseModel):
     """Per-request speculative-decoding acceptance metrics.
 
     Experimental, subject to change. Only populated for single-sequence requests
@@ -167,7 +168,7 @@ class LegacyStructuralTag(OpenAIBaseModel):
     end: str
 
 
-class LegacyStructuralTagResponseFormat(OpenAIBaseModel):
+class LegacyStructuralTagResponseFormat(FailFastRequestMixin, OpenAIBaseModel):
     type: Literal["structural_tag"]
     structures: list[LegacyStructuralTag]
     triggers: list[str]

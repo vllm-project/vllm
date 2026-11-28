@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field, StrictBool, StrictStr, model_validator
 
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 
 ShortText = Annotated[StrictStr, Field(max_length=1048576)]
 InputText = Annotated[StrictStr, Field(max_length=10485760)]
@@ -23,7 +24,7 @@ class DecisionInputText(DecisionModel):
     text: InputText
 
 
-class DecisionInputMessage(DecisionModel):
+class DecisionInputMessage(FailFastRequestMixin, DecisionModel):
     role: Literal["user"]
     content: InputText | Annotated[list[DecisionInputText], Field(max_length=16384)]
     type: Literal["message"] = "message"
@@ -65,7 +66,7 @@ class ChoiceOption(DecisionModel):
     description: ShortText = ""
 
 
-class ChoiceQuestion(QuestionBase):
+class ChoiceQuestion(FailFastRequestMixin, QuestionBase):
     type: Literal["choice"]
     choices: list[ChoiceOption] = Field(min_length=2, max_length=255)
 
@@ -82,7 +83,7 @@ class ScoreLevel(DecisionModel):
     description: ShortText = ""
 
 
-class ScoreQuestion(QuestionBase):
+class ScoreQuestion(FailFastRequestMixin, QuestionBase):
     type: Literal["score"]
     levels: list[ScoreLevel] = Field(min_length=2, max_length=10)
 
@@ -92,7 +93,7 @@ DecisionQuestion = Annotated[
 ]
 
 
-class DecisionRequest(DecisionModel):
+class DecisionRequest(FailFastRequestMixin, DecisionModel):
     model: ShortText
     input: InputText | Annotated[list[DecisionInputMessage], Field(max_length=131072)]
     questions: list[DecisionQuestion] = Field(min_length=1, max_length=200)

@@ -43,6 +43,7 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_structured_outputs_structural_tag,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -259,7 +260,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
-class ChatCompletionRequest(OpenAIBaseModel):
+class ChatCompletionRequest(FailFastRequestMixin, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
@@ -1162,7 +1163,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return data
 
 
-class BatchChatCompletionRequest(OpenAIBaseModel):
+class BatchChatCompletionRequest(FailFastRequestMixin, OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
     Accepts the same fields as ChatCompletionRequest except that `messages`

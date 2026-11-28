@@ -26,6 +26,7 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.utils import random_uuid
 
@@ -237,7 +238,7 @@ CohereEmbeddingType = Literal[
 CohereTruncate = Literal["NONE", "START", "END"]
 
 
-class CohereEmbedContent(BaseModel):
+class CohereEmbedContent(FailFastRequestMixin, BaseModel):
     type: Literal["text", "image_url"]
     text: str | None = None
     image_url: dict[str, str] | None = None
@@ -254,11 +255,11 @@ class CohereEmbedContent(BaseModel):
         return self
 
 
-class CohereEmbedInput(BaseModel):
+class CohereEmbedInput(FailFastRequestMixin, BaseModel):
     content: list[CohereEmbedContent]
 
 
-class CohereEmbedRequest(BaseModel):
+class CohereEmbedRequest(FailFastRequestMixin, BaseModel):
     model: str | None = None
     input_type: str | None = None
     texts: list[str] | None = None

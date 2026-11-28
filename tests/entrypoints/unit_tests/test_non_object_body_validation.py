@@ -10,9 +10,13 @@ This extends the chat completion coverage added in #51654 to the remaining
 request models whose before-validators were missing the same guard.
 """
 
-import pytest
-from pydantic import ValidationError
+from typing import Any
 
+import pytest
+from pydantic import BaseModel, TypeAdapter, ValidationError
+from typing_extensions import TypedDict
+
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringRequest,
 )
@@ -23,10 +27,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.pooling.classify.protocol import ClassificationChatRequest
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingChatRequest
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingChatRequest,
+    EmbeddingRequest,
+)
 from vllm.entrypoints.pooling.pooling.protocol import PoolingChatRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.exceptions import VLLMValidationError
@@ -128,3 +136,105 @@ def test_request_models_accept_safe_cache_salt():
         {"prompt": "hello", "cache_salt": "safe-cache_salt-123"}
     )
     assert request.cache_salt == "safe-cache_salt-123"
+
+
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        ChatCompletionRequest,
+        TokenizeChatRequest,
+        EmbeddingChatRequest,
+        ClassificationChatRequest,
+        PoolingChatRequest,
+    ],
+    ids=lambda model: model.__name__,
+)
+def test_chat_message_validation_stops_at_first_invalid_item(request_type):
+    valid = {"role": "user", "content": "Hello"}
+    invalid: dict[str, Any] = {}
+    assert request_type.model_validate({"messages": [valid, valid]}).messages == [
+        valid,
+        valid,
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        request_type.model_validate({"messages": [valid, invalid, invalid]})
+
+    assert {error["loc"][:2] for error in exc_info.value.errors()} == {("messages", 1)}
+
+
+def test_anthropic_message_content_validation_stops_at_first_invalid_item():
+    request = {
+        "model": "test-model",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": [{}, {}]}],
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        AnthropicMessagesRequest.model_validate(request)
+
+    block_locations = {
+        error["loc"][-2:]
+        for error in exc_info.value.errors()
+        if error["loc"][-1] == "type"
+    }
+    assert block_locations == {(0, "type")}
+
+
+def test_typed_request_mapping_validation_stops_at_first_invalid_value():
+    with pytest.raises(ValidationError) as exc_info:
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "logit_bias": {"1": "invalid", "2": "invalid"},
+            }
+        )
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [("logit_bias", "1")]
+
+
+def test_embedding_batch_validation_preserves_sequence_inputs():
+    message = {"role": "user", "content": "Hello"}
+    adapter: TypeAdapter[Any] = TypeAdapter(EmbeddingRequest)
+
+    request = adapter.validate_python({"messages": ([message], [message])})
+    assert request.messages == ([message], [message])
+
+    with pytest.raises(ValidationError) as exc_info:
+        adapter.validate_python({"messages": ([message], [], [])})
+
+    batch_errors = {
+        error["loc"][-2:]
+        for error in exc_info.value.errors()
+        if error["type"] == "too_short"
+    }
+    assert batch_errors == {("messages", 1)}
+
+
+@pytest.mark.parametrize("guarded_first", [False, True])
+def test_fail_fast_validation_keeps_shared_schema_references_independent(
+    guarded_first,
+):
+    class Items(TypedDict):
+        numbers: list[int]
+
+    class Plain(BaseModel):
+        items: Items
+
+    class Guarded(FailFastRequestMixin, BaseModel):
+        items: Items
+
+    adapter = TypeAdapter(
+        tuple[Guarded, Plain] if guarded_first else tuple[Plain, Guarded]
+    )
+    item = {"items": {"numbers": ["a", "b"]}}
+
+    with pytest.raises(ValidationError) as exc_info:
+        adapter.validate_python((item, item))
+
+    error_locations = {error["loc"] for error in exc_info.value.errors()}
+    plain_index = int(guarded_first)
+    assert error_locations == {
+        (0, "items", "numbers", 0),
+        (1, "items", "numbers", 0),
+        (plain_index, "items", "numbers", 1),
+    }
