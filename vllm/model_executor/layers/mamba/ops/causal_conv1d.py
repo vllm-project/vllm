@@ -68,12 +68,14 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # one program handles one chunk in a single sequence
     # rather than mixing sequences - to make updating initial_states across sequences efficiently
 
-    # single-sequence id
-    idx_seq = tl.load(batch_ptr + tl.program_id(0)).to(tl.int64)
-    chunk_offset = tl.load(token_chunk_offset_ptr + tl.program_id(0))
-
-    # BLOCK_N elements along the feature-dimension (channel)
-    idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    # Order feature blocks inner so concurrent workgroups share each token's row
+    # while keeping a 1D grid exempt from CUDA's 65535 gridDim.y limit (>524K tokens).
+    num_feat_blocks: tl.constexpr = tl.cdiv(dim, BLOCK_N)
+    pid = tl.program_id(0)
+    chunk_pid = pid // num_feat_blocks
+    idx_feats = (pid % num_feat_blocks) * BLOCK_N + tl.arange(0, BLOCK_N)
+    idx_seq = tl.load(batch_ptr + chunk_pid).to(tl.int64)
+    chunk_offset = tl.load(token_chunk_offset_ptr + chunk_pid)
 
     if idx_seq == pad_slot_id:
         if launch_pdl:
@@ -713,10 +715,7 @@ def causal_conv1d_fn(
             return tot
 
     def grid(META):
-        return (
-            num_program(META, args),
-            triton.cdiv(dim, META["BLOCK_N"]),
-        )
+        return (num_program(META, args) * triton.cdiv(dim, META["BLOCK_N"]),)
 
     if batch_ptr.device != x.device:
         batch_ptr = batch_ptr.to(x.device)
