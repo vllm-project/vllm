@@ -116,6 +116,8 @@ def indexer_k_norm_rope_store(
         USE_FP4=use_fp4_cache,
         MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
         SHUFFLE=shuffle,
+        # FNUZ readers (gfx942) decode OCP -0 (0x80) as NaN; store +0.
+        DROP_NEG_ZERO=current_platform.is_fp8_fnuz(),
         BLOCK_TILE_SIZE=_BLOCK_TILE_SIZE,
         HEAD_TILE_SIZE=_HEAD_TILE_SIZE,
         num_warps=1,
@@ -145,6 +147,7 @@ def _indexer_k_norm_rope_quant_store_kernel(
     USE_FP4: tl.constexpr,
     MX_SCALE: tl.constexpr,
     SHUFFLE: tl.constexpr,
+    DROP_NEG_ZERO: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
 ):
@@ -249,6 +252,8 @@ def _indexer_k_norm_rope_quant_store_kernel(
         inv_scale = tl.exp2(-exponent)
         x_clamped = tl.clamp(result_bf16 * inv_scale, -FP8_MAX, FP8_MAX)
         x_uint8 = x_clamped.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
+        if DROP_NEG_ZERO:
+            x_uint8 = tl.where(x_uint8 == 0x80, tl.zeros_like(x_uint8), x_uint8)
         if SHUFFLE:
             tiled = (
                 block // HEAD_TILE_SIZE * BLOCK_TILE_SIZE * HEAD_TILE_SIZE

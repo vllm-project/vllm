@@ -569,6 +569,67 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm kernel")
+@torch.inference_mode()
+def test_indexer_k_store_writes_no_fnuz_nan(monkeypatch):
+    """With FNUZ readers, OCP -0 (0x80, FNUZ NaN) is stored as +0 and no
+    other byte changes."""
+    from vllm.models.deepseek_v41.common.ops import indexer_k_store
+
+    device = "cuda"
+    block_size, num_tokens = 16, 40
+    torch.manual_seed(0)
+    k_pre = torch.randn(num_tokens, HEAD_DIM, device=device).to(torch.bfloat16)
+    # Finite negatives far below half of the smallest FP8 step of their row,
+    # in the plain and in the rotated half of the key.
+    planted = [(0, 0), (7, 5), (7, 70), (39, 127)]
+    for row, col in planted:
+        k_pre[row, col] = -(2.0**-24)
+    norm_weight = torch.ones(HEAD_DIM, device=device, dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens, device=device)
+    # Identity RoPE, so a planted value stays where it is.
+    cos_sin = torch.zeros(MAX_POS, ROPE_DIM, device=device)
+    cos_sin[:, : ROPE_DIM // 2] = 1
+    num_blocks = num_tokens // block_size + 1
+
+    def store(fnuz_readers: bool) -> torch.Tensor:
+        monkeypatch.setattr(
+            indexer_k_store.current_platform, "is_fp8_fnuz", lambda: fnuz_readers
+        )
+        cache = torch.zeros(
+            num_blocks, block_size, HEAD_DIM + 4, device=device, dtype=torch.uint8
+        )
+        indexer_k_store.indexer_k_norm_rope_store(
+            k_pre,
+            positions,
+            cos_sin,
+            norm_weight,
+            1e-20,
+            cache,
+            torch.arange(num_tokens, device=device),
+            1,
+            False,
+        )
+        values = cache.view(num_blocks, -1)[:, : block_size * HEAD_DIM]
+        if current_platform.is_rocm():
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                _unshuffle_indexer_k_values,
+            )
+
+            values = _unshuffle_indexer_k_values(values, block_size, HEAD_DIM)
+        return values.reshape(-1, HEAD_DIM)[:num_tokens].contiguous()
+
+    ocp = store(fnuz_readers=False)
+    stored = store(fnuz_readers=True)
+
+    for row, col in planted:
+        assert stored[row, col] == 0
+    assert not (stored == 0x80).any()
+    # Only -0 changes: every other byte is the OCP one.
+    expected = torch.where(ocp == 0x80, ocp.new_zeros(()), ocp)
+    torch.testing.assert_close(stored, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("use_cutedsl", [False, True])
 @pytest.mark.skipif(
     not (
