@@ -562,6 +562,37 @@ def test_nvfp4_4over6_selects_lower_error_scale(
     assert four_over_six_mse < default_mse
 
 
+def test_reshape_and_cache_flash_hnd_tiny_head() -> None:
+    """HND layout with num_heads * head_size below one warp still completes."""
+    set_random_seed(0)
+    device = "cuda:0"
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_tokens, num_heads, head_size = 4, 3, 7
+    block_size, num_blocks = 16, 2
+    hnd_key = torch.zeros(num_blocks, num_heads, block_size, head_size)
+    hnd_value = torch.zeros_like(hnd_key)
+    key_cache, value_cache = hnd_key.transpose(1, 2), hnd_value.transpose(1, 2)
+    slot_mapping = torch.tensor([0, 5, 16, 31], dtype=torch.long)
+    key = torch.randn(num_tokens, num_heads, head_size)
+    value = torch.randn(num_tokens, num_heads, head_size)
+    scale = torch.tensor(1.0, dtype=torch.float32)
+
+    ops.reshape_and_cache_flash(
+        key, value, key_cache, value_cache, slot_mapping, "auto", scale, scale
+    )
+
+    expected_key = torch.zeros_like(key_cache)
+    expected_value = torch.zeros_like(value_cache)
+    for token, slot in enumerate(slot_mapping.tolist()):
+        block, offset = slot // block_size, slot % block_size
+        expected_key[block, offset] = key[token]
+        expected_value[block, offset] = value[token]
+    torch.testing.assert_close(key_cache, expected_key)
+    torch.testing.assert_close(value_cache, expected_value)
+
+
 # MiMo-V2.6 Flash: K 192 / V 128, 4 KV heads, block sizes 16 and 64 in use.
 ASYM_HEAD_SIZE = 192
 ASYM_HEAD_SIZE_V = 128
