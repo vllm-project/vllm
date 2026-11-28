@@ -510,14 +510,33 @@ def quantize_row(
 class RoutedExpertFront:
     """The fused front (module docstring); `image`: whether the router
     routes image sentinel tokens with `bias_vl`; `max_rows`: 8, 16, 32,
-    64, 128 or 192, the most rows of a call."""
+    64, 128 or 192, the most rows of a call. The pre-dispatch variant without
+    routing records also supports 384 rows with up to eight rows per CTA."""
 
-    def __init__(self, image: bool, max_rows: int = 8) -> None:
-        assert max_rows in (8, 16, 32, 64, 128, 192)
+    def __init__(
+        self,
+        image: bool,
+        max_rows: int = 8,
+        *,
+        build_routing_record: bool = True,
+        quantize: bool = True,
+    ) -> None:
+        assert max_rows in (8, 16, 32, 64, 128, 192) or (
+            not build_routing_record and max_rows == 384
+        )
         self.image = image
+        assert quantize or not build_routing_record
+        self.quantize = quantize
+        # EP ownership and row order are only known after dispatch. Reuse the
+        # top-k/quantization without building a discarded TP record.
+        self.build_routing_record = build_routing_record
         self.max_rows = max_rows
-        self.selecting = SELECT_CTAS  # CTAs, one cluster
-        self.select_rows = max_rows // self.selecting  # 1-8, 16 at 128 rows, 24 at 192
+        # DEP has no cross-CTA routing record and need not fit one cluster.
+        # Keep four warps per row instead of serializing more experts per lane.
+        self.selecting = (
+            SELECT_CTAS if build_routing_record else max(SELECT_CTAS, max_rows // 8)
+        )
+        self.select_rows = max_rows // self.selecting
         # Warps per row: four, or as many as fit above 8 rows a CTA.
         self.parts = min(FRONT_THREADS // 32 // self.select_rows, MAX_PARTS)
         self.per_lane = EXPERTS // 32 // self.parts  # experts per lane
@@ -557,9 +576,12 @@ class RoutedExpertFront:
         `permuted` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         selecting = self.selecting
-        quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
-        # Whole clusters: the last one's spare CTAs exit at once.
-        quantizing = (quantizing + selecting - 1) // selecting * selecting
+        quantizing = Int32(0)
+        if cutlass.const_expr(self.quantize):
+            quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
+        # Only the TP record builder needs whole multi-CTA clusters.
+        if cutlass.const_expr(self.build_routing_record):
+            quantizing = (quantizing + selecting - 1) // selecting * selecting
         self.kernel(
             cute.make_tensor(logits_ptr, cute.make_layout(rows * EXPERTS)),
             cute.make_tensor(bias_ptr, cute.make_layout(EXPERTS)),
@@ -585,7 +607,7 @@ class RoutedExpertFront:
             block=[FRONT_THREADS, 1, 1],
             stream=stream,
             use_pdl=True,
-            cluster=[selecting, 1, 1],
+            cluster=[selecting if self.build_routing_record else 1, 1, 1],
         )
 
     @cute.kernel
@@ -615,10 +637,11 @@ class RoutedExpertFront:
         thread, _, _ = cute.arch.thread_idx()
         cta, _, _ = cute.arch.block_idx()
         if cta >= self.selecting:
-            row = (cta - self.selecting) * QUANT_ROWS + thread // ROW_THREADS
-            if thread < QUANT_ROWS * ROW_THREADS and row < rows:
-                cute.arch.griddepcontrol_wait()
-                quantize_row(x, row, thread % ROW_THREADS, x_quant, x_scale)
+            if cutlass.const_expr(self.quantize):
+                row = (cta - self.selecting) * QUANT_ROWS + thread // ROW_THREADS
+                if thread < QUANT_ROWS * ROW_THREADS and row < rows:
+                    cute.arch.griddepcontrol_wait()
+                    quantize_row(x, row, thread % ROW_THREADS, x_quant, x_scale)
         else:
             self.select_and_route(
                 logits,
@@ -662,9 +685,11 @@ class RoutedExpertFront:
         """Selecting CTA `rank`: top-k of its rows; then CTA 0 builds the
         routing record from every row's ids."""
         selecting, levels = self.selecting, self.levels
-        bitmap_words = present_words(levels)
-        mask_size = MAX_EXPERTS * mask_words_for(levels)
-        selected = self.max_rows * TOP_K
+        bitmap_words = present_words(levels) if self.build_routing_record else 1
+        mask_size = (
+            MAX_EXPERTS * mask_words_for(levels) if self.build_routing_record else 1
+        )
+        selected = self.max_rows * TOP_K if self.build_routing_record else 1
         parts, per_lane, candidates = self.parts, self.per_lane, self.candidates
         held = self.select_rows * candidates
 
@@ -690,9 +715,10 @@ class RoutedExpertFront:
         candidate_score = view(shared.candidate_score, held)
         # Every CTA of the cluster must have started before the stores to CTA
         # 0's shared memory; this phase completes during the top-k.
-        cute.arch.cluster_arrive_relaxed()
-        if rank == 0:
-            clear_scratch(present, rows_of, thread, FRONT_THREADS, levels)
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_arrive_relaxed()
+            if rank == 0:
+                clear_scratch(present, rows_of, thread, FRONT_THREADS, levels)
         warp = thread >> 5
         lane = thread & 31
         local_row = warp // parts
@@ -707,8 +733,9 @@ class RoutedExpertFront:
                 if cutlass.const_expr(self.image):
                     row_bias_vl[j] = bias_vl[base + lane + 32 * j]
         cute.arch.griddepcontrol_wait()
-        if rank == 0:
-            zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
+        if cutlass.const_expr(self.build_routing_record):  # noqa: SIM102
+            if rank == 0:
+                zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
         if row < rows:
             logit = cute.make_rmem_tensor((per_lane,), Float32)
             for j in cutlass.range_constexpr(per_lane):
@@ -729,7 +756,8 @@ class RoutedExpertFront:
                 candidate_id[slot] = expert
                 candidate_score[slot] = score
         cute.arch.sync_threads()
-        cute.arch.cluster_wait()
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_wait()
         slot_id = Int32(-1)
         slot_weight = Float32(0.0)
         if row < rows and part == 0:
@@ -744,27 +772,30 @@ class RoutedExpertFront:
             if has_padding != 0:
                 padding = Int32(is_padding[row])
             slot_id, slot_weight = merge_row(key, expert, score, scale, lane, padding)
-            if lane < TOP_K:
-                store_cta0_shared(ids_shared.iterator + row * TOP_K + lane, slot_id)
+            if cutlass.const_expr(self.build_routing_record):  # noqa: SIM102
+                if lane < TOP_K:
+                    store_cta0_shared(ids_shared.iterator + row * TOP_K + lane, slot_id)
         # Release the stores to CTA 0; CTA 0 acquires them. The release orders
         # every earlier store of the thread, so the global stores follow it
         # rather than delay it by their round trip to L2 (about 0.2-0.4 us).
-        cute.arch.cluster_arrive()
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_arrive()
         if row < rows and part == 0 and lane < TOP_K:
             topk_ids[row * TOP_K + lane] = slot_id
             topk_weights[row * TOP_K + lane] = slot_weight
-        cute.arch.cluster_wait()
-        if rank == 0:
-            build_record(
-                present,
-                rows_of,
-                ids_shared,
-                permuted,
-                record,
-                rows,
-                Int32(TOP_K),
-                Int32(EXPERTS),
-                thread,
-                FRONT_THREADS,
-                levels,
-            )
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_wait()
+            if rank == 0:
+                build_record(
+                    present,
+                    rows_of,
+                    ids_shared,
+                    permuted,
+                    record,
+                    rows,
+                    Int32(TOP_K),
+                    Int32(EXPERTS),
+                    thread,
+                    FRONT_THREADS,
+                    levels,
+                )

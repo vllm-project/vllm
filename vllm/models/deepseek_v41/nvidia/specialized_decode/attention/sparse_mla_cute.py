@@ -338,10 +338,12 @@ class SparseMlaDecodeCute:
     are at most `chunks` x 128 columns wide; `has_sinks`: add each head's
     attention sink to the softmax denominator."""
 
-    def __init__(self, chunks: int, has_sinks: bool) -> None:
+    def __init__(self, chunks: int, has_sinks: bool, head_groups: int = 1) -> None:
         assert 1 <= chunks <= MAX_CHUNKS
+        assert head_groups in (1, 4)
         self.n = chunks
         self.has_sinks = has_sinks
+        self.head_groups = head_groups
         # Received partial blocks a CTA owns at most (block j -> CTA j % n).
         self.slots = (4 + chunks - 1) // chunks
         # Partials go out from the KV tile's upper half, part 4 + j for block j,
@@ -391,7 +393,7 @@ class SparseMlaDecodeCute:
             scale_log2,
             out_scale,
         ).launch(
-            grid=(self.n, tokens, 1),
+            grid=(self.n, tokens, self.head_groups),
             block=(THREADS, 1, 1),
             cluster=(self.n, 1, 1),
             stream=stream,
@@ -419,7 +421,12 @@ class SparseMlaDecodeCute:
     ):
         n = self.n
         tid, _, _ = cute.arch.thread_idx()
-        chunk, token, _ = cute.arch.block_idx()
+        chunk, token, head_group = cute.arch.block_idx()
+        # DEP has TP1 attention: four independent 16-head groups. Preserve
+        # the MMA, shared-memory layout and per-cluster reductions.
+        q_ptr = q_ptr + Int64(head_group * HEADS * HEAD_DIM)
+        out_ptr = out_ptr + Int64(head_group * HEADS * HEAD_DIM * 2)
+        sinks_ptr = sinks_ptr + Int64(head_group * HEADS * 4)
         warp = cute.arch.make_warp_uniform(tid // 32)
         lane = tid % 32
         # Softmax groups: 8 threads a head, 16 rows each.
@@ -796,11 +803,11 @@ class SparseMlaDecodeCute:
 
 
 @cache
-def _kernel(device_index: int, chunks: int, has_sinks: bool):
+def _kernel(device_index: int, chunks: int, has_sinks: bool, head_groups: int = 1):
     """`SparseMlaDecodeCute` compiled for a device, chunk count and sinks."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            SparseMlaDecodeCute(chunks, has_sinks),
+            SparseMlaDecodeCute(chunks, has_sinks, head_groups),
             Int64(0),
             Int32(0),
             Int64(0),
@@ -832,7 +839,7 @@ def _max_tokens(device_index: int, chunks: int) -> int:
     return CTAS_PER_SM * clusters
 
 
-def precompile(device_index: int, has_sinks: bool) -> None:
+def precompile(device_index: int, has_sinks: bool, head_groups: int = 1) -> None:
     """Compile the kernels of DeepSeek-V4's two widths (128 sliding-window
     columns alone, and 640) and count the resident clusters, outside any CUDA
     graph capture; other widths compile at their first launch.
@@ -840,10 +847,11 @@ def precompile(device_index: int, has_sinks: bool) -> None:
     Args:
         device_index: The CUDA device to compile for.
         has_sinks: Whether the layers add attention sinks.
+        head_groups: Number of independent groups of 16 query heads.
 
     """
     for chunks in (1, MAX_CHUNKS):
-        _kernel(device_index, chunks, has_sinks)
+        _kernel(device_index, chunks, has_sinks, head_groups)
         _max_tokens(device_index, chunks)
 
 
@@ -870,13 +878,14 @@ def supports_sparse_mla_cute(
     bmm2_scale: float | torch.Tensor,
     sinks: torch.Tensor | None,
 ) -> bool:
-    """Whether `sparse_mla_decode` takes these arguments: 16 FP8 query heads
+    """Whether `sparse_mla_decode` takes these arguments: 16 or 64 FP8 query heads
     of 512 (BF16 output), FP8 pools, int32 index rows of at most 640 columns,
     scalar scales, FP32 sinks, and a batch whose clusters are all resident."""
     if (
         query.dtype != torch.float8_e4m3fn
         or query.dim() != 3
-        or query.shape[1:] != (HEADS, HEAD_DIM)
+        or query.shape[1] not in (HEADS, 4 * HEADS)
+        or query.shape[2] != HEAD_DIM
         or query.stride(2) != 1
         or query.stride(1) != HEAD_DIM
         or query.stride(0) % 16 != 0
@@ -910,7 +919,7 @@ def supports_sparse_mla_cute(
     if sinks is not None and (
         sinks.dtype != torch.float32
         or not sinks.is_contiguous()
-        or sinks.numel() < HEADS
+        or sinks.numel() < query.shape[1]
     ):
         return False
     if not (
@@ -919,8 +928,14 @@ def supports_sparse_mla_cute(
         return False
     if not (_is_pool(swa_kv_cache) and _is_pool(compressed_kv_cache)):
         return False
+    tensors = (swa_kv_cache, compressed_kv_cache, sparse_indices, sparse_topk_lens, out)
+    if query.device.type != "cuda" or any(t.device != query.device for t in tensors):
+        return False
+    if sinks is not None and sinks.device != query.device:
+        return False
     chunks = (sparse_indices.shape[1] + ROWS - 1) // ROWS
-    return 0 < tokens <= _max_tokens(query.device.index, chunks)
+    groups = query.shape[1] // HEADS
+    return 0 < tokens * groups <= _max_tokens(query.device.index, chunks)
 
 
 def sparse_mla_decode(
@@ -938,17 +953,17 @@ def sparse_mla_decode(
     `supports_sparse_mla_cute` for the accepted layouts).
 
     Args:
-        query: [tokens, 16, 512] FP8 E4M3.
+        query: [tokens, 16 or 64, 512] FP8 E4M3.
         swa_kv_cache: FP8 pool of 512-byte rows `stride(-2)` apart; the first
             128 columns of `sparse_indices` are its row offsets.
         compressed_kv_cache: The pool of the other columns, likewise.
         sparse_indices: [tokens, width] int32 row offsets, -1 for none
             (`width` <= 640).
         sparse_topk_lens: [tokens] int32 active columns of each token.
-        out: [tokens, 16, 512] BF16 attention output.
+        out: Same shape as query, BF16 attention output.
         bmm1_scale: Score scale (the softmax scale times the FP8 scales).
         bmm2_scale: Output scale.
-        sinks: [16] FP32 attention sinks (natural log), or None.
+        sinks: [heads] FP32 attention sinks (natural log), or None.
 
     """
     assert supports_sparse_mla_cute(
@@ -965,7 +980,7 @@ def sparse_mla_decode(
     tokens = query.shape[0]
     width = sparse_indices.shape[1]
     chunks = (width + ROWS - 1) // ROWS
-    _kernel(query.device.index, chunks, sinks is not None)(
+    _kernel(query.device.index, chunks, sinks is not None, query.shape[1] // HEADS)(
         Int64(query.data_ptr()),
         Int32(query.stride(0)),
         Int64(swa_kv_cache.data_ptr()),

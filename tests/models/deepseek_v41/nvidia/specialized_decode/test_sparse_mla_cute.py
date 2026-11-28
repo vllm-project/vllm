@@ -40,7 +40,7 @@ def fp8(shape: tuple[int, ...], std: float, g: torch.Generator) -> torch.Tensor:
     )
 
 
-def make_case(tokens: int, width: int, seed: int) -> dict:
+def make_case(tokens: int, width: int, seed: int, heads: int = H) -> dict:
     """Pools, indices with masked columns, and lengths for `tokens` tokens."""
     g = torch.Generator(device=DEVICE).manual_seed(seed)
     swa_pool = fp8((SWA_ROWS // PAGE, PAGE, D), 1.0, g)
@@ -64,12 +64,12 @@ def make_case(tokens: int, width: int, seed: int) -> dict:
     if tokens > 2:
         lens[2] = 0  # no active column
     return dict(
-        q=fp8((tokens, H, D), 0.5, g),
+        q=fp8((tokens, heads, D), 0.5, g),
         swa_pool=swa_pool,
         comp_pool=comp_pool,
         indices=indices,
         lens=lens,
-        sinks=torch.randn(H, device=DEVICE, generator=g),
+        sinks=torch.randn(heads, device=DEVICE, generator=g),
     )
 
 
@@ -108,16 +108,23 @@ def reference(
 @pytest.mark.parametrize("width", [128, 200, 384, 512, 640])
 @pytest.mark.parametrize("tokens", [1, 6, 48])
 @pytest.mark.parametrize("with_sinks", [True, False])
-def test_matches_reference(width: int, tokens: int, with_sinks: bool) -> None:
-    c = make_case(tokens, width, seed=width * 1000 + tokens)
+@pytest.mark.parametrize("heads", [16, 64])
+def test_matches_reference(
+    width: int, tokens: int, with_sinks: bool, heads: int
+) -> None:
+    c = make_case(tokens, width, seed=width * 1000 + tokens, heads=heads)
     # The kernel takes only tokens whose clusters are all resident at once,
     # which depends on the device's SM count (read once the case's tensors
     # have made the device's context current).
-    tokens = min(tokens, _max_tokens(c["q"].device.index, -(-width // 128)))
+    tokens = min(
+        tokens, _max_tokens(c["q"].device.index, -(-width // 128)) // (heads // H)
+    )
     c.update({key: c[key][:tokens] for key in ("q", "indices", "lens")})
     sinks = c["sinks"] if with_sinks else None
     bmm1_scale, bmm2_scale = D**-0.5 * 1.25, 0.75
-    out = torch.full((tokens, H, D), float("nan"), dtype=torch.bfloat16, device=DEVICE)
+    out = torch.full(
+        (tokens, heads, D), float("nan"), dtype=torch.bfloat16, device=DEVICE
+    )
     args = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"], out)
     assert supports_sparse_mla_cute(*args, bmm1_scale, bmm2_scale, sinks)
     sparse_mla_decode(*args, bmm1_scale, bmm2_scale, sinks)
@@ -130,10 +137,11 @@ def test_matches_reference(width: int, tokens: int, with_sinks: bool) -> None:
         assert bool((got[2] == 0).all())
 
 
-def test_cuda_graph_replay_matches_eager() -> None:
-    c = make_case(12, 640, seed=7)
+@pytest.mark.parametrize("heads", [16, 64])
+def test_cuda_graph_replay_matches_eager(heads: int) -> None:
+    c = make_case(4, 640, seed=7, heads=heads)
     args_in = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"])
-    eager = torch.empty((12, H, D), dtype=torch.bfloat16, device=DEVICE)
+    eager = torch.empty((4, heads, D), dtype=torch.bfloat16, device=DEVICE)
     sparse_mla_decode(*args_in, eager, D**-0.5, 1.0, c["sinks"])
     graphed = torch.empty_like(eager)
     graph = torch.cuda.CUDAGraph()
@@ -142,6 +150,39 @@ def test_cuda_graph_replay_matches_eager() -> None:
     graph.replay()
     torch.accelerator.synchronize()
     assert torch.equal(graphed, eager)
+
+
+@pytest.mark.parametrize("with_sinks", [True, False])
+def test_wide_c8_replay_preserves_masks_and_updates(with_sinks: bool) -> None:
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.sparse_mla_wide import (  # noqa: E501
+        WideWorkspace,
+        sparse_mla_wide,
+    )
+
+    c = make_case(48, 640, seed=41, heads=64)
+    workspace = WideWorkspace(48, 5, c["q"].device)
+    args = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"])
+    sinks = c["sinks"] if with_sinks else None
+    eager = torch.empty(c["q"].shape, device=DEVICE, dtype=torch.bfloat16)
+    graphed = torch.empty_like(eager)
+    scales = (D**-0.5 * 1.25, 0.75)
+    sparse_mla_wide(*args, eager, *scales, sinks, workspace)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        sparse_mla_wide(*args, graphed, *scales, sinks, workspace)
+
+    for seed in (42, 43):
+        changed = make_case(48, 640, seed=seed, heads=64)
+        for key, value in c.items():
+            value.copy_(changed[key])
+        graph.replay()
+        sparse_mla_wide(*args, eager, *scales, sinks, workspace)
+        torch.accelerator.synchronize()
+        assert torch.equal(graphed, eager)
+        torch.testing.assert_close(
+            graphed.float(), reference(c, *scales, sinks), atol=0.03, rtol=0.05
+        )
+        assert bool((graphed[2] == 0).all())
 
 
 def test_declines_unsupported() -> None:

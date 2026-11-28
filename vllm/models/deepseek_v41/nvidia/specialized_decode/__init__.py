@@ -137,23 +137,36 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
 
 
 def decode_backend(vllm_config: VllmConfig) -> str:
-    """`additional_config["decode_backend"]`: `auto` (the default, the stock
-    decode) or `latency_specialized`."""
+    """Select stock decode, specialized TP4, or TP1 with DP and EP."""
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend not in ("auto", "latency_specialized"):
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    supported = (
+        "auto",
+        "latency_specialized",
+        "latency_specialized_dep",
+    )
+    if backend not in supported:
+        raise ValueError(f"Supported decode_backend values are {'/'.join(supported)}")
+    if backend == "latency_specialized_dep":
+        size = vllm_config.parallel_config.data_parallel_size
+        if size not in (2, 4, 8):
+            raise ValueError("latency_specialized_dep requires DP2, DP4 or DP8")
     return backend
 
 
 def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """The specialized decode settings, or None for the stock decode.
 
-    Collective over the TP group when requested: every rank raises if any rank
-    cannot run the specialized decode.
+    Collective over the selected TP or DP group: every rank raises if any
+    member cannot run the specialized decode.
     """
-    if decode_backend(vllm_config) == "auto":
+    backend = decode_backend(vllm_config)
+    if backend == "auto":
         return None
+    if backend == "latency_specialized_dep":
+        from .dep.config import dep_config
+
+        return dep_config(vllm_config)
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
     # The NVLink multicast check is rank-local (the custom all-reduce catches a

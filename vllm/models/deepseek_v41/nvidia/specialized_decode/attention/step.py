@@ -100,8 +100,10 @@ class AttentionStep:
         source: CandidateOverlap | None,
         consumer: CandidateOverlap | None,
         all_gather: "LamportAllGather | None",
+        projection_bank: Any = None,
     ) -> None:
         self.attn = attn
+        self.projection_bank = projection_bank
         self.tables = tables
         self.mla = mla
         # Gathers the row-sharded indexer's slices.
@@ -125,6 +127,13 @@ class AttentionStep:
         self.key_gemm = wk is not None and aux_projection_gemm_accepts([wk])
         # start, latent ready, index key done, index query done.
         self._events = [torch.cuda.Event() for _ in range(4)]
+
+    def _projection(self, layer, x, low_batch):
+        if self.projection_bank is not None and not low_batch:
+            out = self.projection_bank.run(layer, x)
+            if out is not None:
+                return out
+        return projection_mm(layer, x, low_batch)
 
     def run(
         self,
@@ -217,7 +226,7 @@ class AttentionStep:
         else:
             qr_kv = None
             if self.wqa_mxfp8:
-                qr_kv = projection_mm(attn.fused_wqa_wkv, quant, step.low_batch)
+                qr_kv = self._projection(attn.fused_wqa_wkv, quant, step.low_batch)
             if qr_kv is None:
                 qr_kv = attn.fused_wqa_wkv(quant)[0]
         return qr_kv, results[0], results[1]
@@ -310,7 +319,7 @@ class AttentionStep:
 
         q = None
         if self.wq_b_mxfp8:
-            q = projection_mm(attn.wq_b, qr, step.low_batch)
+            q = self._projection(attn.wq_b, qr, step.low_batch)
         if q is None:
             q = attn._wq_b_proj(qr, qr_scale)
         q = q.view(-1, attn.n_local_heads, attn.head_dim)
@@ -404,7 +413,11 @@ class AttentionStep:
     def _wo_b_pinned(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         """`wo_b` above `LOW_BATCH_MAX_ROWS` rows: on the wide low-latency
         or the pinned `cute-dsl` GEMM where one runs."""
-        out = wide_or_pinned_mm(self.attn.wo_b, z)
+        out = (
+            wide_or_pinned_mm(self.attn.wo_b, z)
+            if self.projection_bank is None
+            else self._projection(self.attn.wo_b, z, False)
+        )
         return out if out is not None else self._wo_b_partial(z)
 
     def _wo_b_partial(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:

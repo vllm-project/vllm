@@ -615,11 +615,10 @@ def _front_config(runner: torch.nn.Module) -> FrontConfig | str:
     )
 
 
-def front_applies(gemm: RoutedExpertGemm, runner: torch.nn.Module) -> bool:
+def front_applies(config: FrontConfig | None, runner: torch.nn.Module) -> bool:
     """Whether the fused front may replace the router's top-k this call: the
     router's biases are the tensors the front reads, and no routed-expert
     capture hook (which only `select_experts` feeds) is set."""
-    config = gemm.front_config
     router = runner.router
     if (
         config is None
