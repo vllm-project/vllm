@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -266,3 +268,91 @@ def test_lightning_attention_reference(
 
     assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
     assert ref_kv_cache.shape == actual_kv_cache.shape
+
+
+@torch.inference_mode()
+def test_bailing_prefill_exports_state_at_checkpoint():
+    """A checkpoint holds the state of the prefill stopped at its offset.
+
+    One offset is on the kernel's 256-token block grid and one is not. A decode
+    leads the batch, and nothing else in the cache changes, including the null
+    block of a row whose checkpoint block was not reserved.
+    """
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
+    from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
+        linear_attention_prefill_and_mix,
+    )
+    from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
+        MiniMaxText01LinearKernel,
+    )
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    heads, dim = 4, 64
+    slope = 0.1 * torch.arange(1, heads + 1, dtype=torch.float32)
+    initial = 0.01 * torch.randn(8, heads, dim, dim)
+    kv_cache = initial.clone()
+
+    def run(qkv, num_decodes, prefill_lens, slots, checkpoint=None):
+        kv_cache.copy_(initial)
+        lens = [1] * num_decodes + prefill_lens
+        metadata = SimpleNamespace(
+            num_decodes=num_decodes,
+            num_prefills=len(prefill_lens),
+            num_decode_tokens=num_decodes,
+            query_start_loc=torch.tensor([0, *lens]).cumsum(0),
+            state_indices_tensor_p=torch.tensor(slots[num_decodes:]),
+            checkpoint=checkpoint,
+        )
+        q, k, v = qkv
+        out = linear_attention_prefill_and_mix(
+            q,
+            k,
+            v,
+            kv_cache,
+            torch.tensor(slots),
+            metadata,
+            slope,
+            256,
+            decode_fn=lambda q, *_: q.new_zeros(num_decodes, heads * dim),
+            prefix_fn=MiniMaxText01LinearKernel.jit_linear_forward_prefix,
+        )
+        return out[num_decodes:], kv_cache.clone()
+
+    prefill_lens, offsets = [600, 300, 400], [512, 100, 256]
+    slots, ckpt_slots = [1, 2, 3, 4], [5, 6, NULL_BLOCK_ID]
+    qkv = [0.1 * torch.randn(1 + sum(prefill_lens), heads, dim) for _ in range(3)]
+    checkpoint = MambaPrefillCheckpointMetadata(
+        checkpoint_offsets=torch.tensor(offsets, dtype=torch.int32),
+        state_indices=torch.tensor(ckpt_slots, dtype=torch.int32),
+        offsets=offsets,
+    )
+    out, without_checkpoint = run(qkv, 1, prefill_lens, slots)
+    out_ckpt, with_checkpoint = run(qkv, 1, prefill_lens, slots, checkpoint)
+
+    starts = [1 + sum(prefill_lens[:i]) for i in range(len(prefill_lens))]
+    for start, offset, slot, ckpt_slot in zip(starts, offsets, slots[1:], ckpt_slots):
+        if ckpt_slot == NULL_BLOCK_ID:
+            continue
+        part = [x[start : start + offset] for x in qkv]
+        _, stopped = run(part, 0, [offset], [slot])
+        torch.testing.assert_close(
+            with_checkpoint[ckpt_slot], stopped[slot], rtol=0, atol=0
+        )
+        with_checkpoint[ckpt_slot] = without_checkpoint[ckpt_slot]
+    torch.testing.assert_close(with_checkpoint, without_checkpoint)
+
+    # Splitting changes the kernel's tiling, so the outputs differ by its
+    # rounding; the split must be no less accurate than the single pass.
+    ref = []
+    for start, n, slot in zip(starts, prefill_lens, slots[1:]):
+        q, k, v = (x[start : start + n].transpose(0, 1)[None].double() for x in qkv)
+        out_ref, _ = reference_lightning_attention(
+            q, k, v, slope.double(), 256, initial[slot][None].double()
+        )
+        ref.append(out_ref[0].transpose(0, 1).reshape(n, -1))
+    error = lambda o: (o.double() - torch.cat(ref)).abs().max()
+    assert error(out_ckpt) <= 2 * error(out)

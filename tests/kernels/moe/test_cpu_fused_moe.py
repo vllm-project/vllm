@@ -24,10 +24,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
+    CPUExpertsInt4,
     CPUExpertsInt8,
     CPUUnquantizedExperts,
     PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
+    ZenCPUExpertsInt8,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import (
     _softmax_topk,
@@ -744,4 +746,15 @@ def test_select_experts_sigmoid_scoring(with_bias):
     )
     torch.testing.assert_close(
         topk_weights.gather(1, order), expected_weights.gather(1, expected_order)
+    )
+
+
+@pytest.mark.parametrize(
+    "experts_cls", [CPUExpertsInt4, CPUExpertsInt8, ZenCPUExpertsInt8]
+)
+def test_cpu_quantized_experts_accept_deepseekv3_routing(experts_cls):
+    """Sigmoid + bias + grouped top-k routing (e.g. LFM2.5) is handled by the
+    router, so these experts should accept it."""
+    assert experts_cls._supports_routing_method(
+        RoutingMethodType.DeepSeekV3, None, None
     )

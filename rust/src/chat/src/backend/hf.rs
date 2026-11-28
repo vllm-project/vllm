@@ -114,9 +114,10 @@ impl HfChatBackend {
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new(
                 options.default_chat_template_kwargs,
             )),
-            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new(
-                options.default_chat_template_kwargs,
-            )),
+            RendererSelection::DeepSeekV41 => Arc::new(
+                DeepSeekV41ChatRenderer::new(options.default_chat_template_kwargs)
+                    .with_tokenizer(tokenizer.clone())?,
+            ),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
                 options.default_chat_template_kwargs,
             )?),

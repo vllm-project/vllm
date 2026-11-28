@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
 from vllm.v1.worker.utils import customize_attention_spec
 
@@ -45,6 +46,10 @@ class HYV4DFlyTargetReuse:
         self.config = config
 
         def target_attention(index: int) -> "HYV4MLAAttention":
+            if isinstance(target_layers[index], PPMissingLayer):
+                raise ValueError(
+                    f"DFly target layer {index} must be on the last pipeline stage"
+                )
             attn = target_layers[index].self_attn
             if not isinstance(attn, attention_cls):
                 raise ValueError(f"DFly target layer {index} is not HYV4 MLA")

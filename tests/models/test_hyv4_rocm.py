@@ -599,15 +599,8 @@ def _check_encoder_graph_replay(worker, batches):
     return hits
 
 
-@requires_gfx950
-def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) -> None:
-    """ROCm ViT encoder CUDA graphs (ROCM_AITER_FA varlen attention) replay
-    single and batched images like the eager tower; an image over the largest
-    budget falls back to eager."""
-    from functools import partial
-
-    with vllm_runner(
-        HY4_FLASH_FP8,
+def _encoder_graph_vl_kwargs(num_videos: int) -> dict:
+    return dict(
         load_format="dummy",
         dtype="bfloat16",
         hf_overrides=_small_hyv4_flash_vl_config,
@@ -616,7 +609,7 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
         max_num_batched_tokens=512,
         max_num_seqs=2,
         kv_cache_memory_bytes=512 * 1024 * 1024,
-        limit_mm_per_prompt={"image": 2, "video": 1},
+        limit_mm_per_prompt={"image": 2, "video": num_videos},
         mm_encoder_attn_backend="ROCM_AITER_FA",
         compilation_config=CompilationConfig(
             mode=CompilationMode.NONE,
@@ -625,7 +618,17 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
             encoder_cudagraph_token_budgets=[256, 1024],
             encoder_cudagraph_max_vision_items_per_batch=2,
         ),
-    ) as model:
+    )
+
+
+@requires_gfx950
+def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) -> None:
+    """ROCm ViT encoder CUDA graphs (ROCM_AITER_FA varlen attention) replay
+    single and batched images like the eager tower; an image over the largest
+    budget falls back to eager."""
+    from functools import partial
+
+    with vllm_runner(HY4_FLASH_FP8, **_encoder_graph_vl_kwargs(num_videos=1)) as model:
         results = model.llm.collective_rpc(
             partial(
                 _check_encoder_graph_replay,
@@ -637,3 +640,29 @@ def test_hyv4_flash_vl_encoder_graphs_match_eager(vllm_runner, hyv4_recipe_env) 
             )
         )
     assert results == [[1, 2, 0]]
+
+
+def _encoder_graph_hits(worker) -> int:
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    return manager.get_cumulative_stats()["graph_hits"]
+
+
+@requires_gfx950
+def test_hyv4_flash_vl_image_only_encoder_graphs(vllm_runner, hyv4_recipe_env) -> None:
+    """With videos disabled, as the recipe serves, an image chat request must
+    run through the image encoder CUDA graph."""
+    from PIL import Image
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_pil", "image_pil": Image.new("RGB", (64, 64))},
+                {"type": "text", "text": "Describe the image."},
+            ],
+        }
+    ]
+    with vllm_runner(HY4_FLASH_FP8, **_encoder_graph_vl_kwargs(num_videos=0)) as model:
+        outputs = model.llm.chat(messages, SamplingParams(max_tokens=2))
+        assert len(outputs[0].outputs[0].token_ids) == 2
+        assert model.llm.collective_rpc(_encoder_graph_hits) == [1]

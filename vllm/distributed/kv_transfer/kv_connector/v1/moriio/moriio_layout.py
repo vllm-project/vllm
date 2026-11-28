@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    group_kernel_blocks,
 )
 
 
@@ -272,21 +273,79 @@ def get_layer_transfer_geometry(
     if (
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
+        and shape[0] > 0
         and shape[1] == spec.num_heads
-        and shape[2] == spec.num_states
+        and 0 < shape[2] <= spec.num_states
+        and spec.num_states % shape[2] == 0
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        num_blocks, num_heads, num_states, content_dim = shape
-        slot_size_bytes = num_heads * content_dim * element_size
-        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        kernel_blocks_per_block = spec.num_states // shape[2]
+        if shape[0] % kernel_blocks_per_block:
+            raise ValueError(
+                f"Unsupported MoRIIO cache shape for layer {layer_name}: "
+                f"{tuple(shape)} does not form complete groups of "
+                f"{kernel_blocks_per_block} kernel blocks"
+            )
+        num_blocks = shape[0] // kernel_blocks_per_block
+        if spec.num_head_slots == 2 and stride[1] >= stride[0]:
+            # LHBNC stores all K blocks before all V blocks. Each plane's
+            # base depends on its own pool size, so transfer them separately.
+            plane_block_size = shape[2] * shape[3]
+            expected_stride = (
+                plane_block_size,
+                num_blocks * plane_block_size,
+                shape[3],
+                1,
+            )
+            block_len = plane_block_size * element_size
+            if kernel_blocks_per_block != 1 or stride != expected_stride:
+                raise ValueError(
+                    f"MoRIIO K/V planes for layer {layer_name} must be dense "
+                    "with unsplit blocks"
+                )
+            return LayerTransferGeometry(
+                num_blocks=num_blocks,
+                block_size=spec.block_size,
+                block_len=block_len,
+                slot_size_bytes=shape[3] * element_size,
+                block_stride=stride[0],
+                local_kv_stride=stride[1],
+                remote_kv_stride=stride[0] * (remote_num_blocks or num_blocks),
+                transfers_per_block=2,
+                regions_per_block=2,
+                split_kv_regions=False,
+            )
+        grouped = group_kernel_blocks(kv_cache, num_blocks)
+        block_stride = grouped.stride(0)
+        slot_size_bytes = shape[1] * shape[3] * element_size
+        # Include padding between kernel pages, but not after the last page.
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(grouped.shape[1:], grouped.stride()[1:])
+        )
         block_len *= element_size
+        if kernel_blocks_per_block > 1:
+            stride_bytes = block_stride * element_size
+            last_block_end = (num_blocks - 1) * stride_bytes + block_len
+            available_bytes = (
+                kv_cache.untyped_storage().nbytes()
+                - kv_cache.storage_offset() * element_size
+            )
+            if (
+                stride_bytes != spec.page_size_bytes
+                or block_len > stride_bytes
+                or last_block_end > available_bytes
+            ):
+                raise ValueError(
+                    f"MoRIIO kernel blocks for layer {layer_name} must form "
+                    "non-overlapping manager pages within the registered storage"
+                )
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
+            block_stride=block_stride,
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,
@@ -679,6 +738,11 @@ def get_layer_head_layout(
         and shape[2] == spec.num_states
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
+        if spec.num_head_slots == 2 and shape[3] == spec.num_kv_heads * spec.head_size:
+            raise ValueError(
+                f"MoRIIO cannot slice KV heads of layer {layer_name}: "
+                "packed K/V planes do not expose per-head strides"
+            )
         return HeadLayout(
             num_heads=shape[1],
             num_tokens=shape[2],

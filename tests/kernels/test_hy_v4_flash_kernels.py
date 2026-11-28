@@ -451,6 +451,8 @@ _ENGRAM_PRIMES = {
 
 
 def _engram_config(**overrides):
+    from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
+
     config = dict(
         engram_layer_ids=list(_ENGRAM_LAYERS),
         engram_max_ngram_size=3,
@@ -463,9 +465,14 @@ def _engram_config(**overrides):
         vocab_size=_ENGRAM_VOCAB,
         hidden_size=96,
         hc_mult=4,
+        enable_ihc=True,
+        num_hidden_layers=max(_ENGRAM_LAYERS),
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
     )
     config.update(overrides)
-    return SimpleNamespace(**config)
+    return HYV4FlashConfig(**config)
 
 
 def _hash_state():
@@ -473,7 +480,7 @@ def _hash_state():
 
     with torch.device("cuda"):
         state = FlashNgramHashState(_engram_config())
-    # A short map: ids past it keep their own id, as for added tokens.
+    # A short map: ids past it hash as the pad id.
     state.load_lookup(torch.randint(0, 40, (_ENGRAM_VOCAB - 4,), dtype=torch.int32))
     state.visual_token_ids = (11, 12)
     return state
@@ -559,6 +566,20 @@ def test_engram_head_range_partitions_heads(sizes, tp):
     assert ranges[0][0] == 0 and ranges[-1][1] == len(sizes)
     assert all(lo < hi for lo, hi in ranges)
     assert all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
+
+
+def test_engram_lookup_hashes_ids_past_the_map_as_pad():
+    """Ids past the frozen map read as the pad id, as in the reference."""
+    from vllm.models.hy_v4_flash.common.engram import FlashEngramLayout
+
+    layout = FlashEngramLayout(_engram_config())
+    lookup = torch.arange(_ENGRAM_VOCAB - 4)
+    assert layout.load_lookup(lookup)
+
+    pad = layout.token_map[layout.pad_token_id]
+    assert layout.token_map == lookup.tolist() + [pad] * 4
+    bound = torch.iinfo(torch.int64).max
+    assert max(layout.token_map) * int(layout.multipliers.max()) <= bound
 
 
 def _engram_checkpoint(config, sizes, head_dim, fp8):
@@ -651,30 +672,39 @@ def _engram_reference(weights, hidden, hashes, hc, head_dim):
     ids=["fp8", "bf16", "fp8-uva"],
 )
 def test_engram_layer_matches_reference(
-    num_tokens, fp8, cpu_offload, dist_init, default_vllm_config
+    num_tokens, fp8, cpu_offload, dist_init, tmp_path
 ):
     """A checkpoint-loaded Engram layer matches the eager math, passes
     rows without live buckets through bit-exactly, and zeroes dead heads."""
+    from vllm.config import (
+        EngramConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
     from vllm.models.hy_v4_flash.common.engram import FlashEngram, FlashEngramLayout
     from vllm.utils.platform_utils import is_uva_available
 
     if cpu_offload and not is_uva_available():
         pytest.skip("Engram CPU offload requires UVA")
-    config = _engram_config(engram_fp8_embedding=fp8)
+    checkpoint_config = _engram_config(engram_fp8_embedding=fp8)
+    checkpoint_config.architectures = ["HYV4FlashForCausalLM"]
+    checkpoint_config.save_pretrained(tmp_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        engram_config=EngramConfig(cpu_offload=cpu_offload),
+    )
+    config = vllm_config.model_config.hf_text_config
     layout = FlashEngramLayout(config)
     layer_id = _ENGRAM_LAYERS[1]
     sizes = [p for order in _ENGRAM_PRIMES[str(layer_id)] for p in order]
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=config),
-        engram_config=SimpleNamespace(
-            disk_offload=False,
-            embedding_across_dp=False,
-            dp_shared_memory=False,
-            cpu_offload=cpu_offload,
-        ),
-        load_config=SimpleNamespace(load_format="auto"),
-    )
-    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
         layer = FlashEngram(vllm_config, layout, layer_id, "engram")
     weights = _engram_checkpoint(config, sizes, layout.head_dim, fp8)
     for name, value in weights.items():

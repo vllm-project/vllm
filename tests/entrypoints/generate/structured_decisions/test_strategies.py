@@ -31,8 +31,14 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     parse_questions,
 )
+from vllm.entrypoints.openai.decisions.adapters import make_read_question
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
-from vllm.entrypoints.openai.decisions.protocol import ChoiceAnswer, DecisionRequest
+from vllm.entrypoints.openai.decisions.protocol import (
+    ChoiceAnswer,
+    DecisionRequest,
+    ScoreLevel,
+    ScoreQuestion,
+)
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -970,40 +976,59 @@ async def test_d3_rejects_instructions(d3):
 
 
 @pytest.mark.parametrize(
-    "type_name,criteria,ask",
+    "q,ask",
     [
         (
-            "choice",
-            {"billing": "Charges", "app_fault": None},
+            build_question(
+                "q", "choice", "Which?", {"billing": "Charges", "app_fault": None}, 26
+            ),
             (
                 "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
                 "Reply with the option code only."
             ),
         ),
         (
-            "choice",
-            {"a": "Berlin", "b": "Paris"},
+            build_question("q", "choice", "Which?", {"a": "Berlin", "b": "Paris"}, 26),
             "Which?\n\nOptions:\na Berlin\nb Paris\n\nReply with the option code only.",
         ),
         (
-            "noul",
-            {"true": "asks to cancel", "false": "anything else"},
+            build_question(
+                "q",
+                "noul",
+                "Which?",
+                {"true": "asks to cancel", "false": "anything else"},
+                26,
+            ),
             (
                 "Which?\nYes: asks to cancel\nNo: anything else\n\n"
                 "Reply with yes or no only."
             ),
         ),
         (
-            "score",
-            ["low", "high"],
+            build_question("q", "score", "Which?", ["low", "high"], 26),
             "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
+        ),
+        pytest.param(
+            make_read_question(
+                0,
+                ScoreQuestion(
+                    type="score",
+                    instructions="Which?",
+                    levels=[
+                        ScoreLevel(label="damage", description="cosmetic"),
+                        ScoreLevel(label="damage", description="unusable"),
+                    ],
+                ),
+            ),
+            "Which?\n\n0 damage - cosmetic\n1 damage - unusable\n\n"
+            "Reply with a single digit 0-1 only.",
+            id="decisions-score-descriptions",
         ),
     ],
 )
-def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
+def test_liquid_prompt_matches_the_checkpoint(q, ask):
     # The wording of prompt.py in LiquidAI/d1-3B, which the model was trained on.
     strategy = object.__new__(LiquidStrategy)
-    q = build_question("q", type_name, "Which?", criteria, 26)
     assert strategy._content(strategy.render_state(None), q) == ask
     assert strategy._content("Hi.", q) == f"Hi.\n\n\nQUESTION:\n{ask}"
     state = strategy.render_state({"k": "é"})

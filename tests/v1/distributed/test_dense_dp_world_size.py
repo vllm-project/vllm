@@ -120,7 +120,7 @@ def test_dense_dp_world_size():
 def test_dense_dp_ranks_follow_dynamic_sd_schedule():
     """The DP ranks of a dense model draft as their dynamic speculative
     decoding schedule says instead of falling back to the static K."""
-    model = "vllm-project/tiny-random-LlamaForCausalLM"
+    model = "vllm/tiny-random-LlamaForCausalLM"
     # The schedule drafts no tokens at any batch size; the static K is 3.
     speculative_config = {
         "method": "draft_model",
