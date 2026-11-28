@@ -17,6 +17,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.deepseek_v41.amd import mono_decode as md
+from vllm.models.deepseek_v41.amd.asm import decode as asm_decode
 from vllm.platforms import current_platform
 
 M = 6
@@ -622,6 +623,8 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: tp)
+    # the asm decode layers' too (gfx950 at TP4 only)
+    monkeypatch.setattr(asm_decode, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(md, "_compute_units", lambda: cus)
     gpu = "gfx942" if cdna == 3 else "gfx950"
     monkeypatch.setattr(md, "_gpu_arch", lambda: gpu)
