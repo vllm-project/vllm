@@ -9,7 +9,7 @@ import gc
 import json
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +57,8 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
+    from torch.distributed import ProcessGroup
+
     from vllm.config import MultiModalConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
@@ -604,6 +606,26 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
+@contextmanager
+def _known_to_torch_distributed(group: "ProcessGroup | None") -> Iterator[None]:
+    """Keep a group in torch's world map for the duration of FlashInfer autotuning.
+
+    The autotuner calls `dist.get_backend`, which looks up the group in this map.
+    Outside warmup, vLLM uses the group's absence to identify stateless groups.
+    """
+    from torch.distributed import ProcessGroup
+    from torch.distributed.distributed_c10d import _world
+
+    if not isinstance(group, ProcessGroup) or group in _world.pg_map:
+        yield
+        return
+    _world.pg_map[group] = (group.name(), group.get_group_store())
+    try:
+        yield
+    finally:
+        del _world.pg_map[group]
+
+
 def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -683,7 +705,11 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
-        with torch.inference_mode(), autotune_context:
+        with (
+            torch.inference_mode(),
+            _known_to_torch_distributed(group),
+            autotune_context,
+        ):
             hisparse_enabled = (
                 runner.vllm_config.attention_config.hisparse_config is not None
             )
