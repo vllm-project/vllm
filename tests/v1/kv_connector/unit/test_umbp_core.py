@@ -869,6 +869,99 @@ def test_scheduler_emits_async_load_without_scheduled_model_tokens():
     assert scheduler._pending_loads == {}
 
 
+def test_lookup_asks_other_ranks_only_about_objects_the_first_rank_holds():
+    codec = BlockIdentityCodec(UMBPNamespace("two-phase"))
+    topology = RankTopology(tp_size=2)
+    handle = _SchedulerHandle({})
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}, tensor_parallel_size=2, world_size=2),
+        _kv_cache_config(),
+        handle,
+        codec,
+        topology,
+    )
+    objects = [
+        codec.keys_for_topology(block_hash, topology, (0,))
+        for block_hash in (b"a", b"b", b"c", b"d")
+    ]
+    (a0, a1), (b0, b1), (c0, c1), (d0, _) = objects
+    try:
+        # a is on both ranks, b only on the first, c only on the second, and
+        # the first rank cannot answer for d.
+        handle.hits = {a0: True, a1: True, b0: True, c1: True, d0: None}
+        hits = scheduler._lookup_all_ranks(objects)
+
+        assert handle.queries == [[a0, b0, c0, d0], [a1, b1]]
+        assert hits == [True, True, True, False, False, False, None, None]
+
+        handle.queries.clear()
+        handle.hits = {}
+        assert scheduler._lookup_all_ranks(objects) == [False] * 8
+        assert handle.queries == [[a0, b0, c0, d0]]
+    finally:
+        scheduler.close()
+
+
+def test_two_phase_lookup_keeps_each_objects_own_key_count():
+    # A TP-replicated group stores one key per object, the others one per rank.
+    codec = BlockIdentityCodec(
+        UMBPNamespace("two-phase-widths"), replicated_groups=frozenset({0})
+    )
+    topology = RankTopology(tp_size=2)
+    handle = _SchedulerHandle({})
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}, tensor_parallel_size=2, world_size=2),
+        _kv_cache_config(),
+        handle,
+        codec,
+        topology,
+    )
+    objects = [
+        codec.keys_for_topology(block_hash, topology, (group_id,))
+        for block_hash in (b"a", b"b")
+        for group_id in (0, 1)
+    ]
+    (a,), (a0, a1), (b,), (b0, b1) = objects
+    try:
+        handle.hits = {a: True, a0: True, a1: True, b1: True}
+        hits = scheduler._lookup_all_ranks(objects)
+
+        assert handle.queries == [[a, a0, b, b0], [a1]]
+        assert hits == [True, True, True, False, False, False]
+    finally:
+        scheduler.close()
+
+
+def test_two_phase_lookup_misses_an_object_only_the_first_rank_holds():
+    codec = BlockIdentityCodec(UMBPNamespace("two-phase-match"))
+    topology = RankTopology(tp_size=2)
+    block_hashes = [bytes([index]) for index in range(8)]
+    stored = {
+        key
+        for block_hash in block_hashes[:5]
+        for key in codec.keys_for_topology(block_hash, topology, (0,))
+    }
+    stored.add(codec.keys_for_topology(block_hashes[5], topology, (0,))[0])
+    handle = _SchedulerHandle(dict.fromkeys(stored, True))
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"mode": "embedded", "load_async": False},
+            tensor_parallel_size=2,
+            world_size=2,
+        ),
+        _kv_cache_config(),
+        handle,
+        codec,
+        topology,
+    )
+    request = make_request("req", num_tokens=97, block_hashes=block_hashes)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (80, False)
+    finally:
+        scheduler.close()
+    assert all(":tp0:" in key for key in handle.queries[0])
+
+
 def test_load_batch_metadata_roundtrip_preserves_destinations_and_identity():
     batch = BlockLoadBatch(["g1", "g0"], [7, 3], [1, 0], "r")
     meta = UMBPConnectorMetadata(load_requests={"r": batch})

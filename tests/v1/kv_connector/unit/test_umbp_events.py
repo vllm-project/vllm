@@ -204,12 +204,19 @@ def test_scheduler_emits_only_objects_stored_by_every_worker():
         world_size=2,
     )
     config.kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    codec = BlockIdentityCodec(UMBPNamespace("store-quorum"))
+    topology = RankTopology(tp_size=2)
+    stored = {
+        key
+        for block_hash in (b"a", b"b")
+        for key in codec.keys_for_topology(block_hash, topology, (0,))
+    }
     scheduler = UMBPStoreConnectorScheduler(
         config,
         _kv_cache_config(),
-        _SchedulerHandle([True, True]),
-        BlockIdentityCodec(UMBPNamespace("store-quorum")),
-        RankTopology(tp_size=2),
+        _SchedulerHandle(dict.fromkeys(stored, True)),
+        codec,
+        topology,
     )
     try:
         request = SimpleNamespace(
