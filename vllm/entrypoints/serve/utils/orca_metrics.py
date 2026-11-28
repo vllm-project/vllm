@@ -33,26 +33,35 @@ def create_orca_header(
     if metrics_format.lower() not in ["text", "json"]:
         logger.warning(
             "Warning: `%s` format is not supported in the ORCA response header",
-            format,
+            metrics_format,
         )
         return None
 
-    header = {}
-    orca_report = {
-        "named_metrics": {
-            metric_name: value
-            for metric_name, value in named_metrics
-            if isinstance(metric_name, str) and isinstance(value, float)
-        }
+    # Under data parallel each engine contributes one sample per mapped
+    # metric, so named_metrics can carry duplicate names. Collapse duplicates
+    # into one value per name: utilization-style metrics are averaged across
+    # engines, everything else (e.g. queue depth) is summed. This also keeps
+    # the JSON dict from silently dropping every engine but the last.
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for metric_name, value in named_metrics:
+        if isinstance(metric_name, str) and isinstance(value, float):
+            totals[metric_name] = totals.get(metric_name, 0.0) + value
+            counts[metric_name] = counts.get(metric_name, 0) + 1
+    aggregated_metrics = {
+        name: total / counts[name] if name.endswith("_perc") else total
+        for name, total in totals.items()
     }
+
+    header = {}
+    orca_report = {"named_metrics": aggregated_metrics}
     # output example:
     # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
     if metrics_format.lower() == "text":
         native_http_header = ", ".join(
             [
                 f"named_metrics.{metric_name}={value}"
-                for metric_name, value in named_metrics
-                if isinstance(metric_name, str) and isinstance(value, float)
+                for metric_name, value in aggregated_metrics.items()
             ]
         )
         header["endpoint-load-metrics"] = f"TEXT {native_http_header}"
@@ -62,7 +71,7 @@ def create_orca_header(
     elif metrics_format.lower() == "json":
         header["endpoint-load-metrics"] = f"JSON {json.dumps(orca_report)}"
 
-    logger.info("Created ORCA header %s", header)
+    logger.debug("Created ORCA header %s", header)
 
     return header
 
