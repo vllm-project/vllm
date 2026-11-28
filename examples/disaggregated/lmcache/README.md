@@ -65,7 +65,11 @@ NIXL on a single node.
 
 ### Prerequisites
 
-- Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
+- Install [LMCache](https://github.com/LMCache/LMCache). `LMCacheConnectorV1`
+  needs the lmcache version pinned in `requirements/kv_connectors.txt`
+  (`pip install "lmcache==0.5.7.post1"`); lmcache 0.5.8 removed the v1
+  adapter it depends on. To use a newer lmcache release, switch to
+  `LMCacheMPConnector` instead.
 - Install [NIXL](https://github.com/ai-dynamo/nixl).
 - At least 2 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
