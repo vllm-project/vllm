@@ -18,6 +18,7 @@ import regex as re
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -71,6 +72,7 @@ from .moe import Inkling2MoE, QuantFormat
 from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
 from .ops.attn_res import attn_res
+from .ops.linear import batch_invariant_linear
 from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.norm import rms_norm
 from .ops.seq_parallel import SeqParallel
@@ -87,17 +89,21 @@ class Inkling2LogitsProcessor(LogitsProcessor):
             UnquantizedEmbeddingMethod,
         )
 
-        if (
-            self.head_dtype == torch.float32
-            and isinstance(
-                lm_head.quant_method,
-                (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
-            )
-            and use_sm12x_bf16_ll_gemm(hidden_states, lm_head.weight, embedding_bias)
+        if self.head_dtype == torch.float32 and isinstance(
+            lm_head.quant_method,
+            (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
         ):
-            return sm12x_bf16_ll_gemm(
-                hidden_states, lm_head.weight, embedding_bias, out_dtype=torch.float32
-            )
+            if envs.VLLM_BATCH_INVARIANT:
+                return batch_invariant_linear(
+                    hidden_states, lm_head.weight, embedding_bias, torch.float32
+                )
+            if use_sm12x_bf16_ll_gemm(hidden_states, lm_head.weight, embedding_bias):
+                return sm12x_bf16_ll_gemm(
+                    hidden_states,
+                    lm_head.weight,
+                    embedding_bias,
+                    out_dtype=torch.float32,
+                )
         return super()._apply_head(lm_head, hidden_states, embedding_bias)
 
 

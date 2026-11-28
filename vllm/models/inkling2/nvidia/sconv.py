@@ -13,6 +13,7 @@ from typing import cast
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.utils import set_weight_attrs
@@ -23,7 +24,7 @@ from vllm.models.inkling.nvidia.sconv_swa_attn import (
 
 from .ops.allreduce import Inkling2AllReduceWorkspace, all_reduce_conv_mix
 from .ops.conv_mix import conv_mix as fused_conv_mix
-from .ops.linear import linear_k_groups
+from .ops.linear import batch_invariant_linear, linear_k_groups
 from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.sconv import short_conv
 from .ops.seq_parallel import SeqParallel
@@ -98,6 +99,8 @@ class Inkling2ShortConv(nn.Module):
         """Per-token tap deltas `(T, num_heads * W)` projected from `x`."""
         if not self.dynamic:
             return None
+        if envs.VLLM_BATCH_INVARIANT:
+            return batch_invariant_linear(x, self.weight_proj)
         # Same dispatch as the reference ``linear``: fp32 1024-wide K groups.
         if self.weight_proj.shape[1] >= 2560 and self.weight_proj.shape[0] not in (
             1,

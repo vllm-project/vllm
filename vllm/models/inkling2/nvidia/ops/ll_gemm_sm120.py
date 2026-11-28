@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
@@ -253,6 +254,7 @@ def use_qkv_bmm(
         and x_q.dtype == x_k.dtype == x_v.dtype == w.dtype == torch.bfloat16
         and x_q.stride(1) == x_k.stride(1) == x_v.stride(1) == w.stride(1) == 1
         and current_platform.is_device_capability_family(120)
+        and not envs.VLLM_BATCH_INVARIANT
     )
 
 
@@ -359,4 +361,5 @@ def use_sm12x_bf16_ll_gemm(
             )
         )
         and current_platform.is_device_capability_family(120)
+        and not envs.VLLM_BATCH_INVARIANT
     )

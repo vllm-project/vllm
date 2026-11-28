@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
@@ -51,6 +52,8 @@ def plan_attention(
     256 MiB). Split counts within 2% of the best estimate resolve to the
     smallest.
     """
+    if envs.VLLM_BATCH_INVARIANT:
+        return 1, False
     if is_local:
         return 1, True
     num_tokens = int(query_lens.sum())
@@ -395,7 +398,9 @@ def plan_decode_attention(
     but never less than one CTA per SM. The count depends only on the batch,
     not the KV lengths, so it holds for every replay of a CUDA graph.
     """
-    if max_query_len > _VERIFY_BLOCK_M // (num_heads // num_kv_heads):
+    if envs.VLLM_BATCH_INVARIANT or max_query_len > _VERIFY_BLOCK_M // (
+        num_heads // num_kv_heads
+    ):
         return 0
     work = num_reqs * num_kv_heads
     num_sms = num_compute_units()

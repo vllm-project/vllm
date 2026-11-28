@@ -16,6 +16,7 @@ holds for every replay of a CUDA graph.
 
 import torch
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 # The query tile of tml_fa4 that shears the relative logits.
@@ -337,7 +338,11 @@ def rel_attention(
         DRAFT=draft,
         MODE=mode,
         BLOCK_M=block_m,
-        BLOCK_N=64 if block_m >= 128 else 128 if block_m <= 32 else 64,
+        BLOCK_N=64
+        if envs.VLLM_BATCH_INVARIANT or block_m >= 128
+        else 128
+        if block_m <= 32
+        else 64,
         num_warps=8 if block_m >= 128 else 4,
         num_stages=2,
     )
