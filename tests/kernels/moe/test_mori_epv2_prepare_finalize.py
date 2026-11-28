@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
+import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_common as mori_common
 import vllm.utils.import_utils as import_utils
 from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
@@ -68,10 +68,10 @@ def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
         ctx = SimpleNamespace(
             dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=counts)
         )
-    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(mori_epv2, "get_forward_context", lambda: ctx)
+    monkeypatch.setattr(mori_common, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(mori_common, "get_forward_context", lambda: ctx)
     monkeypatch.setattr(
-        mori_epv2, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
+        mori_common, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     prepare_finalize = _make_pf(op, **pf_kwargs)
