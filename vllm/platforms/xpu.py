@@ -226,6 +226,9 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.debug_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif selected_backend == AttentionBackendEnum.XPU_ATTN:
+            logger.debug_once("Using XPU_ATTN backend.")
+            return AttentionBackendEnum.XPU_ATTN.get_path()
         elif attn_selector_config.use_batch_invariant:
             # Flash Attention on XPU has not been validated for batch
             # invariance. Honor an explicit Flash Attention request;
