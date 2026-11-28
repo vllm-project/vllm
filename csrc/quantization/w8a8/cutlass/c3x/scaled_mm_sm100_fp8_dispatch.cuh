@@ -134,7 +134,7 @@ struct sm100_fp8_config_M256 {
 
 template <typename InType, typename OutType, bool EnableBias>
 struct sm100_fp8_config_M64_swap_ab {
-  // This config is for M in (16, 64] and K >= 4096
+  // This config is for M in (32, 64] and K >= 4096
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
@@ -183,6 +183,26 @@ struct sm100_fp8_config_M16_swap_ab {
 
   // Use ScaledEpilogueColumnBias instead of ScaledEpilogueBias when doing swap
   // AB
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogueColumnBias,
+                                TileShape, ClusterShape, KernelSchedule,
+                                EpilogueSchedule, true>,
+      cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                                ClusterShape, KernelSchedule, EpilogueSchedule,
+                                true>>;
+};
+
+template <typename InType, typename OutType, bool EnableBias>
+struct sm100_fp8_config_M32_swap_ab {
+  // M in (16, 32]
+  // 64-row tiles without a cluster double the CTA count over M64_swap_ab.
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_64, _32, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
+
   using Cutlass3xGemm = conditional_t<
       EnableBias,
       cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogueColumnBias,
@@ -256,6 +276,9 @@ inline void cutlass_gemm_sm100_fp8_dispatch(
   using Cutlass3xGemmM16SwapAB =
       typename sm100_fp8_config_M16_swap_ab<InType, OutType,
                                             EnableBias>::Cutlass3xGemm;
+  using Cutlass3xGemmM32SwapAB =
+      typename sm100_fp8_config_M32_swap_ab<InType, OutType,
+                                            EnableBias>::Cutlass3xGemm;
   using Cutlass3xGemmM64SwapAB =
       typename sm100_fp8_config_M64_swap_ab<InType, OutType,
                                             EnableBias>::Cutlass3xGemm;
@@ -273,8 +296,12 @@ inline void cutlass_gemm_sm100_fp8_dispatch(
     // m in [1, 16]
     return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM16SwapAB>(
         out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
+  } else if (m <= 32) {
+    // m in (16, 32]
+    return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM32SwapAB>(
+        out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
   } else if (m <= 64) {
-    // m in (16, 64]
+    // m in (32, 64]
     if (m == 64 && k < 4096) {
       // do not enable swap AB
       return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM64>(
