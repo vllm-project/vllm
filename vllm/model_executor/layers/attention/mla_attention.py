@@ -1164,6 +1164,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Opaque per-token byte formats stay as raw uint8
             "fp8_ds_mla",
             "nvfp4_ds_mla",
+            "nvfp4",
         ):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
@@ -2741,7 +2742,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
-        use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        # The fp8_ds_mla and nvfp4 context gathers always dequantize to BF16.
+        bf16_workspace = vllm_config.cache_config.cache_dtype in ("fp8_ds_mla", "nvfp4")
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
@@ -2755,9 +2757,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                dtype=torch.bfloat16
-                if use_packed_fp8_cache
-                else self.model_config.dtype,
+                dtype=torch.bfloat16 if bf16_workspace else self.model_config.dtype,
                 device=device,
             )
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
@@ -2772,7 +2772,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size,
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
+                dtype=torch.bfloat16 if bf16_workspace else self.q_data_type,
                 device=device,
             )
 
@@ -3289,7 +3289,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
-            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+            elif self.kv_cache_dtype in ("nvfp4_ds_mla", "nvfp4"):
                 ops.cp_gather_and_upconvert_nvfp4_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
@@ -3297,6 +3297,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     workspace_starts=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=k_scale,
                 )
             elif current_platform.is_cpu():
                 assert not is_quantized_kv_cache(self.kv_cache_dtype), (
@@ -3425,7 +3427,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
-            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+            elif self.kv_cache_dtype in ("nvfp4_ds_mla", "nvfp4"):
                 ops.cp_gather_and_upconvert_nvfp4_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
@@ -3433,6 +3435,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     workspace_starts=padded_local_cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=k_scale,
                 )
             elif is_quantized_kv_cache(self.kv_cache_dtype):
                 assert k_scale is not None

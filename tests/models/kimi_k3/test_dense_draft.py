@@ -196,7 +196,9 @@ def _kda_state(tp: int, num_spec: int) -> MambaSpec:
     )
 
 
-def _packed_block_size(monkeypatch, tp, state_bytes, speculative_config=None):
+def _packed_block_size(
+    monkeypatch, tp, state_bytes, speculative_config=None, mla_bytes=MLA_BYTES
+):
     monkeypatch.setattr(dsa_cache, "kimi_k3_indexer_uses_fp4", lambda _: False)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=K31_PACKED_TEXT_CONFIG),
@@ -204,7 +206,7 @@ def _packed_block_size(monkeypatch, tp, state_bytes, speculative_config=None):
         speculative_config=speculative_config,
     )
     block_size = dsa_cache.packed_dsa_block_size(
-        vllm_config, MLA_BYTES, state_bytes, 64
+        vllm_config, mla_bytes, state_bytes, 64
     )
     assert block_size is not None and block_size % 64 == 0
     return block_size
@@ -228,7 +230,18 @@ def test_packed_dsa_block_fits_kda_states_tightly_and_pairs_across_tp(
     assert all(block_sizes[tp] == block_sizes[16] * 16 // tp for tp in block_sizes)
 
 
-def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
+@pytest.mark.parametrize(
+    ("mla_cache", "draft_cache"),
+    [
+        # FlashMLA sparse's fp8_ds_mla, with the default fp8 draft.
+        (("fp8_ds_mla", torch.uint8, MLA_BYTES), ("fp8", torch.float8_e4m3fn, None)),
+        # SM10x's default fp8_e4m3, with an nvfp4 draft (352 B/token, not 576).
+        (("fp8_e4m3", torch.float8_e4m3fn, None), ("nvfp4", torch.uint8, 352)),
+    ],
+)
+def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(
+    monkeypatch, mla_cache, draft_cache
+):
     """A dense MLA draft (the K3.1 DSpark) groups with the target's DSA caches,
     widening every block row. The block must be sized for that row, or the KDA
     groups fill under 80% of it."""
@@ -236,7 +249,7 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
     draft_layers = 5
     speculative_config = SimpleNamespace(
         method="dspark",
-        kv_cache_dtype="fp8",
+        kv_cache_dtype=draft_cache[0],
         draft_model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(
                 kv_lora_rank=512, qk_rope_head_dim=64, num_hidden_layers=draft_layers
@@ -245,7 +258,7 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
     )
     kda = _kda_state(tp, num_spec)
     block_size = _packed_block_size(
-        monkeypatch, tp, kda.page_size_bytes, speculative_config
+        monkeypatch, tp, kda.page_size_bytes, speculative_config, mla_cache[2] or 576
     )
 
     def mla(head_size, dtype=torch.uint8, **kwargs):
@@ -258,11 +271,18 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
             **kwargs,
         )
 
+    def latent(cache):
+        cache_dtype, dtype, state_bytes = cache
+        return mla(
+            576,
+            dtype=dtype,
+            cache_dtype_str=cache_dtype,
+            state_content_bytes=state_bytes,
+        )
+
     specs = {}
     for i in K31_DSA_LAYERS:
-        specs[f"model.layers.{i}.self_attn"] = full_layer(
-            mla(576, cache_dtype_str="fp8_ds_mla", state_content_bytes=MLA_BYTES)
-        )
+        specs[f"model.layers.{i}.self_attn"] = full_layer(latent(mla_cache))
         specs[f"model.layers.{i}.indexer"] = full_layer(
             mla(INDEX_BYTES, cache_role=SparseCacheRole.INDEXER)
         )
@@ -271,13 +291,9 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
             replace(kda, block_size=block_size)
         )
     for i in range(draft_layers):
-        specs[f"draft.layers.{i}.self_attn"] = full_layer(
-            mla(
-                576,
-                dtype=torch.float8_e4m3fn,
-                cache_dtype_str="fp8",
-            )
-        )
+        specs[f"draft.layers.{i}.self_attn"] = full_layer(latent(draft_cache))
+    mla_page = specs[f"model.layers.{K31_DSA_LAYERS[0]}.self_attn"].spec.page_size_bytes
+    draft_page = specs["draft.layers.0.self_attn"].spec.page_size_bytes
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
@@ -292,8 +308,10 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
     # The draft shares the DSA row, and the block was sized for that row.
     dsa_group = next(g for g in groups if "draft.layers.0.self_attn" in g.layer_names)
     assert len(dsa_group.layer_names) == 2 * len(K31_DSA_LAYERS) + draft_layers
-    assert bytes_per_block == block_size * (
-        len(K31_DSA_LAYERS) * (MLA_BYTES + INDEX_BYTES) + draft_layers * 576
+    assert (
+        bytes_per_block
+        == len(K31_DSA_LAYERS) * (mla_page + block_size * INDEX_BYTES)
+        + draft_layers * draft_page
     )
     kda_groups = [g for g in groups if g.layer_names[0].endswith(".kda")]
     assert [len(g.layer_names) for g in kda_groups] == [23, 23, 23]

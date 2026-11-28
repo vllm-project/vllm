@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-// nvfp4_ds_mla KV cache writer and gather/upconvert reader.
+// nvfp4_ds_mla KV cache writer and gather/upconvert reader, which also serve
+// the dense-MLA nvfp4 KV cache.
 //
 // Separate TU because its e2m1 conversions are only accepted by ptxas for a
 // suffixed Blackwell target (sm_100a / sm_100f); only this file is compiled
@@ -46,6 +47,10 @@ namespace vllm {
 // and byte p holds the scale of element block 4 * (p & 7) + (p >> 3). Keep
 // nvfp4_sf_byte() in lockstep with its counterpart in FlashMLA
 // (csrc/sm100/decode/head64/config.h and tests/quant.py).
+//
+// The dense-MLA "nvfp4" cache (read by FlashInfer's Cake decode) has the same
+// bytes per token, but its scales are in plain order and it stores x / k_scale
+// for both NoPE and RoPE. The writer and reader below serve both formats.
 constexpr int kSfNopeOff = 256 + 64;
 
 __host__ __device__ constexpr int nvfp4_sf_byte(int s) {
@@ -86,10 +91,12 @@ nvfp4_pack16_e2m1_rn(const float (&vals)[16], float inv_sf) {
 #endif
 }
 
-// The e2m1 data and its e4m3 scale both convert to f16 and multiply there; the
-// product then goes f16 -> f32 -> bf16, as no f16 -> bf16 instruction exists.
+// The e2m1 data and its e4m3 scale both convert to f16 and multiply there
+// (exactly); the product then goes f16 -> f32 (times `scale`) -> bf16, as no
+// f16 -> bf16 instruction exists.
 __device__ __forceinline__ void nvfp4_unpack16_e2m1(uint64_t raw,
                                                     uint8_t sf_byte,
+                                                    float scale,
                                                     __nv_bfloat16 (&out)[16]) {
 #if VLLM_NVFP4_NATIVE_CVT
   const __half2_raw sf2_raw = __nv_cvt_fp8x2_to_halfraw2(
@@ -102,7 +109,8 @@ __device__ __forceinline__ void nvfp4_unpack16_e2m1(uint64_t raw,
     const __half2_raw v_raw = __nv_cvt_fp4x2_to_halfraw2(
         static_cast<__nv_fp4x2_storage_t>(raw >> (8 * i)), __NV_E2M1);
     const __half2 v = __hmul2(*reinterpret_cast<const __half2*>(&v_raw), sf2);
-    out2[i] = __float22bfloat162_rn(__half22float2(v));
+    const float2 f = __half22float2(v);
+    out2[i] = __float22bfloat162_rn(make_float2(f.x * scale, f.y * scale));
   }
 #else
   __trap();
@@ -126,11 +134,15 @@ __device__ __forceinline__ float nvfp4_tile_scale(const float* vals,
 // One CUDA block (64 threads) per token.
 // Warp 0: 32 threads, one 16-element NoPE tile each.
 // Warp 1: 32 threads, two RoPE elements each.
+// kDsMla writes nvfp4_ds_mla; otherwise the dense-MLA nvfp4 cache, which
+// stores x / *scale.
+template <bool kDsMla>
 __global__ void concat_and_cache_nvfp4_ds_mla_kernel(
     const __nv_bfloat16* __restrict__ kv_c,    // [num_tokens, 512]
     const __nv_bfloat16* __restrict__ k_pe,    // [num_tokens, 64]
     uint8_t* __restrict__ kv_cache,            // [num_blocks, block_size, 352]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const float* __restrict__ scale,           // [1] or nullptr
     const int block_stride,                    //
     const int entry_stride,                    //
     const int kv_c_stride,                     //
@@ -146,6 +158,7 @@ __global__ void concat_and_cache_nvfp4_ds_mla_kernel(
   const int64_t block_offset = slot_idx % block_size;
   uint8_t* token_ptr =
       kv_cache + block_idx * block_stride + block_offset * entry_stride;
+  const float inv_k_scale = kDsMla ? 1.0f : 1.0f / *scale;
 
   if (threadIdx.x < 32) {
     const int tile = threadIdx.x;
@@ -153,23 +166,24 @@ __global__ void concat_and_cache_nvfp4_ds_mla_kernel(
     float vals[16];
 #pragma unroll
     for (int i = 0; i < 16; i++) {
-      vals[i] = __bfloat162float(src[i]);
+      vals[i] = __bfloat162float(src[i]) * inv_k_scale;
     }
-    // `tile` is the element-block index; its scale byte is permuted.
+    // `tile` is the element-block index; nvfp4_ds_mla permutes its scale byte.
     const float sf = nvfp4_tile_scale(
-        vals, 6.0f, token_ptr + kSfNopeOff + nvfp4_sf_byte(tile));
+        vals, 6.0f,
+        token_ptr + kSfNopeOff + (kDsMla ? nvfp4_sf_byte(tile) : tile));
     const float inv_sf = 1.0f / sf;
     *reinterpret_cast<uint64_t*>(token_ptr + tile * 8) =
         nvfp4_pack16_e2m1_rn(vals, inv_sf);
   } else {
-    // Plain e4m3, unscaled. All 32 lanes take 2 elements each, matching the
-    // reader and concat_and_cache_ds_mla_kernel.
+    // Plain e4m3 (unscaled in nvfp4_ds_mla). All 32 lanes take 2 elements
+    // each, matching the reader and concat_and_cache_ds_mla_kernel.
     const int lane = threadIdx.x - 32;
     const __nv_bfloat16* src = k_pe + token_idx * k_pe_stride + lane * 2;
     uint8_t q[2];
 #pragma unroll
     for (int i = 0; i < 2; i++) {
-      const __nv_fp8_e4m3 v8(__bfloat162float(src[i]));
+      const __nv_fp8_e4m3 v8(__bfloat162float(src[i]) * inv_k_scale);
       q[i] = *reinterpret_cast<const uint8_t*>(&v8);
     }
     *reinterpret_cast<uint16_t*>(token_ptr + 256 + lane * 2) =
@@ -178,12 +192,16 @@ __global__ void concat_and_cache_nvfp4_ds_mla_kernel(
 }
 
 // One warp per token (mirrors cp_gather_and_upconvert_fp8_kv_cache).
+// kDsMla reads nvfp4_ds_mla; otherwise the dense-MLA nvfp4 cache, whose values
+// are multiplied back by *scale.
+template <bool kDsMla>
 __global__ void cp_gather_and_upconvert_nvfp4_kv_cache_kernel(
     const uint8_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 352]
     __nv_bfloat16* __restrict__ dst,          // [total_tokens, 576]
     const int32_t* __restrict__ block_table,  // [num_reqs, BLOCK_INDICES]
     const int32_t* __restrict__ workspace_starts,  // [num_reqs]
     const int32_t* __restrict__ seq_starts,        // [num_reqs] or nullptr
+    const float* __restrict__ scale,               // [1] or nullptr
     const int32_t num_reqs, const int32_t block_size,
     const int32_t total_tokens, const int64_t block_table_stride,
     const int64_t cache_block_stride, const int64_t cache_entry_stride,
@@ -216,25 +234,27 @@ __global__ void cp_gather_and_upconvert_nvfp4_kv_cache_kernel(
   const uint8_t* token_ptr = src_cache + physical_block * cache_block_stride +
                              offset_in_block * cache_entry_stride;
   __nv_bfloat16* dst_ptr = dst + out_token_id * dst_entry_stride;
+  const float k_scale = kDsMla ? 1.0f : *scale;
 
-  // `lane_id` is the element-block index, so its scale byte is permuted.
+  // `lane_id` is the element-block index; nvfp4_ds_mla permutes its scale byte.
   {
     const uint64_t raw =
         *reinterpret_cast<const uint64_t*>(token_ptr + lane_id * 8);
-    const uint8_t sf_byte = token_ptr[kSfNopeOff + nvfp4_sf_byte(lane_id)];
+    const uint8_t sf_byte =
+        token_ptr[kSfNopeOff + (kDsMla ? nvfp4_sf_byte(lane_id) : lane_id)];
     __nv_bfloat16 out[16];
-    nvfp4_unpack16_e2m1(raw, sf_byte, out);
+    nvfp4_unpack16_e2m1(raw, sf_byte, k_scale, out);
     int4* nope_dst = reinterpret_cast<int4*>(dst_ptr) + lane_id * 2;
     nope_dst[0] = *reinterpret_cast<const int4*>(&out[0]);
     nope_dst[1] = *reinterpret_cast<const int4*>(&out[8]);
   }
 
-  // RoPE is unscaled e4m3.
+  // RoPE is e4m3 (unscaled in nvfp4_ds_mla).
   {
     const __nv_fp8_e4m3* raw =
         reinterpret_cast<const __nv_fp8_e4m3*>(token_ptr + 256 + lane_id * 2);
-    const __nv_bfloat16 out[2] = {__float2bfloat16_rn(float(raw[0])),
-                                  __float2bfloat16_rn(float(raw[1]))};
+    const __nv_bfloat16 out[2] = {__float2bfloat16_rn(float(raw[0]) * k_scale),
+                                  __float2bfloat16_rn(float(raw[1]) * k_scale)};
     *reinterpret_cast<uint32_t*>(dst_ptr + 512 + lane_id * 2) =
         *reinterpret_cast<const uint32_t*>(out);
   }
@@ -243,32 +263,37 @@ __global__ void cp_gather_and_upconvert_nvfp4_kv_cache_kernel(
 void launch_concat_and_cache_nvfp4_ds_mla(const void* kv_c, const void* k_pe,
                                           void* kv_cache,
                                           const int64_t* slot_mapping,
-                                          int block_stride, int entry_stride,
-                                          int kv_c_stride, int k_pe_stride,
-                                          int block_size, int num_tokens,
-                                          cudaStream_t stream) {
+                                          const float* scale, int block_stride,
+                                          int entry_stride, int kv_c_stride,
+                                          int k_pe_stride, int block_size,
+                                          int num_tokens, cudaStream_t stream) {
   dim3 grid(num_tokens);
   dim3 block(64);  // warp 0: 32 NoPE tiles; warp 1: 4 RoPE tiles
-  concat_and_cache_nvfp4_ds_mla_kernel<<<grid, block, 0, stream>>>(
+  auto kernel = scale == nullptr ? concat_and_cache_nvfp4_ds_mla_kernel<true>
+                                 : concat_and_cache_nvfp4_ds_mla_kernel<false>;
+  kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(kv_c),
       reinterpret_cast<const __nv_bfloat16*>(k_pe),
-      reinterpret_cast<uint8_t*>(kv_cache), slot_mapping, block_stride,
+      reinterpret_cast<uint8_t*>(kv_cache), slot_mapping, scale, block_stride,
       entry_stride, kv_c_stride, k_pe_stride, block_size);
 }
 
 void launch_cp_gather_and_upconvert_nvfp4_kv_cache(
     const uint8_t* src_cache, void* dst, const int32_t* block_table,
     const int32_t* workspace_starts, const int32_t* seq_starts,
-    int32_t num_reqs, int32_t block_size, int32_t total_tokens,
-    int64_t block_table_stride, int64_t cache_block_stride,
-    int64_t cache_entry_stride, int64_t dst_entry_stride, cudaStream_t stream) {
+    const float* scale, int32_t num_reqs, int32_t block_size,
+    int32_t total_tokens, int64_t block_table_stride,
+    int64_t cache_block_stride, int64_t cache_entry_stride,
+    int64_t dst_entry_stride, cudaStream_t stream) {
   constexpr int warps_per_block = 8;
   const int grid_size = (total_tokens + warps_per_block - 1) / warps_per_block;
   const int block_size_threads = warps_per_block * 32;  // 256 threads
-  cp_gather_and_upconvert_nvfp4_kv_cache_kernel<<<grid_size, block_size_threads,
-                                                  0, stream>>>(
+  auto kernel = scale == nullptr
+                    ? cp_gather_and_upconvert_nvfp4_kv_cache_kernel<true>
+                    : cp_gather_and_upconvert_nvfp4_kv_cache_kernel<false>;
+  kernel<<<grid_size, block_size_threads, 0, stream>>>(
       src_cache, reinterpret_cast<__nv_bfloat16*>(dst), block_table,
-      workspace_starts, seq_starts, num_reqs, block_size, total_tokens,
+      workspace_starts, seq_starts, scale, num_reqs, block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride);
 }

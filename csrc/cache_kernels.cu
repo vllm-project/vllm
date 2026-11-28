@@ -1072,7 +1072,8 @@ void concat_and_cache_mla(
   const int64_t row_bytes = kv_cache.size(2) * kv_cache.element_size();
   const bool has_rope_tail = row_bytes == 656;
 
-  const bool is_nvfp4_ds_mla = kv_cache_dtype == "nvfp4_ds_mla";
+  const bool is_nvfp4_mla =
+      kv_cache_dtype == "nvfp4_ds_mla" || kv_cache_dtype == "nvfp4";
   if (kv_cache_dtype == "fp8_ds_mla") {
     STD_TORCH_CHECK(kv_lora_rank == 512,
                     "kv_lora_rank must be 512 for fp8_ds_mla");
@@ -1085,7 +1086,7 @@ void concat_and_cache_mla(
                     "kv_c.element_size() must be 2 for fp8_ds_mla");
     STD_TORCH_CHECK(k_pe.element_size() == 2,
                     "k_pe.element_size() must be 2 for fp8_ds_mla");
-  } else if (is_nvfp4_ds_mla) {
+  } else if (is_nvfp4_mla) {
     constexpr int bytes_per_token = 352;
     STD_TORCH_CHECK(kv_lora_rank == 512, "kv_lora_rank must be 512 for ",
                     kv_cache_dtype);
@@ -1123,23 +1124,24 @@ void concat_and_cache_mla(
     dim3 block(96);
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
-  } else if (is_nvfp4_ds_mla) {
+  } else if (is_nvfp4_mla) {
     // The kernels live in nvfp4_ds_mla_cache_kernels.cu, which is only built
     // when the target list contains an SM100 arch.
 #if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
     const cudaDeviceProp* props = get_device_prop();
-    STD_TORCH_CHECK(props->major == 10,
-                    "nvfp4_ds_mla KV cache requires SM100 (Blackwell); "
-                    "got SM",
+    STD_TORCH_CHECK(props->major == 10, kv_cache_dtype,
+                    " KV cache requires SM100 (Blackwell); got SM",
                     props->major, props->minor);
     vllm::launch_concat_and_cache_nvfp4_ds_mla(
         kv_c.data_ptr(), k_pe.data_ptr(), kv_cache.data_ptr(),
-        slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride,
-        kv_c_stride, k_pe_stride, block_size, num_tokens, stream);
+        slot_mapping.const_data_ptr<int64_t>(),
+        kv_cache_dtype == "nvfp4" ? scale.const_data_ptr<float>() : nullptr,
+        block_stride, entry_stride, kv_c_stride, k_pe_stride, block_size,
+        num_tokens, stream);
 #else
-    STD_TORCH_CHECK(false,
-                    "the nvfp4 ds_mla kv-cache format requires a CUDA build "
-                    "targeting SM100 (Blackwell)");
+    STD_TORCH_CHECK(false, "the ", kv_cache_dtype,
+                    " kv-cache format requires a CUDA build targeting SM100 "
+                    "(Blackwell)");
 #endif
   } else {
     dim3 grid(num_tokens);
@@ -1988,7 +1990,9 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size, std::optional<torch::stable::Tensor> seq_starts) {
+    int64_t batch_size, std::optional<torch::stable::Tensor> seq_starts,
+    const std::string& kv_cache_dtype,
+    std::optional<torch::stable::Tensor> scale) {  // [1] k_scale for "nvfp4"
   // The kernel lives in nvfp4_ds_mla_cache_kernels.cu, which is only built when
   // the target list contains an SM100 arch.
 #if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
@@ -1997,10 +2001,23 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
   const cudaStream_t stream = get_current_cuda_stream();
 
   const cudaDeviceProp* props = get_device_prop();
-  STD_TORCH_CHECK(props->major == 10,
-                  "nvfp4_ds_mla KV cache requires SM100 (Blackwell); "
-                  "got SM",
-                  props->major, props->minor);
+  STD_TORCH_CHECK(props->major == 10, kv_cache_dtype,
+                  " KV cache requires SM100 (Blackwell); got SM", props->major,
+                  props->minor);
+
+  const float* scale_ptr = nullptr;
+  if (kv_cache_dtype == "nvfp4") {
+    STD_TORCH_CHECK(scale.has_value(), "nvfp4 KV cache needs its k_scale");
+    STD_TORCH_CHECK(
+        scale.value().scalar_type() == torch::headeronly::ScalarType::Float,
+        "scale must be float32");
+    STD_TORCH_CHECK(src_cache.device() == scale.value().device(),
+                    "src_cache and scale must be on the same device");
+    scale_ptr = scale.value().const_data_ptr<float>();
+  } else {
+    STD_TORCH_CHECK(kv_cache_dtype == "nvfp4_ds_mla",
+                    "Unsupported kv_cache_dtype: ", kv_cache_dtype);
+  }
 
   int32_t block_size = src_cache.size(1);
   int32_t head_dim = dst.size(1);
@@ -2026,13 +2043,14 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
                   "src_cache and workspace_starts must be on the same device");
   STD_TORCH_CHECK(
       src_cache.scalar_type() == torch::headeronly::ScalarType::Byte,
-      "src_cache must be uint8 for the nvfp4 ds_mla format, but got ",
+      "src_cache must be uint8 for the ", kv_cache_dtype, " format, but got ",
       src_cache.scalar_type());
   STD_TORCH_CHECK(dst.scalar_type() == torch::headeronly::ScalarType::BFloat16,
                   "dst must be bfloat16");
   STD_TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
   STD_TORCH_CHECK(src_cache.size(2) == 352,
-                  "src_cache.size(2) must be 352 for the nvfp4 ds_mla format");
+                  "src_cache.size(2) must be 352 for the ", kv_cache_dtype,
+                  " format");
 
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
@@ -2040,6 +2058,9 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
   int64_t dst_entry_stride = dst.stride(0);
 
   const int total_tokens = dst.size(0);
+  if (total_tokens == 0) {
+    return;
+  }
 
   vllm::launch_cp_gather_and_upconvert_nvfp4_kv_cache(
       src_cache.const_data_ptr<uint8_t>(), dst.data_ptr(),
@@ -2047,13 +2068,13 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
       workspace_starts.const_data_ptr<int32_t>(),
       seq_starts.has_value() ? seq_starts.value().const_data_ptr<int32_t>()
                              : nullptr,
-      static_cast<int32_t>(batch_size), block_size, total_tokens,
+      scale_ptr, static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride, stream);
 #else
-  STD_TORCH_CHECK(false,
-                  "the nvfp4 ds_mla kv-cache format requires a CUDA build "
-                  "targeting SM100 (Blackwell)");
+  STD_TORCH_CHECK(false, "the ", kv_cache_dtype,
+                  " kv-cache format requires a CUDA build targeting SM100 "
+                  "(Blackwell)");
 #endif
 }
 
