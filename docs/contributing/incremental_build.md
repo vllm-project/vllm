@@ -24,6 +24,20 @@ Before setting up the incremental build:
 
 ## Setting up the CMake Build Environment
 
+### Inspecting build times
+
+For a Ninja build, summarize the recorded build steps without recompiling:
+
+```console
+python tools/report_build_time_ninja.py -C <build-directory>
+```
+
+The helper reads `.ninja_log` and reports the longest steps, parallelism, and
+build-step rate. A log with no valid build records reports that no steps were
+found. If all recorded steps have the same start and end timestamp, parallelism
+and build-step rate are reported as `N/A`: Ninja's millisecond timestamps do not
+provide a positive elapsed interval for those calculations.
+
 The incremental build process is managed through CMake. You can configure your build settings using a `CMakeUserPresets.json` file at the root of the vLLM repository.
 
 ### Generate `CMakeUserPresets.json` using the helper script
