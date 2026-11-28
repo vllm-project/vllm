@@ -60,6 +60,9 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
     # ShardQ computes every head for each rank's token slice.
     supports_shardq: ClassVar[bool] = True
+    # The sink-aware kernel has not been validated with HiSparse's
+    # host-backed prefill path; keep the combination closed.
+    supports_shardq_with_hisparse: ClassVar[bool] = False
 
     def __init__(
         self,
