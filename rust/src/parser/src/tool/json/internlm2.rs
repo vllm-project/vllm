@@ -38,12 +38,8 @@ const INTERNLM2_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
 /// # Divergences from the Python reference
 ///
 /// This Rust port intentionally diverges from
-/// `vllm/tool_parsers/internlm2_tool_parser.py` in two user-visible ways:
+/// `vllm/tool_parsers/internlm2_tool_parser.py` in these user-visible ways:
 ///
-/// - **Parallel tool calls are supported.** Python silently drops every `<|action_start|>` block
-///   after the first (`current_tool_id > 0` returns an empty delta); this parser emits every
-///   well-formed block with incrementing `tool_index`. Models that legitimately emit multiple
-///   action blocks therefore produce more tool calls under Rust than under Python.
 /// - **End-marker bytes inside JSON string values are preserved.** Python does
 ///   `action.split("<|action_end|>")[0]` which truncates regardless of JSON context; this parser
 ///   scans matched braces and quotes so a literal `<|action_end|>` inside an arguments string is
