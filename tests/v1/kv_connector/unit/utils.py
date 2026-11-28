@@ -721,6 +721,9 @@ def make_nixl_push_scheduler(
     sched._finished_request_blocks = {}
     sched._newly_finished_push_blocks = {}
     sched._early_push = False
+    sched._push_trackers = {}
+    sched._push_job_aborts = set()
+    sched._push_lost = set()
     sched._push_registration_timeout = (
         push_registration_timeout
         if push_registration_timeout is not None

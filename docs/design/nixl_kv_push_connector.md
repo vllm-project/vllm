@@ -23,10 +23,35 @@ Under `MultiConnector`, set `transfer_mode` in the NIXL child's
 computes the end of its prompt, instead of after the request finishes. It is
 enabled on the producer by `enable_early_push` in `kv_connector_extra_config`
 (see [NIXL connector usage](../features/nixl_connector_usage.md)) and is off by
-default. Early push is used only in the configurations it is tested in: a
-device KV buffer, PP1, PCP1, DCP1, one transferable full-attention cache group,
-and P and D with the same TP, for requests with `max_tokens=1`. In other
-configurations a warning is logged and requests are pushed when they finish.
+default.
+
+Early push is enabled only when all of the following hold:
+
+* the connector is `NixlPushConnector` on the producer (`kv_producer`);
+* the KV buffer is on the device (`kv_buffer_device=cuda`);
+* PP=1, PCP=1, DCP=1;
+* P and D use the same TP size and the same KV cache group layout;
+* the request has `max_tokens=1`.
+
+In those configurations early push works for every transferable KV cache group
+layout: full-attention, sliding-window, SSM/Mamba hybrids, MLA, DSA, and
+speculative-decoding models. A push job carries the prompt's blocks for every
+transferable KV cache group (`transfer_group_ids`), selected the same way as
+the push at finish: each attention group's list is capped at the blocks
+covering the prompt, sliding-window groups keep their in-window tail, and SSM
+groups keep their state-bearing slot. Non-attention groups are not capped at
+the prompt, because their block table also holds the state and scratch slots
+that the clip must see. `max_tokens=1` makes the prompt the request's last
+computed blocks, so they are all D needs.
+
+Otherwise:
+
+* host KV buffers, PP>1, PCP>1, or DCP>1 log a warning and push requests when
+  they finish;
+* a request with `max_tokens != 1` is pushed when it finishes;
+* a P/D TP mismatch logs a warning and falls back to the push at finish;
+* a P/D KV cache group layout mismatch is refused by push mode (see
+  [Pipeline parallelism and hybrid KV caches](#pipeline-parallelism-and-hybrid-kv-caches)).
 
 Early push changes only when blocks are written. Block lifetimes are those of
 the push at finish: a running request owns its blocks, preemption and abort
@@ -34,9 +59,11 @@ release them, and a finished request holds them under the KV lease
 (`kv_lease_duration`), which D's heartbeats extend.
 
 * In the step that computes the end of the prompt, the scheduler hands the
-  prompt's blocks to the worker as a push job. The writer writes them to D,
-  without a notification, once the step's event completes and D has
-  registered.
+  prompt's blocks, clipped as described above, to the worker as a push job.
+  The writer writes them to D, without a notification, once the step's event
+  completes and D has registered. The push at finish instead sends the blocks
+  covering `request.num_computed_tokens`; with `max_tokens=1` both cover the
+  prompt.
 * D decodes once the normal completion notification arrives, so it must follow
   all of the request's data. The writer sends it with `send_notif` once every
   WRITE of the job is `DONE`. A notification attached to a WRITE would be sent
@@ -50,10 +77,13 @@ release them, and a finished request holds them under the KV lease
   notification fails, it may still have reached D, so the request is left to
   the lease, as a failed push is.
 * When a request with a push job is preempted or aborted, `handle_preemptions`
-  drops the job if it is still queued and waits for its submitted WRITEs
-  before the blocks can be reused. A preempted request is pushed again once
-  recomputed, unless D was already notified, which async scheduling allows
-  before the request finishes.
+  cancels the job: a queued job is dropped, a submitted one is still waited
+  for before the blocks can be reused, and D is not notified for it. A
+  request whose job was handed to the worker is not pushed early again; it is
+  pushed as a whole when it finishes after the recompute. A request preempted
+  before its job was handed over stays eligible for early push. A request D
+  was already notified for keeps that notification, which async scheduling
+  allows before the request finishes, and is not pushed again.
 
 D only reads its blocks after the completion notification, so the D-side
 scheduler and decode admission path are unchanged.

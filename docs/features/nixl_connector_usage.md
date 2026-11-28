@@ -167,7 +167,7 @@ NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require
 
 - `enable_early_push` (via `kv_connector_extra_config`, `NixlPushConnector` prefiller only): Write a request's KV blocks to the decoder in the prefill step that computes the end of its prompt, instead of after the request finishes. (Optional)
     - Default: `false`
-    - Configurations it does not support yet are pushed when the request finishes, with a warning. See [Early push](../design/nixl_kv_push_connector.md#early-push).
+    - Unsupported requests (for example `max_tokens != 1`) are pushed when they finish; unsupported engine configurations log a warning. See [Early push](../design/nixl_kv_push_connector.md#early-push) for supported configurations and fallbacks.
     - Example: `--kv-transfer-config '{"kv_connector": "NixlPushConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"enable_early_push": true}}'`
 
 ## Bidirectional KV Transfer (Multi-turn)
