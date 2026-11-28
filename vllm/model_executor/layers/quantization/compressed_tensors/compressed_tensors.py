@@ -75,7 +75,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
@@ -1319,6 +1319,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.q_scale = torch.nn.Parameter(
             torch.full((n_scales,), -1.0, requires_grad=False, dtype=torch.float32)
         )
+        # dummy weights leave the scales uncalibrated (1.0), not random
+        for scale in (layer.q_scale, layer.k_scale, layer.v_scale):
+            set_weight_attrs(scale, {"dummy_weight_value": 1.0})
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
         # supported. We need to create them here to enable loading of llm-compressor
