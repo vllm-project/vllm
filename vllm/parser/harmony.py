@@ -21,6 +21,7 @@ from xgrammar.structural_tag import (
     OrFormat,
     SequenceFormat,
     TagFormat,
+    TokenFormat,
 )
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -449,6 +450,18 @@ _FUNCTION_CALL_BEGINS = [
 _ANY_CONTENT = AnyTextFormat()
 
 
+def _json_message(begin: str, content: JSONSchemaFormat) -> Format:
+    # Match <|end|> by token ID: as a string it can also be spelled with
+    # ordinary tokens, which the Harmony parser keeps as message text.
+    end_token = get_encoding().encode("<|end|>", allowed_special="all")[0]
+    return SequenceFormat(
+        elements=[
+            TagFormat(begin=begin, content=content, end=""),
+            OptionalFormat(content=TokenFormat(token=end_token)),
+        ]
+    )
+
+
 def _assemble_tag(
     allow_analysis: bool, allow_commentary: bool, content: Format
 ) -> StructuralTag:
@@ -518,14 +531,13 @@ def get_harmony_structural_tag(
         )
     else:
         tags = [
-            TagFormat(
+            _json_message(
                 begin=pattern.format(
                     name=tool.function.name, channel=channel, constrain=constrain
                 ),
                 content=JSONSchemaFormat(
                     json_schema=get_function_parameters(tool.function)
                 ),
-                end=_END_TAG,
             )
             for tool in tools
             for pattern in _FUNCTION_CALL_BEGINS
@@ -563,10 +575,9 @@ def _adjust_output_format(
     if isinstance(final_content, JSONSchemaFormat):
         content = OrFormat(
             elements=[
-                TagFormat(
+                _json_message(
                     begin=_FINAL_BEGIN.format(constrain=constrain),
                     content=final_content,
-                    end=_END_TAG,
                 )
                 for constrain in _JSON_CONSTRAINS
             ]
