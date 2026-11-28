@@ -544,8 +544,8 @@ class EngineArgs:
     data_parallel_size_local: int | None = None
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
-    data_parallel_coordinator_ready_timeout_seconds: int = (
-        ParallelConfig.data_parallel_coordinator_ready_timeout_seconds
+    data_parallel_coordinator_timeout: int = (
+        ParallelConfig.data_parallel_coordinator_timeout
     )
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
@@ -1289,8 +1289,8 @@ class EngineArgs:
             "must use the same port.",
         )
         parallel_group.add_argument(
-            "--data-parallel-coordinator-ready-timeout-seconds",
-            **parallel_kwargs["data_parallel_coordinator_ready_timeout_seconds"],
+            "--data-parallel-coordinator-timeout",
+            **parallel_kwargs["data_parallel_coordinator_timeout"],
         )
         parallel_group.add_argument(
             "--data-parallel-backend",
@@ -2616,9 +2616,7 @@ class EngineArgs:
             cpu_distributed_timeout_seconds=self.cpu_distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
-            data_parallel_coordinator_ready_timeout_seconds=(
-                self.data_parallel_coordinator_ready_timeout_seconds
-            ),
+            data_parallel_coordinator_timeout=self.data_parallel_coordinator_timeout,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,

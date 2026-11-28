@@ -3,7 +3,7 @@
 
 import os
 from contextlib import nullcontext
-from multiprocessing import connection
+from multiprocessing import connection, get_context
 from threading import Event
 from types import SimpleNamespace
 
@@ -18,7 +18,7 @@ from vllm.config.utils import hash_config
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
-from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.coordinator import _wait_for_zmq_addrs
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
     CoreEngine,
@@ -33,22 +33,28 @@ from vllm.v1.executor import UniProcExecutor, multiproc_executor
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def _stall_coordinator_startup(writer, release):
+    with writer:
+        release.wait()
+
+
 @pytest.mark.timeout(30)
-def test_dp_coordinator_wait_uses_configured_timeout():
-    coordinator = DPCoordinator(
-        ParallelConfig(
-            data_parallel_size=2,
-            data_parallel_size_local=2,
-            data_parallel_coordinator_ready_timeout_seconds=10,
-        )
-    )
-    try:
-        reader, writer = connection.Pipe(duplex=False)
-        # Keep the pipe open and empty so the wait can only end by timing out.
-        with reader, writer, pytest.raises(RuntimeError, match="timeout=10 seconds"):
-            coordinator._wait_for_zmq_addrs(reader)
-    finally:
-        coordinator.shutdown()
+def test_dp_coordinator_timeout_terminates_child():
+    ctx = get_context("spawn")
+    reader, writer = ctx.Pipe(duplex=False)
+    release = ctx.Event()
+    proc = ctx.Process(target=_stall_coordinator_startup, args=(writer, release))
+    with reader, writer:
+        proc.start()
+        writer.close()
+        try:
+            with pytest.raises(RuntimeError, match="timeout=1 seconds"):
+                _wait_for_zmq_addrs(proc, reader, timeout=1)
+            assert not proc.is_alive()
+        finally:
+            if proc.is_alive():
+                proc.kill()
+            proc.join()
 
 
 @pytest.mark.parametrize(
