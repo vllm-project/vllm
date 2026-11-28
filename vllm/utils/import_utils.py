@@ -519,9 +519,19 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
+def has_mooncake_ep() -> bool:
+    """Whether the optional Mooncake EP package is available."""
+    return _has_module("mooncake") and _has_module("mooncake.ep")
+
+
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
+
+
+def has_mooncake() -> bool:
+    """Whether the optional Mooncake TransferEngine is available."""
+    return _has_module("mooncake.engine")
 
 
 def has_moonep() -> bool:
@@ -678,6 +688,14 @@ def has_humming() -> bool:
 def has_quark():
     """Whether the optional `quark` package is available."""
     return _has_module("quark")
+
+
+def has_torchcodec_image_decoding() -> bool:
+    """Whether `torchcodec.decoders.decode_image` is available."""
+    if not _has_module("torchcodec.decoders"):
+        return False
+    decoders = importlib.import_module("torchcodec.decoders")
+    return hasattr(decoders, "decode_image")
 
 
 def check_torchcodec_available():

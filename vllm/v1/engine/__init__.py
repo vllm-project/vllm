@@ -66,6 +66,14 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+class EngineHealthState(enum.StrEnum):
+    """EngineCore answer to a `check_health_generate` utility call."""
+
+    OK = "ok"
+    BUSY = "busy"
+    SLEEPING = "sleeping"
+
+
 class FinishReason(enum.IntEnum):
     """Reason a request finished - stop, length, abort, error, or repetition.
 
@@ -90,7 +98,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +114,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -159,6 +167,20 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
+    # Encoder cache tokens a request's distinct multimodal items may need in
+    # total, for frontends without a VllmConfig (the Rust frontend). Set
+    # without chunked prefill, when they are all encoded in one step.
+    max_mm_embeds_per_request: int | None = None
+    # `DeviceConfig.device_type` of this engine (e.g. `cuda`, `cpu`), which the
+    # stat loggers of frontends without a VllmConfig (the Rust frontend) print.
+    device_type: str | None = None
 
 
 class EngineCoreRequest(

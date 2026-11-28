@@ -11,8 +11,8 @@ from vllm.config import PoolerConfig
 @pytest.mark.parametrize(
     "model",
     [
-        "vllm-project/Qwen2.5-1.5B-apeach",
-        "vllm-project/xlm-roberta-base-language-detection",
+        "vllm/Qwen2.5-1.5B-apeach",
+        "vllm/xlm-roberta-base-language-detection",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -54,7 +54,7 @@ def test_classify_models_using_activation(
 @pytest.mark.parametrize(
     "model",
     [
-        "vllm-project/multilingual-e5-small",
+        "vllm/multilingual-e5-small",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -107,6 +107,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_activation = vllm_model.token_classify(example_prompts)
@@ -115,6 +116,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_activation = vllm_model.token_classify(example_prompts)
@@ -134,7 +136,7 @@ def test_reward_models_using_activation(
 @pytest.mark.parametrize(
     "model",
     [
-        "vllm-project/multilingual-e5-small",
+        "vllm/multilingual-e5-small",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])

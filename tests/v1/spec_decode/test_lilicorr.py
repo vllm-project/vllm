@@ -716,6 +716,7 @@ def owned_head_model(monkeypatch):
                 draft_load_config=None,
                 attention_backend=None,
                 kv_cache_dtype=None,
+                apply_draft_eplb_overrides=lambda draft_config: draft_config,
             ),
             model_config=SimpleNamespace(
                 get_total_num_hidden_layers=lambda: 0,
@@ -761,7 +762,6 @@ def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
         VocabParallelEmbedding,
     )
     from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
-    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
     model, config = owned_head_model(owned)
     own_head = model.lm_head
@@ -778,12 +778,8 @@ def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
         model=SimpleNamespace(embed_tokens=embedding), lm_head=target_head
     )
     monkeypatch.setattr(
-        eagle_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
-    )
-    monkeypatch.setattr(
         dflash_utils, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
     )
-    monkeypatch.setattr(dflash_utils, "get_pp_safe_draft_load_config", lambda c: c)
     monkeypatch.setattr(dflash_utils, "get_model", lambda **kw: model)
     if owned:
 

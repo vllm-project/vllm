@@ -23,6 +23,7 @@ from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 from typing_extensions import TypedDict
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
@@ -33,6 +34,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
@@ -72,6 +74,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_down
@@ -101,7 +104,6 @@ logger = init_logger(__name__)
 # because the preprocessor relies on them.
 IMAGE_PROMPT = "<|image|>"
 VIDEO_PROMPT = "<|video|>"
-_MAX_VIDEO_FPS = 8
 
 
 class Molmo2ImageInputs(TensorSchema):
@@ -161,7 +163,7 @@ class Molmo2MultiModalInputs(TypedDict, total=False):
     videos: Molmo2VideoInputs | None
 
 
-@dataclass
+@dataclass(slots=True)
 class VitConfig:
     """Config for a vision transformer."""
 
@@ -186,7 +188,7 @@ class VitConfig:
         return h // self.image_patch_size, w // self.image_patch_size
 
 
-@dataclass
+@dataclass(slots=True)
 class AdapterConfig:
     """Config for a vit-llm adapter."""
 
@@ -201,7 +203,7 @@ class AdapterConfig:
     text_hidden_size: int = 3584
 
 
-@dataclass
+@dataclass(slots=True)
 class TextConfig:
     """Configuration for a text model transformer."""
 
@@ -1449,106 +1451,6 @@ def build_flat_video_bool_length(
     return flat, lengths
 
 
-def get_candidate_target_fps(
-    video_fps: int | float,
-    sampling_fps: int | float,
-    max_fps: int | float = _MAX_VIDEO_FPS,
-) -> list[float]:
-    """Return the subset of `video_fps` factors that remain multiples
-    of `sampling_fps`.
-
-    Examples:
-        >>> get_candidate_target_fps(video_fps=6, sampling_fps=2)
-        [2, 6]
-        >>> get_candidate_target_fps(video_fps=5, sampling_fps=1)
-        [1, 5]
-        >>> get_candidate_target_fps(video_fps=2, sampling_fps=2)
-        [2]
-        >>> get_candidate_target_fps(video_fps=5, sampling_fps=2)
-        Traceback (most recent call last):
-            ...
-        ValueError: sampling_fps=2 must divide video_fps=5 to produce
-            consistent frame steps.
-
-    """
-    video_fps = int(video_fps)
-    sampling_fps = int(sampling_fps)
-    max_fps = int(max_fps)
-
-    if sampling_fps is None:
-        raise ValueError("sampling_fps must be provided")
-    if video_fps <= 0 or sampling_fps <= 0:
-        raise ValueError(
-            "video_fps and sampling_fps must be positive "
-            f"(got {video_fps}, {sampling_fps})"
-        )
-    if video_fps % sampling_fps != 0:
-        raise ValueError(
-            f"sampling_fps={sampling_fps} must divide video_fps={video_fps}."
-        )
-
-    candidates = []
-    for candidate in range(sampling_fps, video_fps + 1, sampling_fps):
-        if candidate > max_fps:
-            break
-        if video_fps % candidate == 0:
-            candidates.append(float(candidate))
-
-    return candidates
-
-
-def get_target_fps(
-    video_fps: float,
-    max_frames: int,
-    total_frames: int,
-    frame_sample_mode: str,
-    candidate_target_fps: list[float],
-) -> float | None:
-    """Get the target fps that best spans the video and has the most frames sampled."""
-    num_frames_sampled = 0
-    selected_target_fps = None
-    for target_fps in candidate_target_fps:
-        step_size = max(int(video_fps / target_fps), 1)
-        num_frames_sampled_at_fps = int(total_frames / step_size)
-        if num_frames_sampled == 0:
-            if (
-                "uniform" in frame_sample_mode
-                and num_frames_sampled_at_fps > max_frames
-            ):
-                break
-            selected_target_fps = target_fps
-            num_frames_sampled = num_frames_sampled_at_fps
-
-        else:
-            # the candidate sampling fps increases so frame count can't decrease
-            assert num_frames_sampled <= num_frames_sampled_at_fps
-            if num_frames_sampled_at_fps > max_frames:
-                # choose the sampling fps that spans the video
-                continue
-
-            elif num_frames_sampled_at_fps > num_frames_sampled:
-                # both are less than max_frames; choose the one with higher
-                # density of frames sampled
-                selected_target_fps = target_fps
-                num_frames_sampled = num_frames_sampled_at_fps
-    return selected_target_fps
-
-
-def get_frame_times_and_chosen_fps(
-    selected_target_fps, total_frames, max_frames, video_fps
-):
-    if selected_target_fps is None:
-        frame_indices = np.linspace(
-            0, total_frames, max_frames, endpoint=False, dtype=int
-        )
-    else:
-        step_size = max(int(video_fps / selected_target_fps), 1)
-        frame_indices = np.arange(0, total_frames, step_size)
-    if len(frame_indices) > max_frames:
-        frame_indices = frame_indices[:max_frames]
-    return selected_target_fps, frame_indices
-
-
 class Molmo2ProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MultiModalDataParser(
@@ -1716,117 +1618,18 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
         processor = self.get_hf_processor()
         video_processor = processor.video_processor
 
         num_frames = video_processor.num_frames
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len, processor)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1),
+            max_total_frames // max(num_videos, 1),
             num_frames,
         )
         return max(max_frames_per_video, 1)
-
-    def _sample_frames(
-        self,
-        total_num_frames: int,
-        video_fps: float,
-        duration: float,
-        frame_sample_mode: str,
-        num_frames: int,
-        max_fps: int,
-        sampling_fps: int,
-    ) -> np.ndarray:
-        if frame_sample_mode == "uniform_last_frame" and max_fps is not None:
-            if total_num_frames <= 2:
-                indices = np.arange(total_num_frames).astype(int)
-            elif duration > (num_frames - 1) / max_fps:  # -1 to include the last frame
-                # uniform fallback
-                indices = np.linspace(
-                    0,
-                    total_num_frames - 1,
-                    num=min(num_frames, total_num_frames),
-                    endpoint=True,
-                ).astype(int)
-            else:
-                float_indices = np.arange(
-                    0.0,
-                    stop=total_num_frames - 1,
-                    step=float(video_fps / max_fps),
-                )
-                if np.round(float_indices[-1]) != total_num_frames - 1:
-                    float_indices = np.concatenate(
-                        [float_indices, [total_num_frames - 1]], axis=0
-                    )
-                indices = np.round(float_indices).astype(int)
-                assert indices[-1] < total_num_frames
-                assert len(float_indices) <= num_frames
-        elif frame_sample_mode == "uniform_last_frame":
-            indices = np.linspace(
-                0,
-                total_num_frames - 1,
-                num=min(num_frames, total_num_frames),
-                endpoint=True,
-            ).astype(int)
-        elif frame_sample_mode == "fps":
-            candidate_target_fps = get_candidate_target_fps(video_fps, sampling_fps)
-            selected_target_fps = get_target_fps(
-                video_fps,
-                num_frames,
-                total_num_frames,
-                frame_sample_mode,
-                candidate_target_fps,
-            )
-            _, indices = get_frame_times_and_chosen_fps(
-                selected_target_fps,
-                total_num_frames,
-                num_frames,
-                video_fps,
-            )
-        else:
-            raise NotImplementedError(frame_sample_mode)
-
-        return indices
-
-    def _get_video_second_idx(
-        self,
-        metadata: dict[str, Any],
-        do_sample_frames: bool | None = None,
-    ) -> list[float]:
-        processor = self.get_hf_processor()
-        video_processor = processor.video_processor
-
-        # metadata["fps"] refers to the true fps of the input video.
-        video_fps = metadata["fps"]
-        frames_indices = metadata.get("frames_indices")
-        if do_sample_frames is None:
-            do_sample_frames = metadata.get("do_sample_frames", False)
-
-        if do_sample_frames:
-            # Frame-based sampling is applied in HF video processor
-            total_num_frames = metadata["total_num_frames"]
-            duration = total_num_frames / video_fps
-            frame_sample_mode = video_processor.frame_sample_mode
-            num_frames = video_processor.num_frames
-            max_fps = video_processor.max_fps
-            sampling_fps = video_processor.sampling_fps
-            frames_indices = self._sample_frames(
-                total_num_frames,
-                video_fps,
-                duration,
-                frame_sample_mode,
-                num_frames,
-                max_fps,
-                sampling_fps,
-            )
-        else:
-            # Time-based sampling is done in vllm molmo2 video loader or molmo_utils
-            assert frames_indices is not None
-        timestamps = [frame_idx / video_fps for frame_idx in frames_indices]
-        return timestamps
 
 
 class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
@@ -1872,7 +1675,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
             processor = self.info.get_hf_processor()
             video_size = processor.video_processor.size
             target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
+                seq_len, num_videos
             )
 
             video_overrides = mm_options.get("video")
@@ -1977,6 +1780,55 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
 
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if (images := hf_data.get("images")) and limit > 0 and not is_profiling_media():
+            assert isinstance(images, Sequence)
+            image_processor = hf_processor.image_processor
+            resolved_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+            image_kwargs = resolved_kwargs.get("images_kwargs", {})
+            if not isinstance(image_kwargs, Mapping):
+                raise ValueError("images_kwargs must be a mapping.")
+
+            def image_option(name: str) -> Any:
+                return (
+                    image_kwargs.get(name)
+                    or resolved_kwargs.get(name)
+                    or getattr(image_processor, name)
+                )
+
+            size = image_kwargs.get("size", resolved_kwargs.get("size"))
+            if size is None:
+                size = image_processor.size
+            if not isinstance(size, Mapping) or not {"height", "width"} <= size.keys():
+                raise ValueError("Image size must contain 'height' and 'width' keys.")
+            crop_height, crop_width = size["height"], size["width"]
+            crop_pixels = crop_height * crop_width
+            max_crops = image_option("max_crops")
+            overlap_margins = image_option("overlap_margins")
+            patch_size = image_option("patch_size")
+            margin = patch_size * sum(overlap_margins)
+            crop_window = crop_height - margin
+            output_pixels = 0
+            image_items = ImageProcessorItems(images)
+            for image_idx in range(len(images)):
+                image_width, image_height = image_items.get_image_size(image_idx)
+                tiling_h, tiling_w = select_tiling(
+                    height=image_height - margin,
+                    width=image_width - margin,
+                    patch_size=crop_window,
+                    max_num_patches=max_crops,
+                )
+                output_pixels += (1 + int(tiling_h * tiling_w)) * crop_pixels
+
+            bytes_per_channel = max(4, torch.get_default_dtype().itemsize)
+            # The image processor retains individual crops while concatenating them.
+            if 2 * output_pixels * 3 * bytes_per_channel > limit:
+                raise VLLMValidationError(
+                    "Image preprocessing exceeds "
+                    f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+                    parameter="image",
+                )
+
         def patched_call(text=None, images=None, videos=None, **kwargs) -> BatchFeature:
             res = hf_processor(text=text, images=images, videos=videos, **kwargs)
 
@@ -1988,7 +1840,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             return res
 
         tokenizer = hf_processor.tokenizer
-        image_processor = hf_processor.image_processor
 
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, Sequence)
@@ -2001,6 +1852,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             video_num_patches_lst = []
             video_tokens_lst = []
             num_video_tokens_lst = []
+            video_prompt_ids = []
 
             for item in videos:
                 assert isinstance(item, tuple) and len(item) == 2
@@ -2016,7 +1868,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 # NOTE: a copy of hf_kwargs is created to update
                 # do_sample_frames, otherwise mm_hash for the object will be
                 # incorrect.
-                video_mm_kwargs = dict(**hf_kwargs)
+                video_mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
                 if "do_sample_frames" not in video_mm_kwargs:
                     # molmo_utils already has "do_sample_frames" in
                     # hf_kwargs, don't overwrite it.
@@ -2042,6 +1894,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 if input_ids[0, 0] == bos_token_id:
                     input_ids = input_ids[:, 1:]
 
+                video_prompt_ids.append(input_ids[0])
                 video_string = tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(VIDEO_PROMPT, video_string, 1)
 
@@ -2078,6 +1931,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_num_patches=torch.cat(video_num_patches_lst),
                 video_tokens=torch.cat(video_tokens_lst),
                 num_video_tokens=torch.cat(num_video_tokens_lst),
+                video_prompt_ids=video_prompt_ids,
             )
         else:
             all_video_outputs = dict()
@@ -2088,25 +1942,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             hf_kwargs,
         )
 
-        if (images := hf_data.get("images")) is not None:
-            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-            parsed_images = mm_items.get_items("image", ImageProcessorItems)
-            image_sizes = [
-                parsed_images.get_image_size(i) for i in range(len(parsed_images))
-            ]
-
-            # For each image: tiling_h * tiling_w + global view
-            tilings = [
-                self.info.select_tiling(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    image_processor=image_processor,
-                )
-                for image_size in image_sizes
-            ]
-            num_crops = torch.tensor(tilings).prod(-1) + 1
-            assert sum(num_crops) == len(processed_data["pixel_values"])
-            assert sum(num_crops) == processed_data["image_num_crops"].sum().item()
+        if hf_data.get("images") is not None:
+            num_crops = processed_data["image_num_crops"]
+            assert num_crops.sum().item() == len(processed_data["pixel_values"])
 
             image_grids = processed_data.pop("image_grids")
             image_num_pooled_patches = image_grids[:, :2].prod(dim=1) + image_grids[
@@ -2183,6 +2021,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 "video", num_video_tokens
             ),
             num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_prompt_ids=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -2213,88 +2052,21 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         ]
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_use_col_tokens = processor.image_use_col_tokens
-        use_single_crop_col_tokens = processor.use_single_crop_col_tokens
-        use_single_crop_start_token = processor.use_single_crop_start_token
-        video_use_col_tokens = processor.video_use_col_tokens
-        use_frame_special_tokens = processor.use_frame_special_tokens
 
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
 
-        image_processor = processor.image_processor
-        video_processor = processor.video_processor
-
         def get_image_replacement_molmo2(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image = images.get(item_idx)
-            image = exif_transpose(image)
-
-            resize_ncols, resize_nrows = self.info.get_base_grid_size(image_processor)
-            if use_single_crop_col_tokens is not None:
-                use_col_tokens = use_single_crop_col_tokens
-            else:
-                use_col_tokens = image_use_col_tokens
-            if use_single_crop_start_token:
-                start_id = low_res_im_start_id
-            else:
-                start_id = img_start_id
-            extra_row = [img_patch_id] * resize_ncols + [img_col_id] * int(
-                use_col_tokens
+            image_tokens = out_mm_kwargs["image"][item_idx]["image_tokens"].data
+            assert isinstance(image_tokens, torch.Tensor)
+            return PromptUpdateDetails.select_token_ids(
+                image_tokens.tolist(), emb_tok_ids
             )
-            extra_joint = [start_id] + extra_row * resize_nrows + [img_end_id]
-
-            image_size = get_image_size(image)
-
-            ncols, nrows = self.info.get_patches_grid_size(
-                image_height=image_size.height,
-                image_width=image_size.width,
-                image_processor=image_processor,
-            )
-
-            joint_row = [img_patch_id] * ncols + [img_col_id] * int(
-                image_use_col_tokens
-            )
-            joint = [img_start_id] + joint_row * nrows + [img_end_id]
-            img_token_ids = extra_joint + joint
-
-            return PromptUpdateDetails.select_token_ids(img_token_ids, emb_tok_ids)
 
         def get_video_replacement_molmo2(item_idx: int):
-            video, metadata = mm_items["video"][item_idx]
-            do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
-            assert do_sample_frames is None or isinstance(do_sample_frames, bool)
-
-            timestamps = self.info._get_video_second_idx(metadata, do_sample_frames)
-            ncols, nrows = self.info.get_base_grid_size(video_processor)
-
-            if use_frame_special_tokens:
-                start_id = frame_start_id
-                end_id = frame_end_id
-            else:
-                start_id = img_start_id
-                end_id = img_end_id
-
-            img_token_ids = []
-
-            for frame_idx, frame_time in enumerate(timestamps):
-                prev_space = " " if frame_idx > 0 else ""
-                frame_prefix = (
-                    prev_space + f"{frame_time:.1f} "
-                )  # explicit whitespace before/after image tokens
-
-                img_token_ids += tokenizer.encode(
-                    frame_prefix,
-                    add_special_tokens=False,
-                )
-
-                joint_row = [img_patch_id] * ncols + [img_col_id] * int(
-                    video_use_col_tokens
-                )
-                joint = [start_id] + nrows * joint_row + [end_id]
-                img_token_ids += joint
-
-            return PromptUpdateDetails.select_token_ids(img_token_ids, emb_tok_ids)
+            token_ids = out_mm_kwargs["video"][item_idx]["video_prompt_ids"].data
+            assert isinstance(token_ids, torch.Tensor)
+            return PromptUpdateDetails.select_token_ids(token_ids.tolist(), emb_tok_ids)
 
         return [
             PromptReplacement(

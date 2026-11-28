@@ -31,6 +31,17 @@ BF16(sum * k_scale / total) and LSE = max + log2(total / 448) (`push`: into the
 owners' mailbox slot, base 2, as DcpValue's push; else the latent [B, Q, 512] and
 natural-log LSE [B, Q] DcpValue reads).
 
+Wide CTAs (`tiles` > 1, SPARSE_TILES): a CTA takes `tiles` such 16-head tiles
+over the same keys. The KV rows it gathers feed every tile, QK runs on QK_WARPS
+warps per tile (warps a one-tile CTA leaves idle in QK), each PV warp reuses its
+transposed V fragments for every tile, and the CTA issues its q mailbox loads right
+after the PDL wait. `bulk` (SPARSE_BULK): each CTA stages its partials of a
+peer's columns in shared memory and moves them with one bulk shared::cluster copy
+per peer instead of per-thread st.async stores. Per head and key the operations
+and their order are unchanged (key split, chunks, QK chains, row maxima, P anchor
+and rounding, sums in warp order, PV k-steps, the merge in CTA order) and the
+partials move as the same FP32 bits, so both match the one-tile kernel bit for bit.
+
 Precision: FlashInfer's sparse MLA decode (E4M3 query and cache, FP32 logits, E4M3
 P at 448 of the running row max of its split, FP32 sums of the unquantized P, FP32
 accumulation, one BF16 rounding of the output). FlashInfer's split-KV partials are
@@ -58,6 +69,7 @@ from ..common.primitives import (
     bf16x2,
     bits_float,
     copy_g2s,
+    copy_s2cluster,
     float_bits,
     launch,
     ldmatrix,
@@ -78,7 +90,7 @@ SPLIT = 4  # CTAs per (16 heads, row): a cluster
 CHUNK = 64  # keys per CTA per shared-memory chunk (DCP8: ~2048 / 8 / SPLIT)
 PITCH = ROW + 16  # 37 x 16 B: the 8 rows of an ldmatrix hit distinct banks
 P_PITCH = CHUNK + 16  # 5 x 16 B
-HEADS = 16  # query heads per CTA (one m16 tile)
+HEADS = 16  # query heads per head tile (one m16 tile)
 QK_WARPS = CHUNK // 8  # one key n-tile each
 QK_CHAINS = 3  # QK accumulator chains (18 k-steps of 32 B)
 THREADS = 512
@@ -90,6 +102,15 @@ COLS = LATENT // SPLIT  # merged columns per CTA
 # (q1) 67.3 -> 63.7, 10 rows 65.6 -> 66.3, 16 rows 71.1 -> 80.6, 20 rows 77.4
 # -> 85.2 (past ~one wave of clusters the split-KV FlashInfer decode wins).
 SPARSE_DCP = "1-8:sparse"
+# Head tiles per CTA (batch tables per DCP size; default 1) and the bulk cluster
+# exchange (1: on) of the pushing decode. At 96 gathered heads one tile per CTA is
+# 24 CTAs per row; with one 512-thread CTA per SM the clusters of 7-8 rows take two
+# waves, two tiles per CTA one. Same results bit for bit. Set from a one-GPU
+# microbenchmark of the decode alone (DCP16: 96 gathered heads, ~130 keys per row
+# and rank, L2 flushed): two tiles + the bulk exchange ahead at 7-8 rows; at 4
+# rows (one wave already) one tile stays ahead.
+SPARSE_TILES = {16: "7-8:2"}
+SPARSE_BULK = {16: "7-8:1"}
 LOG2_P_SCALE = math.log2(448.0)  # E4M3 P at 448 of the row max (FlashInfer's)
 LN2 = math.log(2.0)
 
@@ -121,35 +142,56 @@ def transpose4(w):
 
 
 class SparseDcpDecode:
-    """`batch` rows, `heads` gathered query heads (a multiple of 16; the q
-    mailbox and outputs hold `padded` rows per token), the merge's row width
+    """`batch` rows, `heads` gathered query heads (a multiple of 16 `tiles`;
+    the q mailbox and outputs hold `padded` rows per token), the merge's row width
     `width` (its K). `push` (owner heads H, DCP, mailbox rows): push the
     merged rows and base-2 LSEs into their owners' DcpValue "bf16" mailbox and
-    re-arm the q mailbox rows read (DcpValue `pushed` then only merges)."""
+    re-arm the q mailbox rows read (DcpValue `pushed` then only merges).
+    `tiles`: 16-head tiles per CTA; `bulk`: the cluster exchange as one bulk
+    copy per peer CTA (see the module docstring)."""
 
-    def __init__(self, batch, heads, padded, width, push=None):
-        assert heads % HEADS == 0 and heads <= padded
+    def __init__(self, batch, heads, padded, width, push=None, tiles=1, bulk=False):
+        assert heads % (HEADS * tiles) == 0 and heads <= padded
+        assert QK_WARPS * tiles <= WARPS, tiles
         self.batch, self.heads, self.padded, self.width = batch, heads, padded, width
-        self.push = push
-        self.grid = (heads // HEADS * SPLIT, batch, 1)
+        self.push, self.tiles, self.bulk = push, tiles, bulk
+        self.cta_heads = HEADS * tiles
+        self.grid = (heads // self.cta_heads * SPLIT, batch, 1)
 
     @cute.jit
     def __call__(self, *args):
-        launch(self.kernel, args, self.grid, THREADS, cluster=(SPLIT, 1, 1))
+        if cutlass.const_expr(self.tiles > 1):
+            # One CTA per SM: the 128 registers per thread of that 512-thread
+            # launch (the tiles' accumulators would exceed it unbounded).
+            launch(
+                self.kernel,
+                args,
+                self.grid,
+                THREADS,
+                cluster=(SPLIT, 1, 1),
+                min_blocks_per_mp=1,
+            )
+        else:
+            launch(self.kernel, args, self.grid, THREADS, cluster=(SPLIT, 1, 1))
 
     @cute.kernel
     def kernel(self, args):
         query, kv, rows_in, valid_in = args[:4]
         scale_log2, out_scale = args[6:8]
+        T: cutlass.Constexpr = self.tiles
+        CH: cutlass.Constexpr = self.cta_heads
         smem = cutlass.utils.SmemAllocator()
         kvs = alloc(smem, Uint8, (CHUNK, PITCH), 128)
-        qs = alloc(smem, Uint8, (HEADS, PITCH), 128)
-        ps = alloc(smem, Uint8, (HEADS, P_PITCH), 128)
-        red = alloc(smem, Float32, (2, QK_WARPS, HEADS))
+        qs = alloc(smem, Uint8, (CH, PITCH), 128)
+        ps = alloc(smem, Uint8, (CH, P_PITCH), 128)
+        red = alloc(smem, Float32, (2, QK_WARPS, CH))
         # The cluster's partials of this CTA's columns: rows and (max, sum) per
         # source CTA, pushed by the sources (st.async on ``inbound``).
-        inbox = alloc(smem, Float32, (SPLIT, HEADS, COLS), 16)
-        stats = alloc(smem, Float32, (SPLIT, 2, HEADS))
+        inbox = alloc(smem, Float32, (SPLIT, CH, COLS), 16)
+        stats = alloc(smem, Float32, (SPLIT, 2, CH))
+        if cutlass.const_expr(self.bulk):
+            # This CTA's partials of the other CTAs' columns, one block per peer.
+            staged = alloc(smem, Float32, (SPLIT - 1, CH, COLS), 128)
         bar = smem.allocate(cutlass.Uint64, 8)
         inbound = smem.allocate(cutlass.Uint64, 8)
         tid, _, _ = cute.arch.thread_idx()
@@ -157,11 +199,18 @@ class SparseDcpDecode:
         tile, split = x // SPLIT, x % SPLIT
         lane, warp = tid % 32, tid // 32
         group, quarter = lane // 4, lane % 4
+        # QK and P: warp w < QK_WARPS * T takes head tile qt = w // QK_WARPS and
+        # keys 8 kw .. 8 kw + 7 (kw = w % QK_WARPS) of the chunk.
+        qt, kw = 0, warp
+        if cutlass.const_expr(T > 1):
+            qt, kw = warp // QK_WARPS, warp % QK_WARPS
         if tid == 0:
             cute.arch.mbarrier_init(bar, 1)
             cute.arch.mbarrier_init(inbound, 1)
             cute.arch.mbarrier_init_fence()
-            inbound_bytes = SPLIT * (HEADS * COLS + 2 * HEADS) * 4
+            inbound_bytes = SPLIT * (CH * COLS + 2 * CH) * 4
+            if cutlass.const_expr(self.bulk):  # its own columns: plain stores
+                inbound_bytes = ((SPLIT - 1) * CH * COLS + SPLIT * 2 * CH) * 4
             cute.arch.mbarrier_arrive_and_expect_tx(inbound, inbound_bytes)
         cute.arch.sync_threads()
         # Every CTA's ``inbound`` is armed before any peer pushes (waited below).
@@ -169,6 +218,19 @@ class SparseDcpDecode:
         # Nothing above reads the inputs: the kernel before may launch this early.
         cute.arch.griddepcontrol_wait()
         cute.arch.griddepcontrol_launch_dependents()
+        chunks16 = ROW // 16
+        q_loads: cutlass.Constexpr = -(-CH * chunks16 // THREADS)
+        q_words = []
+        if cutlass.const_expr(T > 1):
+            # The q mailbox rows of every tile in one round right after the wait,
+            # ahead of the counts and rows the KV gather waits on (a clamped index:
+            # no branch); stored to shared memory with the first chunk. Loading
+            # them after the gather instead spills more registers.
+            for i in cutlass.range_constexpr(q_loads):
+                h_flat = min(tid + THREADS * i, Int32(CH * chunks16 - 1))
+                h_row, h_chunk = h_flat // chunks16, h_flat % chunks16
+                h_src = at(query, b, tile * CH + h_row, 16 * h_chunk)
+                q_words.append(load_words(h_src, count=4, mutable=True))
         n = valid_in[b]
         n = max(min(n, Int32(self.width)), Int32(0))
         # This CTA's keys: [first, first + mine).
@@ -177,14 +239,15 @@ class SparseDcpDecode:
         mine = min(n - first, per)
         kv_base = kv.iterator.toint()
         neg_inf = Float32(-math.inf)
-        m_run = zeros(2, Float32)  # rows group, group + 8 (log2 units)
+        # Rows group, group + 8 of tile t at 2 t, 2 t + 1 (log2 units).
+        m_run = zeros(2 * T, Float32)
         m_run.fill(neg_inf)
-        l_run = zeros(2, Float32)
-        acc = zeros((4, 4), Float32)  # latent n-tiles j: columns 4 g + j
+        l_run = zeros(2 * T, Float32)
+        acc = zeros((T, 4, 4), Float32)  # tile t, latent n-tiles j: columns 4 g + j
         # ldmatrix lane addresses: A (16 heads x 32 B), B (8 keys x 2 x 32 B).
         a_row = lane % 8 + 8 * ((lane // 8) % 2)
         a_col = 16 * (lane // 16)
-        b_row = 8 * warp + lane % 8
+        b_row = 8 * kw + lane % 8
         b_col = 16 * (lane // 8)  # k-steps 2 i, 2 i + 1
         phase = Int32(0)
         chunks = (mine + CHUNK - 1) // CHUNK
@@ -206,27 +269,30 @@ class SparseDcpDecode:
             if c == 0:
                 # The q mailbox rows: generic loads, as the multicast stores that
                 # filled them and QueryWait's poll.
-                chunks16 = ROW // 16
-                for i in cutlass.range_constexpr(-(-HEADS * chunks16 // THREADS)):
+                for i in cutlass.range_constexpr(q_loads):
                     flat = tid + THREADS * i
-                    if flat < HEADS * chunks16:
+                    if flat < CH * chunks16:
                         q_row, q_chunk = flat // chunks16, flat % chunks16
-                        src = at(query, b, tile * HEADS + q_row, 16 * q_chunk)
-                        words = load_words(src, count=4, mutable=True)
+                        if cutlass.const_expr(T > 1):
+                            words = q_words[i]
+                        else:
+                            src = at(query, b, tile * CH + q_row, 16 * q_chunk)
+                            words = load_words(src, count=4, mutable=True)
                         dst = qs.iterator + q_row * PITCH + 16 * q_chunk
                         store_words(dst, words, shared=True)
             wait(bar, phase, scope="cta")
             phase = phase ^ 1
             cute.arch.sync_threads()  # the zeroed V rows
-            # ---- QK: warp w < QK_WARPS, keys 8 w .. 8 w + 7 --------------------------
+            # ---- QK: warp w < QK_WARPS * T, tile qt, keys 8 kw .. 8 kw + 7 -----------
             s = zeros(4, Float32)
-            if (warp < QK_WARPS) & (8 * warp < span):
+            if (warp < QK_WARPS * T) & (8 * kw < span):
                 parts = zeros((QK_CHAINS, 4), Float32)
                 for kp in cutlass.range_constexpr(ROW // 64):
                     k = ldmatrix(kvs.iterator + b_row * PITCH + 64 * kp + b_col)
                     for h in cutlass.range_constexpr(2):
                         ks = 2 * kp + h
-                        a = ldmatrix(qs.iterator + a_row * PITCH + 32 * ks + a_col)
+                        qk_row = 16 * qt + a_row  # this warp's tile
+                        a = ldmatrix(qs.iterator + qk_row * PITCH + 32 * ks + a_col)
                         b_frag = (k[2 * h], k[2 * h + 1])
                         mma_into(parts[ks % QK_CHAINS, None], a, b_frag, fp8=True)
                 for e in cutlass.range_constexpr(4):
@@ -237,7 +303,7 @@ class SparseDcpDecode:
             top = zeros(2, Float32)
             top.fill(neg_inf)
             for e in cutlass.range_constexpr(4):
-                key = 8 * warp + 2 * quarter + e % 2
+                key = 8 * kw + 2 * quarter + e % 2
                 value = neg_inf
                 if key < count:
                     value = s[e] * scale_log2
@@ -247,25 +313,34 @@ class SparseDcpDecode:
                 for shift in cutlass.range_constexpr(2):
                     other = cute.arch.shuffle_sync_bfly(top[r], 1 << shift)
                     top[r] = max(top[r], other)
-            if (quarter == 0) & (warp < QK_WARPS):
-                red[0, warp, group] = top[0]
-                red[0, warp, group + 8] = top[1]
+            if (quarter == 0) & (warp < QK_WARPS * T):
+                red[0, kw, 16 * qt + group] = top[0]
+                red[0, kw, 16 * qt + group + 8] = top[1]
             cute.arch.sync_threads()
-            alpha = zeros(2, Float32)
+            alpha = zeros(2 * T, Float32)
             alpha.fill(1.0)
-            m_new = zeros(2, Float32)
-            for r in cutlass.range_constexpr(2):
-                chunk_max = red[0, 0, group + 8 * r]
-                for w in cutlass.range_constexpr(1, QK_WARPS):
-                    chunk_max = max(chunk_max, red[0, w, group + 8 * r])
-                m_new[r] = max(m_run[r], chunk_max)
-                if m_run[r] != neg_inf:
-                    alpha[r] = cute.math.exp2(m_run[r] - m_new[r], fastmath=True)
+            m_new = zeros(2 * T, Float32)
+            for t in cutlass.range_constexpr(T):
+                for r in cutlass.range_constexpr(2):
+                    i = 2 * t + r
+                    chunk_max = red[0, 0, 16 * t + group + 8 * r]
+                    for w in cutlass.range_constexpr(1, QK_WARPS):
+                        chunk_max = max(chunk_max, red[0, w, 16 * t + group + 8 * r])
+                    m_new[i] = max(m_run[i], chunk_max)
+                    if m_run[i] != neg_inf:
+                        alpha[i] = cute.math.exp2(m_run[i] - m_new[i], fastmath=True)
+            own = m_new  # the running maxima of this warp's QK tile
+            if cutlass.const_expr(T > 1):
+                own = zeros(2, Float32)
+                for t in cutlass.range_constexpr(T):
+                    if qt == t:  # warp-uniform
+                        for r in cutlass.range_constexpr(2):
+                            own[r] = m_new[2 * t + r]
             # ---- P (E4M3 at 448 of the running max) and its FP32 sums -------------
             sums = zeros(2, Float32)
-            if (warp < QK_WARPS) & (8 * warp < span):
+            if (warp < QK_WARPS * T) & (8 * kw < span):
                 for r in cutlass.range_constexpr(2):
-                    bias = m_new[r] - Float32(LOG2_P_SCALE)
+                    bias = own[r] - Float32(LOG2_P_SCALE)
                     p = []
                     for e in cutlass.range_constexpr(2):
                         value = s[2 * r + e]
@@ -274,26 +349,28 @@ class SparseDcpDecode:
                             prob = cute.math.exp2(value - bias, fastmath=True)
                         sums[r] += prob
                         p.append(prob)
-                    key = 8 * warp + 2 * quarter
-                    dst = ps.iterator + (group + 8 * r) * P_PITCH + key
+                    key = 8 * kw + 2 * quarter
+                    dst = ps.iterator + (16 * qt + group + 8 * r) * P_PITCH + key
                     store_fp8_pair_shared(dst, p[0], p[1])
             for r in cutlass.range_constexpr(2):
                 for shift in cutlass.range_constexpr(2):
                     sums[r] += cute.arch.shuffle_sync_bfly(sums[r], 1 << shift)
-            if (quarter == 0) & (warp < QK_WARPS):
-                red[1, warp, group] = sums[0]
-                red[1, warp, group + 8] = sums[1]
+            if (quarter == 0) & (warp < QK_WARPS * T):
+                red[1, kw, 16 * qt + group] = sums[0]
+                red[1, kw, 16 * qt + group + 8] = sums[1]
             cute.arch.sync_threads()
-            for r in cutlass.range_constexpr(2):
-                total = red[1, 0, group + 8 * r]
-                for w in cutlass.range_constexpr(1, QK_WARPS):
-                    total += red[1, w, group + 8 * r]
-                l_run[r] = l_run[r] * alpha[r] + total
-                m_run[r] = m_new[r]
-                for j in cutlass.range_constexpr(4):
-                    for e in cutlass.range_constexpr(2):
-                        acc[j, 2 * r + e] *= alpha[r]
-            # ---- PV: warp w, latent columns 32 w .. 32 w + 31 ---------------------
+            for t in cutlass.range_constexpr(T):
+                for r in cutlass.range_constexpr(2):
+                    i = 2 * t + r
+                    total = red[1, 0, 16 * t + group + 8 * r]
+                    for w in cutlass.range_constexpr(1, QK_WARPS):
+                        total += red[1, w, 16 * t + group + 8 * r]
+                    l_run[i] = l_run[i] * alpha[i] + total
+                    m_run[i] = m_new[i]
+                    for j in cutlass.range_constexpr(4):
+                        for e in cutlass.range_constexpr(2):
+                            acc[t, j, 2 * r + e] *= alpha[i]
+            # ---- PV: warp w, latent columns 32 w .. 32 w + 31, every tile ----------
             col = 32 * warp + 4 * group
             for ks in cutlass.range_constexpr(CHUNK // 32):
                 if 32 * ks < span:
@@ -306,45 +383,95 @@ class SparseDcpDecode:
                             src = kvs.iterator + key * PITCH + col
                             words.append(load_words(src, count=1, shared=True)[0])
                         halves.append(transpose4(words))
-                    for j in cutlass.range_constexpr(4):
-                        b_frag = (halves[0][j], halves[1][j])
-                        mma_into(acc[j, None], a, b_frag, fp8=True)
-        # ---- push this CTA's partial to the column owners -----------------------
+                    for t in cutlass.range_constexpr(T):
+                        if cutlass.const_expr(t > 0):  # tile 0's P was read above
+                            pv_row = 16 * t + a_row
+                            pv_at = pv_row * P_PITCH + 32 * ks + a_col
+                            a = ldmatrix(ps.iterator + pv_at)
+                        for j in cutlass.range_constexpr(4):
+                            b_frag = (halves[0][j], halves[1][j])
+                            mma_into(acc[t, j, None], a, b_frag, fp8=True)
+        # ---- push this CTA's partials to the column owners -----------------------
+        if cutlass.const_expr(self.bulk):
+            self.stage(inbox, staged, acc, split, warp, group, quarter)
         cute.arch.cluster_wait()
+        if cutlass.const_expr(self.bulk):  # noqa: SIM102 (compile time)
+            if tid < SPLIT - 1:  # one copy per peer (staged block tid)
+                dst_cta = tid
+                if tid >= split:
+                    dst_cta = tid + 1
+                inbox_ptr, block_ptr = at(inbox, split, 0, 0), at(staged, tid, 0, 0)
+                size = CH * COLS * 4
+                copy_s2cluster(inbox_ptr, block_ptr, inbound, dst_cta, size=size)
         owner = warp // (COLS // 32)  # columns 32 w .. 32 w + 31
-        for r in cutlass.range_constexpr(2):
-            row = group + 8 * r
-            for e in cutlass.range_constexpr(2):
-                # acc[j, 2 r + e]: column 32 w + 8 q + 4 e + j
-                values = tuple(acc[j, 2 * r + e] for j in range(4))
-                column = 32 * (warp % (COLS // 32)) + 8 * quarter + 4 * e
-                dst = at(inbox, split, row, column)
-                push_float(dst, values, inbound, owner)
-            if (warp == 0) & (quarter == 0):
-                for peer in cutlass.range_constexpr(SPLIT):
-                    push_float(at(stats, split, 0, row), m_run[r], inbound, peer)
-                    push_float(at(stats, split, 1, row), l_run[r], inbound, peer)
+        for t in cutlass.range_constexpr(T):
+            for r in cutlass.range_constexpr(2):
+                row = 16 * t + group + 8 * r
+                if cutlass.const_expr(not self.bulk):
+                    for e in cutlass.range_constexpr(2):
+                        # acc[t, j, 2 r + e]: column 32 w + 8 q + 4 e + j
+                        values = tuple(acc[t, j, 2 * r + e] for j in range(4))
+                        column = 32 * (warp % (COLS // 32)) + 8 * quarter + 4 * e
+                        dst = at(inbox, split, row, column)
+                        push_float(dst, values, inbound, owner)
+                if (warp == 0) & (quarter == 0):
+                    for peer in cutlass.range_constexpr(SPLIT):
+                        push_float(
+                            at(stats, split, 0, row), m_run[2 * t + r], inbound, peer
+                        )
+                        push_float(
+                            at(stats, split, 1, row), l_run[2 * t + r], inbound, peer
+                        )
         wait(inbound, 0)  # every source's partial of these columns landed
-        self.merge(args, inbox, stats, tile, split, b, tid)
+        if cutlass.const_expr(self.bulk):
+            cute.arch.sync_threads()  # this CTA's own columns (plain stores)
+            # The copies into this CTA (out of the peers' ``staged``) completed:
+            # the peers may exit once every CTA has passed here.
+            cute.arch.cluster_arrive_relaxed()
+        for t in cutlass.range_constexpr(T):
+            self.merge(args, inbox, stats, tile, split, b, tid, t)
         if cutlass.const_expr(self.push is not None):  # noqa: SIM102 (compile time)
             # Every CTA of the cluster has read the q rows (it pushed after PV).
             if split == 0:
-                chunks16 = ROW // 16
-                for i in range(tid, HEADS * chunks16, THREADS):
+                for i in range(tid, CH * chunks16, THREADS):
                     q_row, q_chunk = i // chunks16, i % chunks16
                     sentinel = (Uint32(Q_SENT),) * 4
-                    q_dst = at(query, b, tile * HEADS + q_row, 16 * q_chunk)
+                    q_dst = at(query, b, tile * CH + q_row, 16 * q_chunk)
                     store_words(q_dst, sentinel)
+        if cutlass.const_expr(self.bulk):
+            cute.arch.cluster_wait()  # this CTA's ``staged`` is no longer read
 
     @cute.jit
-    def merge(self, args, inbox, stats, tile, split, b, tid):
-        """Columns split * COLS .. + COLS of the 16 heads over the cluster's
-        partials (FP32, in `inbox` / `stats`): thread t takes head t // 32, 4
-        columns."""
+    def stage(self, inbox, staged, acc, split, warp, group, quarter):
+        """`bulk`: this CTA's partials of every column (FP32 bits) into its own
+        `inbox` block (its columns) or the `staged` block of their CTA (the
+        peers in CTA order without this one), visible to the bulk copies."""
+        owner = warp // (COLS // 32)  # columns 32 w .. 32 w + 31
+        block = owner
+        if owner > split:
+            block = owner - 1
+        for t in cutlass.range_constexpr(self.tiles):
+            for r in cutlass.range_constexpr(2):
+                row = 16 * t + group + 8 * r
+                for e in cutlass.range_constexpr(2):
+                    words = tuple(float_bits(acc[t, j, 2 * r + e]) for j in range(4))
+                    column = 32 * (warp % (COLS // 32)) + 8 * quarter + 4 * e
+                    if owner == split:  # warp-uniform
+                        store_words(at(inbox, split, row, column), words, shared=True)
+                    else:
+                        store_words(at(staged, block, row, column), words, shared=True)
+        cute.arch.fence_proxy("async.shared", space="cta")
+        cute.arch.sync_threads()
+
+    @cute.jit
+    def merge(self, args, inbox, stats, tile, split, b, tid, t: cutlass.Constexpr[int]):
+        """Columns split * COLS .. + COLS of head tile `t`'s 16 heads over the
+        cluster's partials (FP32, in `inbox` / `stats`): thread i takes head
+        16 t + i // 32, 4 columns."""
         latent, lse_out = args[4:6]
         out_scale = args[7]
         neg_inf = Float32(-math.inf)
-        head, lane = tid // 32, tid % 32
+        head, lane = 16 * t + tid // 32, tid % 32
         assert COLS == 128, COLS  # 32 lanes x 4 columns
         col = split * COLS + 4 * lane
         maxima = [stats[c, 0, head] for c in range(SPLIT)]
@@ -371,7 +498,7 @@ class SparseDcpDecode:
         if total > Float32(0):
             lse2 = top - Float32(LOG2_P_SCALE) + cute.math.log2(total, fastmath=False)
             inverse = out_scale / total
-        gh = tile * HEADS + head
+        gh = tile * self.cta_heads + head
         words = (
             bf16x2(merged[0] * inverse, merged[1] * inverse),
             bf16x2(merged[2] * inverse, merged[3] * inverse),
@@ -404,10 +531,30 @@ def sparse_for(rows, gathered, padded):
     return fits and batch_table(SPARSE_DCP).get(rows) == "sparse"
 
 
+def sparse_layout(batch, heads, push=None):
+    """(head tiles per CTA, bulk exchange) of SparseDcpDecode over `batch` rows of
+    `heads` gathered heads: SPARSE_TILES / SPARSE_BULK of the pushing decode's
+    DCP size (`push`: (owner heads, DCP)), else (1, False)."""
+    if push is None:
+        return 1, False
+    dcp = push[1]
+    tiles = batch_table(SPARSE_TILES.get(dcp, "")).get(batch, 1)
+    if heads % (HEADS * tiles):
+        tiles = 1
+    bulk = batch_table(SPARSE_BULK.get(dcp, "")).get(batch, 0) == 1
+    return tiles, bulk
+
+
 @cache
-def compile_sparse(batch, heads, padded, width, cap, device, push=None):
+def compile_sparse(
+    batch, heads, padded, width, cap, device, push=None, tiles=None, bulk=None
+):
     """SparseDcpDecode of `batch` rows (the q mailbox of `cap` rows; `push`:
-    (owner heads, DCP) to push into the DcpValue mailbox)."""
+    (owner heads, DCP) to push into the DcpValue mailbox; `tiles` / `bulk`:
+    sparse_layout's unless given)."""
+    layout = sparse_layout(batch, heads, push)
+    tiles = layout[0] if tiles is None else tiles
+    bulk = layout[1] if bulk is None else bulk
     query = fake((cap, padded, ROW), None, torch.uint8)
     kv = fake((cute.sym_int(), ROW), (ROW, 1), torch.uint8)
     rows = fake((cute.sym_int(), width), (width, 1), torch.int32, 4)
@@ -415,7 +562,7 @@ def compile_sparse(batch, heads, padded, width, cap, device, push=None):
     latent = fake((batch, padded, LATENT))
     lse = fake((batch, padded), None, torch.float32, 4)
     owners = None if push is None else (*push, cap)
-    kernel = SparseDcpDecode(batch, heads, padded, width, owners)
+    kernel = SparseDcpDecode(batch, heads, padded, width, owners, tiles, bulk)
     args: tuple = (query, kv, rows, valid, latent, lse, Float32(1.0), Float32(1.0))
     if push is not None:
         peers = fake((push[1],), None, torch.int64, 8)

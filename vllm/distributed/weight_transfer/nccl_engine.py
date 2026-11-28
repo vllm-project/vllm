@@ -37,6 +37,7 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+    dtype_name,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -93,8 +94,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     every trainer rank before contacting the workers. The check stays until
     re-init, even if planning failed and the workers fell back to
     `load_weights`. The inference server
-    must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
-    refuse otherwise at init."""
+    must reload directly (the default with weight updates) and run without
+    EPLB; the workers refuse otherwise at init."""
 
 
 @dataclass
@@ -135,11 +136,6 @@ def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
     return {m.name: (m.dtype, tuple(m.shape)) for m in metadata}
 
 
-def _dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
-    return str(dtype).split(".")[-1]
-
-
 def _check_manifest(
     manifest: Manifest, sent: Iterable[tuple[str, torch.dtype, Sequence[int]]]
 ) -> None:
@@ -164,7 +160,7 @@ def _check_manifest(
 def _metadata_payload(
     metadata: Iterable[ParamMeta],
 ) -> list[tuple[str, str, list[int]]]:
-    return [(m.name, _dtype_name(m.dtype), list(m.shape)) for m in metadata]
+    return [(m.name, dtype_name(m.dtype), list(m.shape)) for m in metadata]
 
 
 class NCCLWeightTransferEngine(
@@ -223,6 +219,7 @@ class NCCLWeightTransferEngine(
         """
         from vllm.model_executor.model_loader.reload import check_plannable
 
+        self.shutdown()
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
@@ -562,6 +559,10 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
         reuse = self.is_sender and meta == self._sent_meta
         if self.is_sender:
+            if not reuse:
+                # the workers keep this update's metadata even if it fails:
+                # a failed update must not let the next one reuse older ones
+                self._sent_meta = None
             self.client.start_weight_update()
         for broadcaster, metas in slices:
             src = group_ranks.index(broadcaster)
@@ -570,8 +571,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             else:
                 self._broadcast(metas, src)
         if self.is_sender:
+            self._sent_meta = meta  # what the workers hold, whether finish succeeds
             self.client.finish_weight_update()
-            self._sent_meta = meta
         self._post_send_sync()
 
     def _send_update(self, meta: list[ParamMeta], src: int, reuse: bool) -> None:
@@ -582,7 +583,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         else:
             update_info = NCCLWeightTransferUpdateInfo(
                 names=[m.name for m in meta],
-                dtype_names=[_dtype_name(m.dtype) for m in meta],
+                dtype_names=[dtype_name(m.dtype) for m in meta],
                 shapes=[list(m.shape) for m in meta],
                 src=src,
             )
@@ -638,7 +639,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 # NCCL sends `numel` elements straight from `data_ptr()`, so a
                 # non-contiguous view would ship whatever follows its base
                 # pointer. Keep the copy referenced until the broadcast is
-                # enqueued. (The packed path linearizes in `pack_tensors`.)
+                # enqueued. (The packed path copies into its chunk buffer.)
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=src, stream=stream)
 

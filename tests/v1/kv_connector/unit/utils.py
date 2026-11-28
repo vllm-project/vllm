@@ -22,6 +22,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -38,12 +39,20 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
     MambaSpec,
-    SlidingWindowSpec,
+    ManagerConfig,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -53,7 +62,9 @@ from vllm.v1.structured_output import StructuredOutputManager
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
+        _RemoteStage,
     )
+    from vllm.forward_context import ForwardContext
 
 EOS_TOKEN_ID = 50256
 
@@ -139,11 +150,7 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype=dtype,
-        seed=42,
-        hf_overrides=hf_overrides or {},
+        model=model, dtype=dtype, seed=42, hf_overrides=hf_overrides or {}
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -187,19 +194,13 @@ def create_vllm_config(
     )
 
 
-def set_mtp_config(
-    config: VllmConfig,
-    num_lookahead: int = 1,
-    *,
-    disable_lookahead_block_hashes: bool = False,
-) -> None:
+def set_mtp_config(config: VllmConfig, num_lookahead: int = 1) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
     config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
-        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
     )
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
@@ -207,22 +208,46 @@ def set_mtp_config(
     config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
 
 
+def make_kv_cache_group(
+    layer_names: list[str],
+    spec: KVCacheSpec,
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """A group whose layers all share `spec`. Defaults to full attention,
+    or Mamba for a `MambaSpec`."""
+    if manager_cls is None:
+        manager_cls = (
+            MambaManager if isinstance(spec, MambaSpec) else FullAttentionManager
+        )
+    if manager_config is None:
+        manager_config = manager_cls.config()
+    layer = KVCacheLayerConfig(manager_config, spec)
+    return KVCacheGroup.from_layers({name: layer for name in layer_names}, **kwargs)
+
+
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
     hash_block_size: int | None = None,
+    scheduler_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
-    """Initialize Scheduler For Testing."""
+    """Initialize Scheduler For Testing.
+
+    `scheduler_block_size` defaults to `cache_config.block_size`; pass the LCM
+    of the group block sizes when they differ, as the engine does.
+    """
     block_size = vllm_config.cache_config.block_size
     if kv_cache_config is None:
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,  # A large number of blocks to hold all requests
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -239,9 +264,9 @@ def create_scheduler(
     return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=block_size,
+        block_size=scheduler_block_size or block_size,
         hash_block_size=hash_block_size,
     )
 
@@ -356,6 +381,22 @@ def create_model_runner_output(
     )
 
 
+class RegistersKVCacheTestConnector(ExampleConnector):
+    """External connector that registers the device KV cache for RDMA."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.REGISTERS
+
+
+class ExportsKVCacheTestConnector(ExampleConnector):
+    """External connector that exports the device KV cache to another process."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.EXPORTS_FD
+
+
 class TestExampleConnector(ExampleConnector):
     __test__ = False
 
@@ -365,6 +406,7 @@ class TestExampleConnector(ExampleConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ):
+        assert config.kv_transfer_config is not None
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
@@ -420,7 +462,7 @@ class TestExampleConnector(ExampleConnector):
         return attr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
@@ -489,7 +531,9 @@ class MockKVConnector(KVConnectorBase_V1):
             metadata.requests.append({"req_id": req.req_id})
         return metadata
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(
+        self, forward_context: "ForwardContext", **kwargs: object
+    ) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -517,12 +561,12 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["align", "none"] = "none",
+    enable_prefix_caching: bool = False,
 ) -> KVCacheConfig:
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0", "layer2"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=4,
                 head_size=16,
@@ -532,27 +576,29 @@ def make_kv_cache_config(
     ]
     if swa_enabled:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1", "layer3"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
-                    sliding_window=sw_size,
                 ),
+                SlidingWindowManager,
+                SlidingWindowManager.config(sliding_window=sw_size),
             )
         )
     if mamba_enabled:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba0", "mamba1"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
-                    mamba_cache_mode=mamba_cache_mode,
                 ),
+                MambaManager,
+                MambaManager.config(enable_prefix_caching=enable_prefix_caching),
             )
         )
     return KVCacheConfig(
@@ -581,6 +627,9 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -589,6 +638,7 @@ def make_nixl_scheduler(
     sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
+        num_reprefillable_tokens=0,
         num_hash_lookahead_tokens=0,
         cache_config=CacheConfig(block_size=16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -599,11 +649,11 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
+        sched._new_heartbeat_reqs = set()
         sched._kv_lease_duration = kv_lease_duration
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
-        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
@@ -632,6 +682,7 @@ def make_nixl_push_scheduler(
     `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
+    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
@@ -656,6 +707,9 @@ def make_nixl_push_scheduler(
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
     sched._bounded_replay = False
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,
@@ -669,6 +723,7 @@ def make_nixl_push_scheduler(
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_reprefillable_tokens = 0
     vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
@@ -688,6 +743,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
     return sched
@@ -713,9 +769,11 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._scheduled_writes = defaultdict(int)
     writer._scheduled_layers = defaultdict(set)
     writer._sealed_writes = {}
+    writer._transfer_states = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
-    writer.ensure_worker_started = lambda: None
+    # Tests execute write tasks directly, without starting a background thread.
+    writer._write_worker_started = True
     return writer
 
 
@@ -753,3 +811,33 @@ def region_pairs_by_index(
         partner=regions,
         groups_match=groups_match,
     )
+
+
+def remote_stage(
+    pairs: "_RegionPairs",
+    region_num_blocks: Sequence[int],
+    region_group_ids: Sequence[int] | None = None,
+    xfer_side_handles: dict[int, int] | None = None,
+) -> dict[int, "_RemoteStage"]:
+    """The stages of a PP=1 remote engine: one stage 0 pairing `pairs`.
+
+    `region_num_blocks` and `region_group_ids` describe the paired remote
+    regions; groups default to 0. `xfer_side_handles` maps remote TP rank to
+    its prepped dst handle."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteStage,
+    )
+
+    num_regions = len(pairs.remote_regions)
+    return {
+        0: _RemoteStage(
+            pp_rank=0,
+            pairs=pairs,
+            layers=[],
+            region_num_blocks=list(region_num_blocks),
+            region_group_ids=list(region_group_ids)
+            if region_group_ids is not None
+            else [0] * num_regions,
+            xfer_side_handles=dict(xfer_side_handles or {}),
+        )
+    }

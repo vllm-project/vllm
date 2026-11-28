@@ -60,7 +60,7 @@ if _fa4_available():
         FlashAttentionMetadataBuilder,
         _make_mm_prefix_mask_mod,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
     from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = torch.device("cuda:0")
@@ -499,10 +499,9 @@ def test_decode_only_batch_reports_no_ranges():
 @pytest.mark.parametrize(
     "head_size",
     [
-        # 128: FA4's default SM100 path (not the dedicated hd256 kernel), so
-        # paged KV + seqused_k works on B200 and H100. Non-paged mm_prefix
-        # cases in this file already use HEAD_SIZE=128.
         pytest.param(128, id="hd128"),
+        # 256: Gemma4 sliding-window head dim.
+        pytest.param(256, id="sliding_256"),
         # 512: Gemma4 global head dim; FA4 resolves on H100, skips on
         # Blackwell (TMEM).
         pytest.param(512, id="global_512"),
@@ -511,10 +510,7 @@ def test_decode_only_batch_reports_no_ranges():
 def test_mm_prefix_kv_cache_path(head_size: int):
     """FA4 + mask_mod + block_table matches a dense reference.
 
-    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
-    512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away `seqused_k`, which paged KV
-    requires.
+    Blackwell FA4 rejects 512 via TMEM, so that case runs on H100 only.
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
     `head_size` — `run_attention_backend` / `create_standard_kv_cache_spec`
@@ -550,12 +546,11 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     batch = BatchSpec(
         seq_lens=PAGED_SEQ_LENS, query_lens=PAGED_QUERY_LENS, name="mm_prefix_mixed"
     )
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=mc.dtype,
-        sliding_window=SLIDING_WINDOW,
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
@@ -720,7 +715,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
     from vllm.v1.attention.backends.triton_flashinfer import (
         TritonFlashInferBackend,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     if causal_backend_name == "FLASHINFER":
         backend = TritonFlashInferBackend
@@ -757,11 +752,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
         dtype=storage_dtype,
         kv_quant_mode=get_kv_quant_mode(cache_dtype),
     )
-    spec = (
-        SlidingWindowSpec(**spec_kwargs, sliding_window=window)
-        if window
-        else FullAttentionSpec(**spec_kwargs)
-    )
+    spec = AttentionSpec(**spec_kwargs)
     if reverse_children:
         # Swapping the children and policy must preserve outputs and KV writes;
         # dispatch cannot depend on a particular child's class or position.

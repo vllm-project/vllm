@@ -207,3 +207,28 @@ async def test_language_detection_cancel_aborts_engine_request():
     sampling_params = engine_client.generate.call_args.args[1]
     assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)
+
+
+@pytest.mark.asyncio
+async def test_language_detection_preserves_data_parallel_rank():
+    engine_client = SimpleNamespace(
+        generate=Mock(return_value=_never_finishes()), abort=AsyncMock()
+    )
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
+    server.engine_client = engine_client
+    server.asr_config = SimpleNamespace()
+    server.tokenizer = Mock()
+    server.model_cls = SimpleNamespace(
+        get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
+        get_language_token_ids=Mock(return_value=[1]),
+    )
+
+    task = asyncio.create_task(
+        server._detect_language(Mock(), "lang_detect", data_parallel_rank=3)
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert engine_client.generate.call_args.kwargs["data_parallel_rank"] == 3

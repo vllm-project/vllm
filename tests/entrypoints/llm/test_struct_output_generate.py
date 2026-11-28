@@ -133,7 +133,7 @@ NGRAM_SPEC_CONFIG = {
 
 EAGLE_SPEC_CONFIG = {
     "method": "eagle",
-    "model": "vllm-project/EAGLE-LLaMA3.1-Instruct-8B",
+    "model": "vllm/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
 }
 
@@ -142,36 +142,9 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
     # it, we skip these tests for now.
     # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
-    pytest.param(
-        "mistralai/Ministral-8B-Instruct-2410",
-        "lm-format-enforcer",
-        "hf",
-        None,
-        marks=pytest.mark.skip(
-            reason=(
-                "Flaky: lm-format-enforcer intermittently returns"
-                "incomplete JSON."
-                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
-            )
-        ),
-    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    pytest.param(
-        "Qwen/Qwen2.5-1.5B-Instruct",
-        "lm-format-enforcer",
-        "auto",
-        None,
-        marks=pytest.mark.skip(
-            reason=(
-                "Flaky: lm-format-enforcer intermittently returns"
-                "incomplete JSON."
-                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
-            )
-        ),
-    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
@@ -270,8 +243,7 @@ def test_structured_output(
 
             generated_text = output.outputs[0].text
             assert generated_text is not None
-            if backend != "lm-format-enforcer":
-                assert "\n" not in generated_text
+            assert "\n" not in generated_text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             try:
                 output_json = json.loads(generated_text)
@@ -364,7 +336,7 @@ def test_structured_output(
                 parsed_json = json.loads(generated_text)
                 assert isinstance(parsed_json, dict)
 
-        if backend not in ["outlines", "lm-format-enforcer"]:
+        if backend != "outlines":
             #
             # Test 4: Generate SQL statement using EBNF grammar
             #
@@ -618,7 +590,7 @@ def test_structured_output(
                 )
             jsonschema.validate(instance=output_json, schema=json_schema)
 
-        if backend not in ["outlines", "lm-format-enforcer"]:
+        if backend != "outlines":
             #
             # Test 11: Generate structured output using structural_tag format
             #

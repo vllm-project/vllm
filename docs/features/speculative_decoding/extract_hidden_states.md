@@ -57,8 +57,8 @@ For improved performance, it is recommended to use a RAM-mounted file system suc
 
 ```bash
 vllm serve Qwen/Qwen3-8B \
-    --speculative_config '{"method": "extract_hidden_states", "num_speculative_tokens": 1, "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4]}}}' \
-    --kv_transfer_config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
+    --speculative-config '{"method": "extract_hidden_states", "num_speculative_tokens": 1, "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4]}}}' \
+    --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
 ```
 
 ## Per-Request Options
@@ -122,5 +122,8 @@ Each request produces a `.safetensors` file containing:
 
 The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. Use `load_hidden_states()` from the connector module to read the file with proper synchronization.
 
-!!! note
-    Chunked prefill is not compatible with this feature and must be disabled.
+## Specific Models
+
+### Nemotron 3.5 Parse
+
+To extract hidden states from `nvidia/Nemotron-3.5-Parse`, serve it with `--trust-remote-code` and the flags in the [online example](#online-example). Send the page image and Parse task prompt together as shown in [NVIDIA's serving example](https://huggingface.co/nvidia/Nemotron-3.5-Parse/blob/main/docs/serving.md). The exported states include the model's image prefix tokens.

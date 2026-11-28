@@ -8,7 +8,8 @@ import pytest
 import torch
 
 from vllm.utils.vmm_driver import (
-    _MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
     CudaVmmDriver,
     _find_loaded_library,
     imex_channel_available,
@@ -146,12 +147,24 @@ def test_driver_prefers_the_library_already_loaded(monkeypatch):
     assert opened == ["libamdhip64.so.7"]
 
 
+_FD = MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+_FABRIC = MEM_HANDLE_TYPE_FABRIC
+
+
 @pytest.mark.parametrize(
-    "device_support, imex_channel, requested",
-    [(True, True, _MEM_HANDLE_TYPE_FABRIC), (True, False, 0), (False, True, 0)],
+    "device_support, imex_channel, export_handle_types, requested",
+    [
+        (True, True, 0, _FABRIC),
+        (True, False, 0, 0),
+        (False, True, 0, 0),
+        # POSIX fds are only requested alone: with FABRIC, FABRIC wins.
+        (True, True, _FD, _FD),
+        (True, True, _FD | _FABRIC, _FABRIC),
+        (True, False, _FD | _FABRIC, _FD),
+    ],
 )
 def test_fabric_handle_needs_device_support_and_an_imex_channel(
-    monkeypatch, device_support, imex_channel, requested
+    monkeypatch, device_support, imex_channel, export_handle_types, requested
 ):
     driver = CudaVmmDriver.__new__(CudaVmmDriver)
     driver._rdma_capable = {}
@@ -161,15 +174,19 @@ def test_fabric_handle_needs_device_support_and_an_imex_channel(
         "vllm.utils.vmm_driver.imex_channel_available", lambda: imex_channel
     )
 
-    assert driver._make_alloc_prop(0).requestedHandleTypes == requested
+    prop = driver._make_alloc_prop(0, export_handle_types)
+    assert prop.requestedHandleTypes == requested
 
 
 @pytest.mark.parametrize(
     "first_result, retries",
     [(800, True), (801, True), (2, False)],  # NOT_PERMITTED, NOT_SUPPORTED, OOM
 )
+@pytest.mark.parametrize(
+    "export_handle_types, fallback", [(0, 0), (_FD | _FABRIC, _FD)]
+)
 def test_create_retries_without_fabric_only_if_fabric_was_the_problem(
-    monkeypatch, first_result, retries
+    monkeypatch, first_result, retries, export_handle_types, fallback
 ):
     driver = CudaVmmDriver.__new__(CudaVmmDriver)
     driver._rdma_capable = {}
@@ -181,7 +198,7 @@ def test_create_retries_without_fabric_only_if_fabric_was_the_problem(
 
     def fake_create(handle, size, prop, flags):
         requested.append(prop._obj.requestedHandleTypes)
-        if requested[-1]:
+        if requested[-1] == MEM_HANDLE_TYPE_FABRIC:
             return first_result
         handle._obj.value = 7
         return 0
@@ -190,15 +207,15 @@ def test_create_retries_without_fabric_only_if_fabric_was_the_problem(
 
     if not retries:
         with pytest.raises(RuntimeError):
-            driver.create(4096, 0)
-        assert requested == [_MEM_HANDLE_TYPE_FABRIC]
+            driver.create(4096, 0, export_handle_types)
+        assert requested == [_FABRIC]
         return
 
-    assert driver.create(4096, 0) == 7
-    assert requested == [_MEM_HANDLE_TYPE_FABRIC, 0]
+    assert driver.create(4096, 0, export_handle_types) == 7
+    assert requested == [_FABRIC, fallback]
     # Later allocations skip the rejected request.
-    assert driver.create(4096, 0) == 7
-    assert requested == [_MEM_HANDLE_TYPE_FABRIC, 0, 0]
+    assert driver.create(4096, 0, export_handle_types) == 7
+    assert requested == [_FABRIC, fallback, fallback]
 
 
 def test_imex_channel_available_needs_a_channel_that_opens(monkeypatch, tmp_path):

@@ -11,6 +11,7 @@ fails, every hook here returns False and vLLM runs its own ops.
 """
 
 import os
+import shutil
 
 import torch
 
@@ -30,12 +31,22 @@ _SOURCE = os.path.join(_HERE, "topk512_gfx942.cu")
 MAX_BLOCKS = 8
 MIN_CHUNK = 16384
 
+_NAME = "dsv41_topk942"
+
 _ext = None
 _build_failed = False
 
 
 def _compile():
-    from torch.utils.cpp_extension import load
+    from torch.utils.cpp_extension import _get_build_directory, load
+
+    # hipify writes next to its input, and the installed tree can be read-only.
+    build_dir = _get_build_directory(_NAME, verbose=False)
+    os.makedirs(build_dir, exist_ok=True)
+    source = os.path.join(build_dir, os.path.basename(_SOURCE))
+    partial = f"{source}.{os.getpid()}"
+    shutil.copyfile(_SOURCE, partial)
+    os.replace(partial, source)
 
     # vLLM's ROCm Docker image lists all of its ROCm targets in
     # PYTORCH_ROCM_ARCH. Build for gfx942 only, and then restore the list, so
@@ -43,7 +54,7 @@ def _compile():
     saved = os.environ.get("PYTORCH_ROCM_ARCH")
     os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
     try:
-        return load(name="dsv41_topk942", sources=[_SOURCE], extra_cuda_cflags=["-O3"])
+        return load(name=_NAME, sources=[source], extra_cuda_cflags=["-O3"])
     finally:
         if saved is None:
             del os.environ["PYTORCH_ROCM_ARCH"]

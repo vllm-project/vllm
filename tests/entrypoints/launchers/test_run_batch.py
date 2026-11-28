@@ -56,8 +56,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
 
-CHAT_MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
-EMBEDDING_MODEL_NAME = "vllm-project/multilingual-e5-small"
+CHAT_MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
+EMBEDDING_MODEL_NAME = "vllm/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"
@@ -603,12 +603,16 @@ def test_completions_endpoint():
         assert len(outputs) == 3
         for output in outputs.values():
             assert output.error is None
-        assert isinstance(outputs["request-1"].response.body, CompletionResponse)
+        first = outputs["request-1"].response
+        assert first is not None and isinstance(first.body, CompletionResponse)
         # A list prompt returns one choice per prompt.
-        completion = outputs["request-2"].response.body
+        second = outputs["request-2"].response
+        assert second is not None
+        completion = second.body
         assert isinstance(completion, CompletionResponse)
         assert len(completion.choices) == 2
-        assert isinstance(outputs["chat-1"].response.body, ChatCompletionResponse)
+        chat = outputs["chat-1"].response
+        assert chat is not None and isinstance(chat.body, ChatCompletionResponse)
 
 
 def test_completions_invalid_input():
@@ -1424,6 +1428,33 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         validate_batch(f)
 
 
+@pytest.mark.parametrize(
+    "url,body",
+    [
+        ("/v1/completions", {"model": CHAT_MODEL_NAME, "prompt": ""}),
+        (
+            "/v1/chat/completions",
+            {
+                "model": CHAT_MODEL_NAME,
+                "messages": [{"role": "user", "content": "Hello world!"}],
+                "stream_options": {"include_usage": True},
+            },
+        ),
+    ],
+)
+def test_validate_batch_reports_request_validation_errors(tmp_path, url, body):
+    """Errors from the request models' own validators also name the line."""
+    request = {"custom_id": "bad", "method": "POST", "url": url, "body": body}
+    input_path = _write_batch(tmp_path, [INPUT_BATCH, json.dumps(request)])
+    bad_line = len(INPUT_BATCH.strip().split("\n")) + 1
+
+    with (
+        open(input_path, encoding="utf-8") as f,
+        pytest.raises(ValueError, match=f"line {bad_line}:"),
+    ):
+        validate_batch(f)
+
+
 @pytest.mark.asyncio
 async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
     """Building a TypeAdapter rebuilds its schema, too slow to do per request."""
@@ -1457,6 +1488,7 @@ async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
         "EmbeddingCompletionRequest",
     ]
     assert output.error == "Unexpected response status code: 400"
+    assert output.response is not None
     assert output.response.status_code == 400
     type_adapter.assert_not_called()
 
@@ -1965,6 +1997,7 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     error = BatchRequestOutput.model_validate_json(
         output_path.read_text().strip()
     ).error
+    assert error is not None
     assert "/v1/unsupported" in error
     assert "/v1/widgets" in error
 

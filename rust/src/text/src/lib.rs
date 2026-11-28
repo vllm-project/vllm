@@ -12,9 +12,10 @@ use std::num::NonZeroU32;
 use std::time::Instant;
 
 pub use backend::{
-    DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
+    DefaultMaxTokens, DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits,
+    TextBackend,
 };
-pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
+pub use error::{Error, ErrorKind, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     EffectiveSampling, PreparedTextRequest, lower_sampling_params, lower_text_request,
@@ -25,7 +26,7 @@ pub use output::{
     DecodedText, DecodedTextEvent, DecodedTokenLogprob, Finished, SampledDelta, TextDecodeOptions,
     TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
-pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k, validate_cache_salt};
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
@@ -212,13 +213,18 @@ impl TextLlm {
     /// Create a new text-generation facade from an [`Llm`], such as a
     /// [`vllm_llm::EngineCoreLlm`], plus a text backend.
     pub fn new(llm: impl Llm, backend: DynTextBackend) -> Self {
+        Self::from_boxed(Box::new(llm), backend)
+    }
+
+    /// Create a new text-generation facade from an already boxed [`Llm`].
+    pub fn from_boxed(llm: Box<dyn Llm>, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.info().max_model_len;
         let served_model_name = backend.model_id().to_owned();
 
         Self {
-            llm: Box::new(llm),
+            llm,
             processor: TextRequestProcessor::new(backend, max_model_len),
             served_model_name,
         }
@@ -275,7 +281,7 @@ impl TextLlm {
     }
 
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
-    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    /// like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
         self.processor.backend.tokenizer_vocab_size()
     }
@@ -284,15 +290,6 @@ impl TextLlm {
     /// token IDs and logits-domain sampling controls.
     pub fn model_vocab_size(&self) -> usize {
         self.processor.backend.model_vocab_size()
-    }
-
-    /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream. Like Python's token-in-token-out route, this records no
-    /// render duration.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
-        let prepared = self.processor.prepare(request)?;
-        let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
-        Ok(streams.pop().expect("one output stream per sample"))
     }
 
     /// Tokenize if needed, lower to a generate request, and stream
@@ -481,10 +478,7 @@ mod tests {
         ]
         .map(|result| {
             let error = result.unwrap_err();
-            (
-                error.is_request_validation_error(),
-                error.to_report_string(),
-            )
+            (error.kind().is_invalid_request(), error.to_report_string())
         });
         expect_test::expect![[r#"
             [

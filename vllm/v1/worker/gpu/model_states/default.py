@@ -7,6 +7,9 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_transferred_mrope_position_delta,
+)
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -18,7 +21,10 @@ from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
 )
-from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.mm_pruning import (
+    maybe_create_mm_pruner,
+    uses_multimodal_pruning,
+)
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -61,24 +67,62 @@ class DefaultModelState(ModelState):
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
         )
+        # EVS recomputes M-RoPE positions from the pruned encoder outputs.
+        self.positions_depend_on_encoder = (
+            self.rope_state is not None
+            and uses_multimodal_pruning(self.model_config, model)
+        )
+
+        # Per-request bidirectional MM ranges. Not kept in the encoder cache:
+        # only the first PP rank has one, but every rank builds attn metadata.
+        self.mm_prefix_ranges: dict[str, list[tuple[int, int]]] | None = None
+        if (
+            self.model_config.supports_multimodal_inputs
+            and self.model_config.is_mm_prefix_lm
+        ):
+            self.mm_prefix_ranges = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        if self.mm_prefix_ranges is not None:
+            hf_text_config = self.model_config.hf_text_config
+            self.mm_prefix_ranges[new_req_data.req_id] = compute_mm_prefix_ranges(
+                [new_req_data.mm_features],
+                sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
+            )[0]
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
             mm_features = [
                 f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
             ]
+            position_delta = None
+            if not mm_features:
+                position_delta = get_transferred_mrope_position_delta(
+                    self.vllm_config, new_req_data.sampling_params
+                )
             self.rope_state.init_prefill_positions(
                 req_index,
                 self.model,
                 new_req_data.prefill_token_ids,
                 mm_features=mm_features,
+                position_delta=position_delta,
             )
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        if self.rope_state is None:
+            return None
+        return self.rope_state.get_prefill_delta(req_index)
+
     def remove_request(self, req_id: str) -> None:
+        if self.mm_prefix_ranges is not None:
+            self.mm_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -88,11 +132,21 @@ class DefaultModelState(ModelState):
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.apply_staged_writes()
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         if self.supports_mm_inputs:
-            return self.encoder_runner.inputs_embeds[:num_tokens]
-        return self.inputs_embeds[:num_tokens]
+            inputs_embeds = self.encoder_runner.inputs_embeds
+        else:
+            inputs_embeds = self.inputs_embeds
+        if input_ids is not None:
+            inputs_embeds[: input_ids.shape[0]] = self.model.embed_input_ids(input_ids)
+        return inputs_embeds[:num_tokens]
 
     def prepare_inputs_embeds(
         self,
@@ -100,13 +154,21 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
+        if self.supports_mm_inputs:
+            self.execute_mm_encoder(scheduled_encoder_inputs)
+
+        if input_batch.num_tokens == 0:
+            # Idle PCP ranks still run the padded forward, but embedding an
+            # empty token batch can launch an invalid TP all-reduce kernel.
+            return self.dummy_inputs_embeds(
+                input_batch.num_tokens_after_padding
+            ).zero_()
+
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
 
         if self.supports_mm_inputs:
-            self.execute_mm_encoder(scheduled_encoder_inputs)
-
             mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
             if self.mm_pruner is not None and mm_embeds:
                 # EVS: recompute mrope positions for pruned media.
@@ -147,21 +209,18 @@ class DefaultModelState(ModelState):
             return {}  # Common case (1D positions).
 
         self.rope_state.prepare_positions(
-            input_batch.idx_mapping,
+            input_batch.idx_mapping[: input_batch.num_reqs],
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
-            req_states.num_computed_tokens.gpu,
+            input_batch.positions,
         )
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
-        model_inputs = {}
-        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
-            model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
-        if self.rope_state is not None:
-            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
-        return model_inputs
+        if self.rope_state is None:
+            return {}
+        return {"positions": self.rope_state.get_positions(num_tokens)}
 
     def prepare_attn(
         self,
@@ -197,22 +256,11 @@ class DefaultModelState(ModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if (
-            self.supports_mm_inputs
-            and self.encoder_cache is not None
-            and self.model_config.is_mm_prefix_lm
-        ):
-            mm_features = self.encoder_cache.mm_features
-            hf_text_config = self.model_config.hf_text_config
-            req_doc_ranges = compute_mm_prefix_ranges(
-                [mm_features.get(req_id, ()) for req_id in input_batch.req_ids],
-                sliding_window=self.model_config.get_sliding_window(),
-                clamp_sliding_window=getattr(
-                    self.model, "mm_prefix_clamp_sliding_window", False
-                )
-                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
-                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
-            )
+        if self.mm_prefix_ranges is not None:
+            req_doc_ranges = {
+                i: self.mm_prefix_ranges.get(req_id, [])
+                for i, req_id in enumerate(input_batch.req_ids)
+            }
         dcp_local_seq_lens_cpu_upper_bound = None
         if input_batch.pcp is not None:
             dcp_local_seq_lens_cpu_upper_bound = (

@@ -41,9 +41,18 @@ def get_num_active_loras_for_dispatch(
     req_ids: list[str],
     dummy_run: bool,
 ) -> int:
-    """Compute num_active_loras for cudagraph dispatch."""
+    """Compute num_active_loras for cudagraph dispatch.
+
+    Counts no-LoRA requests as one more active LoRA when they share the batch
+    with adapters, as the LoRA kernels do.
+    """
     if lora_config and not dummy_run:
-        return len(lora_state.get_activate_loras(req_ids))
+        num_active_loras = len(lora_state.get_activate_loras(req_ids))
+        if num_active_loras and any(
+            req_id not in lora_state.lora_requests for req_id in req_ids
+        ):
+            num_active_loras += 1
+        return num_active_loras
     if dummy_run and lora_config:
         return lora_config.max_loras + 1
     return 0

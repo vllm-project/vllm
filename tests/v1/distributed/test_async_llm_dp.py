@@ -68,7 +68,7 @@ async def generate(
     "model",
     [
         "ibm-research/PowerMoE-3b",
-        "vllm-project/tiny-random-LlamaForCausalLM",
+        "vllm/tiny-random-LlamaForCausalLM",
     ],
 )
 @pytest.mark.parametrize(
@@ -272,7 +272,7 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
 # When expert_parallel=False: uses non-MoE model (DP replicas as separate engines).
 # When expert_parallel=True: uses MoE model + EP (DPEngineCoreProc, sync pause path).
 
-DP_PAUSE_MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
+DP_PAUSE_MODEL = "vllm/tiny-random-LlamaForCausalLM"
 DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 
@@ -314,6 +314,47 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
         ):
             pass
         assert out.finished
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(1200, method="thread")
+async def test_dp_duplicate_resume_while_one_rank_starts_a_wave():
+    """A duplicate resume must not send only some ranks into the resume barrier.
+
+    Ranks learn of a new wave at different times. Forced here by resuming the
+    other ranks while idle, then adding a request to rank 0 before resuming it,
+    so the ranks disagree on whether the engines are running.
+    """
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(
+            _get_dp_pause_engine_args(expert_parallel=True)
+        )
+        after.callback(engine.shutdown)
+        client = engine.engine_core
+        request_rank, *other_ranks = client.core_engines
+
+        def resume(rank):
+            return asyncio.create_task(
+                client._call_utility_async("resume_scheduler", engine=rank)
+            )
+
+        resumes = [resume(rank) for rank in other_ranks]
+        # These answer at once unless the ranks are blocked in the barrier.
+        await asyncio.wait(resumes, timeout=5)
+
+        collector = await engine.add_request(
+            request_id="during-duplicate-resume",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5, ignore_eos=True),
+            data_parallel_rank=0,
+        )
+        resumes.append(resume(request_rank))
+        await asyncio.wait_for(asyncio.gather(*resumes), timeout=60)
+
+        while not (out := await asyncio.wait_for(collector.get(), timeout=60)).finished:
+            pass
+        assert isinstance(out, RequestOutput)
+        assert len(out.outputs[0].token_ids) == 5
 
 
 async def _consume(generator) -> None:

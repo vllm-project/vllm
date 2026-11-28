@@ -256,7 +256,7 @@ def run_combs(
     return combined_df
 
 
-@dataclass
+@dataclass(slots=True)
 class SweepStartupArgs:
     startup_cmd: list[str]
     serve_params: ParameterSweep

@@ -19,10 +19,8 @@ INVALID_REPO_NAME = "thisrepodoesnotexist"
 
 # Repo with only one LoRA in the root dir
 LORA_REPO_MODEL_NAME = "meta-llama/Llama-2-7b-hf"
-LORA_REPO = "vllm-project/llama-2-7b-sql-lora-test"
-REPO_DOWNLOAD_DIR = os.path.join(
-    HF_HUB_CACHE, "models--vllm-project--llama-2-7b-sql-lora-test"
-)
+LORA_REPO = "vllm/llama-2-7b-sql-lora-test"
+REPO_DOWNLOAD_DIR = os.path.join(HF_HUB_CACHE, "models--vllm--llama-2-7b-sql-lora-test")
 
 
 @pytest.mark.asyncio

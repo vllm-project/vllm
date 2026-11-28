@@ -24,7 +24,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | Field | Notes |
 | --- | --- |
 | `token_ids` | Required `list[int]`: the already-templated prompt. Non-empty, no negative IDs. |
-| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. |
+| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. `bad_words` needs a tokenizer: a server without one (`--tokens-only` or `--skip-tokenizer-init`) rejects it with a 400. |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
@@ -46,6 +46,10 @@ The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprob
 ## Targeting a data-parallel rank (`X-data-parallel-rank`)
 
 Send the header `X-data-parallel-rank: <int>` to pin a request to one data-parallel (DP) engine rank; there is no body field. Without the header, or with a non-integer value, the request is load balanced. A rank outside `[0, data_parallel_size)` is rejected.
+
+## Request priority (`X-Vllm-Priority`)
+
+Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`).
 
 ## Output modes
 
@@ -94,7 +98,9 @@ print(response["choices"][0]["token_ids"])
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
+- With a reasoning parser, `usage.completion_tokens_details.reasoning_tokens` is the reasoning parser's count summed over the choices, as on coupled chat, also with `include_reasoning: false`. In a stream it's on the final usage chunk, not on per-chunk `continuous_usage_stats` usage.
 - With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
+- The message `role` is the generate server's `--response-role`. `parse_context` doesn't carry `messages`, `add_generation_prompt` or `echo`, so the last message's role and `echo` aren't applied. Use [`/derender`](derenderer.md) for those.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
 
 A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
@@ -138,6 +144,107 @@ The final output of every choice carries `weight_versions`, the label of the wei
 - With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null` or omit the field.
 - An output with no tokens, such as a request aborted before its first token, gets `[]`.
 - The labels are the ones you set with `/update_weight_version` or `/finish_weight_update`, see [Async Reinforcement Learning](../../training/async_rl.md#weight-versions-in-outputs). vLLM doesn't order or check them, and the label is `"default"` until you set one.
+
+## Multimodal inputs
+
+A request can carry media in two ways, and can use both at once:
+
+- `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
+- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
+
+When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are. Models that insert media at the start of the prompt (such as PaliGemma, BLIP-2 and Molmo) would place a new item right after that range without an error, so don't combine the two fields for them.
+
+This fits multi-turn rollouts. Each turn resends the previous prompt with its images already expanded, adds the new turn with one placeholder per new image, and sends the earlier images as `features`:
+
+```python
+import httpx
+
+url = "http://localhost:8000/inference/v1/generate"
+
+# Turn 1: turn1_ids holds one <|image_pad|> for image A.
+turn1 = httpx.post(url, json={
+    "token_ids": turn1_ids,
+    "content_parts": [{"type": "image_url", "url": url_a}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+
+# Turn 2: image A is expanded in turn1["prompt_token_ids"];
+# turn2_ids appends one <|image_pad|> for image B.
+turn2 = httpx.post(url, json={
+    "token_ids": (
+        turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
+    ),
+    "features": {
+        "mm_hashes": turn1["mm_hashes"],
+        "mm_placeholders": turn1["mm_placeholders"],
+    },
+    "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+```
+
+With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Pass them back unchanged rather than building keys yourself because the key format depends on the server's options and on whether the item was sent with a `uuid`. Send the item with `kwargs_data` instead in three cases:
+
+- The item has been evicted from the cache, so a request by key fails.
+- The processor cache is disabled (`--mm-processor-cache-gb 0`), so the returned keys can't be reused.
+- The server runs the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) which doesn't support omitting `kwargs_data` yet. It still returns `mm_hashes`.
+
+### Processed tensors in object storage
+
+A client that already has an item's processed tensors, such as an RL trainer on another node, can upload them to an S3-compatible store and send a reference in `features.kwargs_refs` instead of inlining them in `kwargs_data`. The tensors then skip the request body and any gateway in front of vLLM. The server downloads each object, checks its size and SHA-256 digest, and rebuilds the model's field metadata before it submits the request to the engine.
+
+Each object holds one item, saved with `safetensors.torch.save`. Its tensors are the ones this server's multimodal processor produces for that item, under the same names and dtypes and with their batch dimension, so the same tensors that `/render` returns in `kwargs_data`. The client doesn't need vLLM, but the tensors can differ from what the model's Hugging Face processor returns. For example, Qwen3-VL with the default `mm_device_do_normalize` normalizes on the GPU, so its object holds a `uint8` `pixel_values` and an `image_grid_thw` of shape `[1, 3]`:
+
+```python
+import hashlib
+
+import boto3
+from safetensors.torch import save
+
+payload = save({"pixel_values": pixel_values, "image_grid_thw": image_grid_thw})
+key = f"rollouts/{request_id}/image-0"
+boto3.client("s3").put_object(Bucket="mm-tensors", Key=key, Body=payload)
+
+features = {
+    "mm_hashes": {"image": [image_hash]},
+    "mm_placeholders": {"image": [{"offset": 15, "length": 64}]},
+    "kwargs_refs": {
+        "image": [{
+            "uri": f"s3://mm-tensors/{key}",
+            "format": "safetensors-v1",
+            "nbytes": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }]
+    },
+}
+```
+
+Like `kwargs_data`, each `kwargs_refs` list is parallel to `mm_hashes`, and a `null` entry falls back to `kwargs_data` or the processor cache. An item can't set both. `mm_metadata` for a referenced item may only repeat fields of its object with the same values. The `mm_hashes` entry stays the cache key, so give different content different hashes.
+
+`kwargs_refs` are off by default. Enable them at startup with `--mm-tensor-refs-config`; a server started without it rejects them with a 400:
+
+```bash
+vllm serve Qwen/Qwen3-VL-2B-Instruct --enable-scale-out \
+    --mm-tensor-refs-config '{"s3_allowed_uri_prefix": "s3://mm-tensors/rollouts"}'
+```
+
+The config's fields are:
+
+- `s3_allowed_uri_prefix`: the `s3://bucket/prefix` that every reference must be under. Required.
+- `max_object_bytes`: the largest object the server downloads. Default: 1 GiB.
+- `max_request_bytes`: the largest total size of the objects one request references. A request over it fails with a 400 before anything is downloaded. Default: 1 GiB.
+- `max_reserved_bytes`: the memory one API server reserves for referenced tensors. Each request reserves twice the declared size of its objects, for the downloaded bytes and the decoded tensors, and keeps the reservation until it finishes, even if the client disconnects. Requests wait in arrival order until their reservation fits. It must be at least twice `max_request_bytes`. Default: 8 GiB.
+- `max_concurrent_reads`: how many requests per API server can download references at once. Default: 32.
+
+The endpoint and credentials come from the server's environment, never from the request: `S3_ENDPOINT_URL` if set, otherwise the standard boto3 configuration (for example `AWS_ENDPOINT_URL_S3`, or `addressing_style` in the AWS config file). The server needs `boto3` installed, creates its S3 client at startup, and never deletes objects, so expire them on the client side, for example with a bucket lifecycle rule. Only the Python frontend accepts `kwargs_refs`.
+
+Like `kwargs_data`, `kwargs_refs` is meant for clients in one trust domain:
+
+- The server reads objects with its own credentials, so every caller of the endpoint can reference every object the server can read under the allowed prefix. Don't share a prefix between callers that shouldn't see each other's objects.
+- A missing, inaccessible or mismatched object (wrong size or digest) returns the same 422, so a caller can't probe objects it doesn't know. The details are in the server log.
+- The server checks each object's size, digest and fields, but tensors with a shape the model doesn't expect, such as `pixel_values` rows of the wrong width, can still fail inside the engine.
 
 ## Aborting requests
 

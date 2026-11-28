@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import gc
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
@@ -14,8 +17,23 @@ from vllm.utils.torch_utils import PIN_MEMORY
 
 from ....utils import create_new_process_for_each_test
 
+if TYPE_CHECKING:
+    from vllm.device_allocator.xpumem import XpuMemAllocator
+
+
 DEVICE_TYPE = current_platform.device_type
 OFFLOAD_TAGS = {1: {"weights", "runtime", "cudagraph"}, 2: {"runtime", "cudagraph"}}
+
+
+def _get_allocator() -> cumem.CuMemAllocator | XpuMemAllocator:
+    allocator = get_mem_allocator_instance()
+    if isinstance(allocator, cumem.CuMemAllocator):
+        return allocator
+
+    from vllm.device_allocator.xpumem import XpuMemAllocator
+
+    assert isinstance(allocator, XpuMemAllocator)
+    return allocator
 
 
 def mapped_usage(allocator) -> int:
@@ -65,7 +83,7 @@ def assert_released(backups: dict[int, torch.Tensor]) -> None:
 
 
 def backup_state(worker) -> tuple[dict[int, tuple], int]:
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     state = {}
     for ptr, data in allocator.pointer_to_data.items():
         backup = data.cpu_backup_tensor
@@ -121,7 +139,7 @@ def test_python_error():
     """Test if Python error occurs when there's low-level
     error happening from the C++ side.
     """
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     total_bytes = torch.accelerator.get_memory_info()[1]
     alloc_bytes = int(total_bytes * 0.7)
     tensors = []
@@ -150,7 +168,7 @@ def test_basic_cumem(register_error, monkeypatch):
     x.zero_()
 
     # some tensors from custom memory pool
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     with allocator.use_memory_pool():
         # custom memory pool
         y = torch.empty(shape, device=DEVICE_TYPE)
@@ -267,7 +285,7 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
 
     def get_mapped_bytes_by_tag(worker):
-        allocator = get_mem_allocator_instance()
+        allocator = _get_allocator()
         mapped_bytes = mapped_usage(allocator)
         kv_cache_bytes = sum(
             data.handle[1]
@@ -333,7 +351,7 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
 
     def get_mapped_bytes(worker):
-        return mapped_usage(get_mem_allocator_instance())
+        return mapped_usage(_get_allocator())
 
     backups_by_level: dict[int, dict[int, tuple]] = {}
     for level, other_level in (
@@ -361,7 +379,7 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
 def test_discard_tags():
     """Test that discard(tags) selectively frees GPU memory for specific
     tags while keeping other tags mapped and usable."""
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
 
     with allocator.use_memory_pool("weights"):
         weights = torch.ones(1024, 1024, device=DEVICE_TYPE)
@@ -410,7 +428,7 @@ def test_discard_tags():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_selective_wake_restores_internal_tags(tag):
     """A selective wake defers only weights/kv_cache; other tags always wake."""
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     with allocator.use_memory_pool(tag):
         internal = torch.empty(16 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
     with allocator.use_memory_pool("kv_cache"):
@@ -434,7 +452,7 @@ def test_workspace_scratch_discarded_on_sleep():
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
     from vllm.v1.worker.workspace import WorkspaceManager
 
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     manager = WorkspaceManager(
         torch.device(DEVICE_TYPE),
         alloc_context=lambda: allocator.use_memory_pool("workspace"),
@@ -478,7 +496,7 @@ def test_workspace_scratch_discarded_on_sleep():
 def test_reentered_tag(free_x_early):
     """Enter a tag twice (two workspace ubatches): freeing X returns its memory
     by the next entry, without touching Y or breaking sleep/wake."""
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     nbytes = 64 << 20
     with allocator.use_memory_pool("t"):
         xs = [torch.empty(nbytes, dtype=torch.uint8, device=DEVICE_TYPE)]
@@ -517,7 +535,7 @@ def test_runtime_state_survives_sleep():
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
     from vllm.v1.worker import gpu_worker
 
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     built = {}
 
     def make_runner():
@@ -533,7 +551,6 @@ def test_runtime_state_survives_sleep():
             speculative_config=None,
         ),
         device=torch.device(DEVICE_TYPE, torch.accelerator.current_device_index()),
-        use_v2_model_runner=True,
         rank=1,
         _make_model_runner=make_runner,
     )
@@ -568,7 +585,7 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
     """Only allocations holding nothing but discardable tensors are discarded."""
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     with allocator.use_memory_pool("weights"):
         weight = torch.zeros(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
         small_weight = torch.zeros(4096, dtype=torch.uint8, device=DEVICE_TYPE)
@@ -592,7 +609,7 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
     """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
 
     with allocator.use_memory_pool("weights"):
         fake_weight = torch.full((4096,), 0x44, dtype=torch.uint8, device=DEVICE_TYPE)
@@ -620,7 +637,7 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA graph not supported on XPU")
 def test_cumem_with_cudagraph():
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     with allocator.use_memory_pool():
         weight = torch.eye(1024, device=DEVICE_TYPE)
     with allocator.use_memory_pool(tag="discard"):
@@ -682,7 +699,7 @@ def test_cudagraph_pool_sleep(level):
     )
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     on, off = (SimpleNamespace(use_cumem_cudagraph_pool=v) for v in (True, False))
     handle = current_platform.graph_pool_handle()
     for cfg, ctx in ((off, nullcontext()), (on, capture_outside_cumem_pool())):

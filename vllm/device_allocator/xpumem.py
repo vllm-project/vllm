@@ -3,7 +3,7 @@
 
 import atexit
 import gc
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -101,7 +101,7 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 def use_memory_pool_with_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
-) -> Iterator[tuple[Any, Any]]:
+) -> Generator[tuple[Any, Any]]:
     mem_mod = _xpu_memory_module()
     if not _supports_xpu_mem_pool(mem_mod):
         raise RuntimeError(

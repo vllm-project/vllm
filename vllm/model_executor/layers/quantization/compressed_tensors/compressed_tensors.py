@@ -4,10 +4,10 @@
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import regex as re
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -20,7 +20,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A8Mxfp4,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -68,12 +69,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     create_fp8_quant_key,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -81,6 +85,133 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
+
+
+def _literal_in_regex_source(literal: str) -> str:
+    """Match `literal` as it is written inside a regex pattern string.
+
+    Metacharacters may appear raw or backslash-escaped, so both
+    `.*mlp.fc1.*` and `^model\\.mlp\\.fc1\\Z` contain `.mlp.fc1.`.
+    """
+    parts: list[str] = []
+    for char in literal:
+        if char == ".":
+            parts.append(r"(?:\\\.|\.)")
+            continue
+        escaped = re.escape(char)
+        if escaped == char:
+            parts.append(char)
+            continue
+        parts.append(f"(?:{escaped}|{re.escape(escaped)})")
+    return "".join(parts)
+
+
+def _render_literal(literal: str, escaped: bool) -> str:
+    return re.escape(literal) if escaped else literal
+
+
+def _replace_literal(pattern: str, literal: str, replacement: str | None) -> str | None:
+    """Replace the first copy of `literal` in a regex pattern.
+
+    A replacement of None drops the whole pattern, matching WeightsMapper
+    dropping a weight whose name hits a rule mapped to None.
+    """
+    if literal == "":
+        return pattern
+    match = re.search(_literal_in_regex_source(literal), pattern)
+    if match is None:
+        return pattern
+    if replacement is None:
+        return None
+    rendered = _render_literal(replacement, "\\" in match.group(0))
+    return pattern[: match.start()] + rendered + pattern[match.end() :]
+
+
+def _split_regex_anchors(pattern: str) -> tuple[str, str, str]:
+    start = ""
+    end = ""
+    body = pattern
+    if body.startswith("^"):
+        start = "^"
+        body = body[1:]
+    for anchor in (r"\Z", r"\z", "$"):
+        if body.endswith(anchor):
+            end = anchor
+            body = body[: -len(anchor)]
+            break
+    return start, body, end
+
+
+def _apply_regex_prefix(
+    pattern: str, prefix: str, replacement: str | None
+) -> str | None:
+    start, body, end = _split_regex_anchors(pattern)
+    if prefix == "":
+        # startswith("") is true for every concrete name. Only patterns that
+        # begin with a literal correspond to those names. ".*" already matches
+        # a prefix that was prepended.
+        if (
+            replacement is None
+            or replacement == ""
+            or not body
+            or not (body[0].isalnum() or body[0] == "\\")
+        ):
+            return pattern
+        rendered = _render_literal(replacement, "\\" in body)
+        if body.startswith(rendered):
+            return pattern
+        return start + rendered + body + end
+
+    match = re.match(_literal_in_regex_source(prefix), body)
+    if match is None:
+        return pattern
+    if replacement is None:
+        return None
+    rendered = _render_literal(replacement, "\\" in match.group(0))
+    return start + rendered + body[match.end() :] + end
+
+
+def _apply_regex_suffix(
+    pattern: str, suffix: str, replacement: str | None
+) -> str | None:
+    if suffix == "":
+        return pattern
+    start, body, end = _split_regex_anchors(pattern)
+    match = re.search(_literal_in_regex_source(suffix) + r"\Z", body)
+    if match is None:
+        return pattern
+    if replacement is None:
+        return None
+    rendered = _render_literal(replacement, "\\" in match.group(0))
+    return start + body[: match.start()] + rendered + end
+
+
+def _map_regex_target(pattern: str, mapper: "WeightsMapper") -> str | None:
+    """Rename literals inside a compressed-tensors `re:` body.
+
+    Uses the same prefix, substring, and suffix rules as
+    `WeightsMapper._map_name`. Stacked maps stay unused: fused q/k/v and
+    gate/up modules are matched through `packed_modules_mapping`, and MoE
+    looks up `{module}.0.{proj}`. Mapper regexes are not applied to these
+    patterns either.
+    """
+    for substr, repl in mapper.orig_to_new_substr.items():
+        updated = _replace_literal(pattern, substr, repl)
+        if updated is None:
+            return None
+        pattern = updated
+    for prefix, repl in mapper.orig_to_new_prefix.items():
+        updated = _apply_regex_prefix(pattern, prefix, repl)
+        if updated is None:
+            return None
+        pattern = updated
+    for suffix, repl in mapper.orig_to_new_suffix.items():
+        updated = _apply_regex_suffix(pattern, suffix, repl)
+        if updated is None:
+            return None
+        pattern = updated
+    return pattern
+
 
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
@@ -136,12 +267,20 @@ class CompressedTensorsConfig(QuantizationConfig):
         compressed-tensors targets can be:
         - Layer paths: "layers.0.self_attn.q_proj" -> transformed
         - Module class names: "Linear" -> preserved (no ".")
-        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        - Regex patterns: "re:^layers\\.0\\.mlp\\.gate\\Z" -> literals are
+          rewritten with the rename mapper's prefix, substring, and suffix
+          rules. Stacked fusion (q_proj -> qkv_proj) is not applied.
         """
 
         def _map_target(target: str) -> str | None:
-            is_layer_path = "." in target and not target.startswith("re:")
-            if is_layer_path:
+            if target.startswith("re:"):
+                mapped = _map_regex_target(
+                    target.removeprefix("re:"), hf_to_vllm_mapper
+                )
+                if mapped is None:
+                    return None
+                return "re:" + mapped
+            if "." in target:
                 return hf_to_vllm_mapper._map_name(target)
             return target
 
@@ -210,7 +349,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
@@ -333,16 +472,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
-                if weight_quant.actorder in (
-                    ActivationOrdering.GROUP.value,
-                    ActivationOrdering.DYNAMIC.value,
-                ):
-                    raise ValueError(
-                        "Compressed-tensors group/dynamic activation ordering "
-                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
-                        "Use a checkpoint with static/weight activation ordering or "
-                        "without activation ordering."
-                    )
                 target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
@@ -487,6 +616,17 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             group_shape = GroupShape.PER_TOKEN
         return create_fp8_quant_key(static=False, group_shape=group_shape)
+
+    @staticmethod
+    def _is_mxfp6(quant_args: QuantizationArgs) -> bool:
+        return (
+            quant_args is not None
+            and quant_args.strategy == QuantizationStrategy.GROUP.value
+            and quant_args.symmetric
+            and quant_args.group_size == 32
+            and quant_args.type == QuantizationType.FLOAT
+            and quant_args.num_bits == 6
+        )
 
     @staticmethod
     def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
@@ -811,6 +951,16 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
 
+        if self._is_mxfp6(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=None)
+            if self._is_mxfp8(input_quant) and input_quant.dynamic:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=kMxfp8Dynamic)
+            raise ValueError(
+                "MXFP6 weights require 16-bit or dynamic MXFP8 activations, "
+                f"got {input_quant}"
+            )
+
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
 
@@ -1072,6 +1222,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
+        self.supports_pre_processed_weights = (
+            layer.scheme.supports_pre_processed_weights
+        )
 
     def apply(
         self,
@@ -1162,8 +1315,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.v_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
         )
+        # -1.0 marks a q_scale the checkpoint does not provide.
         layer.q_scale = torch.nn.Parameter(
-            torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
+            torch.full((n_scales,), -1.0, requires_grad=False, dtype=torch.float32)
         )
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
@@ -1252,11 +1406,37 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
+        # k/v scales default to 1.0, so only a configured scheme means they were loaded.
+        fnuz_factor = (
+            2.0
+            if current_platform.is_fp8_fnuz()
+            and is_quantized_kv_cache(layer.kv_cache_dtype)
+            and getattr(self.quant_config, "kv_cache_scheme", None) is not None
+            else 1.0
+        )
+        q_loaded = bool((layer.q_scale > 0).all())
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
-        layer.register_buffer("_q_scale", layer.q_scale.detach())
+        def _set_scale(name: str, value: torch.Tensor) -> None:
+            buf = getattr(layer, name, None)
+            if isinstance(buf, torch.Tensor) and buf.shape == value.shape:
+                buf.copy_(value)
+            else:
+                layer.register_buffer(name, value)
+
+        _set_scale("_k_scale", layer.k_scale.detach() * fnuz_factor)
+        _set_scale("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        _set_scale(
+            "_q_scale",
+            layer.q_scale.detach() * fnuz_factor
+            if q_loaded
+            else torch.ones_like(layer.q_scale),
+        )
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
@@ -1265,9 +1445,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer.k_scale)
-        layer._v_scale_float = _to_scalar(layer.v_scale)
-        layer._q_scale_float = _to_scalar(layer.q_scale)
+        layer._k_scale_float = _to_scalar(layer._k_scale)
+        layer._v_scale_float = _to_scalar(layer._v_scale)
+        layer._q_scale_float = _to_scalar(layer._q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)

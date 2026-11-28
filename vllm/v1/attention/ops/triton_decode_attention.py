@@ -35,8 +35,19 @@ from typing import Any
 import torch
 from packaging import version
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
 
 is_hip_ = current_platform.is_rocm()
 
@@ -319,10 +330,11 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    USE_TD: tl.constexpr = False,
     SLIDING_WINDOW: tl.constexpr = 0,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head_id = tl.program_id(1)
+    cur_head_id = tl.program_id(0)
+    cur_batch = tl.program_id(1)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
     split_kv_id = tl.program_id(2)
 
@@ -338,26 +350,49 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
 
-    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(
-        Q + offs_q,
-        mask=(mask_h[:, None]) & (mask_d[None, :]),
-        other=0.0,
-        cache_modifier=".ca",
-    )
+    if USE_TD:
+        # One KV head: the descriptor bounds are exactly mask_h and mask_d.
+        q_desc = tl.make_tensor_descriptor(
+            Q + cur_batch * stride_qbs,
+            shape=[q_head_num, Lk],
+            strides=[stride_qh, 1],
+            block_shape=[BLOCK_H, BLOCK_DMODEL],
+        )
+        q = q_desc.load([cur_head_id * VALID_BLOCK_H, 0])
+    else:
+        offs_q = (
+            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
+        )
+        q = tl.load(
+            Q + offs_q,
+            mask=(mask_h[:, None]) & (mask_d[None, :]),
+            other=0.0,
+            cache_modifier=".ca",
+        )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-        qpe = tl.load(
-            Q + off_qpe,
-            mask=(mask_h[:, None]) & (mask_dpe[None, :]),
-            other=0.0,
-            cache_modifier=".ca",
-        )
+        if USE_TD:
+            qpe_desc = tl.make_tensor_descriptor(
+                Q + cur_batch * stride_qbs,
+                shape=[q_head_num, Lk],
+                strides=[stride_qh, 1],
+                block_shape=[BLOCK_H, BLOCK_DPE],
+            )
+            qpe = qpe_desc.load([cur_head_id * VALID_BLOCK_H, BLOCK_DMODEL])
+        else:
+            off_qpe = (
+                cur_batch * stride_qbs
+                + cur_head[:, None] * stride_qh
+                + offs_dpe[None, :]
+            )
+            qpe = tl.load(
+                Q + off_qpe,
+                mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+                other=0.0,
+                cache_modifier=".ca",
+            )
 
     # A window of SLIDING_WINDOW keys ends at the sequence end.
     window_start = 0
@@ -372,10 +407,10 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[None, :]
         base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
         if BLOCK_DPE > 0:
-            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
+            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[None, :]
 
         ks = tl.load(k_scale)
         vs = tl.load(v_scale)
@@ -394,28 +429,28 @@ def _fwd_grouped_kernel_stage1(
             )
 
             # explicitly facilitate overlapping load/compute
-            offs_buf_k = kv_off_k[None, :] + base_offs_k
+            offs_buf_k = kv_off_k[:, None] + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
-                mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
+                mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
                 cache_modifier=".cg",
             )
 
             if k.dtype.is_fp8():
                 k = (k.to(tl.float32) * ks).to(q.dtype)
-            qk = tl.dot(q, k.to(q.dtype))
+            qk = tl.dot(q, tl.trans(k.to(q.dtype)))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = kv_off_k[None, :] + base_offs_kpe
+                offs_buf_kpe = kv_off_k[:, None] + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dpe[None, :]),
                     other=0.0,
                     cache_modifier=".cg",
                 )
                 if kpe.dtype.is_fp8():
                     kpe = (kpe.to(tl.float32) * ks).to(qpe.dtype)
-                qk += tl.dot(qpe, kpe.to(qpe.dtype))
+                qk += tl.dot(qpe, tl.trans(kpe.to(qpe.dtype)))
             qk *= sm_scale
 
             if logit_cap > 0:
@@ -439,10 +474,7 @@ def _fwd_grouped_kernel_stage1(
                 if v.dtype.is_fp8():
                     v = (v.to(tl.float32) * vs).to(q.dtype)
             else:
-                # MLA uses a single c_kv.
-                # loading the same c_kv to interpret it as v is not necessary.
-                # transpose the existing c_kv (aka k) for the dot product.
-                v = tl.trans(k)
+                v = k
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -480,6 +512,70 @@ def _fwd_grouped_kernel_stage1(
         )
 
 
+def _decode_grouped_att_m_fwd_warmup_inputs(
+    *,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    num_heads: int,
+    head_size: int,
+    kv_lora_rank: int,
+    page_size: int,
+    kv_block_stride: int,
+    kv_token_stride: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: one latent KV head whose cache row holds the
+    # latent (Lv = kv_lora_rank) then the RoPE part (Lk = head_size). K and V
+    # view the same [num_blocks, page_size, 1, Lk] cache. The block-table row
+    # width depends on the runner's kernel block size split, which the layer
+    # cannot see, so warm both of its integer classes (generic, multiple of 16).
+    splits: Any = WarmupChoices(*num_kv_splits)
+    block_table_width: Any = WarmupChoices(2, 16)
+    kv_strides = (kv_block_stride, kv_token_stride, head_size, 1)
+    return dict(
+        q=TritonWarmupTensor(q_dtype, shape=(1, num_heads, head_size)),
+        k_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, head_size), strides=kv_strides
+        ),
+        v_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, kv_lora_rank), strides=kv_strides
+        ),
+        att_out=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        Req_to_tokens=TritonWarmupTensor(torch.int32, shape=(1, block_table_width)),
+        B_Seqlen=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sm_scale=1.0,
+        page_size=page_size,
+        logit_cap=0.0,
+        k_scale=TritonWarmupTensor(torch.float32),
+        v_scale=TritonWarmupTensor(torch.float32),
+        is_mla=True,
+        sliding_window=sliding_window,
+    )
+
+
+def _use_q_tensor_descriptor(q, k_buffer, is_mla: bool) -> bool:
+    """Whether the grouped stage-1 kernel loads its Q tile with 2D block reads:
+    on XPU, for the 576-wide MLA tile (one KV head), when a descriptor can
+    cover `q`.  The 288-wide tile measured slower with TD, so it keeps
+    pointers."""
+    return (
+        current_platform.is_xpu()
+        and is_mla
+        and k_buffer.shape[-1] == 576
+        and k_buffer.shape[-2] == 1
+        and use_tensor_descriptor()
+        and tensor_descriptor_compatible(q)
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_grouped_kernel_stage1,
+    warmup_inputs=_decode_grouped_att_m_fwd_warmup_inputs,
+)
 def _decode_grouped_att_m_fwd(
     q,
     k_buffer,
@@ -495,7 +591,7 @@ def _decode_grouped_att_m_fwd(
     v_scale,
     is_mla=False,
     sliding_window=0,
-):
+) -> DispatchSpec:
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -527,8 +623,8 @@ def _decode_grouped_att_m_fwd(
     BLOCK_H = 16
     NUM_KV_SPLITS = num_kv_splits
     grid = (
-        batch,
         triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
+        batch,
         NUM_KV_SPLITS,
     )
 
@@ -545,28 +641,31 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    _fwd_grouped_kernel_stage1[grid](
-        q,
-        k_buffer,
-        v_buffer,
-        sm_scale,
-        Req_to_tokens,
-        B_Seqlen,
-        att_out,
-        Req_to_tokens.stride(0),
-        q.stride(0),
-        q.stride(1),
-        _page_stride(k_buffer, page_size),
-        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
-        k_scale,
-        v_scale,
+    use_td = _use_q_tensor_descriptor(q, k_buffer, is_mla)
+
+    return grid, dict(
+        Q=q,
+        K_Buffer=k_buffer,
+        V_Buffer=v_buffer,
+        sm_scale=sm_scale,
+        Req_to_tokens=Req_to_tokens,
+        B_Seqlen=B_Seqlen,
+        Att_Out=att_out,
+        stride_req_to_tokens_b=Req_to_tokens.stride(0),
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_buf_kpbs=_page_stride(k_buffer, page_size),
+        # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_buf_kbs=k_buffer.stride(-3),
+        stride_buf_kh=k_buffer.stride(-2),
+        stride_buf_vpbs=_page_stride(v_buffer, page_size),
+        stride_buf_vbs=v_buffer.stride(-3),
+        stride_buf_vh=v_buffer.stride(-2),
+        stride_mid_ob=att_out.stride(0),
+        stride_mid_oh=att_out.stride(1),
+        stride_mid_os=att_out.stride(2),
+        k_scale=k_scale,
+        v_scale=v_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -582,6 +681,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        USE_TD=use_td,
         SLIDING_WINDOW=sliding_window,
         **extra_kargs,
     )
@@ -658,6 +758,35 @@ def _fwd_kernel_stage2(
     )
 
 
+def _decode_softmax_reducev_fwd_warmup_inputs(
+    *,
+    dtype: torch.dtype,
+    num_heads: int,
+    kv_lora_rank: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
+    # [B, H, Lv] output and [B, H] LSE in the query dtype.
+    splits: Any = WarmupChoices(*num_kv_splits)
+    return dict(
+        logits=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
+        o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
+        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
+        b_seq_len=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sliding_window=sliding_window,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_stage2,
+    warmup_inputs=_decode_softmax_reducev_fwd_warmup_inputs,
+)
 def _decode_softmax_reducev_fwd(
     logits,
     q,
@@ -667,7 +796,7 @@ def _decode_softmax_reducev_fwd(
     b_seq_len,
     num_kv_splits,
     sliding_window=0,
-):
+) -> DispatchSpec:
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -681,17 +810,17 @@ def _decode_softmax_reducev_fwd(
         extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
-    _fwd_kernel_stage2[grid](
-        logits,
-        o,
-        lse,
-        b_seq_len,
-        logits.stride(0),
-        logits.stride(1),
-        logits.stride(2),
-        o.stride(0),
-        o.stride(1),
-        lse.stride(0),
+    return grid, dict(
+        Mid_O=logits,
+        o=o,
+        lse=lse,
+        B_Seqlen=b_seq_len,
+        stride_mid_ob=logits.stride(0),
+        stride_mid_oh=logits.stride(1),
+        stride_mid_os=logits.stride(2),
+        stride_obs=o.stride(0),
+        stride_oh=o.stride(1),
+        stride_lse_bs=lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,

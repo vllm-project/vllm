@@ -96,9 +96,10 @@ _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
 # --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
-_NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
+# `[^<>]` stops each attribute scan at the next tag, keeping the match linear.
+_NAME_RE = re.compile(r'<atem:invoke\b[^<>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(
-    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
+    r'<atem:parameter\b[^<>]*?\bname="(?P<key>[^"]+)"[^<>]*?>(?P<value>.*?)</atem:parameter>',
     re.DOTALL,
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
@@ -333,9 +334,13 @@ class MuseToolParser(ToolParser):
 
         When a client registers a BARE name (e.g. `get_weather`) the shipped
         chat template renders the valid recipient as `"get_weather.*"`, and
-        the model duly emits `get_weather.get_weather`. Collapsing that
-        doubled form is safe: head and tail are identical and the collapsed
-        name is registered.
+        the model fills in the `*`: with the name again
+        (`get_weather.get_weather`), but also with a parameter, a verb or
+        nothing (`get_weather.city`, `get_weather.fetch`, `get_weather.`).
+        The doubled form always collapses to the registered head. Any other
+        suffix collapses only when no registered name lives under `head.`:
+        with `get_weather.temperature` also registered, `get_weather.fetch`
+        may mean a missing sibling, not the bare tool.
 
         Anything else is passed through unchanged. Matching on the trailing
         segment alone is NOT safe -- an emitted `weather.get` against a
@@ -345,7 +350,15 @@ class MuseToolParser(ToolParser):
         if not registered or emitted in registered:
             return emitted
         head, sep, tail = emitted.partition(".")
-        if sep and head == tail and head in registered:
+        if (
+            sep
+            and head in registered
+            and (
+                head == tail
+                or not any(name.startswith(f"{head}.") for name in registered)
+            )
+        ):
+            logger.debug("Muse: mapped emitted tool name %r to %r.", emitted, head)
             return head
         logger.warning(
             "Muse: emitted tool name %r does not match any registered tool; "
@@ -477,8 +490,16 @@ class MuseToolParser(ToolParser):
 
         try:
             registered = self._registered_names(request)
-            calls = self._parse_tool_calls(
-                current_text, registered, self._parameter_types(request)
+            # Only parse on the delta that completes an `</atem:invoke>` (the window
+            # also covers a closing tag split across deltas).
+            close = "</atem:invoke>"
+            tail = current_text[max(0, len(previous_text) - len(close) + 1) :]
+            calls = (
+                self._parse_tool_calls(
+                    current_text, registered, self._parameter_types(request)
+                )
+                if close in tail
+                else []
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
@@ -514,7 +535,8 @@ class MuseToolParser(ToolParser):
 
             self._streamed_content_len = len(content)
             self._streamed_reasoning_len = len(reasoning)
-            self._emitted_tool_calls = len(calls)
+            # Never walk back, since `calls` is empty on non-parsing deltas.
+            self._emitted_tool_calls = max(self._emitted_tool_calls, len(calls))
 
             message = DeltaMessage()
             if content_delta:

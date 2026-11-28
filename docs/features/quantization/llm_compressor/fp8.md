@@ -17,8 +17,9 @@ The FP8 types typically supported in hardware have two distinct representations,
     FP8 models will run on compute capability >= 7.5 (Turing) as weight-only W8A16, utilizing FP8 Marlin.
 
 !!! note "GEMM kernel selection"
-    vLLM picks an FP8 GEMM kernel automatically at load time and logs a
-    `Selected <kernel> for <module>` line at startup. For block-quantized
+    vLLM picks an FP8 GEMM kernel automatically at load time and lists it in the
+    [backends table](../../../usage/troubleshooting.md#check-which-backends-a-model-runs-on)
+    logged at startup. For block-quantized
     checkpoints on CUDA it tries, in order: a FlashInfer/DeepGEMM hybrid
     (Hopper only), DeepGEMM, CUTLASS, Marlin, Triton, Humming, then a
     PyTorch fallback. GPUs without native FP8 support (e.g. Turing/Ampere)
