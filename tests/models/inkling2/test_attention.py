@@ -524,3 +524,21 @@ def test_gate_sink(num_tokens):
     expected = output.view(num_tokens, -1) * torch.sigmoid(gate.float()) * scale
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(actual.float(), expected, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("num_sms", [100, 132, 148])
+@pytest.mark.parametrize("max_query_len", [1, 8])
+def test_plan_decode_attention_full_layers_never_fall_back_to_fa4(
+    monkeypatch, num_sms, max_query_len
+):
+    """Large decode/verify batches on full layers keep the split-KV decode
+    kernel: past 6 CTAs per SM the plan is one split, never 0 (FA4)."""
+    from vllm.models.inkling2.nvidia.ops import attention as ops
+
+    monkeypatch.setattr(ops, "num_compute_units", lambda: num_sms)
+    for num_reqs in range(1, 2049):
+        splits = ops.plan_decode_attention(
+            False, num_reqs, max_query_len, 24, 8, REL_EXTENT
+        )
+        assert splits >= 1, (num_reqs, splits)

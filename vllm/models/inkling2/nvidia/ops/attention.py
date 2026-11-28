@@ -406,7 +406,9 @@ def plan_decode_attention(
         if work <= (16 if max_query_len <= 2 else 8):
             return triton.cdiv(rel_extent - 1, _FA4_BLOCK_N) + 1
         return 5 if work <= 16 else 3 if work <= 32 else 2 if work <= 64 else 1
-    return max(num_sms // work, min(num_sms // 8, 6 * num_sms // work))
+    # Past 6 CTAs per SM (num_reqs * num_kv_heads > 6 * num_sms) both terms
+    # floor to 0, which sent large decode/verify batches to FA4; keep one split.
+    return max(1, num_sms // work, min(num_sms // 8, 6 * num_sms // work))
 
 
 _EX2_ASM = tl.constexpr("ex2.approx.ftz.f32 $0, $1;")
