@@ -816,6 +816,24 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)
 
 
+def test_autotune_cache_key_keeps_sliding_window_cache_dtype():
+    """A recipe's FP8 sliding-window layers run different kernels than plain
+    NVFP4, so normalization must keep the init=False field that records it."""
+    from vllm.config.cache import CacheConfig
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        _normalize_cache_config_for_hash,
+    )
+
+    recipe = CacheConfig(cache_dtype="nvfp4_swa_fp8")
+    recipe.kv_cache_layout = "HND"
+    normalized = _normalize_cache_config_for_hash(recipe)
+    assert normalized.sliding_window_cache_dtype == "fp8"
+    assert hash_config(normalized) == hash_config(
+        CacheConfig(cache_dtype="nvfp4_swa_fp8")
+    )
+    assert hash_config(normalized) != hash_config(CacheConfig(cache_dtype="nvfp4"))
+
+
 def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
     """DP runs with MoE padding skip tune the precomputed-routing TRT-LLM MoE
     ops instead of the logits ops; a cache tuned without them must not hit and

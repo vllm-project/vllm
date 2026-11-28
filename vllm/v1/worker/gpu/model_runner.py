@@ -114,6 +114,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
+    warn_if_kv_cache_dtype_recipe_unused,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
@@ -674,6 +675,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
     def get_kv_cache_layer_configs(self):
+        warn_if_kv_cache_dtype_recipe_unused(self.vllm_config)
         configs = get_kv_cache_layer_configs(self.vllm_config)
         # A draft running at DCP=1 under a DCP target keeps a replicated cache.
         if (

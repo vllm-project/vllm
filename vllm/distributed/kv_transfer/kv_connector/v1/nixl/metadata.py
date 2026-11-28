@@ -204,6 +204,7 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
+        "sliding_window_cache_dtype": str(cache_config.sliding_window_cache_dtype),
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible

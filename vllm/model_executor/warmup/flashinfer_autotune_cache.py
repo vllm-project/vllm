@@ -25,6 +25,12 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
     if cache_config.mamba_block_size is None and cache_config.kv_cache_layout is None:
         return cache_config
     normalized = replace(cache_config, mamba_block_size=None)
+    # replace() drops init=False fields; this one selects different kernels.
+    object.__setattr__(
+        normalized,
+        "sliding_window_cache_dtype",
+        cache_config.sliding_window_cache_dtype,
+    )
     assert normalized.kv_cache_layout is None
     return normalized
 

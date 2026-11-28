@@ -1024,3 +1024,48 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="NVFP4 KV cache requires SM100.",
+)
+@pytest.mark.parametrize(
+    ("recipe", "full_attention_dtype"),
+    [("nvfp4_swa_fp8", "nvfp4"), ("nvfp4_4over6_swa_fp8", "nvfp4_4over6")],
+)
+@pytest.mark.parametrize(
+    ("skip_layers", "sliding_window_dtype"), [([], "fp8"), (["0"], "auto")]
+)
+def test_kv_cache_dtype_recipe(
+    recipe,
+    full_attention_dtype,
+    skip_layers,
+    sliding_window_dtype,
+    monkeypatch,
+    dist_init,
+    workspace_init,
+):
+    """A recipe stores sliding-window layers in FP8 and full-attention layers in
+    its NVFP4 variant; skip layers keep the model dtype."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    model, _ = load_model_without_vllm_runner(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        model_config_kwargs={
+            "hf_overrides": {
+                "layer_types": ["sliding_attention", "full_attention"],
+                "sliding_window": 16,
+            }
+        },
+        vllm_config_kwargs={
+            "cache_config": CacheConfig(
+                cache_dtype=recipe, kv_cache_dtype_skip_layers=skip_layers
+            )
+        },
+    )
+    sliding_layer, full_layer = (layer.self_attn.attn for layer in model.model.layers)
+    assert sliding_layer.sliding_window == 16
+    assert sliding_layer.kv_cache_dtype == sliding_window_dtype
+    assert full_layer.sliding_window is None
+    assert full_layer.kv_cache_dtype == full_attention_dtype

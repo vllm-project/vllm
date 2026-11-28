@@ -329,6 +329,13 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
+        if (
+            cache_config is not None
+            and sliding_window is not None
+            and cache_config.sliding_window_cache_dtype is not None
+        ):
+            kv_cache_dtype = cache_config.sliding_window_cache_dtype
+
         # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index
@@ -674,8 +681,9 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             # SW chooses its own block_size, decoupled from the user's
             # ``--block-size`` (which only constrains primary attention).
-            # When this SW layer is a padded spec (skip-quant: its page is
-            # padded up to ``skip_page_size_padded``), pick the largest kernel
+            # When this SW layer is a padded spec (skip-quant or a KV cache
+            # dtype recipe: its page is padded up to
+            # ``skip_page_size_padded``), pick the largest kernel
             # block that still fits the shared page so we waste fewer padding
             # bytes per block. Otherwise (page_size_padded is None) take the
             # primary block size when the backend can run it unsplit: if this

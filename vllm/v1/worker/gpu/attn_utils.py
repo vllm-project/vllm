@@ -15,6 +15,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
         BatchExecutionDescriptor,
         CudaGraphManager,
     )
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +158,30 @@ def get_kv_cache_layer_configs(
     if vllm_config.attention_config.hisparse_config is not None:
         layer_configs = resolve_hisparse_specs(vllm_config, layer_configs, attn_layers)
     return layer_configs
+
+
+def warn_if_kv_cache_dtype_recipe_unused(vllm_config: VllmConfig) -> None:
+    """KV cache dtype recipes assume interleaved full-attention and
+    sliding-window layers; otherwise one of the two dtypes goes unused."""
+    cache_config = vllm_config.cache_config
+    if cache_config.sliding_window_cache_dtype is None:
+        return
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    is_sliding = [layer.sliding_window is not None for layer in attn_layers.values()]
+    if any(is_sliding) and not all(is_sliding):
+        return
+    layout, dtype = (
+        ("only sliding-window", cache_config.sliding_window_cache_dtype)
+        if any(is_sliding)
+        else ("no sliding-window", cache_config.cache_dtype)
+    )
+    logger.warning_once(
+        "The KV cache dtype recipe targets models that interleave "
+        "full-attention and sliding-window layers, but this model has %s "
+        "attention layers. Use --kv-cache-dtype %s instead.",
+        layout,
+        dtype,
+    )
 
 
 def get_shared_kv_cache_layers(vllm_config: VllmConfig) -> dict[str, str]:

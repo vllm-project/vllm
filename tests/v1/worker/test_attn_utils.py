@@ -1553,3 +1553,29 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         drafter, None, kv_cache_config, None, None, target_groups, kernel_block_sizes
     )
     assert built == {"draft": 128}
+
+
+@pytest.mark.parametrize(
+    ("sliding_windows", "suggested_dtype"),
+    [((None, 16), None), ((None, None), "nvfp4"), ((16, 16), "fp8")],
+)
+def test_kv_cache_dtype_recipe_warns_without_interleaved_layers(
+    monkeypatch, sliding_windows, suggested_dtype
+):
+    """A recipe on a model without both layer kinds leaves one dtype unused."""
+    from vllm.config import CacheConfig
+
+    layers = {
+        f"layer.{i}": SimpleNamespace(sliding_window=w)
+        for i, w in enumerate(sliding_windows)
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(attn_utils, "logger", mock_logger)
+    attn_utils.warn_if_kv_cache_dtype_recipe_unused(
+        SimpleNamespace(cache_config=CacheConfig(cache_dtype="nvfp4_swa_fp8"))
+    )
+    if suggested_dtype is None:
+        mock_logger.warning_once.assert_not_called()
+    else:
+        assert mock_logger.warning_once.call_args.args[-1] == suggested_dtype
