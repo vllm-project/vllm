@@ -6,6 +6,7 @@ import asyncio
 import copy
 import inspect
 import itertools
+import threading
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -1171,6 +1172,9 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+        # Set when the render pool is replaced, so that renders still queued
+        # in the old pool move to the new one.
+        self._pool_replaced = asyncio.Event()
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         # Skip for mock configs
@@ -1188,6 +1192,8 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         eventually finish or be reaped on process exit.
         """
         self._executor.replace_inner()
+        self._pool_replaced.set()
+        self._pool_replaced = asyncio.Event()
         logger.warning(
             "Chat template render timed out — executor pool replaced "
             "(%d worker(s)). The stuck thread may continue consuming "
@@ -1195,19 +1201,84 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             self.model_config.renderer_num_workers,
         )
 
-    async def _render_with_timeout(self, coro):
-        """Run a template-rendering coroutine with a timeout.
+    async def _render_with_timeout(self, *args, **kwargs):
+        """Render the chat template on the renderer pool with a timeout.
 
-        On timeout, replaces the executor so subsequent renders are not
-        permanently blocked by the stuck thread.
+        The timeout counts the render's own run time, not the time the job
+        waits in the pool queue behind other work (tokenization and decoding
+        share the pool). A render still queued when the pool is replaced is
+        submitted again to the new pool. On timeout, replaces the executor so
+        subsequent renders are not permanently blocked by the stuck thread. A
+        queued render also replaces a pool that made no progress for a whole
+        timeout, whatever job holds its workers. A render that runs keeps its
+        timeout when its caller is cancelled; one still queued is dropped.
         """
         timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
         if timeout <= 0:
-            return await coro
+            return await self._apply_chat_template_async(*args, **kwargs)
+        loop = asyncio.get_running_loop()
+
+        def keep_timeout(job, pool_replaced, remaining):
+            # The caller is gone. Replace the pool at the render's deadline if
+            # the render still runs and nothing replaced its pool before.
+            def expire():
+                if not job.done() and not pool_replaced.is_set():
+                    self._replace_executor()
+
+            loop.call_later(remaining, expire)
+
+        while True:
+            started = loop.create_future()
+            abandoned = threading.Event()
+
+            def render(started=started, abandoned=abandoned):
+                loop.call_soon_threadsafe(
+                    lambda: started.done() or started.set_result(None)
+                )
+                if abandoned.is_set():
+                    return None
+                return safe_apply_chat_template(*args, **kwargs)
+
+            job = self._executor.submit(render)
+            result = asyncio.wrap_future(job, loop=loop)
+            pool_replaced = self._pool_replaced
+            replaced = asyncio.ensure_future(pool_replaced.wait())
+            try:
+                while True:
+                    progress = self._executor.progress()
+                    done, _ = await asyncio.wait(
+                        {started, replaced},
+                        timeout=timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if done:
+                        break
+                    # Still queued after a whole timeout. A pool that started
+                    # or finished no job in that time has every worker stuck.
+                    if self._executor.progress() == progress:
+                        self._replace_executor()
+            except asyncio.CancelledError:
+                # No caller is left to time the render: it must not run later.
+                # If a worker took it at this moment, it keeps its timeout.
+                abandoned.set()
+                result.cancel()
+                keep_timeout(job, pool_replaced, timeout)
+                raise
+            finally:
+                replaced.cancel()
+            if started.done():
+                break
+            abandoned.set()  # still queued in the replaced pool: submit again
+        deadline = loop.time() + timeout
         try:
-            return await asyncio.wait_for(coro, timeout=timeout)
+            return await asyncio.wait_for(result, timeout=timeout)
+        except asyncio.CancelledError:
+            keep_timeout(job, pool_replaced, deadline - loop.time())
+            raise
         except TimeoutError:
-            self._replace_executor()
+            # Another render that timed out in the same pool replaced it.
+            if not pool_replaced.is_set():
+                self._replace_executor()
             raise TimeoutError(
                 f"Chat template rendering timed out after "
                 f"{timeout}s. This may indicate a malicious or "
@@ -1381,12 +1452,10 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             visibility_check_kwargs = chat_template_kwargs.copy()
             visibility_check_kwargs["tokenize"] = False
             rendered = await self._render_with_timeout(
-                self._apply_chat_template_async(
-                    model_config,
-                    tokenizer,
-                    conversation,
-                    **visibility_check_kwargs,
-                )
+                model_config,
+                tokenizer,
+                conversation,
+                **visibility_check_kwargs,
             )
             assert isinstance(rendered, str)
             prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
@@ -1402,12 +1471,10 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             chat_template_kwargs["tokenize"] = True
 
         prompt_raw = await self._render_with_timeout(
-            self._apply_chat_template_async(
-                model_config,
-                tokenizer,
-                conversation,
-                **chat_template_kwargs,
-            )
+            model_config,
+            tokenizer,
+            conversation,
+            **chat_template_kwargs,
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
