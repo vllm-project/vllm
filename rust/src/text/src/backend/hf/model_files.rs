@@ -250,6 +250,8 @@ enum SourceFiles {
         model_id: String,
         commit: String,
         cache: Cache,
+        /// Token for looking up missing files on the Hub, as given to `open`.
+        hf_token: Option<HfToken>,
         /// The Hub listing at `commit`, fetched at most once; `None` when the Hub
         /// could not be reached.
         hub: OnceCell<Option<HubListing>>,
@@ -290,7 +292,7 @@ impl SourceFiles {
             .map(|path| Cache::new(path.into()))
             .unwrap_or_else(Cache::from_env);
         if let Some(dir) = cached_snapshot_dir(&cache, &repo) {
-            let snapshot = Self::snapshot(model_id, dir, &cache);
+            let snapshot = Self::snapshot(model_id, dir, &cache, hf_token);
             if snapshot.contains(required).await? {
                 return Ok(snapshot);
             }
@@ -329,6 +331,7 @@ impl SourceFiles {
             model_id,
             commit,
             cache,
+            hf_token,
             hub,
         } = self
         else {
@@ -342,8 +345,9 @@ impl SourceFiles {
         if marker.as_ref().is_some_and(|marker| marker.exists()) || is_hf_hub_offline() {
             return Ok(None);
         }
-        let listing =
-            hub.get_or_init(|| fetch_hub_listing(cache, model_id, commit, filename)).await;
+        let listing = hub
+            .get_or_init(|| fetch_hub_listing(cache, model_id, commit, filename, hf_token.as_ref()))
+            .await;
         let Some(listing) = listing else {
             return Ok(None);
         };
@@ -453,13 +457,14 @@ impl SourceFiles {
     }
 
     /// A cached snapshot of `model_id`, at the commit its directory is named after.
-    fn snapshot(model_id: &str, dir: PathBuf, cache: &Cache) -> Self {
+    fn snapshot(model_id: &str, dir: PathBuf, cache: &Cache, hf_token: Option<&HfToken>) -> Self {
         let commit = dir.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
         Self::Snapshot {
             dir,
             model_id: model_id.to_string(),
             commit,
             cache: cache.clone(),
+            hf_token: hf_token.cloned(),
             hub: OnceCell::new(),
         }
     }
@@ -521,6 +526,7 @@ async fn fetch_hub_listing(
     model_id: &str,
     commit: &str,
     missing_file: &str,
+    hf_token: Option<&HfToken>,
 ) -> Option<HubListing> {
     let unreachable = |reason: String| {
         warn!(
@@ -534,7 +540,7 @@ async fn fetch_hub_listing(
         );
         None
     };
-    let api = match build_api(cache) {
+    let api = match build_api(cache, hf_token) {
         Ok(api) => api,
         Err(error) => return unreachable(error.to_report_string()),
     };
