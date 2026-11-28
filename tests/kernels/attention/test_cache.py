@@ -51,7 +51,8 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+# 4096 tokens are enough to take the grouped launch.
+@pytest.mark.parametrize("num_tokens", [*NUM_TOKENS, 4096])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
