@@ -4610,6 +4610,7 @@ class rocm_aiter_ops:
         return_kv: bool,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4622,7 +4623,8 @@ class rocm_aiter_ops:
         passes False, so the kernel skips that store). For fp8 caches the
         kernel writes the pre-quant K into k_out via k_out_unquantized. When
         q_out_fp8 is set, the kernel also writes Q statically quantized by the
-        fp32 device scalar q_scale (fp8 caches only).
+        fp32 device scalar q_scale (fp8 caches only). v_norm applies a
+        weightless RMS norm to V before the cache write (e.g. Gemma4).
         """
         is_fp8_cache = kv_cache_dtype.startswith("fp8")
         write_unquantized = return_kv and is_fp8_cache
@@ -4659,6 +4661,7 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            v_norm=v_norm,
             k_out_unquantized=k_out if write_unquantized else None,
             q_out_fp8=q_out_fp8,
             per_tensor_q_scale=q_scale,

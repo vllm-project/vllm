@@ -948,6 +948,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
 
+    def fused_v_norm_kvcache_supported(self):
+        """Whether the QKNorm+RoPE+KVCache fusion may also apply a weightless
+        V-norm (e.g. Gemma4) on the KV-cache write. The fused graph keeps
+        un-normed V, so only implementations that read V solely from the KV
+        cache may return True.
+        """
+        return False
+
     def set_interleaved_v_cache(self):
         """Opt this implementation into the interleaved V-cache layout for all of
         its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
@@ -981,12 +989,15 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         layer_slot_mapping: torch.Tensor,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ):
         """If `fused_qk_norm_rope_kvcache_supported` returns True, this method
         will be called by the fused custom op. Applies QK-norm + RoPE and
         writes K/V to the KV cache. Results are written to the pre-allocated
         q_out and k_out tensors, and to q_out_fp8 (Q statically quantized by
         q_scale) when set; V is split from QKV at the graph level.
+        With v_norm, V is weightless-RMS-normed before the KV-cache write
+        (only called when `fused_v_norm_kvcache_supported` returns True).
         """
         raise NotImplementedError
 
