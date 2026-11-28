@@ -123,6 +123,8 @@ impl fmt::Display for ParserSelection {
 #[derive(Clone)]
 pub struct ParserFactory<C> {
     creators: HashMap<String, C>,
+    /// Alternative names, mapped to the registered name they stand for.
+    aliases: HashMap<String, String>,
     patterns: Vec<(String, String)>,
 }
 
@@ -130,6 +132,7 @@ impl<C> Default for ParserFactory<C> {
     fn default() -> Self {
         Self {
             creators: HashMap::new(),
+            aliases: HashMap::new(),
             patterns: Vec::new(),
         }
     }
@@ -140,6 +143,18 @@ impl<C> ParserFactory<C> {
     pub fn register_creator(&mut self, name: &str, creator: C) -> &mut Self {
         self.creators.insert(name.to_string(), creator);
         self
+    }
+
+    /// Register `alias` as another name for the parser registered as `name`.
+    pub fn register_alias(&mut self, alias: &str, name: &str) -> &mut Self {
+        self.aliases.insert(alias.to_string(), name.to_string());
+        self
+    }
+
+    /// Return the registered name `name` stands for: the target of an alias,
+    /// otherwise `name` itself.
+    pub fn canonical_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map_or(name, String::as_str)
     }
 
     /// Add a case-insensitive substring match from model ID to parser name.
@@ -159,12 +174,12 @@ impl<C> ParserFactory<C> {
 
     /// Return true if the exact parser name is registered.
     pub fn contains(&self, name: &str) -> bool {
-        self.creators.contains_key(name)
+        self.creators.contains_key(self.canonical_name(name))
     }
 
     /// Return all registered parser names sorted for stable display.
     pub fn list(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.creators.keys().cloned().collect();
+        let mut names: Vec<_> = self.creators.keys().chain(self.aliases.keys()).cloned().collect();
         names.sort_unstable();
         names
     }
@@ -172,6 +187,6 @@ impl<C> ParserFactory<C> {
     /// Get the constructor for a parser by its exact registered name, or return
     /// None if not found.
     pub fn creator(&self, name: &str) -> Option<&C> {
-        self.creators.get(name)
+        self.creators.get(self.canonical_name(name))
     }
 }

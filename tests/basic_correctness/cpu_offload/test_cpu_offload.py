@@ -34,12 +34,34 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
         args.append("--enforce-eager")
 
     compare_two_settings(
-        model="vllm-project/tiny-random-LlamaForCausalLM",
+        model="vllm/tiny-random-LlamaForCausalLM",
         arg1=[],
         arg2=args,
         env1=None,
         env2=env_vars,
     )
+
+
+def test_cpu_offload_online_quantization():
+    """Serving with online quantization and CPU offloading must not raise.
+
+    Online quantization creates its weights on the meta device, which the
+    offloader leaves for the online method to materialize: online-quantized
+    weights are not offloaded (see `test_uva_offloader_skips_meta_weights`).
+    """
+    compare_two_settings(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        arg1=["--quantization", "fp8_per_tensor"],
+        arg2=["--quantization", "fp8_per_tensor", "--cpu-offload-gb", "1"],
+    )
+
+
+def test_uva_offloader_skips_meta_weights():
+    """Weights online quantization will create are not offloaded."""
+    offloader = UVAOffloader(cpu_offload_max_bytes=1 << 30)
+    layer = nn.Linear(8, 8, device="meta")
+    offloader.wrap_modules(iter([layer]))
+    assert layer.weight.is_meta and offloader.cpu_offload_bytes == 0
 
 
 @pytest.mark.parametrize(
@@ -65,7 +87,7 @@ def test_mrv2_weight_offloading(
 
     try:
         with vllm_runner(
-            "vllm-project/tiny-random-LlamaForCausalLM",
+            "vllm/tiny-random-LlamaForCausalLM",
             enforce_eager=True,
             gpu_memory_utilization=0.03,
             max_model_len=128,
@@ -92,8 +114,18 @@ def _is_offloaded(p: nn.Parameter) -> bool:
     return p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False)
 
 
+@pytest.mark.parametrize(
+    ("model", "model_impl", "tower_name"),
+    [
+        ("Qwen/Qwen3.5-0.8B", "auto", "visual"),
+        # Transformers backend builds towers on the meta device
+        ("HuggingFaceTB/SmolVLM-256M-Instruct", "transformers", "vision_model"),
+    ],
+)
 @pytest.mark.parametrize("disable_uva", [False, True])
-def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
+def test_tower_weight_offloading(
+    vllm_runner, monkeypatch, model, model_impl, tower_name, disable_uva
+):
     """`cpu_offload_params` segments must reach towers built outside make_layers.
 
     Regression test: `wrap_modules` was only called from `make_layers`, so a
@@ -108,7 +140,8 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
 
     try:
         with vllm_runner(
-            "Qwen/Qwen3.5-0.8B",
+            model,
+            model_impl=model_impl,
             enforce_eager=True,
             # allocate more vram as Qwen 3.5 has 1.6 GiB of weights
             gpu_memory_utilization=0.3,
@@ -116,7 +149,7 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
             max_num_seqs=1,
             enable_prefix_caching=False,
             cpu_offload_gb=1,
-            cpu_offload_params={"visual"},
+            cpu_offload_params={tower_name},
         ) as vllm_model:
             engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
@@ -137,15 +170,21 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
                     # back on first forward
                     assert "forward" in vars(tower)
 
-            # The language model must stay resident.
-            assert not any(_is_offloaded(p) for p in model.language_model.parameters())
+            # Everything outside the towers must stay resident.
+            towers = tuple(f"{name}." for name in model._tower_model_names)
+            offloaded = {
+                _is_offloaded(p)
+                for n, p in model.named_parameters()
+                if not n.startswith(towers)
+            }
+            assert offloaded == {False}
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
 
 
 @pytest.mark.parametrize(
-    "model", ["vllm-project/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
+    "model", ["vllm/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
 )
 def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model):
     """Transformers backend decoder layers (including MoE experts) are offloaded as
@@ -238,7 +277,7 @@ PREFETCH_ARGS = [
 def test_transformers_backend_cpu_offload_outputs(offload_args, env):
     """The Transformers backend gives the same outputs with weights offloaded."""
     compare_two_settings(
-        model="vllm-project/tiny-random-LlamaForCausalLM",
+        model="vllm/tiny-random-LlamaForCausalLM",
         arg1=["--model-impl", "transformers"],
         arg2=["--model-impl", "transformers", *offload_args],
         env1=None,

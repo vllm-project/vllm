@@ -26,6 +26,51 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Rust raw-JSON gRPC rendering
+
+The experimental Rust frontend can render a raw OpenAI Chat Completions JSON
+request without running inference. Start the Rust render server with
+`vllm-rs render <model> --grpc-port 50051` to enable the `vllm.Render` gRPC
+service alongside its HTTP render endpoints. The gRPC service is disabled
+unless `--grpc-port` is set.
+
+Call `Render.Render` with `api = API_CHAT` and the UTF-8 JSON request in the
+`body` bytes field. Only Chat Completions are supported by this raw RPC;
+Completions, Anthropic Messages, Responses, and an unspecified API are rejected.
+For example, this protobuf text-format request supplies the raw body:
+
+```protobuf
+api: API_CHAT
+body: "{\"model\":\"<model>\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+mm_payload: MM_PAYLOAD_TENSORS
+```
+
+Choose returned multimodal data with the **proto `mm_payload` field**:
+
+| Value | Returned media |
+| --- | --- |
+| `MM_PAYLOAD_UNSPECIFIED` (default) | Same as `MM_PAYLOAD_TENSORS`. |
+| `MM_PAYLOAD_TENSORS` | Preprocessed inline tensors, hashes, and placeholder ranges. |
+| `MM_PAYLOAD_NONE` | Hashes and placeholder ranges, without inline tensors. |
+
+The JSON body's `mm_payload` and `return_mm_kwargs` fields do not select the
+gRPC output mode. `MM_PAYLOAD_NONE` is useful for routing on the prompt layout;
+its media cannot be forwarded directly to `Inference.Generate` without tensor
+data. Metadata-only mode is currently available on the Python HTTP render routes
+([#65018](https://github.com/vllm-project/vllm/pull/65018)). The Rust gRPC
+service rejects unknown enum values. The existing typed `Render.RenderChat` RPC keeps its
+`omit_media_kwargs` boolean unchanged.
+
+The response returns prompt token IDs, an effective structured-output
+constraint, a reasoning gate, and preprocessed media. **It does not yet return
+lowered sampling or stopping parameters**, including temperature, max_tokens,
+stop, bad_words, or n. To preserve the request's generation behavior, supply
+equivalent generation parameters separately when constructing the
+`Inference.Generate` request. Copying only the render response is insufficient;
+for example, a temperature and multiple samples requested in JSON would not be
+preserved by those fields alone. This remaining contract work is tracked in
+[#65503](https://github.com/vllm-project/vllm/issues/65503).
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model
@@ -166,16 +211,129 @@ should split those fields:
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
 
-Callers that need only the token layout and item hashes, such as cache-aware
-routers, can set `"mm_payload": "none"` on the render request. The response
-then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
-`mm_metadata` to null, so the processed tensors are neither serialized nor sent.
-Do not forward such a response to `/inference/v1/generate`, which reads a null
-`kwargs_data` as every item being cached. The default, `"tensors"`, returns
-both fields.
+### `mm_payload` modes
+
+`mm_payload` on the render request sets which fields the response carries:
+
+| `mm_payload` | `mm_hashes`, `mm_placeholders` | `mm_metadata` | `kwargs_data` | Use it when |
+| --- | --- | --- | --- | --- |
+| `"tensors"` (default) | Yes | When available | Yes | The processed tensors should go to a worker. |
+| `"metadata"` | Yes | Yes | Null | The encode worker gets the media another way, and prefill loads embeddings through the EC connector. |
+| `"none"` | Yes | Null | Null | Only the token layout and item hashes are needed, such as in a cache-aware router. |
 
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
+
+Choose the mode by where the media goes after render: through the render
+response to the workers (`"tensors"`), straight from the client to the encode
+worker (`"metadata"`), or to whichever worker a router picks (`"none"`).
+
+In the diagrams, `features` also carries `mm_hashes` and `mm_placeholders`.
+
+#### `"tensors"`
+
+Use case: render once and let the workers run without reprocessing the media,
+for example a single worker at `/inference/v1/generate`, or an encode worker
+that should not load or process the media itself. The cost is response size:
+`kwargs_data` holds the processed tensors, about 12 MiB for one 1920x1080
+image and 86 MiB for a 32-frame 1280x720 video on Qwen2-VL.
+
+Render serializes the processed tensors, and the client forwards them to the
+encode worker:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant E as Encode worker
+    participant P as Prefill worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media, serialize tensors
+    R-->>Client: token_ids, features (kwargs_data, mm_metadata)
+    Client->>E: POST /inference/v1/generate (kwargs_data)
+    note over E: run encoder
+    E-->>Client: ec_transfer_params
+    Client->>P: POST /inference/v1/generate (mm_metadata, ec_transfer_params)
+    P-->E: EC connector read (P pulls embeddings from E)
+    note over P: prefill
+    P-->>Client: generated output
+```
+
+A single worker can instead take the full response at
+`/inference/v1/generate`.
+
+#### `"metadata"`
+
+Use case: encode/prefill disaggregation where the client sends the original
+media to the encode worker and the embeddings reach prefill through the EC
+connector. Prefill still needs the token layout and the per-item metadata (for
+example `image_grid_thw` for M-RoPE positions), which is a few integers per
+item, so the processed tensors never pass through the client.
+
+Render does not serialize the tensors, so the encode worker needs the media from
+the client:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant E as Encode worker
+    participant P as Prefill worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media
+    R-->>Client: token_ids, features (mm_metadata)
+    Client->>E: Request with media
+    note over E: process media, run encoder
+    E-->>Client: ec_transfer_params
+    Client->>P: POST /inference/v1/generate (mm_metadata, ec_transfer_params)
+    P-->E: EC connector read (P pulls embeddings from E)
+    note over P: prefill
+    P-->>Client: generated output
+```
+
+`mm_metadata` is always set in this response, so `/inference/v1/generate`
+rejects it without `ec_transfer_params`.
+
+#### `"none"`
+
+Use case: routing. A cache-aware router reads `token_ids` and `mm_hashes` to
+send the request to the worker that already holds its prefix or encoder cache,
+then forwards the original request with its media. This is the smallest
+response.
+
+The response is for routing only:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant W as Worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media
+    R-->>Client: token_ids, features (no kwargs_data or mm_metadata)
+    note over Client: choose a worker
+    Client->>W: Original request with media
+    W-->>Client: generated output
+```
+
+Do not forward this response to `/inference/v1/generate`, which reads a null
+`kwargs_data` as every item being cached.
+
+#### Null `mm_metadata`
+
+`mm_metadata` is null if any modality in the request has no metadata fields,
+for example an image and a video on LLaVA-OneVision, which has them only for
+images. Do not use the prefill form for such a request.
+
+With `"metadata"`, the response would then have both fields null, which
+`/inference/v1/generate` reads as every item being cached. Render returns a
+400 error instead, so render that request with `"tensors"`.
 
 ## Example
 

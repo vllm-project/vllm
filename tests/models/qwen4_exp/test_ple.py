@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -15,7 +16,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 from torch.nn import functional as F
-from transformers import Qwen4ExpTextConfig
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
@@ -23,9 +24,21 @@ import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import (
+    EngramConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.distributed.engram_pool import verbs
+from vllm.distributed.parallel_state import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
@@ -42,6 +55,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -55,17 +69,21 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEDiskOffloadEmbedding,
+    Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEHostMemoryEmbedding,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLEPoolEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    stage_checkpoint_rows,
+    stage_host_rows,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.torch_utils import weak_ref_tensor
+from vllm.utils.vmm_driver import imex_channel_available
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
     PleShortConvAttentionMetadataBuilder,
@@ -99,6 +117,7 @@ def test_ple_metadata_preserves_request_and_token_order(
         pytest.skip("CUDA required")
     device = torch.device(device)
     config = VllmConfig()
+    config.cache_config.enable_prefix_caching = False
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=3
     )
@@ -324,6 +343,81 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
         module.ngram_embedding.weight,
         torch.cat((shard_0[2:4], shard_1[0:2])),
     )
+
+
+@pytest.mark.parametrize("case", ["complete", "missing", "duplicate", "missing_scale"])
+def test_pool_ple_requires_complete_unique_local_rows(case: str) -> None:
+    module = _make_ngram_embedding_for_load_test()
+    embedding = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.org_vocab_size = 8
+    embedding.shard_indices = module.ngram_embedding.shard_indices
+    embedding.weight = module.ngram_embedding.weight
+    embedding._loaded_ranges = []
+    scale = torch.finfo(torch.float32).min if case == "missing_scale" else 0.25
+    embedding.weight_scale = nn.Parameter(torch.tensor([scale]))
+    embedding.table = SimpleNamespace(row_start=2, shard=embedding.weight)
+    ready = []
+    embedding.pool = SimpleNamespace(ready=lambda table: ready.append(table))
+    module.ngram_embedding = embedding
+    shards = [
+        ("ngram_embedding.shard_0.weight", torch.zeros(4, 2)),
+        ("ngram_embedding.shard_1.weight", torch.ones(4, 2)),
+    ]
+    if case == "missing":
+        shards.pop()
+    elif case == "duplicate":
+        shards.append(shards[0])
+    module.load_weights(shards)
+    if case == "missing_scale":
+        with pytest.raises(ValueError, match="missing its global scale"):
+            Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
+        assert not ready
+        return
+
+    Qwen4ExpPLEFp8EmbeddingMethod().process_weights_after_loading(embedding)
+    if case == "complete":
+        embedding.process_weights_after_loading()
+        assert ready == [embedding.table]
+        torch.testing.assert_close(embedding.weight[:2], torch.zeros(2, 2))
+        torch.testing.assert_close(embedding.weight[2:], torch.ones(2, 2))
+    else:
+        error = (
+            "PLE rows covered through" if case == "missing" else "overlapping PLE rows"
+        )
+        with pytest.raises(RuntimeError, match=error):
+            embedding.process_weights_after_loading()
+        assert not ready
+
+
+@pytest.mark.parametrize("is_checkpoint_format", [True, False])
+@torch.no_grad()
+def test_ple_pool_blocks_weight_reload_before_mutation(is_checkpoint_format):
+    pooled = Qwen4ExpPLEPoolEmbedding.__new__(Qwen4ExpPLEPoolEmbedding)
+    nn.Module.__init__(pooled)
+    layer = nn.Linear(2, 2, bias=False)
+    model = nn.Sequential(layer, pooled)
+    original = layer.weight.detach().clone()
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            engram_config=None,
+            model_config=SimpleNamespace(architecture="TestModel"),
+            load_config=SimpleNamespace(device="cpu"),
+            lora_config=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot reload weights; restart the group"):
+        reload_weights(
+            config,
+            model,
+            [("0.weight", original + 1)],
+            weights_path=None,
+            is_checkpoint_format=is_checkpoint_format,
+        )
+
+    torch.testing.assert_close(layer.weight, original)
 
 
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
@@ -1123,8 +1217,8 @@ def test_ple_fp8_embedding_supports_mixed_precision_config(
     )
 
 
-def _save_ple_checkpoint(path: Path, fmt: str) -> None:
-    """Save a 24-row, 32-wide PLE table as four checkpoint shards of 6 rows."""
+def _save_ple_checkpoint(path: Path, fmt: str, parts: int = 4) -> None:
+    """Save a 24-row, 32-wide PLE table split into checkpoint shards."""
     tensors: dict[str, torch.Tensor] = {}
     if fmt == "nvfp4":
         planes = {
@@ -1141,7 +1235,7 @@ def _save_ple_checkpoint(path: Path, fmt: str) -> None:
             planes = {"weight": values.to(torch.float8_e4m3fn)}
             tensors["ngram_embedding.weight_scale"] = torch.tensor([0.25])
     for name, table in planes.items():
-        for index, shard in enumerate(table.split(6)):
+        for index, shard in enumerate(table.chunk(parts)):
             tensors[f"ngram_embedding.shard_{index}.{name}"] = shard.clone()
     save_file(tensors, path)
 
@@ -1152,10 +1246,16 @@ def _make_ple_from_checkpoint(
     fmt: str,
     *,
     disk_offload: bool,
+    cpu_offload: bool = False,
+    dp_shared_memory: bool = False,
     device: str = "cpu",
     load: bool = True,
 ) -> Qwen4ExpNGramEmbedding:
-    """Build a two-head PLE embedding and load `path` through file-backed views."""
+    """Build a two-head PLE embedding and load `path` through file-backed views.
+
+    `cpu_offload` without `disk_offload` takes the host-memory table, since
+    UVA is reported unavailable.
+    """
     _mock_etp_group(monkeypatch)
     for module in (embedding_module, parameter_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
@@ -1163,9 +1263,14 @@ def _make_ple_from_checkpoint(
     group = SimpleNamespace(world_size=1)
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
-        engram_config=SimpleNamespace(
-            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
+        engram_config=EngramConfig(
+            disk_offload=disk_offload,
+            cpu_offload=cpu_offload,
+            dp_shared_memory=dp_shared_memory,
         ),
+    )
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module, "is_uva_available", lambda: False
     )
     for name, value in (
         ("get_current_vllm_config", vllm_config),
@@ -1204,22 +1309,173 @@ def _make_ple_from_checkpoint(
     return module
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="disk offload is CUDA-only")
-@pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
-def test_disk_offload_matches_resident_table_under_graph_replay(
-    monkeypatch, tmp_path, fmt
+def _check_pool_ple(rank: int, path: Path, store: str, transport, host: bool) -> None:
+    torch.accelerator.set_device_index(rank)
+    path = path / f"rank-{rank}" / "model.safetensors"
+    model_config = ModelConfig(
+        model=str(path.parent), dtype="bfloat16", skip_tokenizer_init=True
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        engram_config=EngramConfig(
+            peer_group_size=2,
+            peer_group_store=store,
+            peer_group_transport=transport,
+            cpu_offload=host,
+        ),
+    )
+
+    def load(config: VllmConfig) -> Qwen4ExpPLEEmbedding:
+        with set_current_vllm_config(config):
+            with torch.device(f"cuda:{rank}"):
+                module = Qwen4ExpNGramEmbedding(
+                    model_config.hf_text_config,
+                    64,
+                    0,
+                    8,
+                    data_parallel_rank=0,
+                    prefix="t",
+                    params_dtype=torch.bfloat16,
+                )
+            with safe_open(path, framework="pt") as checkpoint:
+                module.load_weights(
+                    (name, checkpoint.get_tensor(name))
+                    for name in checkpoint.keys()  # noqa: SIM118
+                )
+            embedding = module.ngram_embedding
+            embedding.quant_method.process_weights_after_loading(embedding)
+            if isinstance(embedding, Qwen4ExpPLEPoolEmbedding):
+                embedding.process_weights_after_loading()
+            return embedding
+
+    try:
+        with set_current_vllm_config(config):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=rank,
+                distributed_init_method=f"file://{path.parent}/world-{rank}",
+                backend="nccl",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=1)
+        embedding = load(config)
+        reference = load(
+            VllmConfig(
+                model_config=model_config,
+                engram_config=EngramConfig(cpu_offload=False),
+            )
+        )
+        assert isinstance(embedding, Qwen4ExpPLEPoolEmbedding)
+        assert embedding.table is not None
+        assert embedding.weight.shape == (12, 32)
+        start = embedding.table.row_start
+        assert torch.equal(
+            embedding.weight.view(torch.uint8).to(reference.weight.device),
+            reference.weight[start : start + 12].view(torch.uint8),
+        )
+        ids = torch.tensor([[0, 11], [12, 23]], dtype=torch.long, device="cuda")
+        embedding(ids)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = embedding(ids)
+        for rows in ([[12, 12], [11, 0]], [[23, 11], [0, 12]]):
+            ids.copy_(torch.tensor(rows, device="cuda"))
+            graph.replay()
+            expected = reference(ids)
+            assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+            torch.testing.assert_close(
+                embedding.dequantize(output, torch.bfloat16),
+                reference.dequantize(expected, torch.bfloat16),
+                atol=0,
+                rtol=0,
+            )
+        embedding.pool.group.barrier()
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="requires two CUDA GPUs",
+)
+@pytest.mark.parametrize(
+    "transport,host", [("nvlink", False), ("rdma", False), ("rdma", True)]
+)
+def test_ple_pool_checkpoint_shards_and_cuda_graph(
+    tmp_path: Path, transport, host: bool
+) -> None:
+    if transport == "nvlink" and not imex_channel_available():
+        pytest.skip("requires CUDA FABRIC handles")
+    if transport == "rdma" and not verbs.active_devices():
+        pytest.skip("requires an active mlx5 RDMA device")
+    text_config = Qwen4ExpTextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=64,
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        split_ngram_parts=3,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_layer_ids=[1],
+    )
+    text_config.ple_embedding_dtype = "float8_e4m3fn"
+    config = Qwen4ExpConfig(
+        text_config=text_config, architectures=["Qwen4ExpForConditionalGeneration"]
+    )
+    for rank in range(2):
+        config.save_pretrained(tmp_path / f"rank-{rank}")
+    path = tmp_path / "rank-0" / "model.safetensors"
+    _save_ple_checkpoint(path, "fp8", parts=3)
+    os.link(path, tmp_path / "rank-1" / "model.safetensors")
+    torch.multiprocessing.spawn(
+        _check_pool_ple,
+        args=(tmp_path, str(tmp_path / "peers"), transport, host),
+        nprocs=2,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="host staging is CUDA-only")
+@pytest.mark.parametrize(
+    "source,fmt",
+    [
+        (source, fmt)
+        for source in ("disk", "host_memory")
+        for fmt in ("bf16", "fp8", "nvfp4")
+    ]
+    + [("pageable", "bf16")],
+)
+def test_host_staged_ple_matches_resident_table_under_graph_replay(
+    monkeypatch, tmp_path, fmt, source
 ) -> None:
     """Staged rows equal the resident lookup of the same ids in a replayed graph."""
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, fmt)
-    gather, resident = (
-        _make_ple_from_checkpoint(
-            monkeypatch, path, fmt, disk_offload=disk_offload, device="cuda"
-        )
-        for disk_offload in (True, False)
+    if source == "pageable":
+        monkeypatch.setattr(current_platform, "is_pin_memory_available", lambda: False)
+    gather = _make_ple_from_checkpoint(
+        monkeypatch,
+        path,
+        fmt,
+        disk_offload=source == "disk",
+        cpu_offload=source != "disk",
+        device="cuda",
     )
-    assert isinstance(gather.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding)
-    assert gather.ngram_embedding.weight.numel() == 0
+    resident = _make_ple_from_checkpoint(
+        monkeypatch, path, fmt, disk_offload=False, device="cuda"
+    )
+    if source == "disk":
+        assert isinstance(gather.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+        assert gather.ngram_embedding.weight.numel() == 0
+    else:
+        assert isinstance(gather.ngram_embedding, Qwen4ExpPLEHostMemoryEmbedding)
+        assert gather.ngram_embedding.weight.device.type == "cpu"
+    if source == "pageable":
+        assert not gather.ngram_embedding._host_ids.is_pinned()
     hidden_states = torch.zeros(8, 64, device="cuda")
     query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
     ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
@@ -1228,7 +1484,7 @@ def test_disk_offload_matches_resident_table_under_graph_replay(
     monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", True)
 
     def stage() -> None:
-        with_gpu_sync_check(stage_checkpoint_rows)(
+        with_gpu_sync_check(stage_host_rows)(
             [(gather, gather.ngram_embedding)],
             input_ids,
             query_start_loc,
@@ -1242,7 +1498,7 @@ def test_disk_offload_matches_resident_table_under_graph_replay(
     forward(gather)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = forward(gather)
+        output = forward(gather).clone()
     for seed in range(2):
         torch.manual_seed(seed)
         input_ids.copy_(torch.randint(1, 64, (8,)))
@@ -1304,6 +1560,74 @@ def test_disk_offload_fails_closed_on_truncation_and_reload(
         embedding.stage_rows(4)
     with pytest.raises(RuntimeError, match="does not support weight reload"):
         module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(6, 32))])
+
+
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_host_memory_ple_stages_owned_rows(
+    monkeypatch: pytest.MonkeyPatch, fp8: bool, rank: int
+) -> None:
+    """Each ETP rank stages its own rows from host memory and zeros the rest."""
+    _mock_etp_group(monkeypatch, world_size=2, rank=rank)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    method = (
+        Qwen4ExpPLEFp8EmbeddingMethod()
+        if fp8
+        else Qwen4ExpPLEUnquantizedEmbeddingMethod()
+    )
+    embedding = Qwen4ExpPLEHostMemoryEmbedding(
+        8,
+        4,
+        params_dtype=torch.bfloat16,
+        padding_size=2,
+        prefix="test.ple_embedding.ngram_embedding",
+        embedding_method=method,
+        num_ngram_heads=2,
+        max_total_tokens=3,
+    )
+    assert embedding.weight.device.type == "cpu"
+    table = (torch.arange(32).reshape(8, 4) + 1).to(embedding.weight.dtype)
+    embedding.weight.data.copy_(table[rank * 4 : (rank + 1) * 4])
+    for ids in ([[3, 4], [7, 0], [4, 3]], [[1, 6]]):
+        ngram_ids = torch.tensor(ids)
+        embedding.copy_ids_to_host(ngram_ids)
+        embedding.stage_rows(ngram_ids.shape[0])
+        output = embedding.staged_rows(ngram_ids.shape[0])
+
+        expected = table[ngram_ids].float()
+        expected[(ngram_ids < rank * 4) | (ngram_ids >= (rank + 1) * 4)] = 0
+        assert output.dtype == table.dtype
+        torch.testing.assert_close(output.float(), expected.flatten(-2), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dp_shared_memory", [False, True])
+def test_cpu_offload_without_uva_uses_host_memory_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dp_shared_memory: bool
+) -> None:
+    """Both private and shared UVA tables fall back to ordinary host RAM."""
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module,
+        "get_engram_dp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=0),
+    )
+    module = _make_ple_from_checkpoint(
+        monkeypatch,
+        tmp_path,
+        "bf16",
+        disk_offload=False,
+        cpu_offload=True,
+        dp_shared_memory=dp_shared_memory,
+        load=False,
+    )
+    assert type(module.ngram_embedding) is Qwen4ExpPLEHostMemoryEmbedding
+    assert module.ngram_embedding.weight.device.type == "cpu"
+    assert not module.ngram_embedding.supports_prefetch
+    assert module.ngram_embedding.quant_method.supports_pre_processed_weights is False
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
@@ -2405,8 +2729,15 @@ def test_fused_conv_correctness(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "layer_cls",
+    [
+        pytest.param(Qwen4ExpPLELayer, id="nvidia"),
+        pytest.param(Qwen4ExpPLELayerAMD, id="amd"),
+    ],
+)
 def test_prefill_exports_conv_window_at_checkpoint(
-    case: _ConvBatchCase, state_layout: str
+    case: _ConvBatchCase, state_layout: str, layer_cls: type[nn.Module]
 ) -> None:
     """A checkpoint holds the conv state of the prefill stopped at its offset.
 
@@ -2416,7 +2747,7 @@ def test_prefill_exports_conv_window_at_checkpoint(
     """
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
-    module = object.__new__(Qwen4ExpPLELayer)
+    module = object.__new__(layer_cls)
     nn.Module.__init__(module)
     module.conv_state_len = (case.kernel_size - 1) * case.dilation
     module.short_conv_dilation = case.dilation

@@ -4,8 +4,8 @@
 configs, one test per config.
 
 Sized for a 2-GPU pod so it can run on every PR; the full 4-GPU sweeps
-(TP2/TP2, FlashInfer, the wider DP-EP and SW sets, cross-layer, Mamba1) run
-nightly only (see .buildkite/test_areas/disaggregated.yaml).
+(TP2/TP2, FlashInfer, the wider DP-EP and SW sets, cross-layer) run nightly
+only (see .buildkite/test_areas/disaggregated.yaml).
 
 Each test runs run_accuracy_test.sh with its config's environment, which
 starts the prefill and decode servers and the proxy, runs test_accuracy.py
@@ -130,7 +130,7 @@ ARCH_CONFIGS = [
             "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
             "GPU_MEMORY_UTILIZATION": "0.8",
             "MODEL_NAMES": "ibm-granite/granite-4.0-h-tiny",
-            "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192,--trust-remote-code",
+            "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192",
         },
         id="mamba2-granite-4.0-h-tiny",
     ),

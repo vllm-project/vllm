@@ -29,9 +29,15 @@ def _get_num_tokens(output_shape: list) -> int:
 
 
 def _rocm_torch_fp8_scaled_mm_supported() -> bool:
-    from vllm.platforms.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import (
+        on_gfx12x,
+        on_gfx117x,
+        on_gfx942,
+        on_gfx950,
+        on_gfx1250,
+    )
 
-    return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
+    return on_gfx942() or on_gfx950() or on_gfx117x() or on_gfx12x() or on_gfx1250()
 
 
 def _supports_torch_fp8_scaled_mm() -> bool:

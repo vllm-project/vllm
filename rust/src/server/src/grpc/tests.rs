@@ -25,12 +25,12 @@ use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::server::health_reporter;
-use tower::service_fn;
+use tower::{ServiceExt as _, service_fn};
 use vllm_chat::multimodal::{MmLimitPerPrompt, MmLimitSpec, MmModality};
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatTextBackend,
     DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions, RenderedPrompt,
+    NewChatOutputProcessorOptions, ParserSelection, RenderedPrompt, ResolvedParsers,
 };
 use vllm_engine_core_client::mock_engine::{
     DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
@@ -47,6 +47,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
@@ -56,7 +57,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId
 use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -230,12 +231,14 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
 #[derive(Clone)]
 struct FakeTextBackend {
     tokenizer: DynTokenizer,
+    sampling_hints: SamplingHints,
 }
 
 impl Default for FakeTextBackend {
     fn default() -> Self {
         Self {
             tokenizer: Arc::new(TestTokenizer::new()),
+            sampling_hints: SamplingHints::default(),
         }
     }
 }
@@ -248,6 +251,10 @@ impl TextBackend for FakeTextBackend {
     fn model_id(&self) -> &str {
         "test-model"
     }
+
+    fn sampling_hints(&self) -> vllm_text::Result<SamplingHints> {
+        Ok(self.sampling_hints.clone())
+    }
 }
 
 impl ChatBackend for FakeTextBackend {
@@ -258,14 +265,17 @@ impl ChatBackend for FakeTextBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -307,14 +317,17 @@ impl ChatBackend for FakeMultimodalBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -356,6 +369,7 @@ fn qwen_multimodal_model_info(
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
         limit_mm_per_prompt,
+        &std::collections::HashMap::new(),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -497,7 +511,7 @@ async fn start_grpc_test_server(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health, true).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
@@ -857,6 +871,7 @@ async fn generate_without_output_text_skips_detokenization() {
                 default_stream_output_specs(),
                 Arc::new(FakeTextBackend {
                     tokenizer: Arc::new(PanickingTokenizer),
+                    ..Default::default()
                 }),
                 |_| {},
             )
@@ -942,7 +957,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
@@ -1017,7 +1032,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -1273,6 +1288,56 @@ async fn generate_validates_preprocessed_model_limits_and_prompt() {
             .expect_err("invalid streaming multimodal input");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
+    server_task.abort();
+}
+
+/// Media whose placeholder the request's token IDs leave out is the request's
+/// error, as in Python (`PromptUpdateMismatchError`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_media_without_placeholder_in_token_ids() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-missing-placeholder",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |_| {},
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-missing-placeholder".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 12, 13],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("media without a placeholder must be rejected");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert!(
+        status.message().contains("was not found in tokenized prompt"),
+        "{status:?}"
+    );
     server_task.abort();
 }
 
@@ -1760,6 +1825,52 @@ async fn unary_generate_with_sampling_params() {
     // Verify the request was accepted and produced output.
     let outputs = response.outputs.expect("outputs present");
     assert_eq!(outputs.text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_without_temperature_uses_model_default() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-default-temperature",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend {
+                sampling_hints: SamplingHints {
+                    default_temperature: Some(0.6),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.temperature, 0.6);
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
+    InferenceClient::new(channel)
+        .generate(pb::GenerateRequest {
+            request_id: "test-default-temperature".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("generate without temperature");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
@@ -3008,8 +3119,11 @@ const RENDER_EOS_TOKEN_ID: u32 = 0xF010;
 
 /// Qwen3-like backend, so that `auto` parser selection resolves the reasoning
 /// and tool-call parsers, rendering each message as `role: text\n`.
-#[derive(Clone, Debug)]
-struct FakeRenderBackend;
+#[derive(Clone, Debug, Default)]
+struct FakeRenderBackend {
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+}
 
 impl TextBackend for FakeRenderBackend {
     fn tokenizer(&self) -> DynTokenizer {
@@ -3034,14 +3148,17 @@ impl ChatBackend for FakeRenderBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &self.tool_call_parser,
+            &self.reasoning_parser,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -3073,12 +3190,15 @@ impl ChatRenderer for FakeRenderBackend {
 }
 
 fn render_state() -> RenderState {
-    let backend = Arc::new(FakeRenderBackend);
+    render_state_with(FakeRenderBackend::default())
+}
+
+fn render_state_with(backend: FakeRenderBackend) -> RenderState {
+    let backend = Arc::new(backend);
     RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len: Some(1024),
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
@@ -3118,7 +3238,7 @@ fn weather_chat_request() -> pb::ChatRequest {
 }
 
 fn render_token_ids(text: &str) -> Vec<u32> {
-    FakeRenderBackend.tokenizer().encode(text, false).expect("encode")
+    FakeRenderBackend::default().tokenizer().encode(text, false).expect("encode")
 }
 
 async fn render_chat(
@@ -3133,6 +3253,33 @@ async fn render_chat(
         .await
         .expect("render chat")
         .into_inner()
+}
+
+/// `parameters_json` must be a JSON object or `null`, as the HTTP tool DTO
+/// requires.
+#[tokio::test]
+async fn render_chat_rejects_non_object_tool_parameters() {
+    let service = render_service();
+    for parameters_json in [r#""schema""#, "[]", "1", "true"] {
+        let mut chat = weather_chat_request();
+        chat.tools[0].parameters_json = parameters_json.to_string();
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("non-object parameters_json should be rejected");
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{parameters_json}"
+        );
+    }
+
+    let mut chat = weather_chat_request();
+    chat.tools[0].parameters_json = "null".to_string();
+    render_chat(&service, chat).await;
 }
 
 #[tokio::test]
@@ -3182,14 +3329,10 @@ async fn render_chat_echoes_structured_output_without_parsers() {
             r#"{"type": "object", "required": ["b", "a"]}"#.to_string(),
         )),
     };
-    let state = render_state();
-    let service = RenderServiceImpl::new(Arc::new(RenderState {
-        chat: state.chat.with_parser_selections(
-            vllm_chat::ParserSelection::None,
-            vllm_chat::ParserSelection::None,
-        ),
-        ..state
-    }));
+    let service = RenderServiceImpl::new(Arc::new(render_state_with(FakeRenderBackend {
+        tool_call_parser: ParserSelection::None,
+        reasoning_parser: ParserSelection::None,
+    })));
     let chat = pb::ChatRequest {
         tools: Vec::new(),
         structured_output: Some(structured_output.clone()),
@@ -3377,14 +3520,17 @@ impl ChatBackend for FakeMultimodalRenderBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -3469,12 +3615,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
-        super::media::from_proto(rendered.media, None).expect("decode media")
-    else {
-        panic!("expected preprocessed media");
-    };
-    assert!(decoded[0].data.is_some());
+    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    assert!(
+        !decoded.preprocessed.is_empty(),
+        "expected preprocessed media"
+    );
+    assert!(decoded.preprocessed[0].data.is_some());
 }
 
 #[tokio::test]
@@ -3594,14 +3740,10 @@ async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
 /// HTTP chat completions.
 #[tokio::test]
 async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
-    let state = render_state();
-    let service = RenderServiceImpl::new(Arc::new(RenderState {
-        chat: state.chat.with_parser_selections(
-            vllm_chat::ParserSelection::None,
-            vllm_chat::ParserSelection::None,
-        ),
-        ..state
-    }));
+    let service = RenderServiceImpl::new(Arc::new(render_state_with(FakeRenderBackend {
+        tool_call_parser: ParserSelection::None,
+        reasoning_parser: ParserSelection::None,
+    })));
 
     let status = service
         .render_chat(tonic::Request::new(pb::RenderChatRequest {
@@ -3612,6 +3754,430 @@ async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
         .expect_err("tools need a tool parser");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+async fn render_raw<S: crate::render::RenderContext>(
+    service: &RenderServiceImpl<S>,
+    request: pb::RenderRequest,
+) -> Result<pb::RenderResponse, tonic::Status> {
+    service
+        .render(tonic::Request::new(request))
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_rendered_prompt_token_ids_and_reasoning_gate() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+    assert_eq!(rendered.structured_output, None);
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(
+        gate.chat_template_kwargs,
+        json_to_proto_struct(&serde_json::json!({"enable_thinking": true}))
+    );
+}
+
+/// Exercise the actual HTTP route, including JSON validation and lowering.
+#[tokio::test]
+async fn render_raw_chat_parity_with_http_render_route() {
+    for response_format in [
+        None,
+        Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}}
+        })),
+    ] {
+        let state = Arc::new(render_state());
+        let service = RenderServiceImpl::new(state.clone());
+        let mut body = serde_json::json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "chat_template_kwargs": {"enable_thinking": true}
+        });
+        if let Some(format) = response_format {
+            body["response_format"] = format;
+        }
+        let body = serde_json::to_vec(&body).unwrap();
+        let raw = render_raw(
+            &service,
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: body.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("gRPC render");
+        let response = crate::routes::render::build_router(state)
+            .oneshot(
+                axum::http::Request::post("/v1/chat/completions/render")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let http: serde_json::Value = serde_json::from_slice(&bytes).expect("HTTP render response");
+        let http_token_ids: Vec<u32> = http["token_ids"]
+            .as_array()
+            .expect("token_ids array")
+            .iter()
+            .map(|id| id.as_u64().expect("token id u64") as u32)
+            .collect();
+        assert_eq!(raw.prompt_token_ids, http_token_ids);
+        let structured_output: Option<StructuredOutputsParams> =
+            serde_json::from_value(http["sampling_params"]["structured_outputs"].clone()).unwrap();
+        assert_eq!(
+            raw.structured_output,
+            structured_output.as_ref().map(super::convert::structured_output_to_proto)
+        );
+        let gate = raw.engine_reasoning_gate.expect("reasoning gate");
+        assert_eq!(gate.reasoning_ended, http["reasoning_ended"].as_bool());
+        let kwargs = &http["reasoning_parser_kwargs"]["chat_template_kwargs"];
+        assert_eq!(gate.chat_template_kwargs, json_to_proto_struct(kwargs));
+        assert!(raw.media.is_empty());
+        assert!(http.get("features").is_none());
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_trailing_bytes() {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: b"{\"model\":\"render-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]} trailing".to_vec(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("trailing bytes should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("trailing characters"),
+        "{}",
+        status.message()
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_malformed_json() {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: b"{ invalid json ".to_vec(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("malformed json should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().starts_with("Failed to parse the request body as JSON"),
+        "{}",
+        status.message()
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unsupported_api() {
+    let service = render_service();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    }))
+    .unwrap();
+
+    let test_cases = [
+        (
+            pb::Api::Unspecified as i32,
+            tonic::Code::InvalidArgument,
+            "api is required",
+        ),
+        (
+            pb::Api::Completions as i32,
+            tonic::Code::Unimplemented,
+            "api `API_COMPLETIONS` is not supported",
+        ),
+        (
+            pb::Api::AnthropicMessages as i32,
+            tonic::Code::Unimplemented,
+            "api `API_ANTHROPIC_MESSAGES` is not supported",
+        ),
+        (
+            pb::Api::Responses as i32,
+            tonic::Code::Unimplemented,
+            "api `API_RESPONSES` is not supported",
+        ),
+        (999, tonic::Code::InvalidArgument, "unknown api value 999"),
+    ];
+
+    for (api, expected_code, expected_msg) in test_cases {
+        let request = pb::RenderRequest {
+            api,
+            body: body.clone(),
+            ..Default::default()
+        };
+        let status = render_raw(&service, request)
+            .await
+            .expect_err(&format!("api {api} should fail"));
+        assert_eq!(status.code(), expected_code, "case: {api}");
+        assert!(
+            status.message().contains(expected_msg),
+            "case: {api}, got: {}",
+            status.message()
+        );
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_model() {
+    let body = serde_json::json!({
+        "model": "non-existent-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("unknown model should fail");
+
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert!(status.message().contains("The model `non-existent-model` does not exist."));
+}
+
+#[tokio::test]
+async fn render_raw_chat_enforces_validation_parity() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": false,
+        "stream_options": {"include_usage": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("stream_options without stream should fail validation");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stream_options"));
+}
+
+#[tokio::test]
+async fn render_raw_chat_accepts_lora_adapter_model() {
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..render_state()
+    }));
+    let body = serde_json::json!({
+        "model": "adapter-a",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&service, request).await.expect("render raw chat lora");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_parser_grammar_for_required_tool_choice() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }],
+        "tool_choice": "required",
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat tools");
+
+    let Some(pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::StructuralTag(structural_tag)),
+    }) = rendered.structured_output
+    else {
+        panic!(
+            "expected a structural tag: {:?}",
+            rendered.structured_output
+        );
+    };
+    assert!(structural_tag.contains("get_weather"), "{structural_tag}");
+}
+
+/// Only the proto field selects the gRPC payload mode, even when the JSON
+/// body asks for the opposite HTTP mode.
+#[tokio::test]
+async fn render_raw_chat_uses_proto_mm_payload_only() {
+    let service = multimodal_render_service();
+    let mut reference = None;
+    for (mode, json_mode, return_mm_kwargs, includes_kwargs) in [
+        (pb::MmPayload::Unspecified, "none", false, true),
+        (pb::MmPayload::Tensors, "none", false, true),
+        (pb::MmPayload::None, "tensors", true, false),
+    ] {
+        let body = serde_json::json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}},
+                {"type": "text", "text": "Describe"}
+            ]}],
+            "mm_payload": json_mode,
+            "return_mm_kwargs": return_mm_kwargs
+        });
+        let rendered = render_raw(
+            &service,
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: serde_json::to_vec(&body).unwrap(),
+                mm_payload: mode as i32,
+            },
+        )
+        .await
+        .expect("multimodal render");
+        let [item] = rendered.media.as_slice() else {
+            panic!("expected one image")
+        };
+        let Some(pb::media_item::Source::Features(features)) = &item.source else {
+            panic!("expected preprocessed features");
+        };
+        assert_eq!(features.kwargs.is_some(), includes_kwargs, "{mode:?}");
+        assert!(features.mm_hash.is_some());
+        let identity = (
+            rendered.prompt_token_ids.clone(),
+            features.mm_hash.clone(),
+            features.offset,
+            features.length,
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&identity, expected);
+        } else {
+            reference = Some(identity);
+        }
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_mm_payload() {
+    for mm_payload in [3, 999] {
+        let status = render_raw(
+            &render_service(),
+            pb::RenderRequest {
+                api: pb::Api::Chat as i32,
+                body: br#"{"messages":[{"role":"user","content":"Hi"}]}"#.to_vec(),
+                mm_payload,
+            },
+        )
+        .await
+        .expect_err("unsupported payload mode");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("mm_payload"));
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_enforces_output_token_limits() {
+    let service = render_service();
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_completion_tokens": 1025
+    });
+    let status = render_raw(
+        &service,
+        pb::RenderRequest {
+            api: pb::Api::Chat as i32,
+            body: serde_json::to_vec(&body).unwrap(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("max_completion_tokens");
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "status: {status}"
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_model_with_engine_backed_state() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake.clone(),
+        EngineId::from_engine_index(0),
+        default_ready_response(),
+        |_, _| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(
+        EngineCoreLlm::new(client),
+        Arc::new(FakeRenderBackend::default()) as Arc<dyn ChatTextBackend>,
+    )
+    .with_served_model_name("test-model");
+    let service = RenderServiceImpl::new(Arc::new(AppState::new(vec!["test-model".into()], chat)));
+    let status = render_raw(
+        &service,
+        pb::RenderRequest {
+            api: pb::Api::Chat as i32,
+            body: br#"{"model":"unknown-model","messages":[{"role":"user","content":"Hi"}]}"#
+                .to_vec(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("unknown model");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    engine_task.await.expect("mock engine shutdown");
 }
 
 /// Shutdown ends open health watches, including one on the overall server

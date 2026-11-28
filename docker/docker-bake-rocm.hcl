@@ -53,6 +53,8 @@ target "_rocm" {
   attest  = ["type=provenance,disabled=true"]   # provenance would change the pushed digest on every build
   output  = [out()]
 }
+# The stack's key (build.sh keys_at) does not cover this file: a change here that must rebuild
+# the stack bumps ARG REFRESH in docker/Dockerfile.rocm_base.
 target "_stack" {
   inherits   = ["_rocm"]
   target     = "final"

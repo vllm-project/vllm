@@ -7,11 +7,15 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    dsv4_topk,
+    dsv4_topk_platform_supported,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -122,8 +126,8 @@ def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend
         ("triton_unfused", "UnfusedOAITritonExperts"),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_backend_selection(
-    dist_init,
     default_vllm_config,
     monkeypatch,
     has_hash_routing,
@@ -146,8 +150,9 @@ def test_hash_routing_backend_selection(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_rejects_monolithic_without_support(
-    dist_init, default_vllm_config, monkeypatch
+    default_vllm_config, monkeypatch
 ):
     """A monolithic kernel that does not implement hash routing is rejected."""
     from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
@@ -171,19 +176,35 @@ def test_hash_routing_rejects_monolithic_without_support(
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
 @pytest.mark.parametrize(
-    "ep_config,supported",
+    "ep_config,has_hash_routing,rejection",
     [
-        ({"use_ep": True, "ep_size": 8}, True),
-        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, False),
-        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False),
+        ({"use_ep": True, "ep_size": 8}, True, None),
+        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, True, "parallel config"),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False, None),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, True, "hash routing"),
+        (
+            {
+                "use_ep": True,
+                "ep_size": 8,
+                "dp_size": 2,
+                "all2all_backend": "deepep_high_throughput",
+            },
+            False,
+            "parallel config",
+        ),
     ],
-    ids=["naive_ep", "eplb", "all2all"],
+    ids=["naive_ep", "eplb", "dp_ep_ag_rs", "dp_ep_hash_routing", "dp_ep_deepep"],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_aiter_w4a16_expert_parallel_selection(
-    dist_init, default_vllm_config, monkeypatch, ep_config, supported
+    default_vllm_config, monkeypatch, ep_config, has_hash_routing, rejection
 ):
-    """Naive EP (no all2all, no EPLB) selects the AITER W4A16 monolithic kernel,
-    including on hash-routed layers."""
+    """EP selects the AITER W4A16 monolithic kernel, on its own and under DP.
+
+    DP + EP rides the naive allgather/reduce-scatter prepare/finalize, so it
+    stays on this kernel; EPLB and a dispatching all2all do not. Hash routing
+    stays rejected under DP, whose all-gather does not carry `input_ids`.
+    """
     from dataclasses import replace
 
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -191,17 +212,17 @@ def test_aiter_w4a16_expert_parallel_selection(
     )
 
     _, config = _dsv4_moe_config(
-        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+        monkeypatch, default_vllm_config, has_hash_routing, "aiter_triton_mxfp4_bf16"
     )
     config = replace(
         config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
     )
-    if supported:
+    if rejection is None:
         _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
         assert experts_cls is not None
         assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
     else:
-        with pytest.raises(ValueError, match="parallel config"):
+        with pytest.raises(ValueError, match=rejection):
             select_deepseek_v4_mxfp4_moe_backend(config)
 
 
@@ -361,8 +382,8 @@ def test_fused_topk_softplus_sqrt_hash(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="The DeepSeek V4 fast path is CUDA-only.",
+    not dsv4_topk_platform_supported(),
+    reason="The DeepSeek V4 fast path runs on CUDA and gfx950.",
 )
 @pytest.mark.parametrize(
     ("num_tokens", "num_experts", "indices_type"),
@@ -433,6 +454,68 @@ def test_dsv4_fast_topk(
         graph.replay()
         assert (ids == -1).all()
         assert (weights == 0).all()
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and dsv4_topk_platform_supported()),
+    reason="ROCm AITER MoE path on gfx950",
+)
+@pytest.mark.parametrize("num_tokens", [1, 48, 224, 4096])
+@pytest.mark.parametrize("use_padding", [False, True])
+def test_dsv4_fast_topk_with_aiter_fused_moe(
+    num_tokens: int,
+    use_padding: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.router import (
+        fused_topk_bias_router,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: True)
+    calls = []
+
+    def dsv4_topk_spy(*args, **kwargs):
+        calls.append(1)
+        return dsv4_topk(*args, **kwargs)
+
+    monkeypatch.setattr(fused_topk_bias_router, "dsv4_topk", dsv4_topk_spy)
+
+    torch.manual_seed(0)
+    num_experts = 384
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+    if use_padding:
+        is_padding = torch.arange(num_tokens, device="cuda") % 2 == 1
+        monkeypatch.setattr(
+            fused_topk_bias_router, "get_moe_padding_mask", lambda _: is_padding
+        )
+        gating_output[is_padding] = float("nan")
+        topk_weights_ref[is_padding] = 0
+        topk_ids_ref[is_padding] = -1
+
+    topk_weights, topk_ids = fused_topk_bias(
+        gating_output,
+        gating_output,
+        "sqrtsoftplus",
+        correction_bias,
+        6,
+        True,
+        routed_scaling_factor=1.5,
+    )
+
+    assert calls, "the AITER MoE path did not take dsv4_topk"
+    torch.testing.assert_close(topk_ids_ref, topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
 
 
 @pytest.mark.skipif(
@@ -736,8 +819,8 @@ def test_fused_topk_softplus_sqrt_hash_bias_vl(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="The DeepSeek V4 fast path is CUDA-only.",
+    not dsv4_topk_platform_supported(),
+    reason="The DeepSeek V4 fast path runs on CUDA and gfx950.",
 )
 def test_dsv4_fast_topk_bias_vl():
     torch.manual_seed(0)

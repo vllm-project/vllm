@@ -85,6 +85,7 @@ impl<T: TextOutputStream> T {
                                 token_ids: delta_token_ids,
                                 logprobs: mut delta_logprobs,
                                 sampling_mask: delta_sampling_mask,
+                                ..
                             },
                         finished,
                     } => {
@@ -177,6 +178,7 @@ mod tests {
             Ok(DecodedTextEvent::TextDelta {
                 decoded: DecodedText::unattributed("bc"),
                 sampled: SampledDelta {
+                    timestamp: 0.0,
                     token_ids: vec![1, 2],
                     logprobs: Some(DecodedLogprobs {
                         positions: vec![
@@ -270,6 +272,7 @@ mod tests {
             Ok(DecodedTextEvent::TextDelta {
                 decoded: DecodedText::unattributed("he"),
                 sampled: SampledDelta {
+                    timestamp: 0.0,
                     token_ids: vec![1, 2],
                     logprobs: Some(DecodedLogprobs {
                         positions: vec![
@@ -298,6 +301,7 @@ mod tests {
             Ok(DecodedTextEvent::TextDelta {
                 decoded: DecodedText::unattributed("llo"),
                 sampled: SampledDelta {
+                    timestamp: 0.0,
                     token_ids: vec![3, 4, 5],
                     logprobs: Some(DecodedLogprobs {
                         positions: vec![

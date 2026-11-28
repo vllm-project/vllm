@@ -21,7 +21,7 @@ use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
-struct FixtureTokenizer;
+pub(super) struct FixtureTokenizer;
 
 impl Tokenizer for FixtureTokenizer {
     fn encode(
@@ -125,7 +125,7 @@ fn assert_fixture(input_name: &str, expected: ExpectFile) {
     expected.assert_eq(&rendered);
 }
 
-fn render_symbolic_tokens(token_ids: &[u32]) -> String {
+pub(super) fn render_symbolic_tokens(token_ids: &[u32]) -> String {
     let mut out = String::new();
     let mut text_bytes = Vec::new();
     for token_id in token_ids {
@@ -403,7 +403,16 @@ fn rejects_continue_final_message() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(matches!(error, Error::ChatTemplate(_)));
+    assert!(matches!(
+        error,
+        Error::UnsupportedContinueFinalMessage {
+            renderer: "Inkling"
+        }
+    ));
+    assert_eq!(
+        error.kind(),
+        crate::ErrorKind::invalid_param("continue_final_message")
+    );
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 

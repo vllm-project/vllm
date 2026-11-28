@@ -632,15 +632,19 @@ def test_mxfp4_cache_feeds_deepgemm_logits(packed: bool):
     not (current_platform.is_device_capability_family(100) and has_deep_gemm()),
     reason="DeepGEMM MXFP4 MQA logits need SM100",
 )
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_fp4_cache", [False, True])
 @torch.inference_mode()
 def test_indexer_score_reads_its_cache_format(
-    monkeypatch: pytest.MonkeyPatch, workspace_init, use_fp4_cache: bool
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_init,
+    use_fp4_cache: bool,
+    logits_dtype: torch.dtype,
 ):
     """KimiK3DSAIndexer.score quantizes Q to the indexer's cache format and runs
-    sparse_attn_indexer with the matching flag: the decode top-k over a cache
-    written by the fused insert is the top-k of fp32 math over the dequantized
-    Q and K."""
+    sparse_attn_indexer with the matching flag and its logits dtype: the decode
+    top-k over a cache written by the fused insert is the top-k of fp32 math over
+    the dequantized Q and K."""
     torch.manual_seed(0)
     entry = MXFP4_ENTRY if use_fp4_cache else ENTRY
     seq_lens = torch.tensor([1000, 3000, 6100, 4500], device="cuda").int()
@@ -683,6 +687,7 @@ def test_indexer_score_reads_its_cache_format(
         dcp_world_size=1,
         cp_kv_cache_interleave_size=1,
         topk_backend="auto",
+        logits_dtype=logits_dtype,
     )
     context_lens = seq_lens.view(-1, 1).contiguous()
     # Varlen decode, as the metadata builder sets it up: request index per row.
@@ -714,10 +719,22 @@ def test_indexer_score_reads_its_cache_format(
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
         ),
     )
+    # The indexer's logits dtype reaches the decode logits kernel.
+    seen_dtypes = []
+    paged_logits = sparse_indexer.fp8_fp4_paged_mqa_logits
+
+    def recording_paged_logits(*args, **kwargs):
+        seen_dtypes.append(kwargs["logits_dtype"])
+        return paged_logits(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sparse_indexer, "fp8_fp4_paged_mqa_logits", recording_paged_logits
+    )
     q = torch.randn(batch, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
     w = torch.randn(batch, NUM_HEADS, dtype=torch.bfloat16, device="cuda")
     hidden_states = torch.empty(batch, 16, dtype=torch.bfloat16, device="cuda")
     KimiK3DSAIndexer.score(indexer, hidden_states, q, w, None)
+    assert seen_dtypes and set(seen_dtypes) == {logits_dtype}, seen_dtypes
 
     # Reference: the same Q quant, fp32 math over the dequantized Q and K.
     weight_scale = indexer.index_softmax_scale * indexer.indexer_weight_scale

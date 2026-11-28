@@ -18,12 +18,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
+    Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
     # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    # AITER moe_gemm_a8w8 (gfx942): FP8 MFMA with per-32-K E8M0 scaling.
+    Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
@@ -31,10 +34,12 @@ _SUPPORTED_BACKENDS = (
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "flashinfer_cutedsl": Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
+    "aiter_triton_mxfp8_mxfp8": Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
     "humming": Fp8MoeBackend.HUMMING,
 }
@@ -55,12 +60,24 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [DeepGemmExperts]
+    if backend == Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+            FlashInferCuteDSLBatchedExperts,
+        )
+
+        return [FlashInferCuteDSLBatchedExperts]
     if backend == Fp8MoeBackend.AITER_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
             AiterMxfp8Experts,
         )
 
         return [AiterMxfp8Experts]
+    if backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+            AiterTritonMxfp8ExpertsMonolithic,
+        )
+
+        return [AiterTritonMxfp8ExpertsMonolithic]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
             Mxfp8NativeTritonExperts,

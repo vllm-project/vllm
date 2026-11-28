@@ -882,13 +882,6 @@ class TestBuildRenderConfig:
 
     @pytest.mark.parametrize("cohere_only_key", ["template_jinja", "template"])
     def test_cohere_only_template_kwargs_are_rejected(self, cohere_only_key):
-        # ``chat_template_kwargs.template_jinja`` / ``.template`` are
-        # accepted at Cohere's own API surface but not at vLLM's -- raw
-        # template source in vLLM must flow through the standard
-        # ``chat_template`` request field so the
-        # ``--trust-request-chat-template`` guard applies uniformly.
-        # Silently dropping these keys would hide client misconfiguration,
-        # so we reject them loudly instead.
         with pytest.raises(
             ValueError,
             match=f"chat_template_kwargs.{cohere_only_key!r}",
@@ -911,9 +904,7 @@ class TestBuildRenderConfig:
         assert "additional_template_fields" not in cfg
 
     def test_chat_template_arg_populates_template_jinja(self):
-        # The standard vLLM ``chat_template`` request field is the sole
-        # supported channel for raw template source and is forwarded to
-        # melody under its ``template_jinja`` config key.
+        # The server-configured template is still forwarded to Melody.
         _, cfg = _build_render_config(
             self._conv(),
             {},
