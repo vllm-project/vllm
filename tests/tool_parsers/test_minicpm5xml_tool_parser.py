@@ -7,6 +7,9 @@ import random
 from unittest.mock import MagicMock
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
@@ -14,6 +17,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.parser import ParserManager
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
@@ -465,7 +470,7 @@ def test_incomplete_missing_function_end(parser: ToolParser) -> None:
     assert "get_weather" in (out.content or "")
 
 
-def test_param_missing_name_invalid(parser: ToolParser) -> None:
+def test_nameless_param_cannot_satisfy_required(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
         '<function name="get_weather">'
@@ -475,10 +480,10 @@ def test_param_missing_name_invalid(parser: ToolParser) -> None:
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
-    assert "<param>北京</param>" in (out.content or "")
+    assert "get_weather" in (out.content or "")
 
 
-def test_duplicate_param_names_invalid(parser: ToolParser) -> None:
+def test_duplicate_params_keep_first_value(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
         '<function name="get_weather">'
@@ -487,7 +492,7 @@ def test_duplicate_param_names_invalid(parser: ToolParser) -> None:
         "</function>\n"
     )
     out = parser.extract_tool_calls(text, request)
-    assert not out.tools_called
+    assert json.loads(out.tool_calls[0].function.arguments) == {"city": "北京"}
 
 
 def test_case_sensitive_param_name_invalid(parser: ToolParser) -> None:
@@ -495,6 +500,7 @@ def test_case_sensitive_param_name_invalid(parser: ToolParser) -> None:
     text = '<function name="get_weather"><param name="City">北京</param></function>\n'
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
+    assert "get_weather" in (out.content or "")
 
 
 def test_no_required_and_zero_param_valid(parser: ToolParser) -> None:
@@ -588,6 +594,7 @@ def test_extra_arguments_do_not_satisfy_required(parser: ToolParser) -> None:
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
+    assert "unknown" in (out.content or "")
 
 
 def test_zero_arg_tool_ignores_extra_arguments(parser: ToolParser) -> None:
@@ -816,3 +823,153 @@ def test_nullable_string_keeps_raw_text(
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_recovers_missing_param_close(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather"><param name="city">Paris'
+        '<param name="date">2026-11-21</param></function>'
+    )
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(
+        calls, [make_tool_call("get_weather", {"city": "Paris", "date": "2026-11-21"})]
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cdata_in_arguments_wrapper(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_write())
+    value = "  </function>\n<function name='write_file'><param name='ignored'>&lt;  "
+    text = (
+        '<function name="write_file"><arguments><param name="content">\n '
+        f"<![CDATA[{value}]]></arguments></function>"
+    )
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(calls, [make_tool_call("write_file", {"content": value})])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("between", "prose", "cities"),
+    [
+        pytest.param("", "", ["Beijing", "Shanghai"], id="adjacent"),
+        pytest.param(
+            "\nContinuing.\n", "\nContinuing.\n", ["Beijing", "Shanghai"], id="prose"
+        ),
+        pytest.param(
+            '<function name="get_weather"><param name="city">Tokyo</param></function>',
+            "",
+            ["Beijing", "Tokyo", "Shanghai"],
+            id="ordinary-call",
+        ),
+    ],
+)
+def test_missing_cdata_end_keeps_next_call(
+    parser: ToolParser, stream: bool, between: str, prose: str, cities: list[str]
+) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather"><param name="city"><![CDATA[Beijing'
+        "</param></function>"
+        + between
+        + '<function name="get_weather"><param name="city"><![CDATA[Shanghai]]>'
+        "</param></function>"
+    )
+    if stream:
+        output = run_tool_extraction_streaming(
+            parser, list(text), request, assert_one_tool_per_delta=False
+        )
+        calls = output.tool_calls
+        assert output.other_content == prose
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(
+        calls, [make_tool_call("get_weather", {"city": city}) for city in cities]
+    )
+
+
+def test_unified_stream_drains_last_delta() -> None:
+    request = make_request(make_tools_weather() + make_tools_write())
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="minicpm5", enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, request.tools)
+    first = '<function name="get_weather"><param name="city">Paris</param>'
+    assert parser.parse_delta(first, [0], request, [0], finished=False) is None
+    # A broken CDATA block must wait for stream end before recovering.
+    tail = '</function><function name="write_file"><param name="content"><![CDATA[abc</function>'
+    last = parser.parse_delta(tail, [0], request, finished=True)
+    assert last is not None
+    assert [
+        (call.index, call.function.name, json.loads(call.function.arguments))
+        for call in last.tool_calls
+        if call.function is not None and call.function.arguments is not None
+    ] == [
+        (0, "get_weather", {"city": "Paris"}),
+        (1, "write_file", {"content": "abc"}),
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_responses_namespace_function(parser: ToolParser, stream: bool) -> None:
+    request = ResponsesRequest(
+        input="Use the tool.",
+        tools=[
+            {
+                "type": "namespace",
+                "name": "math",
+                "description": "Math tools",
+                "tools": [
+                    tool.function.model_dump() | {"type": "function"}
+                    for tool in make_tools_sum()
+                ],
+            }
+        ],
+    )
+    text = '<function name="math__sum_values"><param name="nums">[1,2]</param><param name="exact">true</param></function>'
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(
+        calls, [make_tool_call("math__sum_values", {"nums": [1, 2], "exact": True})]
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_collapsed_tag_names(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_weather())
+    text = '<functionname="get_weather"><paramname="city">Paris</param></function>'
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(text), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert_tool_calls(calls, [make_tool_call("get_weather", {"city": "Paris"})])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_missing_required_stays_in_content(parser: ToolParser, stream: bool) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather"><param name="date">2026-11-21</param></function>'
+    )
+    if stream:
+        streamed = run_tool_extraction_streaming(parser, list(text), request)
+        assert not streamed.tool_calls
+        assert "get_weather" in streamed.other_content
+    else:
+        out = parser.extract_tool_calls(text, request)
+        assert not out.tool_calls
+        assert "get_weather" in (out.content or "")

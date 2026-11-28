@@ -18,16 +18,23 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.minicpm5 import replay_minicpm5_tool_search
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
     should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import SamplingParams
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -1049,3 +1056,181 @@ class TestBuildResponseOutputItemsStatus:
         assert message.status == "completed"
         assert first.status == "completed"
         assert last.status == "incomplete"
+
+
+def _search_function(name: str, description: str):
+    return {
+        "type": "function",
+        "strict": False,
+        "name": name,
+        "description": description,
+        "parameters": {"type": "object", "properties": {}},
+    }
+
+
+def _weather_namespace(*tools):
+    return {
+        "type": "namespace",
+        "name": "weather",
+        "description": "Weather tools",
+        "tools": list(tools),
+    }
+
+
+def _search_output(call_id: str, *tools):
+    return {
+        "type": "tool_search_output",
+        "call_id": call_id,
+        "execution": "client",
+        "status": "completed",
+        "tools": list(tools),
+    }
+
+
+def test_minicpm5_replays_tools_from_multiple_search_outputs():
+    declared = [
+        {"type": "tool_search", "execution": "client"},
+        _weather_namespace(_search_function("current", "Declared definition")),
+    ]
+    search_items = [
+        {
+            "type": "tool_search_call",
+            "call_id": "search_1",
+            "arguments": {"query": "weather tools"},
+            "execution": "client",
+        },
+        _search_output(
+            "search_1",
+            _weather_namespace(
+                _search_function("current", "Search definition"),
+                _search_function("forecast", "First definition"),
+                {"type": "custom", "name": "note", "format": {"type": "text"}},
+            ),
+            _search_function("calendar", "First calendar"),
+        ),
+        _search_output(
+            "search_2",
+            _weather_namespace(
+                _search_function("forecast", "Later definition"),
+                _search_function("radar", "Radar"),
+            ),
+            _search_function("calendar", "Later calendar"),
+        ),
+    ]
+    choice = {"type": "function", "namespace": "weather", "name": "forecast"}
+    request = ResponsesRequest.model_validate(
+        {
+            "tools": declared,
+            "tool_choice": choice,
+            "input": [{"role": "user", "content": "Get the forecast."}, *search_items],
+        }
+    )
+    replayed = replay_minicpm5_tool_search(request, [])
+    assert replayed.tool_choice.name == "weather__forecast"
+    functions = construct_tool_dicts(replayed.tools, replayed.tool_choice)
+    assert functions is not None
+    assert {
+        tool["function"]["name"]: tool["function"]["description"] for tool in functions
+    } == {
+        "weather__current": "Declared definition",
+        "weather__forecast": "First definition",
+        "weather__radar": "Radar",
+        "calendar": "First calendar",
+    }
+    assert [(member.type, member.name) for member in replayed.tools[1].tools] == [
+        ("function", "current"),
+        ("function", "forecast"),
+        ("custom", "note"),
+        ("function", "radar"),
+    ]
+    assert construct_input_messages(
+        request_instructions=None, request_input=replayed.input
+    ) == [{"role": "user", "content": "Get the forecast."}]
+
+    response = ResponsesResponse.from_request(
+        replayed, SamplingParams(), "minicpm5", 0, [], "completed"
+    )
+    assert response.tools == request.tools
+
+    resumed = ResponsesRequest.model_validate(
+        {
+            "input": "Check again.",
+            "tools": declared,
+            "tool_choice": choice,
+            "previous_response_id": response.id,
+        }
+    )
+    resumed = replay_minicpm5_tool_search(resumed, response._replayed_search_tools)
+    assert resumed.tool_choice == replayed.tool_choice
+    assert resumed.tools == replayed.tools
+    assert resumed._declared_tools == request.tools
+
+
+def test_minicpm5_named_selection_from_stored_search_without_redeclaring_tools():
+    initial = ResponsesRequest.model_validate(
+        {
+            "input": [
+                _search_output(
+                    "search_1", _weather_namespace(_search_function("forecast", "One"))
+                ),
+            ],
+        }
+    )
+    replayed = replay_minicpm5_tool_search(initial, [])
+    resumed = ResponsesRequest.model_validate(
+        {
+            "input": "Get the forecast.",
+            "previous_response_id": "resp_search",
+            "tool_choice": {"type": "function", "name": "forecast"},
+        }
+    )
+    resumed = replay_minicpm5_tool_search(resumed, replayed._replayed_search_tools)
+    assert resumed.tool_choice.name == "weather__forecast"
+    assert resumed.tools == replayed.tools
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "message"),
+    [
+        ({"type": "function", "name": "missing"}, "not found"),
+        ({"type": "custom", "name": "forecast"}, "not a supported custom tool"),
+    ],
+)
+def test_minicpm5_rejects_invalid_discovered_tool_choice(tool_choice, message):
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [
+                _search_output(
+                    "search_1", _weather_namespace(_search_function("forecast", "One"))
+                ),
+            ],
+            "tool_choice": tool_choice,
+        }
+    )
+    with pytest.raises(VLLMValidationError, match=message):
+        replay_minicpm5_tool_search(request, [])
+
+
+def test_minicpm5_rejects_colliding_search_tool_names():
+    request = ResponsesRequest.model_validate(
+        {
+            "tools": [_search_function("weather__forecast", "Flat name")],
+            "input": [
+                _search_output(
+                    "search_1", _weather_namespace(_search_function("forecast", "One"))
+                ),
+            ],
+        }
+    )
+    with pytest.raises(VLLMValidationError, match="colliding tool name"):
+        replay_minicpm5_tool_search(request, [])
+
+
+def test_minicpm5_rejects_malformed_search_tool():
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [_search_output("search_1", {"type": "function"})],
+        }
+    )
+    with pytest.raises(VLLMValidationError, match="Invalid tool definitions"):
+        replay_minicpm5_tool_search(request, [])

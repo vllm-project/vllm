@@ -33,6 +33,19 @@ vllm serve Qwen/Qwen3.6-27B --port 8000 --tensor-parallel-size 8 --max-model-len
 
 For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
 
+For MiniCPM5 models with the XML chat template, such as MiniCPM5-15B-A2.5B, use the `minicpm5` tool parser:
+
+```bash
+vllm serve "$MODEL_DIR" --served-model-name MiniCPM5-15B-A2.5B \
+    --enable-auto-tool-choice --tool-call-parser minicpm5 --reasoning-parser qwen3
+```
+
+The Responses API can reuse tool definitions from client-provided
+`tool_search_output` items. Searches can add functions to an existing
+namespace. To reuse the discovered tools via `previous_response_id`, start vLLM
+with `VLLM_ENABLE_RESPONSES_API_STORE=1` and send `store=true` on the request
+that contains the search results. Tool search is executed by the client.
+
 ## Configuring Codex
 
 Codex is configured via a TOML file located at `~/.codex/config.toml`. Create or edit this file to point Codex at your vLLM server:

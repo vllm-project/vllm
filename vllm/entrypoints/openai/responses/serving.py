@@ -41,6 +41,10 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.harmony import harmony_to_response_output
+from vllm.entrypoints.openai.responses.minicpm5 import (
+    replay_minicpm5_tool_search,
+    resolve_search_tool_choice,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -54,6 +58,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    has_tool_search_output,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
@@ -66,6 +71,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
+    construct_chat_messages_with_tool_call,
     extract_function_tool_names,
     extract_tool_types,
     response_item_status,
@@ -147,6 +153,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
             tokenizer=self.renderer.tokenizer,
+        )
+        self.replay_minicpm5_tool_search = (
+            enable_auto_tools
+            and tool_parser == "minicpm5"
+            and self.model_config.hf_config.model_type != "gpt_oss"
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -297,6 +308,23 @@ class OpenAIServingResponses(GenerateBaseServing):
             if stored_messages is not None:
                 previous_messages = stored_messages.copy()
             previous_response_outputs = list(prev_response.output)
+            if self.replay_minicpm5_tool_search and previous_messages is not None:
+                previous_messages.extend(
+                    construct_chat_messages_with_tool_call(
+                        [
+                            item
+                            for item in prev_response.output
+                            if item.type
+                            in (
+                                "reasoning",
+                                "message",
+                                "function_call",
+                                "custom_tool_call",
+                            )
+                        ]
+                    )
+                )
+                previous_response_outputs = None
 
         return await self.online_renderer.render_responses(
             request,
@@ -364,6 +392,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                 return self._make_not_found_error(prev_response_id)
         else:
             prev_response = None
+
+        if prev_response is not None or has_tool_search_output(request.input):
+            if self.replay_minicpm5_tool_search:
+                request = replay_minicpm5_tool_search(
+                    request,
+                    prev_response._replayed_search_tools if prev_response else [],
+                )
+            else:
+                request = resolve_search_tool_choice(request)
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)

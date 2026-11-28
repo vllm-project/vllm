@@ -177,8 +177,35 @@ def _default_input_image_details(value: Any) -> Any:
     return {**value, "content": new_content} if changed else value
 
 
+def has_tool_search_output(input_items: Any) -> bool:
+    return isinstance(input_items, list) and any(
+        _tool_field(item, "type") == "tool_search_output" for item in input_items
+    )
+
+
 def _tool_field(tool: Any, field: str) -> Any:
     return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _validate_custom_tool_formats(tools: list[Any]) -> None:
+    for tool in tools:
+        if isinstance(tool, dict):
+            tool_dict = tool
+        elif hasattr(tool, "model_dump"):
+            tool_dict = tool.model_dump()
+        else:
+            continue
+        tool_format = tool_dict.get("format")
+        if (
+            tool_dict.get("type") == "custom"
+            and isinstance(tool_format, dict)
+            and tool_format.get("type") == "grammar"
+        ):
+            raise VLLMValidationError(
+                "Custom tools with a grammar format are not supported; "
+                "only free-form text custom tools are accepted.",
+                parameter="tools",
+            )
 
 
 def _merge_additional_tools(tools: list[Any], added: list[Any]) -> list[Any]:
@@ -610,6 +637,9 @@ class ResponsesRequest(OpenAIBaseModel):
             max_output_tokens_param="max_output_tokens",
         )
 
+    _declared_tools: list[Tool] | None = PrivateAttr(default=None)
+    _replayed_search_tools: list[Tool] = PrivateAttr(default_factory=list)
+
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser's adjust_request."""
 
@@ -914,29 +944,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_custom_tool_format(cls, data):
-        if not isinstance(data, dict):
-            return data
-        tools = data.get("tools")
-        if not isinstance(tools, list):
-            return data
-        for tool in tools:
-            if isinstance(tool, dict):
-                tool_dict = tool
-            elif hasattr(tool, "model_dump"):
-                tool_dict = tool.model_dump()
-            else:
-                continue
-            tool_format = tool_dict.get("format")
-            if (
-                tool_dict.get("type") == "custom"
-                and isinstance(tool_format, dict)
-                and tool_format.get("type") == "grammar"
-            ):
-                raise VLLMValidationError(
-                    "Custom tools with a grammar format are not supported; "
-                    "only free-form text custom tools are accepted.",
-                    parameter="tools",
-                )
+        if isinstance(data, dict) and isinstance(tools := data.get("tools"), list):
+            _validate_custom_tool_formats(tools)
         return data
 
     @model_validator(mode="before")
@@ -954,6 +963,25 @@ class ResponsesRequest(OpenAIBaseModel):
         is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
             "type"
         ) in ("function", "custom")
+
+        if data.get("previous_response_id") is not None or has_tool_search_output(
+            data.get("input")
+        ):
+            # Discovered tools are resolved by the serving layer after loading history.
+            if is_named_tool_choice:
+                name = tool_choice.get("name")
+                namespace = tool_choice.get("namespace")
+                if isinstance(name, str) and name:
+                    if isinstance(namespace, str) and namespace:
+                        from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+                        data["tool_choice"] = {
+                            **tool_choice,
+                            "name": flat_namespace_tool_name(namespace, name),
+                        }
+                    return data
+            if tool_choice in ("auto", "required"):
+                return data
 
         if not has_tools:
             if tool_choice in ("auto", "none"):
@@ -1027,6 +1055,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
 
 class ResponsesResponse(OpenAIBaseModel):
+    _replayed_search_tools: list[Tool] = PrivateAttr(default_factory=list)
+
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
     # error: Optional[ResponseError] = None
@@ -1144,7 +1174,7 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
-        return cls(
+        response = cls(
             id=request.request_id,
             created_at=created_time,
             incomplete_details=incomplete_details,
@@ -1159,7 +1189,11 @@ class ResponsesResponse(OpenAIBaseModel):
             else ResponsesRequest.model_fields["parallel_tool_calls"].default,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
-            tools=request.tools,
+            tools=(
+                request.tools
+                if request._declared_tools is None
+                else request._declared_tools
+            ),
             top_p=sampling_params.top_p,
             background=request.background,
             max_output_tokens=sampling_params.max_tokens,
@@ -1188,6 +1222,8 @@ class ResponsesResponse(OpenAIBaseModel):
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
         )
+        response._replayed_search_tools = request._replayed_search_tools
+        return response
 
 
 # vLLM Streaming Events
