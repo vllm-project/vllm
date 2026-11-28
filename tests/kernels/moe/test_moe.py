@@ -198,6 +198,13 @@ def test_xpu_qwen3_5_shared_expert_decode(tmp_path):
         cleanup_dist_env_and_memory()
 
 
+def test_triton_moe_runtime_token_counts_do_not_specialize_alignment() -> None:
+    assert set(fused_moe_module.fused_moe_kernel.do_not_specialize_on_alignment) == {
+        "EM",
+        "num_valid_tokens",
+    }
+
+
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
     captured: dict[str, torch.Tensor] = {}
 
