@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -1306,11 +1306,12 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@set_default_torch_num_threads(1)
 def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
-    """Test INT8 dispatch at exact and multi-block expert boundaries."""
+    """Check expert block boundaries and exact output across thread counts."""
     set_random_seed(0)
-    block_sizes = (3, 4, 5, 33)
-    N, K, E = 128, 128, len(block_sizes)
+    block_sizes = (0, 3, 4, 5, 33, 255, 256, 257)
+    N, K, E = 544, 1056, len(block_sizes)
     M = sum(block_sizes)
 
     a = torch.randn(M, K, dtype=dtype) / (0.5 * K**0.5)
@@ -1319,24 +1320,30 @@ def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
 
     ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids)
     pw1, pw2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
-    out = torch.empty_like(a)
-    ops.fused_experts_cpu(
-        out,
-        a,
-        pw1,
-        pw2,
-        topk_weight,
-        topk_ids,
-        ops.CPUQuantMethod.INT8_W8A8,
-        w1_s,
-        w2_s,
-        None,
-        None,
-        None,
-        is_vnni=True,
-    )
+    outputs = []
+    for threads in (1, 3, 32):
+        with set_default_torch_num_threads(threads):
+            out = torch.empty_like(a)
+            ops.fused_experts_cpu(
+                out,
+                a,
+                pw1,
+                pw2,
+                topk_weight,
+                topk_ids,
+                ops.CPUQuantMethod.INT8_W8A8,
+                w1_s,
+                w2_s,
+                None,
+                None,
+                None,
+                is_vnni=True,
+            )
+            outputs.append(out)
 
-    torch.testing.assert_close(ref_out, out, atol=2e-1, rtol=2e-1)
+    torch.testing.assert_close(ref_out, outputs[0], atol=2e-1, rtol=2e-1)
+    for out in outputs[1:]:
+        assert torch.equal(outputs[0].view(torch.int16), out.view(torch.int16))
 
 
 @pytest.mark.parametrize("M", [1, 64])
