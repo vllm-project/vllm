@@ -299,6 +299,50 @@ RDNAHybridW4A16PrefillDequantMode = Literal["enable", "disable"]
 
 
 @config
+class AmdKernelsConfig:
+    """Routes that run `amd_kernels` (FlyDSL kernels for ROCm gfx950,
+    https://github.com/Inferact/amd-kernels) in place of the stock kernels.
+    Each model that uses the package declares its own routes; see
+    `vllm.model_executor.amd_kernels_routes`."""
+
+    enabled: bool = True
+    """Use `amd_kernels` where the package is installed, the platform is
+    gfx950 and the model has routes for the call's shapes."""
+
+    disabled_routes: list[str] = Field(default_factory=list)
+    """Routes that keep the stock kernels, by name. A route whose prerequisite
+    is disabled is off too. Names of routes no loaded model declares are
+    ignored with a warning."""
+
+    @field_validator("disabled_routes", mode="before")
+    @classmethod
+    def _split_disabled_routes(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [r.strip() for r in value.split(",") if r.strip()]
+        return value
+
+    def compile_factors(self) -> CompileFactors:
+        """The routes decide which kernels the compiled graphs call, and so does
+        the installed `amd_kernels` revision."""
+        factors = get_compile_factors(self, {"disabled_routes"})
+        factors["disabled_routes"] = sorted(set(self.disabled_routes))
+        factors["amd_kernels"] = _amd_kernels_version() if self.enabled else None
+        return factors
+
+
+def _amd_kernels_version() -> str | None:
+    import importlib.metadata
+    import importlib.util
+
+    if importlib.util.find_spec("amd_kernels") is None:
+        return None
+    try:
+        return importlib.metadata.version("amd-kernels")
+    except importlib.metadata.PackageNotFoundError:
+        return "unversioned"
+
+
+@config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
@@ -345,6 +389,10 @@ class KernelConfig:
     to `--additional-config '{"decode_backend": "latency_specialized"}'`. Which
     models, hardware and parallel layouts support it is model-specific; an
     unsupported deployment is refused at startup."""
+
+    amd_kernels: AmdKernelsConfig = Field(default_factory=AmdKernelsConfig)
+    """Routes to `amd_kernels` FlyDSL kernels on ROCm gfx950; see
+    `AmdKernelsConfig`."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Out-of-tree platforms can
