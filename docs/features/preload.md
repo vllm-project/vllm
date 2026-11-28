@@ -85,8 +85,7 @@ resources. VMM moves non-empty GPU storages into exportable `cuMemCreate` or
 input order toward a 1 GiB logical cap, with 512-byte alignment between logical
 storages. An
 oversized storage gets its own allocation, and every allocation is rounded up
-to the driver's granularity. Set `--weight-cache-vmm-max-allocation-bytes` to
-change the cap, or to `0` to use one allocation per storage. Each pack is copied
+to the driver's granularity. Each pack is copied
 and synchronized separately, avoiding retention of a second complete model.
 VMM handles only allocation and FD export/import; the manifest preserves the
 logical layout, including tied parameters, shared storages, offsets and
