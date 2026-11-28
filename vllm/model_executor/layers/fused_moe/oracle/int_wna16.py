@@ -86,6 +86,7 @@ class WNA16MoEBackend(Enum):
     RDNA3 = "RDNA3"
     # Int8 activations per 32 values (kInt8Dynamic32Sym) for up to 64 tokens.
     RDNA3_INT4_INT8 = "RDNA3_INT4_INT8"
+    RDNA_HYBRID = "RDNA_HYBRID"
     # No compute backend: requantization sources only dequantize weights.
     NONE = "NONE"
 
@@ -150,6 +151,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3Int4Int8Experts]
+    elif backend == WNA16MoEBackend.RDNA_HYBRID:
+        from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (  # noqa: E501
+            RDNAHybridW4A16Experts,
+        )
+
+        return [RDNAHybridW4A16Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -167,6 +174,8 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         # kInt8Dynamic32Sym activation request (see _filter_by_activation).
         WNA16MoEBackend.RDNA3_INT4_INT8,
         WNA16MoEBackend.RDNA3,
+        # HIP decode + Triton prefill, gated on gfx115x.
+        WNA16MoEBackend.RDNA_HYBRID,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -219,6 +228,24 @@ def _backend_incompatibility_reason(
             return "group activation ordering is not supported"
         if quant_config.strategy != QuantizationStrategy.GROUP:
             return "only group-wise scales are supported"
+
+    if backend == WNA16MoEBackend.RDNA_HYBRID:
+        from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (  # noqa: E501
+            SUPPORTED_GROUP_SIZES,
+        )
+
+        if not isinstance(quant_config, QuantizationArgs):
+            return "only compressed-tensors checkpoints are supported"
+        if may_have_zp:
+            return "asymmetric checkpoints are not supported"
+        if may_have_bias:
+            return "expert bias is not supported"
+        if quant_config.actorder == "group":
+            return "group activation ordering is not supported"
+        if quant_config.strategy != QuantizationStrategy.GROUP:
+            return "only group-wise scales are supported"
+        if quant_config.group_size not in SUPPORTED_GROUP_SIZES:
+            return f"group size must be one of {SUPPORTED_GROUP_SIZES}"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -308,6 +335,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
         "rdna3_int4_int8": WNA16MoEBackend.RDNA3_INT4_INT8,
+        "rdna_hybrid": WNA16MoEBackend.RDNA_HYBRID,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -533,6 +561,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (
+        RDNAHybridW4A16Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -555,6 +586,7 @@ def make_wna16_moe_kernel(
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
         Rdna3Int4Int8Experts,
+        RDNAHybridW4A16Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -1695,6 +1727,12 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             quant_config.group_size,
         )
+    elif backend == WNA16MoEBackend.RDNA_HYBRID:
+        from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (  # noqa: E501
+            _process_weights_rdna_hybrid,
+        )
+
+        return _process_weights_rdna_hybrid(w13, w2, w13_scale, w2_scale)
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,

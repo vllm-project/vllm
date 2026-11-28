@@ -152,6 +152,7 @@ InTreeMoEBackend = Literal[
     "emulation",
     "rdna3",
     "rdna3_int4_int8",
+    "rdna_hybrid",
 ]
 # Out-of-tree platforms add names via `Platform.get_moe_backends`.
 MoEBackend = InTreeMoEBackend | str
@@ -394,6 +395,9 @@ class KernelConfig:
       on RDNA3/RDNA3.5 (ROCm gfx11) for up to 64 tokens, Triton WNA16
       otherwise; auto-selected for `quantization_config.moe.activation`
       `int8_per_group_32`
+    - "rdna_hybrid": Use the hybrid W4A16 kernels, HIP skinny GEMM for decode
+      and Triton for prefill (ROCm gfx115x only, symmetric int4 with
+      group size 128)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.

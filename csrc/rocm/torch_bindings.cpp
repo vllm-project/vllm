@@ -40,6 +40,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
+  // Fused MoE variant of wvSplitK_int4_g for decode: one launch over all
+  // expert blocks, symmetric weights only
+  rocm_ops.def(
+      "fused_moe_wvSplitK_int4_gemm(Tensor a, Tensor w, Tensor scales, "
+      "Tensor! c, Tensor expert_ids, Tensor? sorted_token_ids, "
+      "int block_size_m, int top_k, int CuCount, int group_size) -> ()");
+  rocm_ops.impl("fused_moe_wvSplitK_int4_gemm", torch::kCUDA,
+                &fused_moe_wvSplitK_int4_gemm);
+
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
       "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
@@ -149,6 +158,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? initial_state, Tensor cu_seqlens, Tensor! out, "
       "Tensor! final_state, float scale) -> ()");
   rocm_ops.impl("rdna35_gdn_chunked", torch::kCUDA, &rdna35_gdn_chunked);
+
+  // W4A16 MoE prefill WMMA GEMM (GEMM1, top_k == 8) for the RDNA hybrid
+  // backend.
+  rocm_ops.def(
+      "fused_moe_wmma_int4_gemm(Tensor a, Tensor w, Tensor scales, Tensor! c, "
+      "Tensor sorted_token_ids, Tensor expert_ids, int n_valid_tokens, "
+      "int top_k, int block_size_m, int num_blocks) -> ()");
+  rocm_ops.impl("fused_moe_wmma_int4_gemm", torch::kCUDA,
+                &fused_moe_wmma_int4_gemm);
 #endif
 }
 
