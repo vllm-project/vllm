@@ -16,7 +16,7 @@ the schemas on pull requests, including on forks.
 
 ```toml
 [dependencies]
-vllm-proto = "0.7"
+vllm-proto = "0.8"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient`,
@@ -25,6 +25,31 @@ For example, import `vllm_proto::inference_client::InferenceClient`,
 The package includes the canonical `.proto` files and generates bindings during
 compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
 credentials, the vLLM checkout, or a separately installed `protoc`.
+
+### Scheduler retirement acknowledgements
+
+`Generate`, `GenerateStream`, and `Control.Abort` accept
+`wait_for_retirement=true`. Generation delays its terminal response until the
+engine replies to an ordered scheduler abort utility, including when a stop
+string ends generation in the frontend. `Abort` can still terminate the
+generation stream before its own response arrives; wait for its response.
+
+Only `scheduler_retired=true` is an acknowledgement. Older servers ignore the
+new request field and return the default false value. Empty Abort requests do
+not produce an acknowledgement. Opted-in Abort requires every supplied ID to
+still have an active mapping, and generation requires a unique active external
+ID. Request-ID randomization must be enabled: the captured internal IDs must
+never refer to a later generation reusing the same external ID.
+
+The wait is bounded to 30 seconds, or the RPC deadline if shorter. Failure,
+disconnect, and timeout mean retirement was not confirmed; they do not undo
+the cancellation. Dropping a generation stream before its terminal response
+retains the existing auto-abort behavior and provides no acknowledgement.
+
+This acknowledges **scheduler retirement**, not completion of in-flight GPU
+steps, KV/encoder transfers, deferred resource release, or external shared-memory
+reads. It must not authorize recycling external media buffers. It neither
+flushes prefix cache nor pauses other requests.
 
 ### Versioning and releases
 

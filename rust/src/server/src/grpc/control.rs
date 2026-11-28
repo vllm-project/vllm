@@ -12,6 +12,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
+use super::retirement::RequestRetirement;
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
 use crate::lora::{
@@ -254,16 +255,25 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
-        let request_ids = request.into_inner().request_ids;
+        let request = request.into_inner();
+        let request_ids = request.request_ids;
         if request_ids.is_empty() {
-            return Ok(Response::new(pb::AbortResponse {}));
+            return Ok(Response::new(pb::AbortResponse::default()));
+        }
+        if request.wait_for_retirement {
+            RequestRetirement::capture(&self.state, &request_ids)?
+                .confirm(&self.state)
+                .await?;
+            return Ok(Response::new(pb::AbortResponse {
+                scheduler_retired: true,
+            }));
         }
         self.state
             .chat
             .abort(&request_ids)
             .await
             .map_err(|error| Status::internal(error.to_report_string()))?;
-        Ok(Response::new(pb::AbortResponse {}))
+        Ok(Response::new(pb::AbortResponse::default()))
     }
 
     async fn load_lora(

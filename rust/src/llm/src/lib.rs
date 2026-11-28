@@ -428,6 +428,25 @@ impl EngineCoreLlm {
         Ok(())
     }
 
+    /// Capture the internal IDs before an output stream (for example after a
+    /// stop-string match) drops its external-ID mapping. Missing IDs are not
+    /// evidence of engine completion. Randomization prevents a later request
+    /// reusing an external ID from being cancelled by this captured operation.
+    pub fn request_ids_for_retirement(&self, external_ids: &[String]) -> Option<Vec<String>> {
+        if !self.randomize_request_id || external_ids.is_empty() {
+            return None;
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for external_id in external_ids {
+            let resolved = self.inflight.resolve(std::slice::from_ref(external_id));
+            if resolved.is_empty() {
+                return None;
+            }
+            ids.extend(resolved);
+        }
+        Some(ids.into_iter().collect())
+    }
+
     /// Shut down the underlying engine-core client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.client.shutdown().await?;

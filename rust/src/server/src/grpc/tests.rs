@@ -43,7 +43,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
 };
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
@@ -2238,6 +2238,29 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
     let mut control_client = ControlClient::new(channel);
     let request_id = "test-abort-active";
 
+    assert!(
+        !control_client
+            .abort(pb::AbortRequest {
+                wait_for_retirement: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .scheduler_retired
+    );
+    assert_eq!(
+        control_client
+            .abort(pb::AbortRequest {
+                request_ids: vec!["unknown".into()],
+                wait_for_retirement: true,
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+
     let mut stream = inference_client
         .generate_stream(pb::GenerateRequest {
             request_id: request_id.to_string(),
@@ -2286,6 +2309,7 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
                 request_id.to_string(),
                 "unknown".to_string(),
             ],
+            ..Default::default()
         })
         .await
         .expect("abort active generation");
@@ -2305,11 +2329,247 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
     control_client
         .abort(pb::AbortRequest {
             request_ids: vec![request_id.to_string()],
+            ..Default::default()
         })
         .await
         .expect("repeated abort should be idempotent");
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+/// Exercise real gRPC handlers while an engine gates its retirement reply.
+async fn assert_retirement_waits_for_engine(mode: &str, fail: bool) {
+    let (utility_seen_tx, utility_seen_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let stop_string = mode.starts_with("stop");
+    let explicit_abort = mode == "abort";
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-retirement".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request = decode_add_request(&add);
+                let internal_id = request.request_id.clone();
+                assert_ne!(internal_id, "retirement-request");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![EngineCoreOutput {
+                            request_id: internal_id.clone(),
+                            new_token_ids: vec![b'x' as u32],
+                            finish_reason: (!stop_string && !explicit_abort)
+                                .then_some(EngineCoreFinishReason::Length),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                let fields = loop {
+                    let frames = recv_engine_message(dealer).await;
+                    if frames[0].as_ref() == [0x01] {
+                        let ids: Vec<String> = rmp_serde::from_slice(&frames[1]).unwrap();
+                        assert_eq!(ids, std::slice::from_ref(&internal_id));
+                        continue;
+                    }
+                    assert_eq!(frames[0].as_ref(), &[0x03]);
+                    let payload = decode_value(&frames[1]).unwrap();
+                    let fields = payload.as_array().unwrap().clone();
+                    assert_eq!(fields[2].as_str(), Some("abort_requests"));
+                    assert_eq!(
+                        fields[3],
+                        Value::Array(vec![Value::Array(vec![internal_id.into()])])
+                    );
+                    break fields;
+                };
+                utility_seen_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        output: UtilityOutput {
+                            call_id: fields[1].as_u64().unwrap().into(),
+                            failure_message: fail.then(|| "engine cancellation failed".into()),
+                            result: (!fail)
+                                .then(|| UtilityResultEnvelope::without_type_info(Value::Nil)),
+                        },
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference,
+        control,
+        health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut inference = InferenceClient::new(channel.clone());
+    let mut control = ControlClient::new(channel);
+    let request = pb::GenerateRequest {
+        request_id: "retirement-request".into(),
+        model: "test-model".into(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".into())),
+        stopping: Some(pb::StoppingCriteria {
+            max_new_tokens: 10,
+            stop_strings: if stop_string {
+                vec!["x".into()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        }),
+        wait_for_retirement: !explicit_abort,
+        ..Default::default()
+    };
+    let mut pending = if mode == "stop_unary" {
+        tokio::spawn(async move {
+            inference.generate(request).await.map(|r| r.into_inner().scheduler_retired)
+        })
+    } else {
+        let mut stream = inference.generate_stream(request).await.unwrap().into_inner();
+        if explicit_abort {
+            while stream.message().await.unwrap().unwrap().outputs.is_none() {}
+            let pending = tokio::spawn(async move {
+                control
+                    .abort(pb::AbortRequest {
+                        request_ids: vec!["retirement-request".into()],
+                        wait_for_retirement: true,
+                    })
+                    .await
+                    .map(|r| r.into_inner().scheduler_retired)
+            });
+            // The local Abort terminal is intentionally not an engine acknowledgement.
+            let terminal = stream.message().await.unwrap().unwrap();
+            assert!(!terminal.scheduler_retired);
+            assert_eq!(
+                terminal.outputs.unwrap().finish_info.unwrap().finish_reason,
+                pb::finish_info::FinishReason::Aborted as i32
+            );
+            pending
+        } else {
+            tokio::spawn(async move {
+                while let Some(response) = stream.message().await? {
+                    if response.outputs.as_ref().is_some_and(|o| o.finish_info.is_some()) {
+                        return Ok(response.scheduler_retired);
+                    }
+                    assert!(!response.scheduler_retired);
+                }
+                panic!("generation ended without retirement acknowledgement")
+            })
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), utility_seen_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending).await.is_err(),
+        "local stream completion or a sent cancellation must not acknowledge engine retirement"
+    );
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), pending).await.unwrap().unwrap();
+    if fail {
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+    } else {
+        assert!(result.unwrap());
+    }
+    engine_task.await.unwrap();
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn retirement_acknowledgement_waits_for_engine_on_abort_and_stop_strings() {
+    for mode in ["abort", "stop_stream", "stop_unary", "length_stream"] {
+        assert_retirement_waits_for_engine(mode, false).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn retirement_failure_does_not_become_a_successful_terminal() {
+    assert_retirement_waits_for_engine("stop_stream", true).await;
+}
+
+/// An engine validation error must not wait for a retirement acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_retirement_preserves_engine_validation_error_without_acknowledgement() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-retirement-validation".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request = decode_add_request(&add);
+                let mut output = request_output(
+                    &request.request_id,
+                    vec![],
+                    Some(EngineCoreFinishReason::Error),
+                );
+                output.error = Some(Box::new(RequestError {
+                    code: RequestError::VALIDATION_ERROR.into(),
+                    message: "structured-output constraint could not be compiled".into(),
+                    retryable: false,
+                }));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![output],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                release_rx.await.unwrap();
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference,
+        control,
+        health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.generate(pb::GenerateRequest {
+            prompt: Some(pb::generate_request::Prompt::Text("hello".into())),
+            wait_for_retirement: true,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("engine validation errors must bypass retirement confirmation")
+    .expect_err("engine validation error must fail the RPC");
+    expect_test::expect![[r#"
+        (
+            InvalidArgument,
+            "structured-output constraint could not be compiled",
+        )
+    "#]]
+    .assert_debug_eq(&(status.code(), status.message()));
+
+    release_tx.send(()).unwrap();
+    engine_task.await.unwrap();
     server_task.abort();
 }
 

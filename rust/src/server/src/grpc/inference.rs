@@ -19,6 +19,7 @@ use vllm_text::{
 };
 
 use super::convert::{self, ResponseOpts};
+use super::retirement::RequestRetirement;
 use super::{InferenceServer, pb};
 use crate::state::AppState;
 
@@ -223,6 +224,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
+        let wait_for_retirement = proto_req.wait_for_retirement;
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
@@ -230,6 +232,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             started_at,
         } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
 
+        let retirement_id = wait_for_retirement.then(|| text_request.request_id.clone());
         let stream = self
             .state
             .chat
@@ -239,6 +242,10 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
+        let retirement = retirement_id
+            .as_ref()
+            .map(|id| RequestRetirement::capture_generation(&self.state, id))
+            .transpose()?;
         let collected = stream
             .collect_output()
             .instrument(request_span.clone())
@@ -270,6 +277,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             collected.sampling_mask.as_ref(),
             &response_opts,
         )?;
+        if let Some(retirement) = &retirement {
+            retirement.confirm(&self.state).await?;
+        }
         info!(
             parent: &request_span,
             elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -279,6 +289,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         Ok(Response::new(pb::GenerateResponse {
             prompt_info: Some(prompt_info),
             outputs: Some(outputs),
+            scheduler_retired: retirement.is_some(),
         }))
     }
 
@@ -289,6 +300,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
+        let wait_for_retirement = proto_req.wait_for_retirement;
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
@@ -298,6 +310,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
             .await?;
 
+        let retirement_id = wait_for_retirement.then(|| text_request.request_id.clone());
         let stream = self
             .state
             .chat
@@ -307,9 +320,18 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
-        let response_stream =
-            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
-                .instrument(request_span);
+        let retirement = retirement_id
+            .as_ref()
+            .map(|id| RequestRetirement::capture_generation(&self.state, id))
+            .transpose()?;
+        let response_stream = generate_stream_responses(
+            stream,
+            response_opts,
+            request_span.clone(),
+            started_at,
+            retirement.map(|retirement| (self.state.clone(), retirement)),
+        )
+        .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
 }
@@ -324,6 +346,7 @@ async fn generate_stream_responses(
     response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
+    retirement: Option<(Arc<AppState>, RequestRetirement)>,
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
     pin_mut!(stream);
@@ -346,6 +369,7 @@ async fn generate_stream_responses(
                 Ok(pb::GenerateResponse {
                     prompt_info: Some(prompt_info),
                     outputs: None,
+                    scheduler_retired: false,
                 })
             }
             Ok(DecodedTextEvent::TextDelta {
@@ -373,10 +397,18 @@ async fn generate_stream_responses(
                 .map(|outputs| pb::GenerateResponse {
                     prompt_info: None,
                     outputs: Some(outputs),
+                    scheduler_retired: false,
                 })
             }
         };
-        y.yield_ok(response?).await;
+        let mut response = response?;
+        if response.outputs.as_ref().is_some_and(|output| output.finish_info.is_some())
+            && let Some((state, retirement)) = &retirement
+        {
+            retirement.confirm(state).await?;
+            response.scheduler_retired = true;
+        }
+        y.yield_ok(response).await;
     }
     info!(
         parent: &request_span,
@@ -478,6 +510,7 @@ mod tests {
             ResponseOpts::default(),
             Span::none(),
             Instant::now(),
+            None,
         )
         .map_ok(|response| response.outputs.expect("outputs").sampling_mask)
         .try_collect()

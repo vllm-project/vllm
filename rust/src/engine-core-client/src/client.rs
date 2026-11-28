@@ -849,6 +849,21 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Retire captured internal request IDs and wait for every connected
+    /// EngineCore to acknowledge its scheduler's abort operation.
+    ///
+    /// Unlike [`Self::abort`], success requires an engine reply. The utility
+    /// uses the existing ordered input queue, after the request's Add. It does
+    /// not wait for deferred GPU or connector resource reclamation.
+    pub async fn abort_and_confirm(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            bail_invalid_client_config!("retirement requires captured request IDs");
+        }
+        self.inner.abort_requests_locally(ids);
+        let _: Vec<()> = self.call_utility("abort_requests", (ids,)).await?;
+        Ok(())
+    }
+
     /// Call a typed utility method on all connected engines, returning one
     /// decoded result per connected engine if all calls succeed. The client
     /// waits for every engine outcome before returning an error so callers can

@@ -97,9 +97,15 @@ message ShutdownResponse {}
 
 message AbortRequest {
   repeated string request_ids = 1;
+  // Wait for EngineCore to retire the captured active requests. This is not
+  // proof that asynchronous GPU, connector, or external-media reads have ended.
+  bool wait_for_retirement = 2;
 }
 
-message AbortResponse {}
+message AbortResponse {
+  // True only after every connected EngineCore acknowledged scheduler retirement.
+  bool scheduler_retired = 1;
+}
 
 // ======================================================================================
 // LoRA lifecycle
