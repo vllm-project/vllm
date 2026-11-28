@@ -784,6 +784,51 @@ def set_model_tag(tag: str, is_encoder: bool = False) -> Generator[None, None, N
         model_is_encoder = old_is_encoder
 
 
+def disable_benchmarks_for_oversized_inputs(
+    inductor_config: dict[str, Any], example_inputs: Sequence[Any]
+) -> None:
+    """Turn off Inductor's compile-time kernel benchmarking when it cannot fit.
+
+    Combo-kernel benchmarking and compile-time autotuning run each candidate
+    kernel on random device copies of its inputs. An input larger than the
+    free device memory (e.g. Gemma-4's per-layer embedding table on a 16 GB
+    GPU) makes compilation fail with OOM. A CPU-offloaded (UVA) weight gets a
+    full device copy too, which undoes the offload: the copy is counted as
+    peak activation memory, and the KV cache is sized without it.
+    """
+    device_inputs = [
+        t
+        for t in example_inputs
+        if isinstance(t, torch.Tensor) and t.device.type != "cpu"
+    ]
+    if not device_inputs:
+        return
+    offloaded = [
+        t for t in device_inputs if getattr(t, "_vllm_is_uva_offloaded", False)
+    ]
+    if offloaded:
+        reason = (
+            f"{sum(t.nbytes for t in offloaded) / (1 << 30):.2f} GiB of graph "
+            "inputs are CPU-offloaded weights"
+        )
+    else:
+        largest = max(device_inputs, key=lambda t: t.nbytes)
+        free = current_platform.free_device_memory(largest.device)
+        if largest.nbytes < free:
+            return
+        reason = (
+            f"a {largest.nbytes / (1 << 30):.2f} GiB graph input exceeds the "
+            f"{free / (1 << 30):.2f} GiB of free device memory"
+        )
+    logger.warning_once(
+        "Disabling Inductor's combo-kernel benchmarking and compile-time "
+        "autotuning, which copy kernel inputs to the device: %s.",
+        reason,
+    )
+    inductor_config["benchmark_combo_kernel"] = False
+    inductor_config["triton.autotune_at_compile_time"] = False
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
@@ -1137,6 +1182,7 @@ class VllmBackend:
 
         self.graph = graph
         self.configure_post_pass()
+        disable_benchmarks_for_oversized_inputs(self.inductor_config, example_inputs)
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.
