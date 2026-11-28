@@ -573,6 +573,26 @@ def test_cutlass_int8_azp(
         )
 
 
+# SM100+ has no int8 azp kernel, so the op must raise a clear error
+# instead of launching the SM90 or SM80 kernel.
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="Only SM100+ rejects int8 azp.",
+)
+def test_cutlass_int8_azp_sm100_error():
+    m, n, k = 32, 16, 64
+    aq_i8 = rand_int8((m, k))
+    bq_i8 = rand_int8((n, k)).t()
+    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
+    scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
+    azp_adj_i32 = bq_i8.to(torch.int32).sum(dim=0, keepdim=True, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="Int8 not supported on SM"):
+        ops.cutlass_scaled_mm_azp(
+            aq_i8, bq_i8, scale_a, scale_b, torch.bfloat16, azp_adj_i32
+        )
+
+
 # Test working with a subset of A and B
 def test_cutlass_subset():
     big_m, big_n, big_k = 1024, 1024, 1024
