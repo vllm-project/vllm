@@ -790,16 +790,18 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.kernel import mx as mx_kernel
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
-try:
-    hf_api().list_repo_refs(
-        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
-    )
-    HF_HUB_AMD_ORG_ACCESS = True
-except (
-    huggingface_hub.errors.RepositoryNotFoundError,
-    huggingface_hub.errors.OfflineModeIsEnabled,
-):
-    HF_HUB_AMD_ORG_ACCESS = False
+
+def has_amd_org_access() -> bool:
+    try:
+        hf_api().list_repo_refs(
+            "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
+        )
+        return True
+    except (
+        huggingface_hub.errors.RepositoryNotFoundError,
+        huggingface_hub.errors.OfflineModeIsEnabled,
+    ):
+        return False
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -2269,14 +2271,12 @@ GSM8K_ACCURACY_CONFIGS = [
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.",
-)
 def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     device_count = torch.accelerator.device_count()
     if device_count < 8:
         pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
+    if not has_amd_org_access():
+        pytest.skip("Read access to huggingface.co/amd is required for this test.")
 
     task = "gsm8k"
     rtol = 0.03

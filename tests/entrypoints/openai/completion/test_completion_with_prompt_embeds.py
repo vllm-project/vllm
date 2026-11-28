@@ -12,15 +12,12 @@ import torch
 
 # downloading lora to test lora requests
 from openai import BadRequestError
-from transformers import AutoConfig
 
 from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
 LORA_SERVING_MODEL_NAME = "opt125m-lora"
-
-CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module", params=["use-lora"])

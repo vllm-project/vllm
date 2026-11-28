@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import partial
+from functools import cache, partial
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -57,11 +57,15 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     )
 
 MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
 PROMPT = "I am Gyoubu Masataka Oniwa"
-PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
+
+
+@cache
+def prompt_tokens() -> list[int]:
+    return AutoTokenizer.from_pretrained(MODEL_NAME)(PROMPT).input_ids
+
 
 _REQUEST_COUNTER = 0
 
@@ -73,7 +77,7 @@ def make_request() -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=request_id,
         external_req_id=f"{request_id}-{uuid.uuid4()}",
-        prompt_token_ids=PROMPT_TOKENS,
+        prompt_token_ids=prompt_tokens(),
         mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,

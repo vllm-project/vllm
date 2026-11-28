@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+
 import pytest
 
 from vllm.assets.video import VideoAsset
@@ -13,7 +15,11 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 pytestmark = pytest.mark.cpu_test
 
-video_data_url = encode_video_url(VideoAsset("baby_reading").np_ndarrays)
+
+@cache
+def video_data_url() -> str:
+    return encode_video_url(VideoAsset("baby_reading").np_ndarrays)
+
 
 DEFAULT_MEDIA_IO_KWARGS = {"video": {"num_frames": 32}}
 DEFAULT_MM_PROCESSOR_KWARGS = {"videos_kwargs": {"do_resize": True}}
@@ -59,7 +65,7 @@ def _video_chat_messages(client_uuid: str) -> list[ChatCompletionMessageParam]:
             "content": [
                 {
                     "type": "video_url",
-                    "video_url": {"url": video_data_url},
+                    "video_url": {"url": video_data_url()},
                     "uuid": client_uuid,
                 },
                 {"type": "text", "text": "Describe the video."},
@@ -70,7 +76,7 @@ def _video_chat_messages(client_uuid: str) -> list[ChatCompletionMessageParam]:
 
 def test_mm_hash_includes_uuid_and_processing_kwargs():
     renderer = _build_video_renderer()
-    messages = _video_chat_messages(video_data_url)
+    messages = _video_chat_messages(video_data_url())
 
     base_hash = _get_message_hash(renderer, messages)
     media_io_hash = _get_message_hash(

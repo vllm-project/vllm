@@ -16,11 +16,12 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_video_asset = VideoAsset("baby_reading")
-baby_reading_video = (
-    baby_reading_video_asset.np_ndarrays,
-    baby_reading_video_asset.metadata,
-)
+
+
+@pytest.fixture(scope="module")
+def baby_reading_video():
+    asset = VideoAsset("baby_reading")
+    return asset.np_ndarrays, asset.metadata
 
 
 def _build_renderer(
@@ -123,7 +124,7 @@ def test_multi_modal_uuids_missing_modality_raises():
     ],
 )
 def test_multi_modal_uuids_accepts_none_and_passes_through(
-    mm_cache_gb: float, enable_prefix_caching: bool
+    mm_cache_gb: float, enable_prefix_caching: bool, baby_reading_video
 ):
     renderer = _build_renderer(
         mm_cache_gb=mm_cache_gb,
@@ -205,7 +206,9 @@ def test_multi_modal_uuids_accepts_empty(
         ),
     ],
 )
-def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
+def test_multi_modal_uuids_preserved_when_caching_disabled(
+    mm_uuids, expected, baby_reading_video
+):
     """Only missing UUIDs get request-local IDs when both caches are disabled."""
     renderer = _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False)
 

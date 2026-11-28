@@ -9,15 +9,12 @@ import pytest
 
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
-from vllm.transformers_utils.repo_utils import hf_api
 
 from ..conftest import AudioTestAssets, VllmRunner
 from ..models.utils import check_logprobs_close
 from ..utils import create_new_process_for_each_test
 
-MODEL_PATH = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
-AUDIO_LORA_PATH = os.path.join(MODEL_PATH, "speech-lora")
-IMAGE_LORA_PATH = os.path.join(MODEL_PATH, "vision-lora")
+MODEL_PATH = "microsoft/Phi-4-multimodal-instruct"
 
 AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assistant|>"  # noqa: E501
 
@@ -40,6 +37,16 @@ VLLM_RUNNER_BASE_KWARGS = {
     "limit_mm_per_prompt": {"audio": 1},
     "enforce_eager": True,
 }
+
+
+@pytest.fixture(scope="module")
+def audio_lora_path(phi4mm_model_path: str) -> str:
+    return os.path.join(phi4mm_model_path, "speech-lora")
+
+
+@pytest.fixture(scope="module")
+def image_lora_path(phi4mm_model_path: str) -> str:
+    return os.path.join(phi4mm_model_path, "vision-lora")
 
 
 def run_test(
@@ -91,6 +98,7 @@ def test_active_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    audio_lora_path: str,
 ):
     """Ensure that we can use the default audio lora."""
     run_test(
@@ -98,7 +106,7 @@ def test_active_default_mm_lora(
         audio_assets,
         monkeypatch,
         lora_request=None,
-        default_mm_loras={"audio": AUDIO_LORA_PATH},
+        default_mm_loras={"audio": audio_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -111,6 +119,7 @@ def test_inactive_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    image_lora_path: str,
 ):
     """Ensure that modalities are filtered properly."""
     # An image-only default LoRA must not change audio-only generation.
@@ -126,7 +135,7 @@ def test_inactive_default_mm_lora(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        default_mm_loras={"image": IMAGE_LORA_PATH},
+        default_mm_loras={"image": image_lora_path},
     )
     check_logprobs_close(
         outputs_0_lst=outputs_without_default_lora,
@@ -144,14 +153,15 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    audio_lora_path: str,
 ):
     """Ensure that redundantly providing the lora works."""
     run_test(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        lora_request=LoRARequest("audio", 1, AUDIO_LORA_PATH),
-        default_mm_loras={"audio": AUDIO_LORA_PATH},
+        lora_request=LoRARequest("audio", 1, audio_lora_path),
+        default_mm_loras={"audio": audio_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -164,6 +174,8 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    audio_lora_path: str,
+    image_lora_path: str,
 ):
     """Ensure that if the lora_request conflicts with default_mm_loras,
     we use the lora_request."""
@@ -171,14 +183,16 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        lora_request=LoRARequest("speech", 2, AUDIO_LORA_PATH),
-        default_mm_loras={"audio": IMAGE_LORA_PATH},
+        lora_request=LoRARequest("speech", 2, audio_lora_path),
+        default_mm_loras={"audio": image_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
 
 @create_new_process_for_each_test()
-def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner, monkeypatch):
+def test_default_mm_lora_does_not_expand_string_reqs(
+    vllm_runner, monkeypatch, audio_lora_path
+):
     # See run_test: force spawn to avoid the forked-child CUDA re-init crash.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
@@ -189,7 +203,7 @@ def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner, monkeypatch):
     # does not expand the lora req if the prompt type is a string.
     vllm_runner_kwargs = {
         **VLLM_RUNNER_BASE_KWARGS,
-        **{"default_mm_loras": {"audio": AUDIO_LORA_PATH}},
+        **{"default_mm_loras": {"audio": audio_lora_path}},
     }
 
     # Avoid the full generation call since these tests are expensive;
