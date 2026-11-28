@@ -482,6 +482,7 @@ class RequestRunner:
         skip_reading_prefix_cache: bool = False,
         req_id: str | None = None,
         resumable: bool = False,
+        kv_hints: "KvHintsEnvelope | None" = None,
     ):
         if req_id is None:
             self.req_id += 1
@@ -500,6 +501,7 @@ class RequestRunner:
             pooling_params=None,
             block_hasher=self._block_hasher,
             resumable=resumable,
+            kv_hints=kv_hints,
         )
         if kv_transfer_params is not None:
             req.kv_transfer_params = kv_transfer_params
