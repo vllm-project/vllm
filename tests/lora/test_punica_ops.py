@@ -307,6 +307,33 @@ def check_lora_expand_kernel(
     assert_close(out_tensor, ref_out_tensor)
 
 
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_lora_expand_row_padded_output(add_inputs: bool):
+    tokens, rank = 4, 8
+    inputs = torch.ones((2, tokens, rank), device=DEVICE_TYPE, dtype=torch.bfloat16)
+    weights = [inputs.new_full((1, 6, rank), v) for v in (1, 2)]
+    storage = inputs.new_full((tokens, 16), -1)
+    output = storage[:, 1:13]
+    meta = LoRAKernelMeta.make(max_loras=1, max_num_tokens=tokens, device=DEVICE_TYPE)
+    meta.prepare_tensors(torch.zeros(tokens, device=DEVICE_TYPE, dtype=torch.long))
+
+    with _dict_lock:
+        _LORA_B_PTR_DICT.clear()
+        triton_ops.lora_expand(
+            inputs,
+            weights,
+            output,
+            *meta.meta_args(token_nums=tokens, specialize_active_lora=False),
+            offset_start=0,
+            add_inputs=add_inputs,
+        )
+
+    expected = torch.full_like(storage, -1)
+    expected[:, 1:7] = rank - int(add_inputs)
+    expected[:, 7:13] = 2 * rank - int(add_inputs)
+    torch.testing.assert_close(storage, expected, rtol=0, atol=0)
+
+
 # Tests
 # We test the punica kernels along 2 verticals mainly.
 # 1. Variations in hidden_dim size
