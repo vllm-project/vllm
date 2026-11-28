@@ -64,6 +64,7 @@ class _RecordingModelRunner:
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
         self.target_hook_calls = 0
+        self.encoder_cache_resets = 0
 
     def reload_weights(self, *args) -> None:
         self.seen_config = get_current_vllm_config()
@@ -73,6 +74,9 @@ class _RecordingModelRunner:
 
     def on_target_weights_replaced(self) -> None:
         self.target_hook_calls += 1
+
+    def reset_encoder_cache(self) -> None:
+        self.encoder_cache_resets += 1
 
     def get_draft_model(self) -> nn.Module | None:
         return None
@@ -207,6 +211,19 @@ def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
     assert worker._weight_update_active is True
 
 
+def test_finish_update_clears_target_encoder_cache():
+    """finish_weight_update bypasses GPUModelRunner.reload_weights(), so the
+    target's encoder cache must be cleared explicitly or pre-update hashes
+    re-serve embeddings computed under the old weights (#67088)."""
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+
+    Worker.start_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert worker.model_runner.encoder_cache_resets == 1
+
+
 def test_finish_draft_session_skips_the_target_hook(monkeypatch):
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
@@ -219,6 +236,7 @@ def test_finish_draft_session_skips_the_target_hook(monkeypatch):
 
     assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.target_hook_calls == 0
+    assert worker.model_runner.encoder_cache_resets == 0
 
 
 def test_refused_draft_start_keeps_weights_complete(monkeypatch):
