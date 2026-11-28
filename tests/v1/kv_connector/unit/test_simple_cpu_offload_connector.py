@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheTensor,
+    MLAAttentionSpec,
 )
 
 
@@ -201,3 +202,53 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
     assert isinstance(scheduler.cpu_coordinator, HybridKVCacheCoordinator)
     attention_groups = scheduler.cpu_coordinator.attention_groups
     assert [g.group_ids for g in attention_groups] == [[0]]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("share", "aliased", "expected_blocks"),
+    [(False, False, 64), (True, False, 76), (True, True, 64)],
+)
+def test_share_replicated_regions_sizes_cpu_pool(share, aliased, expected_blocks):
+    world_size, num_blocks = 2, 4
+    index = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        max_tp_shards=1,
+    )
+    index_bytes = index.page_size_bytes
+    kv_cache_config = _make_kv_cache_config(num_blocks)
+    attn_tensor = kv_cache_config.kv_cache_tensors[0]
+    attn_bytes = attn_tensor.size
+    attn_tensor.size += index_bytes * num_blocks
+    kv_cache_config.kv_cache_tensors.append(
+        KVCacheTensor(
+            size=attn_tensor.size,
+            layers=["index"],
+            layer_stride=index_bytes * num_blocks,
+            block_stride=index_bytes,
+            offset=0 if aliased else attn_bytes,
+        )
+    )
+    kv_cache_config.kv_cache_groups[0].kv_cache_specs["index"] = index
+
+    vllm_config = create_vllm_config(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": world_size * 64 * (_BYTES_PER_BLOCK + index_bytes),
+            "share_replicated_regions": share,
+        },
+    )
+    parallel_config = vllm_config.parallel_config
+    parallel_config.tensor_parallel_size = parallel_config.world_size = world_size
+    parallel_config.distributed_executor_backend = "mp"
+
+    connector = SimpleCPUOffloadConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    # Shared: 2 ranks * 98304 B // (2 * 1024 B private + 512 B stored once).
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager.num_cpu_blocks == expected_blocks

@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
     unpin_tensor,
 )
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
@@ -22,7 +25,11 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
-from vllm.v1.simple_kv_offload.sizing import num_offload_blocks
+from vllm.v1.simple_kv_offload.sizing import (
+    num_offload_blocks,
+    offload_capacity_blocks,
+    rank_shared_layer_bytes,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -45,6 +52,7 @@ class SimpleCPUOffloadWorker:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         cpu_hugepage_size: int | None = None,
+        share_replicated_regions: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -56,6 +64,8 @@ class SimpleCPUOffloadWorker:
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
         self.cpu_hugepage_size = cpu_hugepage_size
+        self.share_replicated_regions = share_replicated_regions
+        self._shared_region: SharedOffloadRegion | None = None
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -119,6 +129,12 @@ class SimpleCPUOffloadWorker:
         # tensor's placement -- layers in one allocation can differ in page size.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         seen: set[tuple[torch.device, int]] = set()
+        shared_layers = (
+            rank_shared_layer_bytes(self.kv_cache_config, self.vllm_config)
+            if self.share_replicated_regions
+            else {}
+        )
+        shared_names: list[str] = []
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             name = next((n for n in kv_cache_tensor.layers if n in kv_caches), None)
             if name is None:
@@ -163,6 +179,8 @@ class SimpleCPUOffloadWorker:
                     else f"{layer_name}.{idx % groups_per_layer}"
                 )
                 unique_gpu_caches[key_name] = region
+                if layer_name in shared_layers:
+                    shared_names.append(key_name)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
         # page_size_bytes (e.g., layers of one group with varying head_size).
@@ -170,10 +188,14 @@ class SimpleCPUOffloadWorker:
             t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
+        shared_bytes_per_block = sum(shared_layers.values())
+        world_size = self.vllm_config.parallel_config.world_size if shared_layers else 1
 
         self.num_cpu_blocks = self._resolve_num_cpu_blocks(
             self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
             total_bytes_per_block,
+            shared_bytes_per_block,
+            world_size,
         )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
@@ -186,15 +208,33 @@ class SimpleCPUOffloadWorker:
         if self.disk_mode:
             self._init_disk_mode(unique_gpu_caches, total_bytes_per_block, self.device)
         else:
-            self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
+            self._init_cpu_mode(
+                unique_gpu_caches,
+                total_bytes_per_block,
+                self.device,
+                shared_names,
+                shared_bytes_per_block,
+            )
 
-    def _resolve_num_cpu_blocks(self, capacity_bytes: int, bytes_per_block: int) -> int:
-        local_capacity = capacity_bytes // bytes_per_block
+    def _resolve_num_cpu_blocks(
+        self,
+        capacity_bytes: int,
+        bytes_per_block: int,
+        shared_bytes_per_block: int = 0,
+        world_size: int = 1,
+    ) -> int:
+        local_capacity = offload_capacity_blocks(
+            capacity_bytes, bytes_per_block, shared_bytes_per_block, world_size
+        )
         requested = self._num_cpu_blocks_override
         if requested is None:
             assert self.kv_cache_config is not None
             return num_offload_blocks(
-                self.kv_cache_config, capacity_bytes, bytes_per_block
+                self.kv_cache_config,
+                capacity_bytes,
+                bytes_per_block,
+                shared_bytes_per_block,
+                world_size,
             )
         if type(requested) is not int or not 0 < requested <= local_capacity:
             raise ValueError(
@@ -236,13 +276,32 @@ class SimpleCPUOffloadWorker:
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
         device: torch.device,
+        shared_names: list[str],
+        shared_bytes_per_block: int,
     ) -> None:
-        logger.info(
-            "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks (%.2f GB)",
-            len(unique_gpu_caches),
-            self.num_cpu_blocks,
-            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
-        )
+        rank = 0
+        if shared_names:
+            parallel_config = self.vllm_config.parallel_config
+            rank = parallel_config.rank
+            private_bytes_per_block = total_bytes_per_block - shared_bytes_per_block
+            logger.info(
+                "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks "
+                "(%.2f GB private per rank, %.2f GB in %d regions shared by "
+                "%d ranks)",
+                len(unique_gpu_caches),
+                self.num_cpu_blocks,
+                self.num_cpu_blocks * private_bytes_per_block / (1024**3),
+                self.num_cpu_blocks * shared_bytes_per_block / (1024**3),
+                len(shared_names),
+                parallel_config.world_size,
+            )
+        else:
+            logger.info(
+                "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks (%.2f GB)",
+                len(unique_gpu_caches),
+                self.num_cpu_blocks,
+                (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
+            )
 
         pin_memory = PIN_MEMORY
         if not pin_memory:
@@ -250,8 +309,22 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
+        cpu_kv_caches: dict[str, torch.Tensor] = {}
+        for shared in (False, True):
+            gpu_caches = {
+                name: region
+                for name, region in unique_gpu_caches.items()
+                if (name in shared_names) == shared
+            }
+            if gpu_caches:
+                cpu_kv_caches.update(
+                    self._alloc_cpu_caches(gpu_caches, pin_memory, shared)
+                )
+        self.cpu_kv_caches = {name: cpu_kv_caches[name] for name in unique_gpu_caches}
 
+        # Shared regions need no cross-rank sync: the scheduler caches a block
+        # only after every rank reported its store, and reuses it only after
+        # every rank finished loading it.
         self._backend = DmaCopyBackend()
         self._backend.init(
             unique_gpu_caches,
@@ -259,16 +332,23 @@ class SimpleCPUOffloadWorker:
             device,
             self.load_stream,
             self.store_stream,
+            skip_store=frozenset(shared_names) if rank else frozenset(),
         )
 
     def _alloc_cpu_caches(
-        self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
+        self,
+        unique_gpu_caches: dict[str, torch.Tensor],
+        pin_memory: bool,
+        shared: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
         layer_bytes = [
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
-        buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
+        if shared:
+            buf = self._map_shared_buffer(sum(layer_bytes))
+        else:
+            buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
 
         cpu_kv_caches = {}
         offset = 0
@@ -293,8 +373,24 @@ class SimpleCPUOffloadWorker:
                 for tensor in reversed(registered):
                     unpin_tensor(tensor)
                 raise
-            self._pinned_host_ranges = registered
+            self._pinned_host_ranges += registered
         return cpu_kv_caches
+
+    def _map_shared_buffer(self, nbytes: int) -> torch.Tensor:
+        parallel_config = self.vllm_config.parallel_config
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        nbytes = round_up(nbytes, mmap.PAGESIZE)
+        self._shared_region = SharedOffloadRegion(
+            engine_id=f"{kv_transfer_config.engine_id}_simple",
+            num_chunks=1,
+            rank=None,
+            kv_bytes_per_chunk=nbytes,
+            cpu_page_size=nbytes,
+            barrier=lambda: get_tp_group().barrier(),
+            populate_shard=(parallel_config.rank, parallel_config.world_size),
+        )
+        return self._shared_region.base_tensor
 
     def shutdown(self) -> None:
         """Stop the copy thread and unregister the pinned CPU caches.
@@ -312,6 +408,11 @@ class SimpleCPUOffloadWorker:
             except RuntimeError as e:
                 logger.warning("Failed to unpin a CPU KV cache range: %s", e)
         self._pinned_host_ranges = []
+        if self._shared_region is not None:
+            # The mapping can only be closed once no tensor views it.
+            self.cpu_kv_caches = None
+            self._shared_region.cleanup()
+            self._shared_region = None
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

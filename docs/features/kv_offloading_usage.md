@@ -564,6 +564,35 @@ Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
 requests transparent huge pages. In both cases, the memory follows the worker's
 NUMA policy, for example from `--numa-bind`.
 
+## Storing replicated KV once with `SimpleCPUOffloadConnector`
+
+Under tensor parallelism some KV regions hold the same bytes on every rank,
+for example an MLA latent or a sparse-attention index cache. By default every
+rank keeps its own CPU copy of them. Set `share_replicated_regions` to `true`
+to keep one copy in a `/dev/shm` mapping that rank 0 writes and every rank
+reads, so that the same byte budget holds more blocks:
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use": 107374182400,
+    "share_replicated_regions": true
+  }
+}
+```
+
+A region is shared when its layer declares `max_tp_shards=1` in its KV cache
+spec and shares no memory with another layer, the engine uses tensor
+parallelism only (no pipeline or context parallelism) on one node with the
+multiprocessing executor, and the KV cache layout is layer-outermost. If no
+region qualifies, a warning is logged and every rank keeps private buffers.
+`/dev/shm` must have room for the shared regions, whose size the start-up log
+reports. In containers this usually needs `--ipc=host` or a larger
+`--shm-size`. The option applies to the `cpu` backend and cannot be combined
+with `cpu_hugepage_block_size`.
+
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 
 `SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in

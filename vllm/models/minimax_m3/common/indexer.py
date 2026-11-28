@@ -175,6 +175,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             head_size=self.head_size,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
+            max_tp_shards=1,
         )
         return FullAttentionManager.layer_config(spec)
 

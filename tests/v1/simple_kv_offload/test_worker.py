@@ -9,6 +9,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 
 from __future__ import annotations
 
+import dataclasses
 import mmap
 import time
 from unittest.mock import MagicMock
@@ -866,5 +867,80 @@ def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_fr
         _launch_and_wait(worker._backend, blocks, is_store=False)
         assert torch.equal(raw, expected)
     finally:
-        if worker._backend is not None:
-            worker._backend.shutdown()
+        worker.shutdown()
+
+
+def test_only_rank_zero_stores_replicated_regions(dist_init):
+    """Ranks above 0 leave a replicated layer's host copy to rank 0 on store,
+    and every rank loads it back with its private layers."""
+    num_blocks, world_size = 4, 2
+    specs = _dsa_specs(1, 64)
+    index = "model.layers.0.self_attn.indexer.k_cache"
+    index_spec = specs[index]
+    assert isinstance(index_spec, AttentionSpec)
+    specs[index] = dataclasses.replace(index_spec, max_tp_shards=1)
+    group = make_kv_cache_group_from_specs(specs)
+    page_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    blocks = list(range(num_blocks))
+    workers: list[SimpleCPUOffloadWorker] = []
+    try:
+        for rank in range(world_size):
+            vllm_config = VllmConfig(
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+                )
+            )
+            vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
+            parallel_config = vllm_config.parallel_config
+            parallel_config.tensor_parallel_size = world_size
+            parallel_config.world_size = world_size
+            parallel_config.rank = rank
+            parallel_config.distributed_executor_backend = "mp"
+            kv_cache_config = get_kv_cache_config_from_groups(
+                vllm_config, [group], num_blocks
+            )
+            kv_caches = allocate_kv_cache(
+                kv_cache_config, torch.device("cuda"), KVCacheLayout.LBNHC
+            )
+            worker = SimpleCPUOffloadWorker(
+                vllm_config,
+                kv_cache_config,
+                num_blocks * page_bytes,
+                share_replicated_regions=True,
+            )
+            workers.append(worker)
+            worker.register_kv_caches(kv_caches)
+
+        expected = []
+        for rank, worker in enumerate(workers):
+            assert worker.gpu_kv_caches is not None
+            for i, region in enumerate(worker.gpu_kv_caches.values()):
+                region.fill_(1 + 2 * rank + i)
+            expected.append({n: r.clone() for n, r in worker.gpu_kv_caches.items()})
+            _launch_and_wait(worker._backend, blocks, is_store=True)
+        for rank, worker in enumerate(workers):
+            assert worker.cpu_kv_caches is not None
+            for name, want in expected[rank].items():
+                host = worker.cpu_kv_caches[name][:num_blocks]
+                if name == index and rank:
+                    assert not host.any()
+                else:
+                    assert torch.equal(host, want.cpu())
+
+        # In an engine every rank maps rank 0's shared region.
+        cpu0, cpu1 = workers[0].cpu_kv_caches, workers[1].cpu_kv_caches
+        assert cpu0 is not None and cpu1 is not None
+        cpu1[index].copy_(cpu0[index])
+        for worker in workers:
+            assert worker.gpu_kv_caches is not None
+            for region in worker.gpu_kv_caches.values():
+                region.zero_()
+            _launch_and_wait(worker._backend, blocks, is_store=False)
+        for rank, worker in enumerate(workers):
+            assert worker.gpu_kv_caches is not None
+            for name, region in worker.gpu_kv_caches.items():
+                want = expected[0 if name == index else rank][name]
+                assert torch.equal(region, want)
+    finally:
+        for worker in workers:
+            worker.shutdown()

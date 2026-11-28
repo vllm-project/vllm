@@ -243,7 +243,7 @@ def copy_blocks(
 ) -> None:
     """Copy blocks via cuMemcpyBatchAsync / hipMemcpyBatchAsync."""
     n = len(src_block_ids)
-    if n == 0:
+    if n == 0 or params.num_layers == 0:
         return
 
     assert _batch_memcpy is not None, "build_params() must run before copy_blocks()"
