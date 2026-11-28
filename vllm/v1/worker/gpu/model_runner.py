@@ -105,6 +105,7 @@ from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
+    CopyEventPool,
     StepTimingCollector,
     new_d2h_stream,
 )
@@ -250,8 +251,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.output_copy_stream = new_d2h_stream(self.device)
+        # The Confidential Computing copy patches learn a D2H stream's producer
+        # from `wait_stream()`, which the pooled events replace with an event wait.
+        self.output_copy_events: CopyEventPool | None = None
         if current_platform.is_confidential_compute():
             install_conf_compute_copy_patches()
+        else:
+            self.output_copy_events = CopyEventPool()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -2384,6 +2390,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pending_aux_output=pending_aux_output,
             num_drafted_tokens_per_req=num_drafted_tokens_per_req,
             num_verified_tokens_per_req=num_verified_tokens_per_req,
+            event_pool=self.output_copy_events,
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
