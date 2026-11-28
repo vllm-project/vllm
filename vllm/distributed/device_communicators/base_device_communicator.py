@@ -250,6 +250,11 @@ class DeviceCommunicatorBase:
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
+    @property
+    def supports_sharded_sequential_sampling(self) -> bool:
+        """Whether TP can exchange vocab shards and gather sequential drafts."""
+        return False
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_

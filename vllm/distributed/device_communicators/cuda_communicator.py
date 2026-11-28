@@ -392,6 +392,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             scope="global",
         )
 
+    @property
+    def supports_sharded_sequential_sampling(self) -> bool:
+        return self.pynccl_comm is not None and not self.pynccl_comm.disabled
+
     def all_reduce(self, input_):
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
@@ -521,6 +525,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_size, dtype=input_.dtype, device=input_.device
         )
         pynccl_comm.all_gather(output_tensor, input_.contiguous())
+        if dim == 0:
+            # NCCL writes rank shards in the order needed for a dim-0 gather.
+            return output_tensor
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
