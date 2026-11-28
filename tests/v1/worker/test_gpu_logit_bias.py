@@ -15,7 +15,7 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     )
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState, apply_logit_bias
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcRequestState,
@@ -115,3 +115,42 @@ def test_v2_min_tokens_mixed_batch_gates_restore_per_request():
 
     assert out[0, STOP_TOKEN] == 1.0
     assert torch.isneginf(out[1]).all()
+
+
+def test_v2_logit_bias_reads_restored_allowed_tokens():
+    rows, vocab_size, count = 1024, 151936, 1024
+    generator = torch.Generator(device=DEVICE).manual_seed(70415)
+    mapping = torch.randperm(
+        rows, device=DEVICE, generator=generator, dtype=torch.int32
+    )
+    allowed = torch.randperm(vocab_size, device=DEVICE, generator=generator)[:count]
+    # Give each request distinct IDs, then apply its biases in a different order.
+    allowed = (allowed + torch.arange(rows, device=DEVICE)[:, None]) % vocab_size
+    order = torch.rand(rows, count, device=DEVICE, generator=generator).argsort(dim=1)
+    biased = allowed.gather(1, order).int()
+    allowed = allowed.int()
+    bias = torch.rand(rows, count, device=DEVICE, generator=generator)
+    counts = torch.full((rows,), count, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros_like(counts)
+    stop_ids = torch.zeros(rows, 128, dtype=torch.int32, device=DEVICE)
+    indices = biased[mapping.long()].long()
+    expected = 1.0 + bias[mapping.long()]
+    logits = torch.empty(rows, vocab_size, dtype=torch.float32, device=DEVICE)
+    # The inter-warp race depends on scheduling and can miss a single launch.
+    for _ in range(100):
+        logits.fill_(1.0)
+        apply_logit_bias(
+            logits,
+            mapping,
+            zeros,
+            counts,
+            allowed,
+            counts,
+            biased,
+            bias,
+            zeros,
+            zeros,
+            zeros,
+            stop_ids,
+        )
+        torch.testing.assert_close(logits.gather(1, indices), expected, atol=0, rtol=0)
