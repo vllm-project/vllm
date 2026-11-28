@@ -40,6 +40,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _uses_global_input_scale(
+    quant_method: FusedMoEMethodBase, weight_name: str
+) -> bool:
+    return (
+        getattr(quant_method, "use_global_sf", False) and "input_scale" in weight_name
+    )
+
+
 def _index_expert_mapping(
     mapping: list[tuple[str, str, int, str]],
 ) -> dict[str, list[tuple[str, str, int, str]]]:
@@ -236,9 +244,11 @@ class RoutedExperts(PluggableLayer):
             loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
 
         self.lora_base_layer_prefix = ""
+        self._flag_padding_for_reload()
 
-    def padding_fill_params(self) -> list[str]:
-        """Params a direct reload zero-fills; read at cold start, before PWAL."""
+    def _flag_padding_for_reload(self) -> None:
+        """Flag the params a direct reload zero-fills whole at begin; decided
+        from the sizes at construction, before post-load processing."""
         c = self.moe_config
         inter = c.intermediate_size_per_partition
         if not (
@@ -247,13 +257,11 @@ class RoutedExperts(PluggableLayer):
             # The loader refills this padding too, but a load plan skips loader fills.
             or c.tp_shard_with_padding
         ):
-            return []
+            return
         # Per-expert scalars ((E,), (E, <=2)) aren't padded.
-        return [
-            n
-            for n, p in self._parameters.items()
-            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]
-        ]
+        for p in self._parameters.values():
+            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]:
+                p.fill_on_reload = True
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -761,10 +769,7 @@ class RoutedExperts(PluggableLayer):
         )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        use_global_sf = (
-            getattr(base_quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
-        )
+        use_global_sf = _uses_global_input_scale(base_quant_method, weight_name)
 
         if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
@@ -850,11 +855,15 @@ class RoutedExperts(PluggableLayer):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
-            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
-            # The generic assignment below would broadcast w1/w3 into the
-            # whole expert row, so the second shard would overwrite the first.
+            # ModelOpt and Quark NVFP4 store w13 input scales as two logical
+            # shards. The generic assignment below would broadcast w1/w3 into
+            # the whole expert row, so the second shard would overwrite the
+            # first, and the layerwise loader would count each scalar twice.
             if (
-                "ModelOpt" in quant_method_name
+                (
+                    "ModelOpt" in quant_method_name
+                    or quant_method_name == "QuarkNvfp4MoEMethod"
+                )
                 and param.data.ndim == 2
                 and shard_id in ("w1", "w3")
             ):
@@ -1028,6 +1037,8 @@ class RoutedExperts(PluggableLayer):
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
         mapping_by_expert = _index_expert_mapping(expert_mapping)
+        quant_method = getattr(self, "quant_method", None)
+        source_method = getattr(quant_method, "requantization_source", None)
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
@@ -1063,6 +1074,13 @@ class RoutedExperts(PluggableLayer):
                     )
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
+                if (
+                    named_expert is not None
+                    and source_method is not None
+                    and self._map_global_expert_id_to_local_expert_id(expert_id) == -1
+                    and not _uses_global_input_scale(source_method, weight_name)
+                ):
+                    continue
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 if self.shared_expert_online_loader is not None:
                     param_name = self.shared_expert_online_loader.redirect_param_name(
@@ -1456,6 +1474,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
@@ -1468,12 +1487,15 @@ class RoutedExperts(PluggableLayer):
             x: Input tensor after any transforms
             router_logits: Router logits (for monolithic kernels)
             input_ids: input ids for DeepSeek V4
+            x_scale: Scales of `x` when the caller already quantized it (needs
+                `quant_method.accepts_quantized_input`)
 
         Returns:
             Finalized routed states or a deferred-finalize output.
 
         """
         assert self.quant_method.is_monolithic
+        extra = {} if x_scale is None else {"x_scale": x_scale}
 
         # Monolithic kernels handle routing internally
         return self.quant_method.apply_monolithic(
@@ -1481,6 +1503,7 @@ class RoutedExperts(PluggableLayer):
             x=x,
             router_logits=router_logits,
             input_ids=input_ids,
+            **extra,
         )
 
     @property

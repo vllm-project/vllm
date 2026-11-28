@@ -41,6 +41,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import (
+    nvfp4_block_scale_interleave as block_scale_interleave,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -670,6 +673,39 @@ def moe_kernel_quantize_input(
         return A, A_scale
 
 
+# Quant dtypes whose activation scales use the swizzled 128x4 layout when the
+# kernel declares is_scale_swizzled=True. Must cover every quant_dtype branch in
+# moe_kernel_quantize_input that honors is_scale_swizzled.
+_SWIZZLED_SCALE_DTYPES = ("nvfp4", "mxfp8")
+
+
+def restore_dispatched_scale_layout(
+    a1q_scale: torch.Tensor | None,
+    quant_dtype: None | torch.dtype | str,
+    is_scale_swizzled: bool,
+) -> torch.Tensor | None:
+    """Swizzle activation scales after an a2a dispatch, if the kernel
+    expects it.
+
+    Dispatch paths quantize with is_scale_swizzled=False, since the swizzled
+    layout is padded and would not line up row-for-row with the hidden states
+    in the a2a. For kernels that expect swizzled scales, convert the
+    dispatched row-major scales to the swizzled 128x4 layout here; otherwise
+    return the scales unchanged.
+    """
+    if (
+        a1q_scale is None
+        or not is_scale_swizzled
+        or quant_dtype not in _SWIZZLED_SCALE_DTYPES
+    ):
+        return a1q_scale
+    if a1q_scale.element_size() == 1:
+        a1q_scale = a1q_scale.view(torch.uint8)
+    # despite its name, this is flashinfer's generic block_scale_interleave
+    # and handles mxfp8 scale vectors as well
+    return block_scale_interleave(a1q_scale)
+
+
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
     if scales is not None:
         if scales.numel() == 1:
@@ -872,7 +908,10 @@ def resolve_moe_use_td() -> bool:
     dispatcher in `triton_attn.py`. `1`/`0` force it on/off regardless
     of hardware; forcing `1` where it cannot compile (see
     `moe_use_td_hw_supported`) fails at ptxas. Blackwell CUDA (sm100+) can
-    compile it but is opt-in only, pending validation.
+    compile it but is opt-in only, pending validation. The WNA16 launcher
+    (`invoke_fused_moe_wna16_triton_kernel`) additionally requires
+    `moe_use_td_hw_supported()` and falls back to the pointer path for
+    shapes and configs its TD path does not cover.
     """
     override = envs.VLLM_TRITON_USE_TD
     if override is None:
@@ -889,9 +928,10 @@ def warn_if_moe_use_td_ineffective(
     """One-shot warning when `VLLM_TRITON_USE_TD` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
-    MoE backend is not the fused Triton kernel, or (b) the model is
-    quantized (the TD path falls back to the pointer path under any
-    quantization).
+    MoE backend is not the fused Triton kernel, or (b) `fused_moe_kernel`
+    is launched with quantized weights, for which it ignores the flag.
+    Grouped `int4_w4a16` weights use `fused_moe_kernel_gptq_awq` instead,
+    which has its own TD path and does not call this.
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
@@ -907,11 +947,7 @@ def warn_if_moe_use_td_ineffective(
             "`--moe-backend triton` to enable the tensor-descriptor path"
         )
     else:
-        reason = (
-            "the model uses quantized MoE weights; the TD path is "
-            "currently restricted to non-quantized weights and falls "
-            "back to the pointer path"
-        )
+        reason = "fused_moe_kernel ignores it for quantized weights"
     logger.warning(
         "VLLM_TRITON_USE_TD is set to %s but %s.",
         envs.VLLM_TRITON_USE_TD,

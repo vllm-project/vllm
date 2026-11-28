@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import InklingTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
@@ -26,13 +28,12 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
-from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
     _INKLING_FA4_REL_ATTENTION_KERNEL,
@@ -68,7 +69,7 @@ class RelLogitsProj(nn.Module):
 class InklingAttention(nn.Module, AttentionLayerBase):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         *,
         num_heads: int,
         num_kv_heads: int,
@@ -174,29 +175,30 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
-        if vllm_config.kernel_config.enable_jit_warmup:
+        # SM8x never runs the FA4 kernel, so there is nothing to warm up.
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and not current_platform.is_device_capability_family(80)
+        ):
             _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         block_size = vllm_config.cache_config.block_size
-        if self.is_local:
-            assert self.local_extent is not None
-            return SlidingWindowSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_dim,
-                dtype=self.kv_cache_torch_dtype,
-                sliding_window=self.local_extent,
-            )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
         )
+        if self.is_local:
+            assert self.local_extent is not None
+            return SlidingWindowManager.layer_config(
+                spec, sliding_window=self.local_extent
+            )
+        return FullAttentionManager.layer_config(spec)
 
     def _split_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
         key_cache, value_cache = self.kv_cache.transpose(1, 2).split(

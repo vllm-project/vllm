@@ -7,10 +7,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
+)
+from vllm.model_executor.model_loader.reload import (
+    finish_reload,
+    record_metadata_for_reloading,
+    start_reload,
 )
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
@@ -747,8 +753,10 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32, packed_fp4=False)
     "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
 )
 @pytest.mark.parametrize("packed_fp4", [False, True])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_engram_meta_initialization_does_not_allocate_host_tables(
-    dist_init, cpu_offload, use_thp, packed_fp4
+    default_vllm_config, cpu_offload, use_thp, packed_fp4
 ):
     """Encoder-only language-model placeholders must not allocate host storage."""
     with torch.device("meta"):
@@ -766,6 +774,54 @@ def test_engram_meta_initialization_does_not_allocate_host_tables(
     assert layer.weight_scale_inv.shape == (36, 2)
     assert layer.weight.dtype == (torch.uint8 if packed_fp4 else torch.float8_e4m3fn)
     assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_engram_layerwise_reload_preserves_storage(
+    default_vllm_config, monkeypatch, cpu_offload
+):
+    """Reload FP8 values and E8M0 scale bytes without replacing host/UVA storage."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with torch.device("cuda"):
+        table = ParallelEngramEmbedding(36, 64, (17, 19), cpu_offload=cpu_offload)
+        record_metadata_for_reloading(table)
+    originals = {
+        name: (param, param.data_ptr(), param.weight_loader)
+        for name, param in table.named_parameters()
+    }
+    ids = torch.tensor([[0, 17], [16, 35]], dtype=torch.int32, device="cuda")
+    out = torch.empty(2, 2, 64, dtype=torch.bfloat16, device="cuda")
+
+    for value in (1, 2, 1):
+        weight = torch.full((36, 64), value, dtype=torch.float32).to(
+            torch.float8_e4m3fn
+        )
+        scales = torch.full((36, 2), 127 + value, dtype=torch.uint8)
+        start_reload(table)
+        for param in table.parameters():
+            assert param.is_meta == (not cpu_offload)
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(
+            table.weight_scale_inv, scales.view(torch.float8_e8m0fnu)
+        )
+        finish_reload(table, model_config=None, device=torch.device("cuda"))
+
+        for name, expected in (("weight", weight), ("weight_scale_inv", scales)):
+            param = getattr(table, name)
+            original, pointer, loader = originals[name]
+            assert param is original
+            assert param.data_ptr() == pointer
+            assert param.weight_loader is loader
+            if cpu_offload:
+                assert param.device.type == "cpu" and param.is_pinned()
+            assert torch.equal(
+                param.view(torch.uint8).cpu(), expected.view(torch.uint8)
+            )
+        table.lookup(ids, out)
+        expected = _reference_lookup(weight.cuda(), scales.cuda(), ids, 0, 36)
+        assert torch.equal(out, expected)
 
 
 @pytest.mark.parametrize(
@@ -1049,7 +1105,11 @@ def test_engram_mxfp4_lookup_matches_torch(cpu_offload, background, num_tokens):
 @pytest.mark.parametrize(
     "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
 )
-def test_engram_packed_weight_is_half_width_uint8(dist_init, cpu_offload, use_thp):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_engram_packed_weight_is_half_width_uint8(
+    default_vllm_config, cpu_offload, use_thp
+):
     dim, head_sizes = 256, (31,) * 24
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(

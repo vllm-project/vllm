@@ -49,6 +49,7 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineHealthState,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -113,7 +114,7 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         renderer: BaseRenderer | None = None,
     ) -> "EngineCoreClient":
         # renderer is passed through to the multiprocess clients, which start
@@ -134,7 +135,7 @@ class EngineCoreClient(ABC):
             return EngineCoreClient.make_async_mp_client(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 renderer=renderer,
             )
 
@@ -142,18 +143,18 @@ class EngineCoreClient(ABC):
             return SyncMPClient(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 renderer=renderer,
             )
 
-        return InprocClient(vllm_config, executor_class, log_stats)
+        return InprocClient(vllm_config, executor_class, collect_stats)
 
     @staticmethod
     @instrument(span_name="Overall Loading")
     def make_async_mp_client(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -163,7 +164,7 @@ class EngineCoreClient(ABC):
         client_args = (
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,
@@ -242,6 +243,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    def get_engine_ranks(self) -> list[int]:
+        raise NotImplementedError
+
+    async def check_health_generate_async(self, engine_rank: int) -> EngineHealthState:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -405,14 +412,14 @@ class InprocClient(EngineCoreClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         *,
         executor_fail_callback: Callable | None = None,
     ):
         self.engine_core = EngineCore(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             executor_fail_callback=executor_fail_callback,
         )
         # Release the executor's workers when the client is collected, as
@@ -528,7 +535,7 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
@@ -620,7 +627,7 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
-@dataclass
+@dataclass(slots=True)
 class ElasticScalingCache:
     existing_core_engines: list[EngineIdentity]
     num_new_core_engines: int
@@ -644,7 +651,7 @@ class MPClient(EngineCoreClient):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         renderer: BaseRenderer | None = None,
     ):
@@ -729,7 +736,7 @@ class MPClient(EngineCoreClient):
                 )
 
                 with launch_core_engines(
-                    vllm_config, executor_class, log_stats, addresses
+                    vllm_config, executor_class, collect_stats, addresses
                 ) as engine_launch:
                     self.resources.coordinator = engine_launch.coordinator
                     self.resources.engine_manager = engine_launch.engine_manager
@@ -993,14 +1000,14 @@ class SyncMPClient(MPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         renderer: BaseRenderer | None = None,
     ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             renderer=renderer,
         )
 
@@ -1189,7 +1196,7 @@ class AsyncMPClient(MPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1199,7 +1206,7 @@ class AsyncMPClient(MPClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             client_addresses=client_addresses,
             renderer=renderer,
         )
@@ -1455,6 +1462,15 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
+    def get_engine_ranks(self) -> list[int]:
+        return [int.from_bytes(engine, "little") for engine in self.core_engines]
+
+    async def check_health_generate_async(self, engine_rank: int) -> EngineHealthState:
+        state = await self._call_utility_async(
+            "check_health_generate", engine=engine_rank.to_bytes(2, "little")
+        )
+        return EngineHealthState(state)
+
     async def set_weight_version_async(self, weight_version: str) -> None:
         await self.call_utility_async("set_weight_version", weight_version)
 
@@ -1546,7 +1562,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1563,7 +1579,7 @@ class DPAsyncMPClient(AsyncMPClient):
         super().__init__(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,
@@ -1785,7 +1801,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1804,7 +1820,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         super().__init__(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,

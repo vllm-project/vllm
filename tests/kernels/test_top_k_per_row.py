@@ -667,6 +667,42 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     _assert_exact_topk(logits, indices, lengths)
 
 
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_short_rows(top_k: int) -> None:
+    """In a graph, rows no longer than k skip the split as lengths change."""
+    set_random_seed(0)
+    # Wider than kSplitWorkThreshold. With 8 rows, gfx950 sends k = 1024 to its
+    # own split launch, which takes at most 64 rows.
+    next_n, width = 2, 262_144
+    steps = [[0, top_k, 3 * top_k, width], [top_k + 1, 1, width - 1, top_k - 1]]
+    lengths = torch.tensor(steps[0], dtype=torch.int32, device="cuda")
+    rows = lengths.numel() * next_n
+    logits = torch.randn(rows, width, device="cuda").bfloat16().float()
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    offsets = torch.arange(next_n, dtype=torch.int32, device="cuda")
+
+    def run() -> None:
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, lengths, indices, top_k, width, next_n
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for step in steps:
+        lengths.copy_(torch.tensor(step, dtype=torch.int32))
+        indices.fill_(-777)
+        graph.replay()
+        row_ends = (lengths[:, None] - next_n + offsets + 1).clamp_min(0)
+        _assert_exact_topk(logits, indices, row_ends)
+        _assert_leading_topk(indices, row_ends)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
@@ -1984,9 +2020,26 @@ NAN_ORDERING_CASES = [
 @pytest.mark.parametrize("backend,num_rows,dtype", NAN_ORDERING_CASES)
 @pytest.mark.parametrize("seq_len", [65536, 262144])
 @pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "nan_sign",
+    [
+        1,
+        pytest.param(
+            -1,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="ROCm keys a sign-set NaN below -inf"
+            ),
+        ),
+    ],
+)
 @torch.inference_mode()
 def test_topk_nan_ordering_matches_torch(
-    backend: str, num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
+    backend: str,
+    num_rows: int,
+    seq_len: int,
+    top_k: int,
+    dtype: torch.dtype,
+    nan_sign: int,
 ) -> None:
     # Fewer NaNs than top_k, mixed with +inf and the largest finite values:
     # every kernel's ordered key must rank NaN above +inf, as torch.topk does.
@@ -2001,6 +2054,10 @@ def test_topk_nan_ordering_matches_torch(
     logits.scatter_(1, pos[:, n_nan + n_big : n_nan + 2 * n_big], fmax)
     logits.scatter_(1, pos[:, n_nan + 2 * n_big :], 1e30)
     logits = logits.to(dtype)
+    if nan_sign < 0:
+        # The bf16 cast drops a NaN's sign: set the bits after it.
+        bits = logits.view(torch.int16 if dtype == torch.bfloat16 else torch.int32)
+        bits.scatter_(1, pos[:, :n_nan], -1)
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
@@ -2569,6 +2626,29 @@ def _has_flashinfer_topk() -> bool:
     return importlib.util.find_spec("flashinfer") is not None
 
 
+def _has_flashinfer_gvr2() -> bool:
+    """FlashInfer with the gvr_2 top_k_varlen backend (SM100 family only).
+    Probes the package tree so collection does not import flashinfer."""
+    if not _has_flashinfer_topk() or not current_platform.is_device_capability_family(
+        100
+    ):
+        return False
+    import importlib.util
+    import os
+
+    spec = importlib.util.find_spec("flashinfer")
+    assert spec is not None and spec.submodule_search_locations
+    return any(
+        os.path.exists(os.path.join(p, "topk_varlen", "kernels", "gvr2_topk_host.py"))
+        for p in spec.submodule_search_locations
+    )
+
+
+requires_flashinfer_gvr2 = pytest.mark.skipif(
+    not _has_flashinfer_gvr2(), reason="requires flashinfer gvr_2 top-k on SM100"
+)
+
+
 SPARSE_INDEXER_EXPLICIT_BACKENDS = [
     pytest.param(
         "per_row",
@@ -2596,6 +2676,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
             not _has_flashinfer_topk(), reason="requires flashinfer top-k"
         ),
     ),
+    pytest.param("flashinfer_gvr2", marks=requires_flashinfer_gvr2),
     pytest.param("deep_select", marks=requires_sm100),
 ]
 
@@ -2747,21 +2828,58 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
 
     def resolve(
         backend: str,
-        t: torch.Tensor = logits,
+        t: torch.Tensor | None = None,
         k: int = 2048,
         num_rows: int = 64,
     ) -> str:
         cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
         with set_current_vllm_config(cfg):
-            return SparseIndexerTopk().resolve_backend(t, k, num_rows)
+            return SparseIndexerTopk().resolve_backend(
+                logits if t is None else t, k, num_rows
+            )
 
     is_sm100 = current_platform.is_device_capability_family(100)
     has_coop = _has_cooperative_topk()
     has_fi = _has_flashinfer_topk()
+    has_gvr2 = _has_flashinfer_gvr2()
+
+    if has_gvr2:
+        assert resolve("flashinfer_gvr2", num_rows=1) == "flashinfer_gvr2"
+        with pytest.raises(RuntimeError, match="topk_tokens must be in"):
+            resolve("flashinfer_gvr2", k=3000)
+        with pytest.raises(RuntimeError, match="fp32"):
+            resolve("flashinfer_gvr2", logits.to(torch.bfloat16))
+        # Row pitch not a multiple of 4 (float4 loads).
+        odd_pitch = torch.randn(64, 131074, dtype=torch.float32, device="cuda")[
+            :, :131072
+        ]
+        with pytest.raises(RuntimeError, match="multiple of 4"):
+            resolve("flashinfer_gvr2", odd_pitch)
+        # A strided view whose last row ends at its width cannot be read as
+        # [rows, stride]; as_fp32_logits output always can.
+        from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
+
+        def short_tail(dtype):
+            return torch.empty_strided(
+                (64, 131072), (131328, 1), dtype=dtype, device="cuda"
+            )
+
+        with pytest.raises(RuntimeError, match="full stride"):
+            resolve("flashinfer_gvr2", short_tail(torch.float32))
+        upcast = as_fp32_logits(
+            short_tail(torch.bfloat16),
+            torch.full((64,), 131072, dtype=torch.int32, device="cuda"),
+        )
+        assert upcast.stride(0) == 131328
+        assert resolve("flashinfer_gvr2", upcast) == "flashinfer_gvr2"
+    else:
+        with pytest.raises(RuntimeError, match="gvr_2|SM100|CUDA"):
+            resolve("flashinfer_gvr2")
 
     # "auto" is the chain cooperative -> persistent -> per_row, with the
     # cooperative/persistent switch at cooperative_topk's cluster-wave row
-    # limit. It must never select the opt-in backends by itself.
+    # limit. It must never select the opt-in backends (gvr_2 included, whose
+    # latency is data-dependent) by itself, even on wide rows.
     if has_coop:
         from vllm.model_executor.layers.indexer_topk import (
             AUTO_COOPERATIVE_MAX_ROWS,
@@ -2967,6 +3085,68 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 
     assert recorded["next_n"] == 1
     assert recorded["row_ends"] == [99, 100, 199, 200]
+
+
+@requires_flashinfer_gvr2
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "q_lens,ctx_lens,row_relative,backend",
+    [
+        ([2048], [0], True, "flashinfer_gvr2"),
+        ([1536], [40000], True, "flashinfer_gvr2"),
+        ([1024, 700, 300], [0, 33000, 1500], True, "flashinfer_gvr2"),
+        ([96], [40000], True, "per_row"),
+        ([1024, 700, 300], [0, 33000, 1500], False, "per_row"),
+    ],
+)
+@torch.inference_mode()
+def test_sparse_indexer_prefill_topk_gvr2(
+    top_k: int,
+    q_lens: list[int],
+    ctx_lens: list[int],
+    row_relative: bool,
+    backend: str,
+) -> None:
+    """Explicit flashinfer_gvr2 runs prefill top-k on gvr_2 only for chunks
+    of >= GVR2_PREFILL_MIN_ROWS row-relative rows (row_starts None); small
+    chunks and logits with per-row starts fall back. Row r selects over
+    logits[r, ks[r]:ke[r]] (uncleaned outside) with indices relative to ks[r],
+    matching torch.topk."""
+    set_random_seed(0)
+    ks, ke, k_off = [], [], 0
+    for q, c in zip(q_lens, ctx_lens):
+        for i in range(q):
+            ks.append(k_off)
+            ke.append(k_off + c + i + 1)
+        k_off += c + q
+    row_starts = torch.tensor(ks, dtype=torch.int32, device="cuda")
+    row_ends = torch.tensor(ke, dtype=torch.int32, device="cuda")
+    if row_relative:
+        row_ends -= row_starts
+        row_starts.zero_()
+    num_rows, width = len(ks), int(row_ends.max())
+    pitch = (width + 255) // 256 * 256
+    logits = torch.randn(num_rows, pitch, device="cuda")[:, :width]
+    cols = torch.arange(width, device="cuda")
+    outside = (cols < row_starts[:, None]) | (cols >= row_ends[:, None])
+    logits[outside] = 1e30
+    reference = logits.masked_fill(outside, float("-inf"))
+
+    topk = _make_topk("flashinfer_gvr2")
+    starts = None if row_relative else row_starts
+    assert topk.resolve_prefill_backend(logits, top_k, starts) == backend
+    indices = torch.full((num_rows, top_k), 7, dtype=torch.int32, device="cuda")
+    topk.forward_prefill(logits, starts, row_ends, indices, top_k)
+
+    lens = (row_ends - row_starts)[:, None]
+    valid = torch.arange(top_k, device="cuda")[None, :] < lens
+    assert ((indices == -1) | ((indices >= 0) & (indices < lens))).all()
+    assert torch.equal((indices >= 0).sum(1), valid.sum(1))
+    picked = reference.gather(
+        1, (indices.long() + row_starts[:, None]).clamp(0, width - 1)
+    ).masked_fill(indices < 0, 0)
+    expected = reference.topk(top_k, dim=1).values.masked_fill(~valid, 0)
+    torch.testing.assert_close(picked.sort(1).values, expected.sort(1).values)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

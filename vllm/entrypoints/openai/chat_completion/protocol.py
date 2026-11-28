@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
@@ -18,15 +19,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     AnyResponseFormat,
+    BadWordsParam,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
     MMPayload,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
@@ -71,6 +77,25 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+
+def _coerce_tool_calls_to_list(tool_calls: Any) -> Any:
+    """Materialize one-shot tool_calls iterators without crashing on bad types.
+
+    Generators must be converted to lists before union-type matching, but
+    `list()` on a non-iterable scalar (for example `tool_calls: 1`) raises
+    `TypeError`, which escapes Pydantic as an HTTP 500. Non-iterable scalars
+    are surfaced so field validation can reject them (400). Strings and
+    mappings are left to field validation, and handling of empty
+    string/object — normalized to [] — is unchanged by this patch.
+    """
+    if tool_calls is None or isinstance(tool_calls, list):
+        return tool_calls
+    if isinstance(tool_calls, (str, bytes, bytearray, Mapping)) or not isinstance(
+        tool_calls, Iterable
+    ):
+        return tool_calls
+    return list(tool_calls)
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -291,7 +316,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -320,7 +345,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     allowed_token_ids: list[int] | None = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -402,8 +427,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -489,9 +514,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "What the render response's `features` carry for multimodal "
             "items. 'tensors' serializes the processed tensors into "
-            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
-            "callers that need only the token layout and item hashes, such as "
-            "cache-aware routers. Do not send a 'none' response to "
+            "`kwargs_data` and `mm_metadata`. 'metadata' sets `kwargs_data` to "
+            "null and keeps `mm_metadata` for prefill with "
+            "`ec_transfer_params`. 'none' sets both to null for callers that "
+            "need only the token layout and item hashes, such as cache-aware "
+            "routers. `mm_metadata` is null if any modality has no metadata, "
+            "which 'metadata' rejects. Do not send a 'none' response to "
             "`/inference/v1/generate` which reads a null `kwargs_data` as "
             "every item being cached. Only supported on the render endpoints. "
             "Ignored on regular generation endpoints."
@@ -596,7 +624,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content
@@ -617,7 +645,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
@@ -680,6 +708,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # model-visible tool-choice instruction only for requests with a
             # tools block.
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
             response_format=self.response_format,
         )
 
@@ -704,7 +733,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     # Default sampling parameters for chat completion requests
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -1150,7 +1179,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_COMPLETION_PROMPTS)
     )
     model: str | None = None
 

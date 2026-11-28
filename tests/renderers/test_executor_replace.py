@@ -15,12 +15,12 @@ from vllm.utils.async_utils import make_async
 MODEL_NAME = "openai-community/gpt2"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -43,18 +43,18 @@ class MockModelConfig:
         return self.hidden_size
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyTokenizer:
     truncation_side: str = "left"
     max_chars_per_token: int = 1
@@ -103,10 +103,11 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
     old_inner = executor._inner
 
     async def _run():
-        assert await renderer._tokenize_prompt_async(
+        tokenized, _ = await renderer._tokenize_text_prompt_async(
             {"prompt": "ab"},
             TokenizeParams(max_total_tokens=100),
         )
+        assert tokenized["prompt_token_ids"] == [0, 1]
         renderer._replace_executor()
         assert renderer._executor is executor
         assert executor._inner is not old_inner
@@ -114,7 +115,7 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             old_inner.submit(lambda: None)
 
-        tokenized = await renderer._tokenize_prompt_async(
+        tokenized, _ = await renderer._tokenize_text_prompt_async(
             {"prompt": "abc"},
             TokenizeParams(max_total_tokens=100),
         )

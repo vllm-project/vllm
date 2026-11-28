@@ -12,6 +12,10 @@ import pytest
 import torch
 import zmq
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group,
+    sliding_window_layer,
+)
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -42,13 +46,11 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
+from vllm.v1.core.single_type_kv_cache_manager import ChunkedLocalAttentionManager
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    SlidingWindowSpec,
     compute_layer_kv_cache_shape_bytes,
 )
 
@@ -64,7 +66,7 @@ def _find_free_port() -> int:
 def _make_test_kv_cache_config() -> KVCacheConfig:
     layer_names = ["layer0", "layer1", "layer2"]
     num_blocks = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
@@ -81,7 +83,7 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
                 block_stride=page,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)],
+        kv_cache_groups=[make_kv_cache_group(layer_names, spec)],
     )
 
 
@@ -144,10 +146,13 @@ def _setup_kv_transfer_request(
 def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.is_producer = False
+    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
@@ -167,6 +172,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_abort = {}
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
@@ -325,12 +331,7 @@ def create_vllm_config(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=False,
     )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="bfloat16", seed=42)
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
@@ -604,9 +605,7 @@ def test_register_kv_caches(mock_parallel_groups):
     DP_RANK = 0
     # Create test kv cache tensors using KVCacheSpec layout
     shape = compute_layer_kv_cache_shape_bytes(
-        FullAttentionSpec(
-            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
-        ),
+        AttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16),
         2,
     )
     shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
@@ -699,9 +698,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     vllm_config = create_vllm_config(role=ROLE)
     # Create test kv cache tensors using KVCacheSpec layout
     shape = compute_layer_kv_cache_shape_bytes(
-        FullAttentionSpec(
-            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
-        ),
+        AttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16),
         2,
     )
     shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
@@ -967,10 +964,10 @@ def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
 
 def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     """One full-attention group + one sliding-window group (Gemma-like)."""
-    full_spec = FullAttentionSpec(
+    full_spec = AttentionSpec(
         block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
     )
-    sw_spec = SlidingWindowSpec(
+    sw_spec = sliding_window_layer(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
@@ -990,17 +987,17 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+            make_kv_cache_group(["full0"], full_spec),
+            make_kv_cache_group(["sw0"], sw_spec),
         ],
     )
 
 
 def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
     """A uniform sliding-window model (e.g. Mistral-7B): the single group is a
-    SlidingWindowSpec, so HMA is not required once hybrid management is
+    sliding-window group, so HMA is not required once hybrid management is
     disabled, yet the spec guard still applies."""
-    sw_spec = SlidingWindowSpec(
+    sw_spec = sliding_window_layer(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
@@ -1008,7 +1005,7 @@ def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
         sliding_window=32,
     )
     num_blocks = 2
-    page = sw_spec.page_size_bytes
+    page = sw_spec.spec.page_size_bytes
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -1020,7 +1017,7 @@ def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+            make_kv_cache_group(["sw0"], sw_spec),
         ],
     )
 
@@ -1083,15 +1080,14 @@ def test_transfer_disabled_hybrid_group_is_ignored():
 def test_non_sliding_window_hybrid_is_rejected():
     """A hybrid group that is not sliding-window (e.g. chunked-local
     attention) must fail closed rather than be silently mistransferred."""
-    full_spec = FullAttentionSpec(
+    full_spec = AttentionSpec(
         block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
     )
-    local_spec = ChunkedLocalAttentionSpec(
+    local_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
         dtype=torch.float16,
-        attention_chunk_size=32,
     )
     num_blocks = 2
     page = full_spec.page_size_bytes
@@ -1106,8 +1102,13 @@ def test_non_sliding_window_hybrid_is_rejected():
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(layer_names=["local0"], kv_cache_spec=local_spec),
+            make_kv_cache_group(["full0"], full_spec),
+            make_kv_cache_group(
+                ["local0"],
+                local_spec,
+                ChunkedLocalAttentionManager,
+                ChunkedLocalAttentionManager.config(attention_chunk_size=32),
+            ),
         ],
     )
     with pytest.raises(NotImplementedError, match="sliding-window hybrid"):
@@ -1307,6 +1308,7 @@ def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_ra
     # One TP rank per stage, so stage s sits at offset s.
     assert worker.side_channel_port == 12347 + pp_rank
     assert worker.notify_port == 12348 + pp_rank
+    assert worker.moriio_engine is not None
     assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
 
 

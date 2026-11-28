@@ -351,10 +351,15 @@ class OffloadingConnectorStats(KVConnectorStats):
             info: One mapping of info metric label name to label value for each
                 series, as OffloadingManager.config_info() returns it. An empty
                 mapping still gives one series, with an empty value on every
-                label the spec declared.
+                label the spec declared. Values are stringified here, as the
+                Prometheus label values they become, so every frontend reads the
+                same strings.
 
         """
-        self.data[_StatsKey.INFO] = [dict(series_info) for series_info in info]
+        self.data[_StatsKey.INFO] = [
+            {key: str(value) for key, value in series_info.items()}
+            for series_info in info
+        ]
 
     def observe_histogram(
         self,

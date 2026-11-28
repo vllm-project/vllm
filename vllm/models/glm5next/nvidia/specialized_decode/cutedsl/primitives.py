@@ -11,7 +11,7 @@ from functools import partial, wraps
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Float64, Int32, Int64, Uint8, Uint16, Uint32, Uint64
+from cutlass import Float32, Int32, Int64, Uint8, Uint16, Uint32, Uint64
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.experimental import primitives as nvvm
@@ -137,14 +137,6 @@ def query_norm_rsqrt(total: Float32, eps: Float32):
     return code, "=f,f,f", (total, eps)
 
 
-@asm(Float64, pure=True)
-def reciprocal64(value: Float64):
-    step = "fma.rn.f64 e,n,r,0d3ff0000000000000; fma.rn.f64 {},r,e,r; "
-    code = "{ .reg .f64 r,e,n; neg.f64 n,$1; rcp.approx.ftz.f64 r,$1; "
-    code += step.format("r") * 2 + step.format("$0") + "}"
-    return code, "=d,d", (value,)
-
-
 @asm(Float32, pure=True)
 def sigmoid_reciprocal(denominator: Float32, *, fast_math):
     """1 / (1 + exp(-x)) from its denominator: an approximate divide with `fast_math`,
@@ -198,20 +190,6 @@ def situ(g: Float32, u: Float32, beta_lb: Float32, inv_beta: Float32, inv_lb: Fl
     code += "rcp.approx.ftz.f32 rc,ex; mul.f32 z,$3,tg; mul.f32 z,z,rc; "
     code += "mul.f32 $0,z,tu; }"
     return code, "=f,f,f,f,f,f", (g, u, beta_lb, inv_beta, inv_lb)
-
-
-@cute.jit
-def shared_situ(gate, up, beta, inverse_beta, linear_beta, inverse_linear_beta):
-    denominator = Float32(1) + cute.math.exp(-gate, fastmath=False)
-    sigmoid = Float32(0)
-    if denominator != Float32(float("inf")):
-        sigmoid = Float32(reciprocal64(Float64(denominator)))
-    g = (beta * cute.math.tanh(gate * inverse_beta, fastmath=False)) * sigmoid
-    u = up
-    if linear_beta > 0:
-        divided = Float32(Float64(up) * inverse_linear_beta)
-        u = linear_beta * cute.math.tanh(divided, fastmath=False)
-    return g * u
 
 
 def bits_float(bits):

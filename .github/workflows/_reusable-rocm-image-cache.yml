@@ -1,0 +1,43 @@
+name: Reusable ROCm image cache
+
+on:
+  workflow_call:
+    secrets:
+      BUILDKITE_API_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository == 'vllm-project/vllm' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'status' &&
+      github.event.sender.login == 'buildkite-limited-access[bot]' &&
+      (github.event.state == 'success' || github.event.state == 'failure') &&
+      (github.event.context == 'ci/step: ROCm image cache' ||
+      github.event.context == 'ci/step: Cache a PR''s ROCm images for main')))
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - name: Cache or recheck PRs' ROCm base images
+        run: >-
+          uv run --no-project --python 3.12
+          .github/workflows/scripts/run_ci_command.py
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_AMD_PIPELINE: amd-ci
+          BUILDKITE_ORGANIZATION: vllm
+          BUILDKITE_PIPELINE: ci
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+          GH_TOKEN: ${{ github.token }}

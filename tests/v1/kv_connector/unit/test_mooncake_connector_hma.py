@@ -7,12 +7,13 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 """
 
 import asyncio
-from unittest.mock import patch
+import ctypes
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -26,12 +27,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     TransferRegion,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 
-from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
+from .offloading_connector.utils import make_kv_cache_group
+from .test_mooncake_connector import (
+    FakeMooncakeWrapper,
+    _make_packed_mla_kv_cache_config,
+    _xfer_meta,
+    mooncake_register_worker,
+    patch_worker_dependencies,
+)
 from .utils import (
     create_request,
     create_vllm_config,
@@ -47,9 +54,9 @@ from .utils import (
 @pytest.mark.parametrize(
     "swa_enabled,expected_blocks_per_sw",
     [
-        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128+1)
+        # SWA enabled: full attention (0) + sliding window (2048/16=128+1)
         (True, [0, 128 + 1]),
-        # SWA disabled: only FullAttentionSpec (0)
+        # SWA disabled: only AttentionSpec (0)
         (False, [0]),
     ],
 )
@@ -397,9 +404,9 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
         # Mismatched req is reported via err_reqs/err_msg with no transfers built.
         assert err_reqs == ["d-mismatch"]
         assert err_msg == "KV group count mismatch"
-        assert src_ptrs == []
-        assert dst_ptrs == []
-        assert lengths == []
+        assert src_ptrs.size == 0
+        assert dst_ptrs.size == 0
+        assert lengths.size == 0
 
         worker.shutdown()
 
@@ -508,18 +515,18 @@ def test_worker_is_hma_required_multiple_full_attention_groups():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=2 * block_size,
                     num_kv_heads=4,
                     head_size=16,
@@ -591,3 +598,187 @@ def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
         assert worker.get_transfer_results().finished_recving == set()
     finally:
         worker.shutdown()
+
+
+_hisparse_producer_cases = pytest.mark.parametrize(
+    "hisparse_producer",
+    [
+        (packed, tp, rank)
+        for packed in (False, True)
+        for tp in (1, 2, 4)
+        for rank in range(tp)
+    ],
+    indirect=True,
+)
+
+
+def _hisparse_decoder_config(tp_size: int, nnodes: int = 1):
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector", block_size=maybe_update_block_size(16)
+    )
+    config.parallel_config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        nnodes=nnodes,
+        distributed_executor_backend="mp",
+    )
+    return config
+
+
+@pytest.fixture
+def hisparse_producer(request):
+    packed, tp, rank = request.param
+    cache_config = _make_packed_mla_kv_cache_config(8)
+    names = cache_config.kv_cache_groups[0].layer_names
+    page = cache_config.kv_cache_groups[0].kv_cache_specs[names[0]].page_size_bytes
+    backing = torch.arange(16, dtype=torch.uint8).repeat_interleave(page).view(8, -1)
+    caches = dict(zip(names, backing.split(page, dim=1)))
+    if not packed:
+        caches = {name: cache.contiguous() for name, cache in caches.items()}
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
+    )
+    with mooncake_register_worker(
+        cache_config, vllm_config=config, tp_size=tp, tp_rank=rank
+    ) as (worker, _):
+        worker.register_kv_caches(caches)
+        yield worker, caches, page
+
+
+@pytest.mark.cpu_test
+@_hisparse_producer_cases
+@pytest.mark.parametrize(
+    "decoder_tp, decoder_nnodes", [(1, 1), (2, 1), (4, 1), (8, 1), (2, 2), (8, 2)]
+)
+@pytest.mark.parametrize("shared", [False, True])
+def test_hisparse_import_copies_uncached_pages(
+    hisparse_producer, decoder_tp, decoder_nnodes, shared
+):
+    """Only the elected P rank copies each D rank's GPU and owned host suffixes.
+
+    A shared host pool is owned by its node's lowest TP rank, so with D spanning
+    nodes every node's pool must be filled, not only TP rank 0's."""
+    producer, caches, page = hisparse_producer
+    decoder_config = _hisparse_decoder_config(decoder_tp, decoder_nnodes)
+    ranks_per_node = decoder_tp // decoder_nnodes
+    config = _make_packed_mla_kv_cache_config(8, num_groups=2)
+    config.kv_cache_groups[0].host_resident = True
+    config.hisparse_host_num_blocks = 8
+    config.hisparse_shared_host_pool = shared
+    source, indexer = caches.values()
+    for rank in producer.transfer_topo.handshake_target_ranks(decoder_tp):
+        host = torch.full((8, page), 0xCC, dtype=torch.uint8)
+        gpu = torch.full((8, page + 64), 0xCC, dtype=torch.uint8)
+        host_owner = rank % ranks_per_node == 0 or not shared
+        sends_bytes = producer.tp_rank == rank * producer.tp_size // decoder_tp
+        expected_host, expected_gpu = host.clone(), gpu.clone()
+        if sends_bytes:
+            if host_owner:
+                expected_host[[6, 5]] = source[[2, 1]]
+            expected_gpu[[7, 2, 6], 32 : 32 + page] = indexer[[3, 2, 1]]
+        pull = _make_pull_meta("d", [[6, 5], [7, 2, 6]])
+        send = SendBlockMeta("p", pull.transfer_id, [[4, 3, 2, 1]], asyncio.Event())
+        with mooncake_register_worker(
+            config, vllm_config=decoder_config, tp_size=decoder_tp, tp_rank=rank
+        ) as (decoder, reg):
+            assert producer.tp_rank in decoder.transfer_topo.handshake_target_ranks(
+                producer.tp_size
+            )
+            decoder.register_kv_caches(
+                dict(zip(caches, (host, gpu[:, 32 : 32 + page])))
+            )
+            meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
+            assert (host.data_ptr() in reg.call_args.args[0]) == host_owner
+        assert pull.local_block_ids == [[6, 5], [7, 2, 6]]
+        local, remote, error = producer._prepare_transfer_regions(meta)
+        assert error is None
+        sources, destinations, lengths, errors, message = asyncio.run(
+            producer._build_transfer_params([("d", send)], meta, local, remote)
+        )
+        assert errors == [] and message is None
+        for src, dst, length in zip(sources, destinations, lengths):
+            ctypes.memmove(int(dst), int(src), int(length))
+        assert torch.equal(host, expected_host)
+        assert torch.equal(gpu, expected_gpu)
+        assert int(lengths.sum()) == (5 if host_owner else 3) * page * sends_bytes
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "hisparse_producer", [(True, 2, 0), (True, 2, 1)], indirect=True
+)
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("producer_blocks", [[], [4, 3, 2, 1]])
+async def test_hisparse_full_prefix_hit_completes_without_writes(
+    hisparse_producer, shared, producer_blocks
+):
+    """Empty suffixes acknowledge every peer and release P without touching D."""
+    producer, caches, page = hisparse_producer
+    config = _make_packed_mla_kv_cache_config(8, num_groups=2)
+    config.kv_cache_groups[0].host_resident = True
+    config.hisparse_host_num_blocks = 8
+    config.hisparse_shared_host_pool = shared
+    announcement = MooncakeConnectorMetadata()
+    announcement.add_new_req("p", [], {"transfer_id": "tx-1"}, False)
+    await producer.record_send_reqs(announcement)
+    completed = MooncakeConnectorMetadata()
+    completed.add_new_req("p", [producer_blocks], {"transfer_id": "tx-1"}, False)
+    await producer.record_send_reqs(completed)
+    ranks = producer.transfer_topo.handshake_target_ranks(4)
+    sock = AsyncMock()
+    with patch.object(producer.transfer_backend, "transfer_sync_arrays") as write:
+        for index, rank in enumerate(ranks):
+            host = torch.full((8, page), 0xCC, dtype=torch.uint8)
+            gpu = torch.full((8, page), 0xDD, dtype=torch.uint8)
+            pull = _make_pull_meta("d", [[], []])
+            pull.pull_tasks_count = 1
+            with mooncake_register_worker(
+                config,
+                vllm_config=_hisparse_decoder_config(4),
+                tp_size=4,
+                tp_rank=rank,
+            ) as (decoder, reg):
+                decoder.register_kv_caches(dict(zip(caches, (host, gpu))))
+                assert (host.data_ptr() in reg.call_args.args[0]) == (
+                    rank == 0 or not shared
+                )
+                meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
+                await producer.send_kv_to_decode(b"decoder", sock, meta)
+                response = producer._xfer_resp_decoder.decode(
+                    sock.send_multipart.call_args.args[0][1]
+                )
+                assert response.status == MooncakeXferResponseStatus.FINISH
+                assert response.ok_reqs == ["d"] and not response.err_reqs
+                pending = {"d": pull}
+                decoder.process_pulling_result(response, pending)
+                assert pending == {} and pull.pull_tasks_count == 0
+                assert await decoder.fetch_finished_recving_reqs() == set()
+                assert decoder.get_block_ids_with_load_errors() == set()
+                reg.assert_called_once()
+            assert torch.all(host == 0xCC) and torch.all(gpu == 0xDD)
+            expected = {"p"} if index == len(ranks) - 1 else set()
+            assert await producer.fetch_finished_sending_reqs() == expected
+        write.assert_not_called()
+    assert "tx-1" not in producer.reqs_need_send
+    assert await producer.fetch_finished_sending_reqs() == set()
+
+
+@pytest.mark.cpu_test
+@_hisparse_producer_cases
+def test_hisparse_import_rejects_incompatible_layout(hisparse_producer):
+    """An incompatible indexer payload must reject the entire peer layout."""
+    producer, caches, page = hisparse_producer
+    targets = torch.zeros((2, 8, page + 1), dtype=torch.uint8)
+    regions = [
+        TransferRegion(name, i, targets[i].data_ptr(), page + 1, page + i, i)
+        for i, name in enumerate(caches)
+    ]
+    meta = _xfer_meta(regions, {"d": ("x", [[5, 6], [7]])}, remote_tp_size=2)
+    local, remote, error = producer._prepare_transfer_regions(meta)
+    assert local == remote == []
+    assert error == (
+        "Region-mapped source and destination payloads differ "
+        f"for layer {regions[1].layer_name}: source={page}, destination={page + 1}"
+    )

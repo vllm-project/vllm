@@ -13,7 +13,7 @@ use vllm_chat::{
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatRole,
     ChatTextBackend, ChatTool, ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor,
     DynChatRenderer, FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions,
-    ParserSelection, RenderedPrompt, ResolvedToolContext, SamplingParams,
+    ParserSelection, RenderedPrompt, ResolvedParsers, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -160,6 +160,7 @@ struct FakeChatBackend {
     has_template: bool,
     model_id: String,
     tokenizer: DynTokenizer,
+    parsers: ResolvedParsers,
 }
 
 fn fake_chat_tokenizer() -> TestTokenizer {
@@ -181,33 +182,73 @@ impl fmt::Debug for FakeChatBackend {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self {
-            has_template: true,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
-        }
+        Self::with_model_id("test-model")
     }
 
     fn without_template() -> Self {
         Self {
             has_template: false,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
+            ..Self::new()
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
+        let model_id = model_id.into();
+        let tokenizer: DynTokenizer = Arc::new(fake_chat_tokenizer());
+        let parsers = resolve_parsers(
+            &model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         Self {
             has_template: true,
-            model_id: model_id.into(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
+            model_id,
+            tokenizer,
+            parsers,
         }
     }
 
+    /// Use `tokenizer`, resolving `auto` parser selections against it.
     fn with_tokenizer(mut self, tokenizer: DynTokenizer) -> Self {
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         self.tokenizer = tokenizer;
         self
     }
+
+    fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &self.tokenizer,
+            tool_call_parser,
+            reasoning_parser,
+        );
+        self
+    }
+}
+
+fn resolve_parsers(
+    model_id: &str,
+    tokenizer: &DynTokenizer,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> ResolvedParsers {
+    ResolvedParsers::new(
+        model_id,
+        Arc::clone(tokenizer),
+        &tool_call_parser,
+        &reasoning_parser,
+    )
+    .unwrap()
 }
 
 impl TextBackend for FakeChatBackend {
@@ -228,16 +269,21 @@ impl ChatBackend for FakeChatBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
-            &self.model_id,
-            self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &self.parsers,
             options.tool_strict_level,
         )?))
+    }
+
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        self.parsers.tool_call_parser_name()
+    }
+
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        self.parsers.reasoning_parser_name()
     }
 }
 
@@ -643,7 +689,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
+        vllm_chat::Error::InvalidContinueFinalMessage { .. }
     ));
 }
 
@@ -1076,15 +1122,16 @@ async fn chat_explicitly_disables_reasoning_parser() {
         },
     );
 
-    let backend: Arc<dyn ChatTextBackend> =
-        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(
+        FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")
+            .with_parser_selections(ParserSelection::Auto, ParserSelection::None),
+    );
     let chat = connect_chat_llm_with_ipc(
         EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
-    .await
-    .with_reasoning_parser(ParserSelection::None);
+    .await;
 
     let message = chat
         .chat(sample_request("chat-reasoning-disabled"))
@@ -1510,88 +1557,6 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_rejects_unknown_tool_parser_before_engine_request() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-chat-tool-no-model".to_vec();
-    let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
-            Box::pin(async move {
-                assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
-                    "chat request should fail before any engine request is sent"
-                );
-            })
-        });
-
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
-    let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new_single(handshake_address),
-        &ipc,
-        backend,
-    )
-    .await
-    .with_tool_call_parser(ParserSelection::Explicit(
-        "definitely_missing_tool_parser".into(),
-    ));
-    let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
-        Ok(_) => panic!("unknown explicit tool parser should fail"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        vllm_chat::Error::ParserUnavailableByName { name, .. }
-        if name == "definitely_missing_tool_parser"
-    ));
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    chat.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-chat-reasoning-no-model".to_vec();
-    let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
-            Box::pin(async move {
-                assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
-                    "chat request should fail before any engine request is sent"
-                );
-            })
-        });
-
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
-    let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new_single(handshake_address),
-        &ipc,
-        backend,
-    )
-    .await
-    .with_reasoning_parser(ParserSelection::Explicit(
-        "definitely_missing_reasoning_parser".into(),
-    ));
-    let error = match chat.chat(sample_request("chat-reasoning-no-model")).await {
-        Ok(_) => panic!("unknown explicit reasoning parser should fail"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        vllm_chat::Error::ParserUnavailableByName { name, .. }
-        if name == "definitely_missing_reasoning_parser"
-    ));
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    chat.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -1606,14 +1571,15 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
             })
         });
 
-    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(
+        FakeChatBackend::new().with_parser_selections(ParserSelection::None, ParserSelection::Auto),
+    );
     let chat = connect_chat_llm_with_ipc(
         EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
-    .await
-    .with_tool_call_parser(ParserSelection::None);
+    .await;
     let error = match chat.chat(sample_tool_request("chat-tool-parser-disabled")).await {
         Ok(_) => panic!("tool requests should fail when tool parsing is disabled"),
         Err(error) => error,
@@ -1651,7 +1617,7 @@ async fn processor_excludes_request_tools_for_tool_choice_none_when_configured()
             true,
         )
         .unwrap();
-        let processor = ChatRequestProcessor::render_only(Arc::new(FakeChatBackend::new()))
+        let processor = ChatRequestProcessor::new(Arc::new(FakeChatBackend::new()), None, None)
             .with_exclude_tools_when_tool_choice_none(exclude);
         let text_request = processor.prepare_for_tokenization(request).await.unwrap();
         let Prompt::Text(prompt) = text_request.prompt else {

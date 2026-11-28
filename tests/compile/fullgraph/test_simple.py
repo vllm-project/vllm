@@ -18,7 +18,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
 
@@ -94,7 +93,6 @@ def _run_simple_model(
             backend=backend,
             splitting_ops=splitting_ops,
             use_inductor_graph_partition=use_inductor_graph_partition,
-            cudagraph_copy_inputs=True,
             cudagraph_capture_sizes=[1, 2],
         )
     )
@@ -105,7 +103,7 @@ def _run_simple_model(
             intermediate_unbacked=intermediate_unbacked,
         )
 
-    inputs = torch.randn(100).cuda()
+    input_buffer = torch.randn(100).cuda()
 
     with (
         compilation_counter.expect(
@@ -118,7 +116,7 @@ def _run_simple_model(
         set_forward_context(None, vllm_config=vllm_config),
     ):  # background context
         # warm up with background context
-        model(inputs)
+        model(input_buffer)
 
         # capturing/replaying should under context of cudagraph dispatching
         with set_forward_context(
@@ -129,7 +127,7 @@ def _run_simple_model(
                 num_tokens=2,
             ),
         ):
-            model(torch.randn(2).cuda())
+            model(input_buffer[:2])
         with set_forward_context(
             None,
             vllm_config=vllm_config,
@@ -138,9 +136,9 @@ def _run_simple_model(
                 num_tokens=1,
             ),
         ):
-            model(torch.randn(1).cuda())
+            model(input_buffer[:1])
 
-        input = torch.zeros(2).cuda()
+        input_buffer[:2].zero_()
         reset_global_counter()
         with set_forward_context(
             None,
@@ -150,7 +148,7 @@ def _run_simple_model(
                 num_tokens=2,
             ),
         ):
-            output = model(input)
+            output = model(input_buffer[:2])
         assert get_global_counter() == 2
         assert torch.allclose(output.cpu(), torch.tensor([19.0, 19.0]))
 
@@ -185,8 +183,6 @@ def test_simple_piecewise_compile(backend, intermediate_unbacked, monkeypatch):
 
 @torch.inference_mode()
 def test_simple_inductor_graph_partition(monkeypatch):
-    if not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     # disable compile cache so that we run separately for different splitting_ops
     # and get the expected number of cudagraphs captured.

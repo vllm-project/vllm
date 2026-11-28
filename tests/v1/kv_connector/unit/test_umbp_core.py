@@ -27,7 +27,10 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
+from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from vllm import SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
@@ -65,16 +68,25 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
     KVQuantMode,
-    UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 mori_available = importlib.util.find_spec("mori") is not None
@@ -84,19 +96,115 @@ pytestmark = pytest.mark.skipif(
     reason="UMBP is only available on ROCm with the mori package installed",
 )
 
-_LAYER1_SPEC = FullAttentionSpec(
+_LAYER1_SPEC = AttentionSpec(
     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
 )
 _LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
 
 
+@pytest.mark.parametrize(
+    ("scheduled_compute", "preempted"),
+    [(True, False), (False, False), (True, True)],
+    ids=["computed", "pending-load", "preempted"],
+)
+def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
+    """The last sample makes a hash reusable; a pending load supplies no KV."""
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
+    set_mtp_config(config)
+    config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    scheduler = UMBPStoreConnectorScheduler(
+        config,
+        kv_config,
+        _SchedulerHandle({}),
+        BlockIdentityCodec(UMBPNamespace("lookahead")),
+    )
+    pool = BlockPool(8, True, 16, enable_kv_cache_events=False)
+    scheduler.bind_gpu_block_pool(pool)
+    blocks = pool.get_new_blocks(2)
+    block_ids = ([block.block_id for block in blocks],)
+    init_none_hash(sha256)
+    request = Request(
+        "r",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
+    if scheduled_compute:
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [
+            NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+        ]
+        output.num_scheduled_tokens = {"r": 32}
+        output.total_num_scheduled_tokens = 32
+        scheduler.build_connector_meta(output)
+    if preempted:
+        output = SchedulerOutput.make_empty()
+        output.preempted_req_ids = {"r"}
+        scheduler.build_connector_meta(output)
+    # The sampled token completes the second block's hash.
+    request.num_computed_tokens = 32
+    request.append_output_token_ids(32)
+    scheduler.request_finished(request, block_ids)
+    output = SchedulerOutput.make_empty()
+    output.finished_req_ids = {"r"}
+    metadata = scheduler.build_connector_meta(output)
+    plans = list(metadata.iter_store_plans())
+    if scheduled_compute and not preempted:
+        assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
+        assert plans[0].token_ids == tuple(range(16, 33))
+        assert blocks[1].ref_cnt == 2
+    else:
+        assert plans == []
+        assert blocks[1].ref_cnt == 1
+    scheduler.close()
+
+
+def test_external_hit_uses_the_same_lookahead_policy_as_core():
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
+    set_mtp_config(config)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    # Force the hybrid coordinator path with a second group.
+    group = kv_config.kv_cache_groups[0]
+    kv_config.kv_cache_groups.append(
+        replace(group, kv_cache_specs={"draft": group.distinct_specs[0]})
+    )
+    codec = BlockIdentityCodec(UMBPNamespace("lookahead-hit"))
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(16, sha256, config.num_hash_lookahead_tokens)
+
+    def request(token_ids: list[int]) -> Request:
+        return Request(
+            "r", token_ids, SamplingParams(max_tokens=1), None, block_hasher=hasher
+        )
+
+    stored = request(list(range(33)))
+    runtime = _SchedulerHandle(
+        {
+            codec.key(block_hash, group): True
+            for block_hash in stored.block_hashes
+            for group in (0, 1)
+        }
+    )
+    scheduler = UMBPStoreConnectorScheduler(config, kv_config, runtime, codec)
+    assert scheduler.get_num_new_matched_tokens(stored, 0) == (32, True)
+    # A different token after the block invalidates its lookahead hash.
+    changed = request([*range(32), 99])
+    assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
+    scheduler.close()
+
+
 def _uniform_type_kv_cache_config(
-    layer2: FullAttentionSpec = _LAYER2_SPEC,
+    layer2: AttentionSpec = _LAYER2_SPEC,
     *,
     block_stride: int | None = None,
     num_blocks: int = 8,
 ) -> KVCacheConfig:
-    """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
+    """One full-attention group whose two layers have unequal pages.
 
     Without `block_stride` each layer is laid out layer-major with its own
     page as the block stride; with it both pages share one block-major stride.
@@ -116,12 +224,13 @@ def _uniform_type_kv_cache_config(
             )
         )
         offset += spec.page_size_bytes
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
+    group = KVCacheGroup.from_layers(
+        {name: FullAttentionManager.layer_config(spec) for name, spec in specs.items()}
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
-        kv_cache_groups=[KVCacheGroupSpec(list(specs), group_spec)],
+        kv_cache_groups=[group],
     )
 
 
@@ -377,7 +486,7 @@ def test_namespace_fingerprints_uniform_type_layer_specs(baseline, variant):
 
 
 def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
-    """The scheduler sees a flattened group spec; keys must still match."""
+    """The scheduler adopts the workers' namespace, so keys match."""
     install_memory_runtime(monkeypatch)
     worker_config = _uniform_type_kv_cache_config(block_stride=192)
     vllm_config = _vllm_config({"mode": "embedded"})
@@ -390,9 +499,13 @@ def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
     try:
         handshake(scheduler, worker)
 
-        assert scheduler.connector_scheduler.codec.key(b"a") == (
-            worker.connector_worker.codec.key(b"a")
-        )
+        scheduler_impl = scheduler.connector_scheduler
+        worker_impl = worker.connector_worker
+        assert scheduler_impl is not None
+        assert worker_impl is not None
+        assert scheduler_impl.codec is not None
+        assert worker_impl.codec is not None
+        assert scheduler_impl.codec.key(b"a") == worker_impl.codec.key(b"a")
     finally:
         scheduler.shutdown()
         worker.shutdown()
@@ -458,8 +571,12 @@ def test_scheduler_binds_when_ranks_share_a_report_key(monkeypatch):
     scheduler = UMBPStoreConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
     worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
     try:
-        scheduler.set_xfer_handshake_metadata({0: worker.get_handshake_metadata()})
+        worker_metadata = worker.get_handshake_metadata()
+        assert worker_metadata is not None
+        scheduler.set_xfer_handshake_metadata({0: worker_metadata})
 
+        assert scheduler.connector_scheduler is not None
+        assert worker.connector_worker is not None
         assert scheduler.connector_scheduler.codec == worker.connector_worker.codec
     finally:
         scheduler.shutdown()
@@ -728,23 +845,6 @@ def test_scheduler_lookup_failure_recomputes_and_allows_retry(failure):
         assert scheduler.get_num_new_matched_tokens(request, 0) == (16, False)
     finally:
         scheduler.close()
-
-
-@pytest.mark.parametrize(("use_eagle", "expected"), [(False, 32), (True, 16)])
-def test_scheduler_single_group_lookup_drops_last_block_for_eagle(use_eagle, expected):
-    vllm_config = _vllm_config({"mode": "embedded", "load_async": False})
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: use_eagle
-    )
-    scheduler = UMBPStoreConnectorScheduler(
-        vllm_config,
-        _kv_cache_config(),
-        _SchedulerHandle([True, True]),
-        BlockIdentityCodec(UMBPNamespace("eagle")),
-    )
-    request = make_request("req", num_tokens=33)
-
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
 
 
 def test_scheduler_emits_async_load_without_scheduled_model_tokens():
@@ -1246,7 +1346,9 @@ def test_sync_load_finishes_before_forward_without_layer_hooks(
     assert handle.waited == [handle.load_job]
     assert worker.get_finished(set()) == (None, None)
     assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
-    stats = worker.get_kv_connector_stats().reduce()
+    connector_stats = worker.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["load_completed"] == (0 if fail_load else 1)
     assert stats["load_failed"] == (1 if fail_load else 0)
 
@@ -1397,7 +1499,9 @@ def test_async_load_cancellation_preserves_other_requests():
 
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
-    assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["load_completed"] == 1
     assert finished == (None, {"second"})
     worker.wait_for_layer_load("")
     assert worker.get_kv_connector_stats() is None
@@ -1445,7 +1549,9 @@ def test_worker_partial_store_failure_reports_unpublished_objects():
     metadata = worker.build_connector_worker_meta()
     assert metadata.store_events == {9: StoreEventResult(1)}
     assert not hasattr(worker.runtime, "published")
-    assert worker.get_kv_connector_stats().reduce()["store_failed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_failed"] == 1
 
 
 @pytest.mark.parametrize("forward", [False, True])
@@ -1488,7 +1594,9 @@ def test_connector_finalizes_each_store_once_when_forward_hook_is_skipped(
         assert next_step == ({} if forward else expected)
         assert plan.key in runtime.store
 
-    stats = connector.get_kv_connector_stats().reduce()
+    connector_stats = connector.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["store_submitted"] == 2
     assert stats["store_completed"] == 2
 
@@ -1585,6 +1693,7 @@ def test_embedded_runtime_register_store_and_load(monkeypatch):
                 new_reqs=[consumer], scheduled_tokens={consumer.req_id: 1}
             )
         )
+        assert isinstance(load_metadata, UMBPConnectorMetadata)
         assert set(load_metadata.load_requests) == {consumer.req_id}
 
         load_worker.bind_connector_metadata(load_metadata)
@@ -1699,6 +1808,7 @@ def test_embedded_logical_hit_requires_all_tp_dcp_objects(monkeypatch):
     )
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.codec is not None
     for block_hash in request.block_hashes:
         runtime.store.update(
             scheduler.codec.keys_for_topology(block_hash, scheduler.topology, (0,))
@@ -1939,7 +2049,9 @@ def test_worker_submits_stores_once(grouped):
     assert worker.get_finished({"req"}) == (None, None)
     completed = worker.build_connector_worker_meta()
     assert completed.store_events == {19: StoreEventResult(1)}
-    assert worker.get_kv_connector_stats().reduce()["store_num_bytes"] == 32
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_num_bytes"] == 32
 
 
 def _replicated_kv_cache_config() -> KVCacheConfig:
@@ -1949,8 +2061,12 @@ def _replicated_kv_cache_config() -> KVCacheConfig:
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla"], replicated),
-            KVCacheGroupSpec(["gqa"], _LAYER2_SPEC),
+            KVCacheGroup.from_layers(
+                {"mla": FullAttentionManager.layer_config(replicated)}
+            ),
+            KVCacheGroup.from_layers(
+                {"gqa": FullAttentionManager.layer_config(_LAYER2_SPEC)}
+            ),
         ],
     )
 
@@ -2052,7 +2168,10 @@ def test_scheduler_adopts_matching_worker_replicated_groups(monkeypatch):
             {rank: UMBPHandshakeMetadata("ns", (0,)) for rank in range(2)}
         )
 
-        assert scheduler.connector_scheduler.codec.replicated_groups == {0}
+        assert scheduler.connector_scheduler is not None
+        codec = scheduler.connector_scheduler.codec
+        assert isinstance(codec, BlockIdentityCodec)
+        assert codec.replicated_groups == {0}
     finally:
         scheduler.shutdown()
 

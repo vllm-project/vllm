@@ -64,6 +64,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
+    "mxfp4_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -929,26 +930,24 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         )
 
 
-HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+HAS_CUSTOM_CLASS = is_torch_equal_or_newer("2.14.0.dev")
 
-# Allow toggling LayerName usage via environment variable.
-# Defaults to True on torch >= 2.11, False otherwise.
-# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
-_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
+# Set VLLM_USE_LAYERNAME=0 to pass layer names as plain str.
+_USE_LAYERNAME = envs.VLLM_USE_LAYERNAME
 
-if HAS_OPAQUE_TYPE:
-    from torch._opaque_base import OpaqueBase
+if HAS_CUSTOM_CLASS:
+    from torch._custom_class_base import CustomClassBase
 else:
-    OpaqueBase = object  # type: ignore[misc, assignment]
+    from torch._opaque_base import OpaqueBase as CustomClassBase
 
 
-class LayerName(OpaqueBase):  # type: ignore[misc]
+class LayerName(CustomClassBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
-    When torch >= 2.11, this is registered as a hoisted value-type opaque
-    object so that torch.compile lifts it as a graph input instead of baking
-    it as a constant.  This avoids per-layer recompilation for custom ops
-    that accept layer name strings (attention, MOE, KV cache, etc.).
+    This is registered as a hoisted opaque object so that torch.compile lifts
+    it as a graph input instead of baking it as a constant. This avoids
+    per-layer recompilation for custom ops that accept layer name strings
+    (attention, MOE, KV cache, etc.).
     """
 
     def __init__(self, value: str):
@@ -964,13 +963,17 @@ class LayerName(OpaqueBase):  # type: ignore[misc]
         return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
-if HAS_OPAQUE_TYPE:
+if HAS_CUSTOM_CLASS:
+    from torch._library.opaque_object import register_custom_class
+
+    register_custom_class(LayerName, typ="constant", hoist=True)
+else:
     from torch._library.opaque_object import register_opaque_type
 
     register_opaque_type(LayerName, typ="value", hoist=True)
 
-# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
-# layer_name parameters use LayerName; otherwise they remain plain str.
+# With VLLM_USE_LAYERNAME enabled, custom op layer_name parameters use
+# LayerName; otherwise they remain plain str.
 if TYPE_CHECKING:
     from typing import TypeAlias
 
@@ -987,11 +990,6 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 def _encode_layer_name(layer_name: str) -> str | LayerName:
     """Wrap a str layer name as LayerName when enabled."""
     return LayerName(layer_name) if _USE_LAYERNAME else layer_name
-
-
-# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
-def supports_xpu_graph() -> bool:
-    return is_torch_equal_or_newer("2.11.0.dev")
 
 
 # create a library to hold the custom op

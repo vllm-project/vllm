@@ -45,7 +45,8 @@ The three supported scoring functions are as illustrated in the figure below.
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | ✅︎ | |
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
-| `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
+| `GteForSequenceClassification` | mGTE-TRM, native Transformers checkpoint (see note) | `alibaba-nlp-community/gte-multilingual-reranker-base`, etc. | N/A | ✅︎ | |
+| `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | ✅︎ | |
 | `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
 | `ModernBertForSequenceClassification` | ModernBERT-based | `Alibaba-NLP/gte-reranker-modernbert-base`, etc. | N/A | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`(see note), etc. | [mxbai_rerank_v2.jinja](../../../examples/pooling/score/template/mxbai_rerank_v2.jinja) | ✅︎ | ✅︎ |
@@ -68,24 +69,27 @@ The three supported scoring functions are as illustrated in the figure below.
     Load the official original `BAAI/bge-reranker-v2-gemma` by using the following command.
 
     ```bash
-    vllm serve BAAI/bge-reranker-v2-gemma --hf_overrides '{"architectures": ["GemmaForSequenceClassification"],"classifier_from_token": ["Yes"],"method": "no_post_processing"}'
+    vllm serve BAAI/bge-reranker-v2-gemma --hf-overrides '{"architectures": ["GemmaForSequenceClassification"],"classifier_from_token": ["Yes"],"method": "no_post_processing"}'
     ```
 
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewForSequenceClassification`. The name `NewForSequenceClassification` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'` to specify the use of the `GteNewForSequenceClassification` architecture.
 
 !!! note
+    For the native Transformers copy of mGTE-TRM (`model_type: gte`, no `trust_remote_code`), set `--hf-overrides '{"architectures": ["GteForSequenceClassification"]}'` to serve LoRA adapters trained with Transformers' `GteForSequenceClassification`, which target the split `q_proj`, `k_proj`, `v_proj`, `gate_proj` and `up_proj` modules. Adapters trained on the remote-code model, which target the fused `qkv_proj` and `up_gate_proj`, keep using `GteNewForSequenceClassification`.
+
+!!! note
     Load the official original `mxbai-rerank-v2` by using the following command.
 
     ```bash
-    vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf_overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
+    vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf-overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
     ```
 
 !!! note
     Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: [examples/pooling/score/qwen3_reranker_offline.py](../../../examples/pooling/score/qwen3_reranker_offline.py) [examples/pooling/score/qwen3_reranker_online.py](../../../examples/pooling/score/qwen3_reranker_online.py).
 
     ```bash
-    vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    vllm serve Qwen/Qwen3-Reranker-0.6B --hf-overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
 !!! note
@@ -110,10 +114,10 @@ The three supported scoring functions are as illustrated in the figure below.
 \* Feature support is the same as that of the original model.
 
 !!! note
-    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`. `Qwen3-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples.
+    Similar to Qwen3-Reranker, you need to use the following `--hf-overrides` to load the official original `Qwen3-VL-Reranker`. `Qwen3-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
     ```bash
-    vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    vllm serve Qwen/Qwen3-VL-Reranker-2B --hf-overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
 --8<-- [end:supported-cross-encoder-models]
@@ -394,6 +398,8 @@ The following rerank api parameters are supported:
 
 Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
 Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
+By default, each result includes the original document. Set `return_documents` to `false`
+to return only the document index and relevance score in each result.
 
 ??? console "Request"
 
@@ -490,6 +496,22 @@ vLLM does not apply a checkpoint's chat template by default, since many reranker
 - Models with a built-in score template keep using it.
 
 The template in use is logged at startup.
+
+### Activation function
+
+For a Sentence Transformers `CrossEncoder` whose pipeline is a single Transformer module, vLLM applies the `activation_fn` saved in `config_sentence_transformers.json`, as `CrossEncoder.predict` does. See [Resolution precedence](README.md#resolution-precedence) for the full order.
+
+!!! note
+    Earlier versions of vLLM ignored this setting. Checkpoints that save an `Identity` activation there, such as `nvidia/llama-nemotron-rerank-vl-1b-v2`, now return raw logits instead of sigmoid scores. The ranking does not change. To keep the previous scores, set the activation explicitly:
+
+    ```bash
+    vllm serve nvidia/llama-nemotron-rerank-vl-1b-v2 \
+        --runner pooling \
+        --trust-remote-code \
+        --hf-overrides '{"sbert_ce_default_activation_function": "torch.nn.modules.activation.Sigmoid"}'
+    ```
+
+    For offline inference, pass the same dict as `hf_overrides` to `LLM`.
 
 ### Enable/disable activation
 

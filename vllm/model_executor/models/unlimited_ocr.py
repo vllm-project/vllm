@@ -64,6 +64,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
 from vllm.model_executor.layers.dash_attention import DASHAttention
+from vllm.model_executor.layers.fused_moe import RoutedScaleMode
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -197,7 +198,7 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
-    Disables crop mode for multi-image requests (to stay consistent with
+    For v1, disables crop mode for multi-image requests (to stay consistent with
     `UnlimitedOCRProcessor.tokenize_with_images`), and -- since that makes the
     per-image output depend on the request's image count -- bypasses the
     per-item processing cache for multi-image requests, exactly like
@@ -214,9 +215,6 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
-        crop_mode = mm_kwargs.get("crop_mode", CROP_MODE)
-
         image_token_id = hf_processor.image_token_id
         assert isinstance(image_token_id, int)
 
@@ -228,23 +226,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
-                size = images.get_image_size(item_idx)
-
-                # Only v1 disables cropping for multi-image input. Match the
-                # selected HF processor when expanding image placeholders.
-                effective_cropping = bool(crop_mode) and (
-                    len(images) == 1
-                    or getattr(
-                        self.info.get_hf_config().text_config, "unlimited_ocr2", False
-                    )
-                )
-
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=effective_cropping,
-                )
+                token_count = out_mm_kwargs["image"][item_idx]["num_image_tokens"].data
+                assert isinstance(token_count, torch.Tensor)
+                num_image_tokens = int(token_count.item())
             return [image_token_id] * num_image_tokens
 
         return [
@@ -282,11 +266,13 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
-        # The processor logic differs for single-image (crop) vs multi-image
+        # For v1, the processor logic differs for single-image (crop) vs multi-image
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache
         # the single-image case and recompute multi-image requests fresh.
-        if inputs.mm_data_items.get_count("image", strict=False) > 1:
+        if inputs.mm_data_items.get_count("image", strict=False) > 1 and not getattr(
+            self.info.get_hf_config().text_config, "unlimited_ocr2", False
+        ):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
@@ -325,7 +311,9 @@ class UnlimitedOCR2DecoderLayer(DeepseekV2DecoderLayer):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+                routed_scale_mode=RoutedScaleMode.ROUTER
+                if rocm_aiter_ops.is_fused_moe_enabled()
+                else RoutedScaleMode.OUTPUT,
             )
         else:
             self.mlp = DeepseekV2MLP(
