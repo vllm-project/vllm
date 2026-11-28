@@ -975,11 +975,17 @@ class Scheduler(SchedulerInterface):
                                 del scheduled_encoder_inputs[preempted_req_id]
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
+                                refunded_encoder_tokens = sum(
+                                    min(
+                                        preempted_req.mm_features[
+                                            i
+                                        ].mm_position.get_num_encoder_tokens(),
+                                        self.max_num_encoder_input_tokens,
+                                    )
                                     for i in preempted_encoder_inputs
                                 )
-                                encoder_compute_budget += num_embeds_to_restore
+                                encoder_compute_budget += refunded_encoder_tokens
+                                new_encoder_compute_budget += refunded_encoder_tokens
                                 if iteration_details is not None:
                                     num_scheduled_encoder_inputs -= len(
                                         preempted_encoder_inputs
@@ -1742,8 +1748,10 @@ class Scheduler(SchedulerInterface):
                 total_num_scheduled_tokens - iteration_details.num_decode_tokens
             )
             iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
-            iteration_details.num_encoder_output_tokens = (
-                self.max_num_encoder_input_tokens - encoder_compute_budget
+            iteration_details.num_encoder_output_tokens = sum(
+                self.requests[req_id].get_num_encoder_embeds(i)
+                for req_id, inputs in scheduled_encoder_inputs.items()
+                for i in inputs
             )
             if self.observability_config.enable_logging_iteration_details:
                 iteration_details.scheduled_workload = make_scheduled_workload(
@@ -2319,8 +2327,22 @@ class Scheduler(SchedulerInterface):
                 and self.ec_connector is not None
                 and self.ec_connector.requires_encoder_cache_readmission(request, i)
             )
+            # A single oversized item must be allowed to occupy a step alone.
+            # Normal items continue to be charged their full unpruned cost.
+            raw_encoder_compute = mm_feature.mm_position.get_num_encoder_tokens()
+            encoder_compute_charge = min(
+                raw_encoder_compute,
+                self.max_num_encoder_input_tokens,
+            )
+            # The cache manager compares the unpruned count to the remaining
+            # budget. Account for the waived oversize portion so that its
+            # check is equivalent to: encoder_compute_charge <= remaining.
+            # Preserve can_allocate's API for custom encoder cache managers.
+            admission_budget = (
+                encoder_compute_budget + raw_encoder_compute - encoder_compute_charge
+            )
             if needs_readmission or not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+                request, i, admission_budget, num_embeds_to_schedule
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -2353,7 +2375,7 @@ class Scheduler(SchedulerInterface):
                 return [], 0, encoder_compute_budget, [], []
 
             num_embeds_to_schedule += num_encoder_embeds
-            encoder_compute_budget -= num_encoder_embeds
+            encoder_compute_budget -= encoder_compute_charge
             mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
 

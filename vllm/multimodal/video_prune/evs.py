@@ -272,6 +272,9 @@ def recompute_mrope_positions(
             )
             in_the_middle_of_media = (
                 seen_mm_tokens > seem_mm_tokens_before_last_vision_start
+                # A chunk may start immediately after VISION_START, before
+                # any media tokens have been computed (e.g. Qwen2.5-VL).
+                or num_computed_tokens == last_vision_start_token + 1
             )
             # For Qwen3 VL, we can be inside a media segment even before any
             # video tokens appear (timestamp tokens are text). If we've passed
