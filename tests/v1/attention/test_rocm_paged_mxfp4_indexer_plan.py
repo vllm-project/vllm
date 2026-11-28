@@ -185,15 +185,13 @@ def test_decode_launches_native_on_uniform_steps():
     "decode_rows, k, first_filled, step_rows",
     [
         (7, 512, 7, None),
-        (128, 512, 0, None),
-        (7, 2048, 0, None),
+        (128, 512, 128, None),
+        (7, 2048, 7, None),
         (None, 512, 0, None),
-        (37, 512, 0, 147),
+        (32, 512, 128, 128),
     ],
 )
-def test_topk_fill_skips_the_rows_vllms_topk_writes(
-    decode_rows, k, first_filled, step_rows
-):
+def test_topk_fill_skips_the_decode_rows(decode_rows, k, first_filled, step_rows):
     num_tokens = 130
     buffer = torch.full((num_tokens + 1, k), 7, dtype=torch.int32)
     metadata = types.SimpleNamespace(

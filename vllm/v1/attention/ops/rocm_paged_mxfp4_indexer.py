@@ -530,6 +530,25 @@ def _remap_compact_topk(
     )
 
 
+def _compact_topk(
+    compact: torch.Tensor,
+    slot_ends: torch.Tensor,
+    out: torch.Tensor,
+    positions: torch.Tensor,
+    block: int,
+    step_rows: int | None = None,
+) -> None:
+    rows, k = out.shape
+    kernel_rows = rows if step_rows is None else step_rows
+    if k == 512 and _vllm_topk(kernel_rows, k):
+        torch.ops._C.top_k_per_row_decode_remap(
+            compact, slot_ends, out, positions, block
+        )
+        return
+    _topk(compact, slot_ends, out, k, step_rows)
+    _remap_compact_topk(out, positions, block)
+
+
 @dataclass(slots=True)
 class _Layer:
     """One indexer layer's inputs and outputs for this step."""
@@ -623,10 +642,8 @@ def _layer(
 def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
     lengths = layer.metadata.decode_row_lens
     start = 0
-    if layer.metadata.decode is not None and lengths is not None:
-        rows = _decode_step_rows(layer.metadata, lengths.shape[0])
-        if _vllm_topk(rows, layer.topk_tokens):
-            start = rows
+    if lengths is not None:
+        start = _decode_step_rows(layer.metadata, lengths.shape[0])
     if start < num_tokens:
         layer.topk_buffer[start:num_tokens] = -1
 
@@ -770,8 +787,7 @@ def _gather_prefill(
         candidates=gather,
     )
     out = layer.topk_buffer[t0:t1, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens)
-    _remap_compact_topk(out, gather["positions"], layer.block)
+    _compact_topk(compact, slot_ends, out, gather["positions"], layer.block)
 
 
 def _gather_decode(layer: _Layer, num_cols: int) -> None:
@@ -814,8 +830,14 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         candidates=gather,
     )
     out = layer.topk_buffer[:rows, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens, _decode_step_rows(metadata, rows))
-    _remap_compact_topk(out, gather["positions"], layer.block)
+    _compact_topk(
+        compact,
+        slot_ends,
+        out,
+        gather["positions"],
+        layer.block,
+        _decode_step_rows(metadata, rows),
+    )
 
 
 def _decode_step_rows(metadata: "RocmMxfp4IndexerMetadata", rows: int) -> int:
