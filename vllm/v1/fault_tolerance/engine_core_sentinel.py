@@ -370,7 +370,7 @@ class EngineCoreSentinel:
         # Commit the dead set only after the full recovery succeeded.
         self._dead_dp_ranks = new_dead
         logger.debug(
-            "[FT] request_id=%s scale_down committed: removed %s, "
+            "[FT] request_id=%s scale_down completed: removed %s, "
             "cumulative dead_dp_ranks=%s",
             ft_request.request_id,
             sorted(newly_dead),
@@ -525,7 +525,7 @@ class EngineCoreSentinel:
             self.fault_info = "Recovery failed; full restart required"
             logger.error(
                 "[FT] request_id=%s status -> DEAD; "
-                "scale_down could not commit; full restart required",
+                "scale_down recovery failed; full restart required",
                 ft_request.request_id,
             )
             self._push_status()

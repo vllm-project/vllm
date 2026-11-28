@@ -542,9 +542,7 @@ class MultiprocExecutor(Executor):
                     ):
                         raise RuntimeError(f"Worker {rank} failed with error '{error}'")
                     failures.append(f"Worker {rank}: {error}")
-                    logger.error(
-                        "[FT] RPC %s failed on worker %d: %s", method, rank, error
-                    )
+                    logger.error("RPC %s failed on worker %d: %s", method, rank, error)
                     assert isinstance(kv_output, KVConnectorOutput)
                     responses.append(kv_output)
                 elif status != WorkerProc.ResponseStatus.SUCCESS:
@@ -557,9 +555,7 @@ class MultiprocExecutor(Executor):
                             " stack trace above for the root cause"
                         )
                     failures.append(f"Worker {rank}: {result}")
-                    logger.error(
-                        "[FT] RPC %s failed on worker %d: %s", method, rank, result
-                    )
+                    logger.error("RPC %s failed on worker %d: %s", method, rank, result)
                 else:
                     responses.append(result)
 

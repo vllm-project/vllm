@@ -87,16 +87,16 @@ async def _run_fault_recovery(
     context = (
         f"[FT] request_id={ft_request.request_id} instruction={ft_request.instruction}"
     )
-    logger.info("%s dispatch started", context)
+    logger.info("%s recovery requested", context)
     try:
         result = await client.handle_fault(ft_request)
     except Exception:
-        logger.exception("%s dispatch failed", context)
+        logger.exception("%s recovery request failed", context)
         return
     if not result.success:
         logger.error("%s recovery failed: %s", context, result.reason)
     else:
-        logger.info("%s recovery committed", context)
+        logger.info("%s recovery completed", context)
 
 
 @router.get("/v1/fault_tolerance/status")
