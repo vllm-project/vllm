@@ -181,4 +181,61 @@ void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
       topk_id_ptr, size, expert_map_ptr, num_experts);
 }
 
+__global__ void smallSortAndScanExpertsKernel(
+    const int* ids, const int* source_rows, const int* expert_map,
+    int* keys_for_sort, int* sorted_experts, int* sorted_rows,
+    int64_t* expert_offsets, int* inverse, int size, int num_experts,
+    int num_local_experts) {
+  __shared__ int keys[128];
+  __shared__ int ordered_keys[128];
+  const int index = threadIdx.x;
+  int key = 0;
+  if (index < size) {
+    const int expert = ids[index];
+    if (expert < 0 || expert >= num_experts) {
+      key = num_experts;
+    } else {
+      const int local = expert_map ? expert_map[expert] : expert;
+      key = local == -1 ? expert + num_experts : local;
+    }
+    keys_for_sort[index] = key;
+    keys[index] = key;
+  }
+  __syncthreads();
+  if (index < size) {
+    int rank = 0;
+    for (int other = 0; other < size; ++other) {
+      const int other_key = keys[other];
+      rank += other_key < key || (other_key == key && other < index);
+    }
+    const int row = source_rows[index];
+    ordered_keys[rank] = key;
+    sorted_experts[rank] = key;
+    sorted_rows[rank] = row;
+    if (inverse != nullptr) {
+      inverse[row] = rank;
+    }
+  }
+  __syncthreads();
+  for (int expert = index; expert <= num_local_experts; expert += blockDim.x) {
+    expert_offsets[expert] =
+        findTotalEltsLessThanTarget(ordered_keys, size, expert);
+  }
+}
+
+void smallSortAndScanExperts(const int* ids, const int* source_rows,
+                             const int* expert_map, int* keys_for_sort,
+                             int* sorted_experts, int* sorted_rows,
+                             int64_t* expert_offsets, int* inverse, int size,
+                             int num_experts, int num_local_experts,
+                             cudaStream_t stream) {
+  int threads = 128;
+  while (threads < num_local_experts && threads < 1024) {
+    threads *= 2;
+  }
+  smallSortAndScanExpertsKernel<<<1, threads, 0, stream>>>(
+      ids, source_rows, expert_map, keys_for_sort, sorted_experts, sorted_rows,
+      expert_offsets, inverse, size, num_experts, num_local_experts);
+}
+
 #endif
