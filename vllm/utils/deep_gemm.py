@@ -178,13 +178,18 @@ def is_deep_gemm_supported() -> bool:
             "/usr/local/cuda). Set CUDA_HOME to a CUDA toolkit to enable them."
         )
         return False
-    # DeepGEMM's JIT asserts nvcc >= 12.9 and aborts the engine otherwise.
+    # DeepGEMM's JIT asserts nvcc >= 12.9 and its SM120 kernels `#error` below
+    # CUDA 13; either aborts the engine.
+    min_version = (
+        (13, 0) if current_platform.is_device_capability_family(120) else (12, 9)
+    )
     version = _nvcc_version(nvcc)
-    if version is not None and version < (12, 9):
+    if version is not None and version < min_version:
         logger.warning_once(
-            "DeepGEMM kernels are disabled: DeepGEMM's JIT needs nvcc 12.9 or "
-            "newer, found %d.%d at %s. Set CUDA_HOME to a newer CUDA toolkit "
-            "to enable them.",
+            "DeepGEMM kernels are disabled: DeepGEMM's JIT needs nvcc %d.%d or "
+            "newer on this GPU, found %d.%d at %s. Set CUDA_HOME to a newer "
+            "CUDA toolkit to enable them.",
+            *min_version,
             *version,
             nvcc,
         )
