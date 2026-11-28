@@ -56,6 +56,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseIncompleteEvent,
+    ResponseInProgressEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
     ResponsesResponse,
@@ -2614,3 +2615,169 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+def _make_background_serving(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_ENABLE_RESPONSES_API_STORE", True)
+    serving = _make_serving_instance()
+    engine_client = serving.engine_client
+    models = serving.models
+    online_renderer = serving.online_renderer
+    assert isinstance(engine_client, MagicMock)
+    assert isinstance(models, MagicMock)
+    assert isinstance(online_renderer, MagicMock)
+    engine_client.errored = False
+    models.is_base_model.return_value = True
+    models.lora_requests = {}
+    models.model_name.return_value = "test-model"
+    online_renderer.validate_chat_template.return_value = None
+    online_renderer.trust_request_chat_template = False
+    online_renderer.reasoning_effort_map = {}
+    online_renderer.render_responses = AsyncMock(
+        return_value=SimpleNamespace(
+            messages=[],
+            engine_input=tokens_input([7, 8]),
+        )
+    )
+    engine_client.renderer.get_tokenizer.return_value = MagicMock()
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def generate(*args, **kwargs):
+        started.set()
+        await release.wait()
+        yield _make_request_output("hello", [42], finish_reason="stop")
+
+    engine_client.generate.side_effect = generate
+    return serving, started, release
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_background_response_transitions_to_in_progress(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+):
+    """Background responses must report `in_progress` via GET while generating."""
+    serving, started, release = _make_background_serving(monkeypatch)
+    request = ResponsesRequest(input="hi", background=True, store=True, stream=stream)
+    result = await serving.create_responses(request)
+    task = serving.background_tasks.get(request.request_id)
+
+    try:
+        if stream:
+            assert not isinstance(result, (ResponsesResponse, ErrorResponse))
+            await asyncio.wait_for(started.wait(), timeout=5)
+            first_event = await asyncio.wait_for(anext(result), timeout=5)
+            second_event = await asyncio.wait_for(anext(result), timeout=5)
+            assert isinstance(first_event, ResponseCreatedEvent)
+            assert isinstance(second_event, ResponseInProgressEvent)
+            assert second_event.response.status == "in_progress"
+
+            in_flight = await serving.retrieve_responses(
+                request.request_id, starting_after=None, stream=False
+            )
+            assert isinstance(in_flight, ResponsesResponse)
+            assert in_flight.status == "in_progress"
+
+            release.set()
+
+            async def _drain():
+                return [event async for event in result]
+
+            remaining = await asyncio.wait_for(_drain(), timeout=5)
+            assert isinstance(remaining[-1], ResponseCompletedEvent)
+            assert remaining[-1].response.status == "completed"
+            if task is not None:
+                await asyncio.wait_for(task, timeout=5)
+        else:
+            assert isinstance(result, ResponsesResponse)
+            assert result.status == "queued"
+            await asyncio.wait_for(started.wait(), timeout=5)
+            # Initial POST response object must remain "queued".
+            assert result.status == "queued"
+
+            in_flight = await serving.retrieve_responses(
+                request.request_id, starting_after=None, stream=False
+            )
+            assert isinstance(in_flight, ResponsesResponse)
+            assert in_flight.status == "in_progress"
+
+            release.set()
+            assert task is not None
+            await asyncio.wait_for(task, timeout=5)
+
+        final = await serving.retrieve_responses(
+            request.request_id, starting_after=None, stream=False
+        )
+        assert isinstance(final, ResponsesResponse)
+        assert final.status == "completed"
+    finally:
+        release.set()
+        if stream and not isinstance(result, (ResponsesResponse, ErrorResponse)):
+            await result.aclose()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_background_cancel_while_in_progress(monkeypatch: pytest.MonkeyPatch):
+    """Cancelling an `in_progress` background response transitions to `cancelled`."""
+    serving, started, release = _make_background_serving(monkeypatch)
+    request = ResponsesRequest(input="hi", background=True, store=True, stream=False)
+    result = await serving.create_responses(request)
+    assert isinstance(result, ResponsesResponse)
+    task = serving.background_tasks.get(request.request_id)
+
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        in_flight = await serving.retrieve_responses(
+            request.request_id, starting_after=None, stream=False
+        )
+        assert isinstance(in_flight, ResponsesResponse)
+        assert in_flight.status == "in_progress"
+
+        cancelled = await serving.cancel_responses(request.request_id)
+        assert isinstance(cancelled, ResponsesResponse)
+        assert cancelled.status == "cancelled"
+
+        stored = await serving.retrieve_responses(
+            request.request_id, starting_after=None, stream=False
+        )
+        assert isinstance(stored, ResponsesResponse)
+        assert stored.status == "cancelled"
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_background_cancelled_status_not_overwritten_by_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A cancelled background response must never flip back to `in_progress`."""
+    serving, _, release = _make_background_serving(monkeypatch)
+    request = ResponsesRequest(input="hi", background=True, store=True, stream=False)
+    result = await serving.create_responses(request)
+    assert isinstance(result, ResponsesResponse)
+    task = serving.background_tasks.get(request.request_id)
+
+    try:
+        cancelled = await serving.cancel_responses(request.request_id)
+        assert isinstance(cancelled, ResponsesResponse)
+        assert cancelled.status == "cancelled"
+
+        await serving._mark_background_response_in_progress(request.request_id)
+        stored = await serving.retrieve_responses(
+            request.request_id, starting_after=None, stream=False
+        )
+        assert isinstance(stored, ResponsesResponse)
+        assert stored.status == "cancelled"
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

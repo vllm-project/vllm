@@ -55,7 +55,7 @@ async def test_background(client: openai.AsyncOpenAI):
     for _ in range(max_retries):
         await asyncio.sleep(1)
         response = await client.responses.retrieve(response.id)
-        if response.status != "queued":
+        if response.status not in ("queued", "in_progress"):
             break
     print(response)
 
@@ -95,6 +95,7 @@ async def test_background_cancel(client: openai.AsyncOpenAI):
             break
         await asyncio.sleep(poll_interval)
 
+    assert response.status == "in_progress"
     response = await client.responses.cancel(response.id)
     assert response.status == "cancelled"
 
