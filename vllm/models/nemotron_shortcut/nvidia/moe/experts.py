@@ -60,6 +60,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.models.nemotron_shortcut.nvidia.moe.config import (
     NemotronShortcutMoEConfig,
     activation_clamp,
+    ordered_mxfp8_finalize,
 )
 from vllm.models.nemotron_shortcut.nvidia.moe.flashinfer import (
     NemotronShortcutCuteDslMxfp8Experts,
@@ -454,6 +455,10 @@ def select_mxfp8_experts(moe: FusedMoEConfig) -> type[mk.FusedMoEExperts]:
     instead of silently running a plain ReLU².
     """
     backend = moe.moe_backend
+    if ordered_mxfp8_finalize():
+        if backend not in ("auto", "flashinfer_cutedsl"):
+            raise ValueError("Ordered MXFP8 finalize requires flashinfer_cutedsl")
+        backend = "flashinfer_cutedsl"
     if backend in ("auto", "flashinfer_cutedsl"):
         supported, reason = NemotronShortcutCuteDslMxfp8Experts.is_supported_config(
             NemotronShortcutCuteDslMxfp8Experts,

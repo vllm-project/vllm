@@ -333,6 +333,23 @@ class TestReloadEqualsColdStart:
 
 
 class TestUnsent:
+    def test_draft_update_only_requires_its_own_parameters(self):
+        target = _cold_start(_checkpoint())
+        draft = _cold_start(_checkpoint())
+        # Sharing happens after both cold starts. This weight keeps its layout.
+        draft.attn.kv_b = target.attn.kv_b
+        before = _state(target)
+        updated = _checkpoint(1.01)
+        del updated["attn.kv_b.weight"]
+        _reload(draft, updated)
+        _assert_same(_state(target), before, addresses=True)
+        _assert_same(
+            _state(draft), _state(_cold_start(_checkpoint(1.01))), names=["proj.weight"]
+        )
+        del updated["proj.weight"]
+        with pytest.raises(RuntimeError, match=r"did not load 1 .*proj\.weight"):
+            _reload(draft, updated)
+
     def test_missing_parameter_raises_before_post_processing(self):
         model = _cold_start(_checkpoint())
         before = _state(model)

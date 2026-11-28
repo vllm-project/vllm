@@ -11,8 +11,8 @@ no rollback, the next full update repairs it.
 
 Delivery contract: an update loads every parameter cold start loaded (as
 `model.load_weights` reports it; after a dummy start, the first update sets
-the record and is not checked itself), except those level 2 sleep preserves
-(`--sleep-preserve-parameter-names`: the update does not rewrite them).
+the record and is not checked itself), except tensors owned by another model
+and those preserved by level 2 sleep (`--sleep-preserve-parameter-names`).
 `finish` checks it before rerunning PWAL, which would otherwise reprocess the
 kept runtime bytes of a parameter the update left out.
 A parameter flagged `fill_on_reload` must also be delivered whole: `begin`
@@ -187,7 +187,7 @@ def mark_loaded(model: torch.nn.Module, name: str) -> None:
 
 def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
     """Raise unless the update loaded every parameter cold start loaded, except
-    those level 2 sleep preserves because the update does not rewrite them.
+    tensors owned by another model and those level 2 sleep preserves.
     `load_weights` reports parameter names, whatever checkpoint names fed
     them (fused or per-expert); a tied parameter counts under either name."""
     loaded = model.__dict__.pop("_loaded_params", None)
@@ -199,11 +199,19 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
     params = dict(model.named_parameters(remove_duplicate=False))
-    delivered = {params.get(n, n) for n in loaded}
+    covered = {params.get(n, n) for n in loaded}
+    # A drafter can adopt the target's embeddings and head after cold start.
+    # Only a checkpoint tensor with a known, different owner is exempt.
+    covered.update(
+        p
+        for p in params.values()
+        if (ckpt := getattr(p, "_ckpt", None)) is not None
+        and ckpt[0] is not model._ckpt_owner
+    )
     missing = sorted(
         n
         for n in required
-        if params.get(n, n) not in delivered
+        if params.get(n, n) not in covered
         and not any(fnmatchcase(n, p) for p in preserved)
     )
     if missing:

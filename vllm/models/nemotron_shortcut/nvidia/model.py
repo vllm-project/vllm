@@ -45,6 +45,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.base_loader import get_bound_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.interfaces import IsHybrid, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -582,6 +584,10 @@ def check_sdsa_indexer_loaded(model: nn.Module, loaded: set[str]) -> None:
         isinstance(m, NemotronShortcutSparseAttention) for m in model.modules()
     )
     if has_sparse and not any(".indexer." in name for name in loaded):
+        # A dummy start has no checkpoint to validate. The first real call
+        # can be a refit bucket, with the indexer in a later bucket.
+        if isinstance(get_bound_model_loader(model), DummyModelLoader):
+            return
         raise ValueError(
             "The checkpoint's config has index_topk, but the checkpoint has no "
             "SDSA indexer weights. Without index_topk the model runs full "
@@ -668,8 +674,9 @@ class NemotronShortcutTextModel(nn.Module):
 
         # The selection buffers that every SDSA layer of the model shares.
         self.sdsa_buffers = None
-        if config.index_topk is not None:
-            self.sdsa_buffers = allocate_sdsa_buffers(vllm_config, config.index_topk)
+        index_topk = getattr(config, "index_topk", None)
+        if index_topk is not None:
+            self.sdsa_buffers = allocate_sdsa_buffers(vllm_config, index_topk)
 
         def get_layer(prefix: str):
             layer_idx = extract_layer_index(prefix)

@@ -2,8 +2,8 @@
 
 Direct reload updates a running model's weights in place, and is the default
 (`VLLM_RELOAD_MODE=auto`) with runtime weight updates (`--weight-transfer-config`):
-their weight-transfer updates and disk `reload_weights` calls reload directly,
-and each must load every weight. Anything listed under
+their weight-transfer updates and disk `reload_weights` calls reload directly.
+Each update must cover the model's own checkpoint weights. Anything listed under
 [Refused Configurations](#refused-configurations) reloads layerwise instead
 (see [Layerwise (Re)loading](layerwise.md)) with a log saying why.
 `VLLM_RELOAD_MODE=direct` enables direct reload also without
@@ -21,7 +21,9 @@ those refusals; `VLLM_RELOAD_MODE=layerwise` turns it off.
 - **Finish** reruns the cold-start post-load processing.
 
 No layer is buffered and no tensor changes address, so captured CUDA graphs
-stay valid. Each update must send every weight.
+stay valid. A draft-only update can omit embeddings and output weights shared
+from the target. It must still send every checkpoint weight the drafter owns,
+except weights explicitly preserved during sleep.
 
 ## Online Quantization
 
