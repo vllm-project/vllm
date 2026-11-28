@@ -74,8 +74,8 @@ def _is_auto_numa_available(
 
     log = logger.warning if verbose else logger.debug
 
-    if not current_platform.is_cuda_alike():
-        log("Automatic NUMA binding requires a CUDA or ROCm platform.")
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        log("Automatic NUMA binding requires a CUDA, ROCm, or XPU platform.")
         return False
 
     if not os.path.isdir("/sys/devices/system/node/node1"):
