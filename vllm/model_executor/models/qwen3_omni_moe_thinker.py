@@ -1366,7 +1366,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         audios = hf_inputs.hf_data.get("audio")
         if audios:
             assert isinstance(audios, (list, tuple))
-            feature_extractor = self.info.get_hf_processor().feature_extractor
+            feature_extractor = self.info.get_hf_processor(
+                **hf_kwargs
+            ).feature_extractor
             hop_length = feature_extractor.hop_length
 
             def pad_to_hop_length(x: np.ndarray) -> np.ndarray:
@@ -1397,38 +1399,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_data, hf_processor_mm_kwargs, processed_data
         )
 
-        if (
-            "audio_feature_lengths" in processed_data
-            and "feature_attention_mask" in processed_data
-        ):
-            audios = mm_data.get("audio", [])
-            if audios:
-                assert isinstance(audios, (list, tuple))
-                feature_extractor = self.info.get_hf_processor(
-                    **hf_processor_mm_kwargs
-                ).feature_extractor
-                hop_length = feature_extractor.hop_length
-
-                audio_num_frames = []
-                for audio in audios:
-                    audio_length = (
-                        len(audio[0]) if isinstance(audio, tuple) else len(audio)
-                    )
-                    num_frame = (
-                        (audio_length // hop_length)
-                        if audio_length % hop_length == 0
-                        else (audio_length // hop_length - 1)
-                    )
-                    if hf_processor_mm_kwargs.get("truncation", False):
-                        num_frame = min(
-                            num_frame, feature_extractor.n_samples // hop_length
-                        )
-                    audio_num_frames.append(num_frame)
-
-                processed_data["feature_attention_mask"] = [
-                    torch.ones(num_frame) for num_frame in audio_num_frames
-                ]
-                processed_data["audio_feature_lengths"] = torch.tensor(audio_num_frames)
+        if mm_data.get("audio") and "feature_attention_mask" in processed_data:
+            # Keep each clip independent of batch padding without changing the
+            # lengths already derived from the processed (possibly truncated) audio.
+            processed_data["feature_attention_mask"] = [
+                mask[mask.bool()] for mask in processed_data["feature_attention_mask"]
+            ]
 
         return processed_data
 
