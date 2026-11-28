@@ -1774,13 +1774,26 @@ class Worker(WorkerBase):
         is_draft: bool = False,
         lora_adapter: dict[str, Any] | None = None,
     ) -> None:
+        if lora_adapter is not None:
+            if self.lora_config is None:
+                raise RuntimeError(
+                    "LoRA is not enabled on this worker. Start vLLM with --enable-lora."
+                )
+            if self._weight_update_active:
+                raise RuntimeError(
+                    "start_weight_update called while a weight update is already "
+                    "active. Call finish_weight_update first."
+                )
+            from vllm.distributed.weight_transfer.lora_sink import LoRAWeightSink
+
+            self._weight_update_lora_sink = LoRAWeightSink.from_dict(lora_adapter)
+            self._weight_update_active = True
+            self._weight_update_is_draft = False
+            return
+
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
-        if lora_adapter is not None and self.lora_config is None:
-            raise RuntimeError(
-                "LoRA is not enabled on this worker. Start vLLM with --enable-lora."
-            )
         if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
@@ -1803,47 +1816,36 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
-        lora_sink = None
-        if lora_adapter is not None:
-            from vllm.distributed.weight_transfer.lora_sink import LoRAWeightSink
-
-            lora_sink = LoRAWeightSink.from_dict(lora_adapter)
         draft_model = self.get_draft_model() if is_draft else None
         try:
-            if lora_sink is not None:
-                self.weight_transfer_engine.set_weight_update_target(
-                    lora_sink, self.model_config
-                )
-            elif is_draft:
+            if is_draft:
                 self._set_draft_weight_update_target()
             if draft_model is not None:
                 # Load through the unquantized target head, as without
                 # draft_lm_head_quantization; finish re-derives the copies.
                 share_source_lm_heads(draft_model)
             # Starting may already move weights; only a successful finish
-            # restores them. LoRA updates leave base/draft weights untouched.
-            if lora_sink is None:
-                self._incomplete_weight_updates.add(is_draft)
+            # restores them.
+            self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
             if draft_model is not None:
                 restore_quantized_lm_heads(draft_model, refresh=False)
             raise
-        if lora_sink is None:
-            # Engines may receive kernel-format weights, needing no room; so warn
-            # rather than fail when short.
-            self._weight_update_kv_cache_loan.enter_context(
-                kv_cache_lent_for_weight_update(
-                    getattr(self.model_runner, "extensible_kv_cache", None),
-                    draft_model or self.model_runner.get_model(),
-                    reclaimable=self._kv_cache_reclaimable,
-                    fail_if_short=False,
-                )
+        # Engines may receive kernel-format weights, needing no room; so warn
+        # rather than fail when short.
+        self._weight_update_kv_cache_loan.enter_context(
+            kv_cache_lent_for_weight_update(
+                getattr(self.model_runner, "extensible_kv_cache", None),
+                draft_model or self.model_runner.get_model(),
+                reclaimable=self._kv_cache_reclaimable,
+                fail_if_short=False,
             )
+        )
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
-        self._weight_update_lora_sink = lora_sink
+        self._weight_update_lora_sink = None
 
     def update_weights(self, update_info: dict | list[dict]) -> None:
         """Receive one weight update chunk from the trainer.
@@ -1858,14 +1860,12 @@ class Worker(WorkerBase):
                 global worker rank across data parallel replicas.
 
         """
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
         if not self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update must be called before update_weights."
             )
 
+        lora_sink = getattr(self, "_weight_update_lora_sink", None)
         with set_current_vllm_config(self.vllm_config):
             try:
                 if isinstance(update_info, list):
@@ -1876,17 +1876,32 @@ class Worker(WorkerBase):
                     ]
                 else:
                     local_update_info = update_info
+                if lora_sink is not None and lora_sink.load_http_tensors(
+                    local_update_info
+                ):
+                    return
+                self._check_weight_transfer_engine()
+                assert self.weight_transfer_engine is not None
+                if lora_sink is not None and not lora_sink.uses_transfer_engine:
+                    self.weight_transfer_engine.set_weight_update_target(
+                        lora_sink, self.model_config
+                    )
+                    self.weight_transfer_engine.start_weight_update()
+                    lora_sink.uses_transfer_engine = True
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
                 self._end_weight_update(refresh=False)
                 raise
 
     def _end_weight_update(self, refresh: bool) -> None:
-        assert self.weight_transfer_engine is not None
+        lora_sink = getattr(self, "_weight_update_lora_sink", None)
         self._weight_update_active = False
         self._weight_update_lora_sink = None
         self._weight_update_kv_cache_loan.close()
-        self.weight_transfer_engine.reset_weight_update_target()
+        if self.weight_transfer_engine is not None and (
+            lora_sink is None or lora_sink.uses_transfer_engine
+        ):
+            self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
             (draft_model := self.get_draft_model()) is not None
         ):
@@ -1894,18 +1909,20 @@ class Worker(WorkerBase):
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
         if not self._weight_update_active:
             raise RuntimeError(
                 "finish_weight_update called without a matching start_weight_update."
             )
 
         lora_sink = getattr(self, "_weight_update_lora_sink", None)
+        if lora_sink is None or lora_sink.uses_transfer_engine:
+            self._check_weight_transfer_engine()
+
         with set_current_vllm_config(self.vllm_config):
             try:
-                self.weight_transfer_engine.finish_weight_update()
+                if lora_sink is None or lora_sink.uses_transfer_engine:
+                    assert self.weight_transfer_engine is not None
+                    self.weight_transfer_engine.finish_weight_update()
                 if lora_sink is not None and not self.model_runner.add_lora(
                     lora_sink.to_lora_request()
                 ):

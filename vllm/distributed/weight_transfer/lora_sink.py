@@ -1,13 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Minimal `nn.Module` sink for streaming one LoRA adapter's weights."""
+"""Minimal `nn.Module` sink and HTTP safetensors codec for streaming one LoRA."""
 
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+import pybase64 as base64
 import torch
+from safetensors.torch import load as safetensors_load
+from safetensors.torch import save as safetensors_save
 
 from vllm.lora.request import _TensorLoRARequest
+
+
+def encode_lora_tensors_http(tensors: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+    """Encode a mapping of LoRA tensors as a JSON-safe HTTP `update_info` dict.
+
+    Uses `safetensors` serialization (safe, no pickle) + base64.
+    """
+    if not tensors:
+        raise ValueError("tensors must not be empty")
+
+    # safetensors requires contiguous CPU tensors with non-aliased storage.
+    cpu_tensors: dict[str, torch.Tensor] = {}
+    seen_data_ptrs: set[int] = set()
+    for name, tensor in tensors.items():
+        t = tensor.detach().to(device="cpu").contiguous()
+        if t.data_ptr() in seen_data_ptrs:
+            t = t.clone()
+        seen_data_ptrs.add(t.data_ptr())
+        cpu_tensors[name] = t
+
+    raw = safetensors_save(cpu_tensors)
+    return {"safetensors_b64": base64.b64encode(raw).decode("ascii")}
+
+
+def decode_lora_tensors_http(
+    update_info: Mapping[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Decode an HTTP `update_info` payload produced by `encode_lora_tensors_http`."""
+    raw_b64 = update_info["safetensors_b64"]
+    if not isinstance(raw_b64, str) or not raw_b64:
+        raise ValueError("'safetensors_b64' must be a non-empty base64 string")
+    return safetensors_load(base64.b64decode(raw_b64))
 
 
 class LoRAWeightSink(torch.nn.Module):
@@ -44,6 +79,7 @@ class LoRAWeightSink(torch.nn.Module):
         self.base_model_name = base_model_name
         self.is_3d_lora_weight = is_3d_lora_weight
         self.tensors: dict[str, torch.Tensor] = {}
+        self.uses_transfer_engine = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LoRAWeightSink":
@@ -64,6 +100,13 @@ class LoRAWeightSink(torch.nn.Module):
             self.tensors[name] = tensor.detach().to(device="cpu", copy=True)
             loaded.add(name)
         return loaded
+
+    def load_http_tensors(self, update_info: Mapping[str, Any]) -> bool:
+        """If `update_info` carries HTTP safetensors, decode and stash them."""
+        if "safetensors_b64" not in update_info:
+            return False
+        self.load_weights(decode_lora_tensors_http(update_info).items())
+        return True
 
     def to_lora_request(self) -> _TensorLoRARequest:
         if not self.tensors:
