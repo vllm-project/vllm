@@ -6,6 +6,7 @@ import copy
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -46,6 +47,7 @@ from vllm.v1.metrics.stats import (
 from vllm.v1.outputs import SamplingMaskLists
 
 if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
     from vllm.v1.engine.admission_control import SharedAdmissionStats
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -305,6 +307,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         collect_stats: bool,
         stream_interval: int,
+        reasoning_parser_cls: type["ReasoningParser"] | None = None,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
         if sampling_params := request.sampling_params:
@@ -331,6 +334,7 @@ class RequestState:
             detokenizer = IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
+                reasoning_parser_cls=reasoning_parser_cls,
             )
             max_tokens_param = sampling_params.max_tokens
             top_p = sampling_params.top_p
@@ -595,9 +599,11 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        reasoning_parser: str = "",
     ):
         self.collect_stats = collect_stats
         self.tokenizer = tokenizer
+        self.reasoning_parser = reasoning_parser
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
@@ -605,6 +611,14 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+
+    @cached_property
+    def _reasoning_parser_cls(self) -> type["ReasoningParser"] | None:
+        # Resolved on first use: only the serving layer marks requests as
+        # mid-reasoning, and it has registered the parser by then.
+        from vllm.parser.parser_manager import ParserManager
+
+        return ParserManager.get_reasoning_parser(self.reasoning_parser)
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -719,6 +733,9 @@ class OutputProcessor:
             queue=queue,
             collect_stats=self.collect_stats,
             stream_interval=self.stream_interval,
+            reasoning_parser_cls=(
+                self._reasoning_parser_cls if request.reasoning_ended is False else None
+            ),
         )
         self.request_states[request_id] = req_state
         if parent_req:
