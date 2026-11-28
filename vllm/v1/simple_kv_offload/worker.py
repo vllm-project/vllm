@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
+    registration_pins_pages,
     unpin_tensor,
 )
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+# Staging buffer (both halves) of staged copies, see `staged_copies`.
+STAGING_BYTES = 128 << 20
 
 
 class SimpleCPUOffloadWorker:
@@ -59,6 +63,12 @@ class SimpleCPUOffloadWorker:
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
+        # Where registering does not pin the pool's pages (ROCm, see
+        # registration_pins_pages), the pool is left unregistered and copies go
+        # through a small staging buffer: migrating a page of a registered
+        # 128 GiB pool stalled the GPU for 20-30 s. HugeTLB pages are never
+        # compacted, so a HugeTLB pool is registered.
+        self.staged_copies = not registration_pins_pages() and not cpu_hugepage_size
         self.device: torch.device | None = None
         self.num_cpu_blocks: int = 0
 
@@ -251,6 +261,14 @@ class SimpleCPUOffloadWorker:
             )
 
         self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
+        staging_bytes = STAGING_BYTES if self.staged_copies and pin_memory else 0
+        if staging_bytes:
+            logger.info(
+                "SimpleCPUOffloadWorker: the CPU KV cache is not registered with "
+                "the GPU runtime (its pages would stay movable); copies go "
+                "through a %d MiB staging buffer.",
+                staging_bytes >> 20,
+            )
 
         self._backend = DmaCopyBackend()
         self._backend.init(
@@ -259,12 +277,14 @@ class SimpleCPUOffloadWorker:
             device,
             self.load_stream,
             self.store_stream,
+            staging_bytes=staging_bytes,
         )
 
     def _alloc_cpu_caches(
         self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
     ) -> dict[str, torch.Tensor]:
-        """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
+        """Carve per-layer caches out of one mapping, registered in bounded chunks
+        unless the copies are staged."""
         layer_bytes = [
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
@@ -277,7 +297,7 @@ class SimpleCPUOffloadWorker:
             view = buf[offset : offset + size].view(gpu_tensor.dtype)
             cpu_kv_caches[name] = view.view(cpu_shape)
             offset += size
-        if pin_memory:
+        if pin_memory and not self.staged_copies:
             registered = []
             try:
                 for start, end in host_registration_ranges(
