@@ -196,6 +196,10 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager = FsAsyncLookupManager(self.file_mapper, self.tier_type)
 
     @override
+    def is_stored(self, key: OffloadKey, req_context: ReqContext) -> bool:
+        return self.lookup(key, req_context) is LookupResult.HIT
+
+    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:

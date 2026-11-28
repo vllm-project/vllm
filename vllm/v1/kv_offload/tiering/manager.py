@@ -45,9 +45,10 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     StoreTrigger,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager, store_order
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -116,6 +117,38 @@ class _DeferredRelease(NamedTuple):
     tier_idx: int
     chunk_ids: list[int]
     deferred_at: float
+
+
+def _retry_with_held_keys(
+    keys: Collection[OffloadKey],
+    keys_to_retry: list[OffloadKey],
+    held_keys: set[OffloadKey],
+    req_context: ReqContext,
+) -> list[OffloadKey]:
+    """Add the held keys a group's cut leaves behind to its keys to retry.
+
+    The connector offers each cut group again from its cut and expects
+    `keys_to_retry` to hold all of its offered keys from there on, so held
+    keys at or after the cut, in the primary tier's (position, offer) order,
+    are retried too.
+    """
+    order = store_order(keys, req_context)
+    cuts: dict[int, tuple[float, int]] = {}
+    for key in keys_to_retry:
+        group_idx = get_offload_group_idx(key)
+        if group_idx not in cuts or order[key] < cuts[group_idx]:
+            cuts[group_idx] = order[key]
+    retried = set(keys_to_retry)
+    return [
+        key
+        for key in keys
+        if key in retried
+        or (
+            key in held_keys
+            and (cut := cuts.get(get_offload_group_idx(key))) is not None
+            and order[key] >= cut
+        )
+    ]
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -978,12 +1011,21 @@ class TieringOffloadingManager(OffloadingManager):
         # Cascading of these newly-stored chunks to participating tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
+        # When the offer does not fit, chunks that every secondary tier receiving
+        # the request's stores already holds would only take primary space from
+        # the chunks that are new.
+        held_keys = self._keys_held_by_all_secondary_tiers(keys, req_context)
+        offered = [k for k in keys if k not in held_keys] if held_keys else keys
         primary_result = self.primary_tier.prepare_store(
-            keys, req_context, trigger=trigger
+            offered, req_context, trigger=trigger
         )
 
         if primary_result is None:
             return None
+        if held_keys and primary_result.keys_to_retry:
+            primary_result.keys_to_retry = _retry_with_held_keys(
+                keys, primary_result.keys_to_retry, held_keys, req_context
+            )
 
         if primary_result.keys_to_store:
             state = self._req_state[req_context.req_id]
@@ -996,13 +1038,51 @@ class TieringOffloadingManager(OffloadingManager):
             # again.
             deferred_keys = set(primary_result.keys_to_store)
             deferred_keys.update(primary_result.keys_to_retry)
-            keys_already_in_primary = tuple(k for k in keys if k not in deferred_keys)
+            keys_already_in_primary = tuple(
+                k for k in offered if k not in deferred_keys
+            )
             if keys_already_in_primary:
                 self._cascade_existing_chunks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers
                 )
 
         return primary_result
+
+    def _keys_held_by_all_secondary_tiers(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> set[OffloadKey]:
+        """Offered keys every secondary tier this request stores to holds, when
+        the offer does not fit.
+
+        A key stays in the offer unless each writable tier that receives this
+        request's stores confirms it holds it (is_stored()) and one of them can
+        serve this request a load of it. A request with request-level tiers
+        keeps every key, since those tiers are cascaded each of its chunks even
+        when they hold it. A left-out key is not staged in the primary tier for
+        this request; a later load promotes it from a secondary tier.
+        """
+        state = self._req_state[req_context.req_id]
+        skip_tiers = state.skip_cascade_tiers or ()
+        tiers = [
+            tier
+            for tier_idx, tier in enumerate(self.secondary_tiers)
+            if tier.access_mode.can_write and tier_idx not in skip_tiers
+        ]
+        if (
+            not any(
+                tier.access_mode.can_read
+                and req_context.load_tier_filter.allows(tier.medium, tier.locality)
+                for tier in tiers
+            )
+            or state.request_level_tiers
+            or not self.primary_tier.num_chunks_short(keys)
+        ):
+            return set()
+        return {
+            key
+            for key in keys
+            if all(tier.is_stored(key, req_context) for tier in tiers)
+        }
 
     def _cascade_existing_chunks_to_request_level_tiers(
         self,

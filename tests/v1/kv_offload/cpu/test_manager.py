@@ -444,6 +444,39 @@ def test_cpu_manager_stores_the_leading_keys_that_fit():
     assert output.keys_to_retry == to_keys([7])
 
 
+@pytest.mark.parametrize("store_threshold", [0, 2])
+def test_num_chunks_short_matches_what_prepare_store_cuts(store_threshold):
+    """num_chunks_short() reports the shortfall prepare_store() then cuts,
+    counting pinned, write-pending and offered chunks the same way; store
+    admission can only make it overestimate."""
+    manager = make_cpu_manager(
+        num_chunks=5, cache_policy="lru", store_threshold=store_threshold
+    )
+    store = partial(manager.prepare_store, trigger=StoreTrigger.ON_COMPUTE)
+    # Store admission counts each key once per request.
+    for i in range(store_threshold or 1):
+        store(to_keys([1, 2, 3]), make_req_context(f"warmup-{i}"))
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # 2 free chunks. Key 1 is pinned, key 3 is write-pending, key 2 is offered.
+    offer = to_keys([2, 4, 5, 6])
+
+    short = manager.num_chunks_short(offer)
+    output = store(offer, _EMPTY_REQ_CTX)
+
+    assert output is not None
+    assert short == 1
+    if store_threshold:
+        # Keys 4-6 are seen once and not admitted: nothing is cut.
+        assert output.keys_to_store == []
+        assert output.keys_to_retry == []
+    else:
+        assert output.keys_to_store == to_keys([4, 5])
+        assert output.keys_to_retry == to_keys([6])
+
+
 def test_cpu_manager_trims_a_store_by_key_position():
     """The keys of the lowest positions are stored, whatever the offer order,
     so that a trimmed store covers the same tokens in every group."""
