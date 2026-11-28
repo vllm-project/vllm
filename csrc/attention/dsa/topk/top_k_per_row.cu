@@ -541,7 +541,7 @@ template <int kNumThreadsPerBlock, bool useRadixSort>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
     const float* logits, const int* rowStarts, const int* rowEnds,
     int* outIndices, int stride0, int stride1, const int topK,
-    const int offsetIndex) {
+    const int offsetIndex, const int64_t outStride) {
   // The number of bins in the histogram.
   static constexpr int kNumBins = 2048;
 
@@ -553,7 +553,7 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
   int rowEnd = rowEnds[rowIdx];
 
   // Local pointers to this block
-  outIndices += static_cast<int64_t>(rowIdx) * topK;
+  outIndices += static_cast<int64_t>(rowIdx) * outStride;
   logits += static_cast<int64_t>(rowIdx) * stride0;
 
   topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort>(
@@ -933,24 +933,37 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
       logits.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
+  STD_TORCH_CHECK(indices.dim() == 2, "indices must be 2-D");
+  STD_TORCH_CHECK(indices.size(0) >= numRows,
+                  "indices has fewer rows than numRows");
+  STD_TORCH_CHECK(indices.size(1) >= topK,
+                  "indices has fewer columns than topK");
+  STD_TORCH_CHECK(indices.stride(1) == 1,
+                  "indices must have unit innermost stride");
+  STD_TORCH_CHECK(indices.stride(0) >= topK, "indices rows must not overlap");
+  if (numRows == 0) {
+    return;
+  }
+
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
   vllm::topKPerRowPrefill<kNumThreadsPerBlock, false>
       <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-         stream>>>(logits.const_data_ptr<float>(),
-                   rowStarts.const_data_ptr<int>(),
-                   rowEnds.const_data_ptr<int>(),
-                   indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
-                   static_cast<int>(stride1), static_cast<int>(topK), 0);
+         stream>>>(
+          logits.const_data_ptr<float>(), rowStarts.const_data_ptr<int>(),
+          rowEnds.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
+          static_cast<int>(stride0), static_cast<int>(stride1),
+          static_cast<int>(topK), 0, indices.stride(0));
 
   if (numRows > kSortingAlgorithmThreshold) {
     int numRadixBlocks = numRows - kSortingAlgorithmThreshold;
     vllm::topKPerRowPrefill<kNumThreadsPerBlock, true>
         <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-           stream>>>(
-            logits.const_data_ptr<float>(), rowStarts.const_data_ptr<int>(),
-            rowEnds.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
-            static_cast<int>(stride0), static_cast<int>(stride1),
-            static_cast<int>(topK), kSortingAlgorithmThreshold);
+           stream>>>(logits.const_data_ptr<float>(),
+                     rowStarts.const_data_ptr<int>(),
+                     rowEnds.const_data_ptr<int>(),
+                     indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
+                     static_cast<int>(stride1), static_cast<int>(topK),
+                     kSortingAlgorithmThreshold, indices.stride(0));
   }
 }

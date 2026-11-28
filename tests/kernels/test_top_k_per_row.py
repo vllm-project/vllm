@@ -5,7 +5,6 @@
 import numpy as np
 import pytest
 import torch
-
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -315,6 +314,48 @@ def test_top_k_per_row(
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_prefill_strided_output() -> None:
+    """The output row stride must be honored, not assumed packed (#70377)."""
+    torch.set_default_device("cuda:0")
+    num_rows, vocab_size, top_k = 4, 128, 16
+    logits = torch.randn(num_rows, vocab_size, dtype=torch.float32)
+    row_starts = torch.zeros(num_rows, dtype=torch.int32)
+    row_ends = torch.full((num_rows,), vocab_size, dtype=torch.int32)
+
+    base = torch.full((num_rows, 48), 777, dtype=torch.int32)
+    indices = base[:, :top_k]
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    ref = torch.empty((num_rows, top_k), dtype=torch.int32)
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        ref,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(indices, ref)
+    assert torch.equal(base[:, top_k:], torch.full_like(base[:, top_k:], 777))
 
 
 def _run_top_k_per_row_decode_test(
