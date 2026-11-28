@@ -9,6 +9,7 @@ in token-level parity. Image blocks emit the bare `<|content_image|>` marker;
 """
 
 import pytest
+from PIL import Image
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.inkling import (
@@ -263,6 +264,15 @@ class TestRenderingSemantics:
                 add_generation_prompt=False,
             )
             == "<|message_tool|>my_tool<|content_text|>ok<|end_message|>"
+        )
+
+    def test_image_pil_part(self, inkling_tokenizer):
+        """`image_pil` parts from `LLM.chat` render as an image marker, like
+        `image_url`."""
+        image = {"type": "image_pil", "image_pil": Image.new("RGB", (2, 2))}
+        assert (
+            render_text(inkling_tokenizer, [{"role": "user", "content": [image]}])
+            == "<|message_user|><|content_image|><|end_message|><|message_model|>"
         )
 
     def test_tool_response_image_part(self, inkling_tokenizer):
@@ -949,6 +959,15 @@ class TestInkling2Rendering:
             "<|message_model|><|content_thinking|>hm<|end_message|>"
             "<|message_model|><|content_tool_error|>no tool<|end_message|>"
             "<|content_model_end_sampling|>"
+        )
+
+    def test_image_pil_part(self):
+        """`image_pil` parts from `LLM.chat` render as an image marker, like
+        `image_url`."""
+        image = {"type": "image_pil", "image_pil": Image.new("RGB", (2, 2))}
+        assert render_inkling2_text([{"role": "user", "content": [image]}]) == (
+            _EFFORT_09 + "<|end_message|><|message_user|><|content_image|>"
+            "<|end_message|>"
         )
 
     def test_continue_final_message(self):
