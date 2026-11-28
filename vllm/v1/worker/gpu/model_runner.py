@@ -90,6 +90,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.sample.ops.topk_topp_sampler import maybe_reserve_topk_topp_workspace
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -510,11 +511,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Speculative verification uses native top-k/top-p masking even
             # when target-only sampling can use FlashInfer's fused sampler.
-            # CPU has no fused sampler, so it always masks with the kernel.
-            if (
-                current_platform.is_rocm()
-                or current_platform.is_cpu()
-                or (current_platform.is_cuda() and self.speculative_config is not None)
+            if current_platform.is_rocm() or (
+                current_platform.is_cuda() and self.speculative_config is not None
             ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
@@ -1072,6 +1070,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
+        maybe_reserve_topk_topp_workspace(
+            self.vllm_config, logits.device, logits.shape[-1]
+        )
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )

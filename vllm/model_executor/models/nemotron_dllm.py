@@ -1011,8 +1011,8 @@ class MaskedDiffusionSampler:
             token_slots = decode_slots.repeat_interleave(
                 valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
             )
-            top_k, top_p, _ = self.sampling_states.get_top_k_top_p(
-                token_slots, decode_slots_np, logits.shape[-1]
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                token_slots, decode_slots_np
             )
             if top_k is not None or top_p is not None:
                 logits = _filter_sampling_logits(
