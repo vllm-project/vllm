@@ -373,6 +373,8 @@ class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
+    # Alias kept for OpenAI-compatible clients that read `reasoning_content`.
+    reasoning_content: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
     @model_serializer(mode="wrap")
@@ -380,4 +382,9 @@ class DeltaMessage(OpenAIBaseModel):
         data = handler(self)
         if len(data.get("tool_calls", [])) == 0:
             data.pop("tool_calls", None)
+        reasoning = data.get("reasoning")
+        if reasoning is not None:
+            data["reasoning_content"] = reasoning
+        else:
+            data.pop("reasoning_content", None)
         return data

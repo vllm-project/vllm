@@ -111,12 +111,19 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
+    # Alias kept for OpenAI-compatible clients that read `reasoning_content`.
+    reasoning_content: str | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
         if len(data.get("tool_calls", [])) == 0:
             data.pop("tool_calls", None)
+        reasoning = data.get("reasoning")
+        if reasoning is not None:
+            data["reasoning_content"] = reasoning
+        else:
+            data.pop("reasoning_content", None)
         return data
 
 
