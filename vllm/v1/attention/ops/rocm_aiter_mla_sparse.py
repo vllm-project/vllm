@@ -831,6 +831,23 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
     )
 
 
+@functools.cache
+def _gluon_paged_mqa_logits_module():
+    """The re-tuned gfx950 paged-MQA logits module, or None where Triton has no
+    gluon AMD backend."""
+    if not _ON_GFX950:
+        return None
+    try:
+        from vllm.v1.attention.ops import rocm_gluon_paged_mqa_logits
+    except Exception as error:  # noqa: BLE001
+        logger.warning_once(
+            "gfx950 gluon paged-MQA logits is unavailable, using AITER's: %s",
+            str(error),
+        )
+        return None
+    return rocm_gluon_paged_mqa_logits
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -842,6 +859,7 @@ def rocm_fp8_paged_mqa_logits(
     *,
     compress_ratio: int = 1,
     cache_layout: str | None = None,
+    rows_per_request: int = 0,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -861,6 +879,9 @@ def rocm_fp8_paged_mqa_logits(
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
         cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
             also takes the Triton path.
+        rows_per_request: For flattened MTP decode (`next_n` == 1), the number
+            of consecutive rows of each request, or 0 if they are not uniform.
+            Selects the gfx950 gluon kernel for verify rows.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -895,6 +916,32 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _USE_FUSED_PAGED_MQA_LOGITS:
+            batch_size, next_n, heads, _ = q_fp8.shape
+            preshuffle = indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA
+            gluon = _gluon_paged_mqa_logits_module()
+            if gluon is not None and gluon.supported(
+                q_fp8,
+                kv_cache_fp8,
+                context_lens,
+                block_tables,
+                preshuffle=preshuffle,
+                rows_per_request=rows_per_request,
+            ):
+                logger.info_once("Using gfx950 gluon paged-MQA logits for MTP verify.")
+                out_logits = _decode_logits_workspace(
+                    batch_size * next_n, max_model_len
+                )
+                gluon.gluon_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    rows_per_request,
+                )
+                return out_logits
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
@@ -902,7 +949,6 @@ def rocm_fp8_paged_mqa_logits(
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
-            batch_size, next_n, heads, _ = q_fp8.shape
             out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
@@ -913,7 +959,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
+                Preshuffle=preshuffle,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -1744,6 +1790,11 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=decode_max_model_len,
             compress_ratio=compress_ratio,
             cache_layout=cache_layout,
+            rows_per_request=(
+                decode_metadata.write_max_decode_len
+                if decode_metadata.decode_is_uniform
+                else 0
+            ),
         )
 
         if candidate_blocks is not None:
