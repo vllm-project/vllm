@@ -56,6 +56,10 @@ except ImportError as e:
 
 try:
     import vllm._C  # noqa: F401
+except ModuleNotFoundError:
+    # vllm._C only holds the Octave KV cache kernels on ROCm and is not built
+    # unless gfx942 or gfx1100 is targeted.
+    pass
 except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
@@ -678,9 +682,11 @@ class RocmPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         """Import ROCm-specific kernels."""
-        super().import_kernels()
-
         import contextlib
+
+        # vllm._C is imported at module load, where its absence is expected.
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C_stable_libtorch  # noqa: F401
 
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):

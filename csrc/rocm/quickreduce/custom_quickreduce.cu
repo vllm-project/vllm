@@ -1,7 +1,13 @@
-#include <ATen/cuda/Exceptions.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include <torch/types.h>
+#include "torch_utils.h"
+
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/device.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include <cstring>
 
 #ifdef USE_ROCM
 
@@ -30,53 +36,65 @@ void qr_destroy(quickreduce::fptr_t _fa) {
   }
 }
 
-torch::Tensor qr_get_handle(quickreduce::fptr_t _fa) {
+torch::stable::Tensor qr_get_handle(quickreduce::fptr_t _fa) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   hipIpcMemHandle_t handle = fa->get_handle();
-  auto options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-  auto data_handle =
-      torch::empty({static_cast<int64_t>(sizeof(hipIpcMemHandle_t))}, options);
-  std::memcpy(data_handle.data_ptr(), &handle, sizeof(hipIpcMemHandle_t));
+  auto data_handle = torch::stable::empty(
+      {static_cast<int64_t>(sizeof(hipIpcMemHandle_t))},
+      torch::headeronly::ScalarType::Byte, std::nullopt,
+      torch::stable::Device(torch::stable::DeviceType::CPU));
+  std::memcpy(data_handle.mutable_data_ptr(), &handle,
+              sizeof(hipIpcMemHandle_t));
   return data_handle;
 }
 
 void qr_open_handles(quickreduce::fptr_t _fa,
-                     const std::vector<torch::Tensor>& handles) {
+                     const std::vector<torch::stable::Tensor>& handles) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   std::vector<hipIpcMemHandle_t> ipc_handles;
   ipc_handles.reserve(handles.size());
   for (auto& handle : handles) {
     // Ensure the tensor is on the same device as the current device.
     hipIpcMemHandle_t ipc_handle;
-    std::memcpy(&ipc_handle, handle.data_ptr(), sizeof(hipIpcMemHandle_t));
+    std::memcpy(&ipc_handle, handle.const_data_ptr(),
+                sizeof(hipIpcMemHandle_t));
     ipc_handles.push_back(ipc_handle);
   }
   fa->open_ipc_handles(ipc_handles);
 }
 
-void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
-                   torch::Tensor& out, int64_t quant_level, bool cast_bf2half) {
+void qr_all_reduce(quickreduce::fptr_t _fa, torch::stable::Tensor& inp,
+                   torch::stable::Tensor& out, int64_t quant_level,
+                   bool cast_bf2half) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
-  auto stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      inp.get_device_index());
+  auto stream = get_current_cuda_stream(inp.get_device_index());
 
-  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
-  TORCH_CHECK_EQ(inp.numel(), out.numel());
-  TORCH_CHECK_LE(out.numel(), fa->kMaxProblemSize);
-  if (out.scalar_type() == at::ScalarType::Half) {
-    fa->allreduce<half, false>(reinterpret_cast<half*>(inp.data_ptr()),
-                               reinterpret_cast<half*>(out.data_ptr()),
-                               out.numel(), quant_level, stream);
-  } else if (out.scalar_type() == at::ScalarType::BFloat16) {
+  STD_TORCH_CHECK(inp.scalar_type() == out.scalar_type(),
+                  "inp and out must have the same dtype, got ",
+                  inp.scalar_type(), " and ", out.scalar_type());
+  STD_TORCH_CHECK(inp.numel() == out.numel(),
+                  "inp and out must have the same number of elements, got ",
+                  inp.numel(), " and ", out.numel());
+  STD_TORCH_CHECK(out.numel() <= fa->kMaxProblemSize, "out has ", out.numel(),
+                  " elements, more than the maximum of ", fa->kMaxProblemSize);
+  if (out.scalar_type() == torch::headeronly::ScalarType::Half) {
+    fa->allreduce<half, false>(
+        reinterpret_cast<const half*>(inp.const_data_ptr()),
+        reinterpret_cast<half*>(out.mutable_data_ptr()), out.numel(),
+        quant_level, stream);
+  } else if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     if (cast_bf2half) {
-      fa->allreduce<half, true>(reinterpret_cast<half*>(inp.data_ptr()),
-                                reinterpret_cast<half*>(out.data_ptr()),
-                                out.numel(), quant_level, stream);
+      fa->allreduce<half, true>(
+          reinterpret_cast<const half*>(inp.const_data_ptr()),
+          reinterpret_cast<half*>(out.mutable_data_ptr()), out.numel(),
+          quant_level, stream);
     } else {
       fa->allreduce<quickreduce::nv_bfloat16, false>(
-          reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
-          reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
+          reinterpret_cast<const quickreduce::nv_bfloat16*>(
+              inp.const_data_ptr()),
+          reinterpret_cast<quickreduce::nv_bfloat16*>(out.mutable_data_ptr()),
           out.numel(), quant_level, stream);
     }
   } else {

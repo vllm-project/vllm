@@ -365,9 +365,7 @@ endif()
 #
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
-  set(VLLM_EXT_SRC
-    "csrc/rocm/quickreduce/torch_bindings.cpp"
-    "csrc/rocm/quickreduce/custom_quickreduce.cu")
+  set(VLLM_EXT_SRC)
   # Octave KV cache (store, decode, rotation, prefill): only built for the
   # validated architectures, gfx1100 (RDNA3) and gfx942 (MI300).
   set(VLLM_OCTAVE_KV OFF)
@@ -383,22 +381,26 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     )
   endif()
 
-  message(STATUS "Enabling C extension.")
-  define_extension_target(
-    _C
-    DESTINATION vllm
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_GPU_ARCHES}
-    USE_SABI 3
-    WITH_SOABI)
   if(VLLM_OCTAVE_KV)
+    message(STATUS "Enabling C extension.")
+    define_extension_target(
+      _C
+      DESTINATION vllm
+      LANGUAGE ${VLLM_GPU_LANG}
+      SOURCES ${VLLM_EXT_SRC}
+      COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+      ARCHITECTURES ${VLLM_GPU_ARCHES}
+      USE_SABI 3
+      WITH_SOABI)
     # MFMA accumulators in VGPRs: in AGPRs every online-softmax rescale of the
     # output copies it through 64 extra VGPRs and halves the occupancy.
     set_source_files_properties(
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/attention/octave_decode_mfma_cdna.hip"
       PROPERTIES COMPILE_FLAGS "-mllvm -amdgpu-mfma-vgpr-form")
+  else()
+    # The Octave KV cache is all that is left in _C. setup.py still requests
+    # the target on ROCm, so keep an empty one when no Octave arch is built.
+    add_custom_target(_C)
   endif()
 endif() # _C HIP endif
 
@@ -496,6 +498,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         SRCS "csrc/mamba/gdn_prefill_conv.cu"
         CUDA_ARCHS "10.3a")
     endif()
+  endif()
+
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/rocm/quickreduce/torch_bindings.cpp"
+      "csrc/rocm/quickreduce/custom_quickreduce.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
