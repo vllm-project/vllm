@@ -258,6 +258,7 @@ def _capture_tile_config(
     dtype=torch.bfloat16,
     head_dim: int = 128,
     on_gfx1151: bool = False,
+    on_rdna4: bool = False,
     head_stride_pad: int = 0,
 ) -> _LaunchCapture:
     """Capture the tile configuration with the platform predicates mocked.
@@ -277,6 +278,7 @@ def _capture_tile_config(
 
         monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: on_gfx1x)
         monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: on_gfx1151)
+        monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: on_rdna4)
 
     capture = _LaunchCapture()
     monkeypatch.setattr(prefill_ops, "_fwd_kernel", capture)
@@ -374,6 +376,16 @@ def test_context_attention_non_contiguous_heads(D: int):
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
 
 
+# The parts the head-dim blocking is enabled on, as the platform predicate that
+# selects each of them.
+TUNED_PARTS = pytest.mark.parametrize("part", ["gfx1151", "rdna4"])
+
+
+def _tuned(part: str) -> dict:
+    return {f"on_{part}": True}
+
+
+@TUNED_PARTS
 @pytest.mark.parametrize(
     ("head_dim", "expected"),
     [
@@ -385,58 +397,64 @@ def test_context_attention_non_contiguous_heads(D: int):
         (128, (128, 0)),
     ],
 )
-def test_gfx1151_splits_the_head_dim(monkeypatch, head_dim, expected) -> None:
+def test_tuned_parts_split_the_head_dim(monkeypatch, part, head_dim, expected) -> None:
     """A non-power-of-2 head dim is covered by a main block plus a tail."""
     capture = _capture_tile_config(
-        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+        monkeypatch, is_rocm=True, on_gfx1x=True, head_dim=head_dim, **_tuned(part)
     )
     got = (capture.kwargs["BLOCK_DMODEL"], capture.kwargs["BLOCK_DMODEL_TAIL"])
     assert got == expected
 
 
+@TUNED_PARTS
 @pytest.mark.parametrize("head_dim", [72, 80])
-def test_gfx1151_narrows_the_tile_for_the_split_dims(monkeypatch, head_dim) -> None:
+def test_tuned_parts_narrow_the_tile_for_the_split_dims(
+    monkeypatch, part, head_dim
+) -> None:
     """The 64 + 16 head dims take a narrower tile and 4 warps."""
     capture = _capture_tile_config(
-        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+        monkeypatch, is_rocm=True, on_gfx1x=True, head_dim=head_dim, **_tuned(part)
     )
     assert capture.kwargs["BLOCK_N"] == 16
     assert capture.kwargs["num_warps"] == 4
 
 
+@TUNED_PARTS
 @pytest.mark.parametrize("head_dim", [64, 96, 128])
-def test_gfx1151_leaves_the_other_head_dims_on_the_rdna_tile(
-    monkeypatch, head_dim
+def test_tuned_parts_leave_the_other_head_dims_on_the_rdna_tile(
+    monkeypatch, part, head_dim
 ) -> None:
     """Only the 64 + 16 dims are faster narrower; the rest keep the RDNA tile."""
     capture = _capture_tile_config(
-        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+        monkeypatch, is_rocm=True, on_gfx1x=True, head_dim=head_dim, **_tuned(part)
     )
     assert capture.kwargs["BLOCK_N"] == 32
 
 
+@TUNED_PARTS
 @pytest.mark.parametrize("head_dim", [64, 72, 80, 96, 128])
-def test_alignment_hint_is_not_tied_to_the_tile(monkeypatch, head_dim) -> None:
+def test_alignment_hint_is_not_tied_to_the_tile(monkeypatch, part, head_dim) -> None:
     """The hint is an alignment fact, so it does not depend on the KV tile.
 
     It only tells the compiler something new when head_dim is 8 mod 16;
     elsewhere it is a tautology and measures exactly neutral.
     """
     capture = _capture_tile_config(
-        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+        monkeypatch, is_rocm=True, on_gfx1x=True, head_dim=head_dim, **_tuned(part)
     )
     assert capture.kwargs["HEAD_STRIDE_ALIGNED_8"] is True
 
 
+@TUNED_PARTS
 @pytest.mark.parametrize("head_dim", [72, 96])
-def test_nothing_changes_off_gfx1151(monkeypatch, head_dim) -> None:
-    """Every other part keeps the launch configuration it has today."""
+def test_nothing_changes_off_the_tuned_parts(monkeypatch, part, head_dim) -> None:
+    """Every other part (gfx11 other than gfx1151, CDNA, ...) keeps today's launch."""
     with pytest.MonkeyPatch.context() as m:
         tuned = _capture_tile_config(
-            m, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+            m, is_rocm=True, on_gfx1x=True, head_dim=head_dim, **_tuned(part)
         )
     stock = _capture_tile_config(
-        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=False, head_dim=head_dim
+        monkeypatch, is_rocm=True, on_gfx1x=True, head_dim=head_dim
     )
     assert stock.kwargs["BLOCK_DMODEL"] == triton.next_power_of_2(head_dim)
     assert stock.kwargs["BLOCK_DMODEL_TAIL"] == 0
@@ -444,14 +462,40 @@ def test_nothing_changes_off_gfx1151(monkeypatch, head_dim) -> None:
     assert stock.kwargs != tuned.kwargs
 
 
+@pytest.mark.parametrize(
+    ("is_rocm", "on_gfx1x", "on_gfx1151", "on_rdna4", "tuned"),
+    [
+        pytest.param(True, True, True, False, True, id="gfx1151"),
+        pytest.param(True, True, False, True, True, id="rdna4"),
+        pytest.param(True, True, False, False, False, id="other-gfx1x"),
+        # on_rdna4() is false on gfx1250, which on_gfx12x() would include.
+        pytest.param(True, False, False, False, False, id="cdna-or-gfx1250"),
+        pytest.param(False, False, True, True, False, id="not-rocm"),
+    ],
+)
+def test_head_dim_blocking_is_gated_by_platform(
+    monkeypatch, is_rocm, on_gfx1x, on_gfx1151, on_rdna4, tuned
+) -> None:
+    capture = _capture_tile_config(
+        monkeypatch,
+        is_rocm=is_rocm,
+        on_gfx1x=on_gfx1x,
+        on_gfx1151=on_gfx1151,
+        on_rdna4=on_rdna4,
+        head_dim=72,
+    )
+    assert (capture.kwargs["BLOCK_DMODEL_TAIL"] == 16) is tuned
+
+
+@TUNED_PARTS
 @pytest.mark.parametrize("head_dim", [72, 96])
-def test_gfx1151_split_matches_the_reference(monkeypatch, head_dim) -> None:
-    """Run the split-D kernel for real, so CI covers it off gfx1151 too."""
+def test_tuned_split_matches_the_reference(monkeypatch, part, head_dim) -> None:
+    """Run the split-D kernel for real, so CI covers it off the tuned parts too."""
     import vllm.platforms.rocm as rocm_platform
 
     if not current_platform.is_rocm():
         pytest.skip("needs the ROCm platform module")
-    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+    monkeypatch.setattr(rocm_platform, f"on_{part}", lambda: True)
 
     torch.manual_seed(42)
     B, S, H = 2, 256, 8
@@ -475,7 +519,8 @@ def test_gfx1151_split_matches_the_reference(monkeypatch, head_dim) -> None:
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
 
 
-def test_narrow_tile_needs_the_alignment_hint(monkeypatch) -> None:
+@TUNED_PARTS
+def test_narrow_tile_needs_the_alignment_hint(monkeypatch, part) -> None:
     """A padded head stride disables the hint, and then the wide tile wins.
 
     head_dim 72 still splits as 64 + 16, but a view whose head stride is not
@@ -486,9 +531,9 @@ def test_narrow_tile_needs_the_alignment_hint(monkeypatch) -> None:
         monkeypatch,
         is_rocm=True,
         on_gfx1x=True,
-        on_gfx1151=True,
         head_dim=72,
         head_stride_pad=4,
+        **_tuned(part),
     )
     assert capture.kwargs["BLOCK_DMODEL_TAIL"] == 16, "still a 64 + 16 split"
     assert capture.kwargs["HEAD_STRIDE_ALIGNED_8"] is False
