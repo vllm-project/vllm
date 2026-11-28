@@ -15,6 +15,10 @@ import vllm.envs as envs
 _T = TypeVar("_T")
 
 
+class MediaDecodedSizeExceededError(ValueError):
+    """Raised when decoded media exceeds the request-wide byte limit."""
+
+
 class MediaDecodedBudget:
     """Thread-safe decoded-media byte accumulator for one request."""
 
@@ -34,7 +38,7 @@ class MediaDecodedBudget:
                 available = limit - self.used - self._reserved
                 if available >= max_bytes or self._reserved == 0:
                     if available <= 0:
-                        raise ValueError(
+                        raise MediaDecodedSizeExceededError(
                             "Request decoded media exceeds "
                             "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
                         )
@@ -53,7 +57,7 @@ class MediaDecodedBudget:
             try:
                 used = self.used + decoded_bytes
                 if decoded_bytes > reserved or used > limit:
-                    raise ValueError(
+                    raise MediaDecodedSizeExceededError(
                         "Request decoded media exceeds "
                         f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={limit} "
                         f"({used} bytes)."
@@ -75,7 +79,7 @@ class MediaDecodedBudget:
                 self._condition.wait()
             used = self.used + decoded_bytes
             if used > limit:
-                raise ValueError(
+                raise MediaDecodedSizeExceededError(
                     "Request decoded media exceeds "
                     f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={limit} "
                     f"({used} bytes)."

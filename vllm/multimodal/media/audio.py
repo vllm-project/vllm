@@ -24,7 +24,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from .base import MediaDecodedBudget, MediaIO
+from .base import MediaDecodedBudget, MediaDecodedSizeExceededError, MediaIO
 
 logger = init_logger(__name__)
 
@@ -661,7 +661,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 if (
                     max_audio_decode_bytes is None or reserved < max_audio_decode_bytes
                 ) and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(exc):
-                    raise ValueError(
+                    raise MediaDecodedSizeExceededError(
                         "Request decoded media exceeds "
                         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
                     ) from exc
