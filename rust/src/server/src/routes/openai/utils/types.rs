@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::fmt;
+use std::marker::PhantomData;
 use std::slice;
 
 use indexmap::IndexMap;
+use itertools::Either;
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use vllm_chat::{AllowedToolsMode, ChatTool, InputAudioFormat};
@@ -672,11 +676,59 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match deserialize_text_or_list(deserializer)? {
+            Either::Left(text) => Self::Text(text),
+            Either::Right(parts) => Self::Parts(parts),
+        })
+    }
+}
+
+/// Deserialize a string-or-list field by its JSON type rather than
+/// `#[serde(untagged)]`, which would replace a list element's precise error
+/// with a generic one.
+pub(crate) fn deserialize_text_or_list<'de, D, T>(
+    deserializer: D,
+) -> Result<Either<String, Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct TextOrList<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for TextOrList<T> {
+        type Value = Either<String, Vec<T>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a string or a list")
+        }
+
+        fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            Ok(Either::Left(text.to_owned()))
+        }
+
+        fn visit_string<E: de::Error>(self, text: String) -> Result<Self::Value, E> {
+            Ok(Either::Left(text))
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::with_capacity(seq.size_hint().unwrap_or_default());
+            while let Some(item) = seq.next_element()? {
+                items.push(item);
+            }
+            Ok(Either::Right(items))
+        }
+    }
+
+    deserializer.deserialize_any(TextOrList(PhantomData))
 }
 
 // ============================================================================

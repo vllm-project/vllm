@@ -584,7 +584,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | T + A | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
 | `HCXVisionV2ForCausalLM` | HyperCLOVAX-SEED-Think-32B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Think-32B` | | |
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
-| `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | |
+| `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | ✅︎ |
 | `HYV4VLForConditionalGeneration` | HY4 | T + I<sup>+</sup> + V<sup>+</sup> | `tencent/Hy4`, `tencent/Hy4-FP8` | | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
@@ -678,9 +678,10 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     selected. HY4 Flash on ROCm also requires `--kv-cache-dtype` `auto`,
     `bfloat16` or `fp8_ds_mla`, and OCP FP8.
 
-    HY4 Flash does not support LoRA or pipeline parallelism. Published HY4
-    Flash checkpoints use `HYV4FlashForConditionalGeneration`, which vLLM maps
-    to `HYV4FlashVLForConditionalGeneration`.
+    HY4 Flash does not support LoRA, and supports pipeline parallelism on
+    NVIDIA CUDA only. Published HY4 Flash checkpoints use
+    `HYV4FlashForConditionalGeneration`, which vLLM maps to
+    `HYV4FlashVLForConditionalGeneration`.
 
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.

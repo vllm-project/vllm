@@ -63,7 +63,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
 if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
-        ("vllm-project/mamba2-130m-hf", None, CPU_BLOCK_SIZES, True),
+        ("vllm/mamba2-130m-hf", None, CPU_BLOCK_SIZES, True),
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
@@ -706,7 +706,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # The chunk size must be a multiple of the GPU block size, which
         # defaults to 64 tokens.
-        ("vllm-project/mamba2-1.3b-hf", 64, 1),
+        ("vllm/mamba2-1.3b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):

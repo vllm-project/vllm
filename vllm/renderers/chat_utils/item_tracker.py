@@ -268,11 +268,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @property
     def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
-        return self._media_io_kwargs or (
-            self._model_config.multimodal_config.media_io_kwargs
-            if self._model_config.multimodal_config
-            else None
-        )
+        return self._media_io_kwargs
 
     @cached_property
     def video_io_defaults(self) -> dict[str, Any]:
@@ -571,6 +567,8 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         # needlessly adds their latency.
         # Keep the original group and item order when rebuilding the result.
         item_groups = list(self._items_by_modality.items())
+        # Break the parser <-> tracker reference cycle once items are snapshotted.
+        self._items_by_modality.clear()
         items = [item for _, group in item_groups for item in group]
         results = await asyncio.gather(
             *(item() for item in items), return_exceptions=True
