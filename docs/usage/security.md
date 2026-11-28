@@ -146,6 +146,9 @@ lookup.
   clip is processed and account for the concatenated output while the
   individual tensors are live. EmbeddingGemma2 counts the frames the processor
   will keep when processor-side sampling is enabled.
+- Ovis2.5 applies `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` to the aggregate
+  float32 image and video tensors for each processor call before allocation,
+  including minimum-size upscaling and temporal padding.
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
