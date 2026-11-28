@@ -416,6 +416,181 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
 
 
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_stored_tool_call_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    preprocess_chat = AsyncMock(return_value=([], [tokens_input([1])]))
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_stored",
+                    "output": "done",
+                }
+            ],
+            tools=[],
+        ),
+        previous_messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_stored"}],
+            }
+        ],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    preprocess_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_stored_response_output_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    preprocess_chat = AsyncMock(return_value=([], [tokens_input([1])]))
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_stored",
+                    "output": "done",
+                }
+            ],
+            tools=[],
+        ),
+        previous_response_outputs=[
+            ResponseFunctionToolCall(
+                arguments="{}",
+                call_id="call_stored",
+                name="lookup",
+                type="function_call",
+            )
+        ],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    preprocess_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_empty_responses_call_id():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "",
+                    "output": "orphaned",
+                }
+            ],
+            tools=[],
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
+    assert result.error.param == "call_id"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_skips_validation_for_internal_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+
+    request = ResponsesRequest(input="internal continuation", tools=[]).model_copy(
+        update={
+            "input": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_x",
+                    "content": "internal output",
+                }
+            ]
+        }
+    )
+    result = await renderer.render_responses(
+        request,
+        validate_tool_call_ids=False,
+    )
+
+    assert not isinstance(result, ErrorResponse)
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_parallel_responses_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "one",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_2",
+                    "name": "two",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_2",
+                    "output": "two",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "one",
+                },
+            ],
+            tools=[],
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+
+
 _REUSED_IDS = [10, 20, 30]
 _IMAGE_PART = {
     "type": "input_image",
@@ -725,14 +900,37 @@ async def test_online_renderer_renders_harmony_continuation_with_call_linkage(
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_returns_typed_error_for_bad_harmony_call_reference():
+@pytest.mark.parametrize("call_id", [None, "", "missing"])
+async def test_online_renderer_returns_typed_error_for_bad_harmony_call_reference(
+    call_id,
+):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
+    item = {"type": "function_call_output", "output": "orphaned"}
+    if call_id is not None:
+        item["call_id"] = call_id
+    request = ResponsesRequest(
+        input=[item],
+        tools=[],
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
+    assert result.error.param == "call_id"
+    assert "call_id" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_orphan_function_call_output():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
     request = ResponsesRequest(
         input=[
             {
                 "type": "function_call_output",
-                "call_id": "missing",
+                "call_id": "call_missing",
                 "output": "orphaned",
             }
         ],
@@ -743,8 +941,91 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
 
     assert isinstance(result, ErrorResponse)
     assert result.error.type == "invalid_request_error"
-    assert result.error.param == "input"
-    assert "No call message found for missing" in result.error.message
+    assert result.error.param == "call_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call_id", "expected_param"),
+    [("call_stored", None), ("call_orphan", "call_id")],
+)
+async def test_serving_responses_validates_against_stored_history(
+    monkeypatch: pytest.MonkeyPatch,
+    call_id,
+    expected_param,
+):
+    """A follow-up answering a stored call must pass; an unknown one must 400.
+
+    Exercises the real `_render_resolved_response_inputs` wiring that loads
+    `msg_store`/`response_store` for `previous_response_id`, so a regression
+    that drops the stored output would fail here.
+    """
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+    engine_client = MagicMock()
+    engine_client.model_config = MagicMock()
+    engine_client.model_config.max_model_len = 100
+    engine_client.model_config.hf_config.model_type = "test"
+    engine_client.model_config.get_diff_sampling_param.return_value = {}
+    engine_client.input_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=MagicMock(),
+        online_renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        tool_server=MagicMock(spec=ToolServer),
+    )
+
+    prev = ResponsesResponse(
+        id="resp_prev",
+        model="test-model",
+        output=[
+            ResponseFunctionToolCall(
+                arguments="{}",
+                call_id="call_stored",
+                name="lookup",
+                type="function_call",
+            )
+        ],
+        parallel_tool_calls=True,
+        temperature=1.0,
+        tool_choice="auto",
+        tools=[],
+        top_p=1.0,
+        background=False,
+        max_output_tokens=16,
+        service_tier="auto",
+        status="completed",
+        truncation="disabled",
+    )
+    serving.response_store["resp_prev"] = prev
+    serving.msg_store["resp_prev"] = [{"role": "user", "content": "hi"}]
+
+    request = ResponsesRequest(
+        input=[{"type": "function_call_output", "call_id": call_id, "output": "done"}],
+        previous_response_id="resp_prev",
+        tools=[],
+    )
+
+    result = await serving._render_resolved_response_inputs(request, prev)
+
+    if expected_param is None:
+        assert not isinstance(result, ErrorResponse)
+    else:
+        assert isinstance(result, ErrorResponse)
+        assert result.error.type == "invalid_request_error"
+        assert result.error.param == expected_param
 
 
 @pytest.mark.asyncio
@@ -1022,6 +1303,12 @@ class TestInitializeToolSessions:
         assert render_request.input == turn_messages
         assert render_request.instructions is None
         assert render_request.cache_salt == "request-salt"
+        assert (
+            serving_responses_instance.online_renderer.render_responses.call_args.kwargs[
+                "validate_tool_call_ids"
+            ]
+            is False
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.cpu_test
