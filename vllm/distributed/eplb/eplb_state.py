@@ -457,6 +457,7 @@ class EplbState:
     ):
         """Build the initial EPLB state."""
         self.is_async = self.parallel_config.eplb_config.use_async
+        self.min_rearrange_gain = self.parallel_config.eplb_config.min_rearrange_gain
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
@@ -1056,6 +1057,7 @@ class EplbState:
                 skip_rearrange = False
                 if (
                     current_platform.is_rocm()
+                    and self.min_rearrange_gain > 0
                     and not is_profile
                     and rank_mapping is None
                     and bool((old_physical_to_logical_map >= 0).all())
@@ -1098,7 +1100,7 @@ class EplbState:
                     relative_improvement = (
                         current_imbalance - proposed_imbalance
                     ) / current_imbalance
-                    skip_rearrange = relative_improvement < 0.05
+                    skip_rearrange = relative_improvement < self.min_rearrange_gain
                     if skip_rearrange and is_main_rank:
                         logger.info(
                             "[EPLB] Skip rearrange: imbalance %.4f -> "
