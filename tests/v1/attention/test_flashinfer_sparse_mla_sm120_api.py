@@ -3,6 +3,7 @@
 """Behavior checks for FlashInfer SM120 sparse MLA backend selection."""
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -16,6 +17,9 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseSM120Backend,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 
 def _fake_vllm_config(model_type: str) -> SimpleNamespace:
@@ -42,7 +46,6 @@ def test_sm120_dense_prefill_requires_rope_tail(monkeypatch) -> None:
     def build_impl(qk_rope_head_dim: int):
         def fake_common_init(self, *args, **kwargs) -> None:
             self.qk_rope_head_dim = qk_rope_head_dim
-            self.topk_indices_buffer = kwargs["topk_indices_buffer"]
 
         monkeypatch.setattr(
             "vllm.model_executor.layers.attention.sparse_mla_attention."
@@ -61,7 +64,13 @@ def test_sm120_dense_prefill_requires_rope_tail(monkeypatch) -> None:
                 logits_soft_cap=None,
                 attn_type="decoder",
                 kv_sharing_target_layer_name=None,
-                topk_indices_buffer=torch.empty(1, dtype=torch.int32),
+                q_lora_rank=None,
+                kv_lora_rank=512,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=qk_rope_head_dim,
+                qk_head_dim=128 + qk_rope_head_dim,
+                v_head_dim=512,
+                kv_b_proj=cast("ColumnParallelLinear", None),
             )
 
     assert build_impl(qk_rope_head_dim=64).supports_dense_mha_prefill
