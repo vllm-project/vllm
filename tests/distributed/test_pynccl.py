@@ -65,11 +65,14 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
+    caller_stream = torch.accelerator.current_stream()
     pynccl_comm = PyNcclCommunicator(
         get_world_group().cpu_group, device=get_world_group().device
     )
+    assert torch.accelerator.current_stream() == caller_stream
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(pynccl_comm.rank)
     tensor = pynccl_comm.all_reduce(tensor)
+    assert torch.accelerator.current_stream() == caller_stream
     torch.accelerator.synchronize()
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
