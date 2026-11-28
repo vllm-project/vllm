@@ -31,7 +31,6 @@ from tests.kernels.utils import torch_moe
 from vllm.config import (
     CompilationConfig,
     EPLBConfig,
-    KernelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -2300,13 +2299,8 @@ def _biased_moe_tp_worker(rank: int, tp_size: int, port: int, result_path: str):
         device = torch.device(current_platform.device_type, rank)
         torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
-    # Unquantized FlashInfer CUTLASS drops expert biases, so pin a bias-aware
-    # kernel on GPU; CPU only has its own backend.
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(tensor_parallel_size=tp_size),
-        kernel_config=KernelConfig(
-            moe_backend="auto" if current_platform.is_cpu() else "triton"
-        ),
     )
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
