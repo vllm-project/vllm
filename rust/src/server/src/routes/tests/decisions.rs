@@ -201,14 +201,14 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
 
 
         ---
-        decision-req-2: temperature 0, max_tokens 1, logprobs None, logprob_token_ids Some([65, 66]), cache_salt Some("salt")
+        decision-req-2: temperature 0, max_tokens 1, logprobs None, logprob_token_ids Some([48, 49]), cache_salt Some("salt")
         <|im_start|>user
         The screen is broken.
 
         Question: Rate the damage.
-        A: none
-        B: total
-        Answer with the letter of one option only.<|im_end|>
+        0: none
+        1: total
+        Answer with the number of one level only.<|im_end|>
         <|im_start|>assistant
         <think>
 
@@ -261,7 +261,7 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
             }
           ],
           "usage": {
-            "input_tokens": 389,
+            "input_tokens": 388,
             "input_tokens_details": {
               "cached_tokens": 0,
               "cache_write_tokens": 0
@@ -270,7 +270,7 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
             "output_tokens_details": {
               "reasoning_tokens": 0
             },
-            "total_tokens": 392
+            "total_tokens": 391
           }
         }"#]]
     .assert_eq(&serde_json::to_string_pretty(&json).unwrap());

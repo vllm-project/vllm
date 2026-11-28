@@ -150,8 +150,8 @@ pub async fn systemone(
     .into_response())
 }
 
-/// The read of one question: a predicate as yes or no, a choice or a score as
-/// options labeled with letters. Python's `make_read_question`.
+/// The read of one question, with the labels of its type: a predicate as yes or
+/// no, a choice as letters, a score as digits. Python's `make_read_question`.
 fn read_question(question: &DecisionQuestion) -> Result<Question, ApiError> {
     let (question_type, instructions, options) = match question {
         DecisionQuestion::Predicate { instructions, .. } => {
@@ -190,12 +190,16 @@ fn read_question(question: &DecisionQuestion) -> Result<Question, ApiError> {
                     description: Some(level.description.clone()),
                 })
                 .collect();
-            (QuestionType::Choice, instructions, options)
+            (QuestionType::Score, instructions, options)
         }
     };
     let limit = question_type.label_set().len();
     if options.len() > limit {
-        bail_invalid_request!("This model supports at most {limit} choices per question");
+        let kind = match question_type {
+            QuestionType::Score => "score levels",
+            _ => "choices",
+        };
+        bail_invalid_request!("This model supports at most {limit} {kind} per question");
     }
     Ok(Question {
         question_type,
@@ -278,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn predicates_read_yes_then_no_and_scores_read_letters() {
+    fn predicates_read_yes_then_no_and_scores_read_digits() {
         let predicate: DecisionQuestion =
             serde_json::from_value(json!({"type": "predicate", "instructions": "Q?"})).unwrap();
         let read = read_question(&predicate).unwrap();
@@ -292,10 +296,11 @@ mod tests {
         }))
         .unwrap();
         let read = read_question(&score).unwrap();
-        assert_eq!(read.labels(), ["A", "B"]);
+        assert_eq!(read.question_type, QuestionType::Score);
+        assert_eq!(read.labels(), ["0", "1"]);
         assert_eq!(
             read.prompt(),
-            "Question: Rate\nA: low\nB: high - very\nAnswer with the letter of one option only."
+            "Question: Rate\n0: low\n1: high - very\nAnswer with the number of one level only."
         );
     }
 
@@ -309,6 +314,17 @@ mod tests {
         let error = read_question(&question).unwrap_err();
         assert!(
             format!("{error:?}").contains("This model supports at most 26 choices per question")
+        );
+
+        let levels: Vec<_> = (0..11).map(|i| json!({"label": i.to_string()})).collect();
+        let question: DecisionQuestion = serde_json::from_value(
+            json!({"type": "score", "instructions": "Rate", "levels": levels}),
+        )
+        .unwrap();
+        let error = read_question(&question).unwrap_err();
+        assert!(
+            format!("{error:?}")
+                .contains("This model supports at most 10 score levels per question")
         );
     }
 }
