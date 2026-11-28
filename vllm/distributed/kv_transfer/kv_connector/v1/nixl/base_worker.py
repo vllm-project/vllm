@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -223,8 +223,43 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+class DeferredBlockRelease:
+    """Release the blocks of finished requests only after the GPU work that was
+    in flight when they finished has completed.
+
+    A zero-copy RDMA pull into recycled blocks (host-pinned KV cache) can
+    otherwise race with kernels of the step that finished the request, e.g. the
+    MTP drafter, which may still write into those blocks; the cuda_copy staging
+    used for device memory made that ordering implicit. The guard is an event
+    recorded when the release reaches the worker: by then the forward and the
+    drafter of every step that still held the request are already enqueued on
+    the current stream (post_forward runs before the drafter of its own step).
+    It only fences that stream, so a drafter moved to its own stream would need
+    its own guard. Nothing blocks: readiness is polled with Event.query()."""
+
+    def __init__(self) -> None:
+        self._pending: list[tuple[ReqId, torch.cuda.Event]] = []
+
+    def on_step(self, finished: Collection[ReqId]) -> None:
+        if not finished:
+            return
+        event = torch.cuda.Event()
+        event.record()
+        self._pending.extend((req_id, event) for req_id in finished)
+
+    def ready(self) -> set[ReqId]:
+        done = {req_id for req_id, event in self._pending if event.query()}
+        if done:
+            self._pending = [p for p in self._pending if p[0] not in done]
+        return done
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
+
+    # Created in __init__ with a host-pinned KV cache (see DeferredBlockRelease).
+    deferred_release: DeferredBlockRelease | None = None
+    deferred_recv_report: DeferredBlockRelease | None = None
 
     # Transfer mode included in the NIXL compatibility hash so that a push
     # (WRITE) connector and a pull (READ) connector never handshake together.
@@ -1035,7 +1070,27 @@ class NixlBaseConnectorWorker:
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
+        if (
+            vllm_config.cache_config.kv_cache_host_pinned
+            and self.kv_buffer_device == "cuda"
+        ):
+            # CUDA tensors backed by host-pinned memory: register them as DRAM
+            # so UCX takes the plain ibv_reg_mr path, no GDR and no staging.
+            nixl_memory_type = "DRAM"
         self.nixl_memory_type = nixl_memory_type
+        # Zero-copy pulls land in freed blocks immediately: hold their release
+        # until the GPU work in flight has completed (see DeferredBlockRelease).
+        self.deferred_release = (
+            DeferredBlockRelease()
+            if vllm_config.cache_config.kv_cache_host_pinned
+            and self.kv_buffer_device == "cuda"
+            else None
+        )
+        # Same guard for receives that queue post-processing kernels: their
+        # report frees an aborted request's blocks, so it waits for the kernels.
+        self.deferred_recv_report = (
+            DeferredBlockRelease() if self.deferred_release is not None else None
+        )
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.copy_blocks: CopyBlocksOp | None = None
@@ -3560,6 +3615,7 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
+        post_processed = set[str]()
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -3587,6 +3643,7 @@ class NixlBaseConnectorWorker:
                 # P/D group positions differ. Use the actual region read plan,
                 # including any local allocation padding the read did not cover.
                 self._zero_region_blocks(meta.region_blocks_to_zero)
+                post_processed.add(req_id)
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -3619,11 +3676,13 @@ class NixlBaseConnectorWorker:
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
                     )
+                    post_processed.add(req_id)
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
                 block_ids_for_heterogeneous_attn_post_process.append(
                     meta.local_physical_block_ids[0]
                 )
+                post_processed.add(req_id)
         for (
             block_size_ratio,
             block_ids_list,
@@ -3642,10 +3701,19 @@ class NixlBaseConnectorWorker:
 
         self._sync_device_after_direct_recv(direct_device_recving)
 
+        if self.deferred_recv_report is not None:
+            self.deferred_recv_report.on_step(post_processed)
+            done_recving = (
+                done_recving - post_processed
+            ) | self.deferred_recv_report.ready()
+
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)
 
         self._cleanup_remote_engines()
+        if self.deferred_release is not None:
+            done_sending.update(self.deferred_release.ready())
+
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
