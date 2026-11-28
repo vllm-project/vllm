@@ -206,6 +206,10 @@ def _fwd_kernel(
     # start position inside of the query
     # generally, N goes over kv, while M goes over query_len
     block_start_loc = BLOCK_M * start_m
+    # Query tiles past this request's chunk have no rows to compute; return before
+    # the pass over the cached context instead of masking the result afterwards.
+    if block_start_loc >= cur_batch_query_len:
+        return
 
     # initialize offsets
     # [BLOCK_SIZE]; starts at 0
@@ -604,6 +608,10 @@ def _fwd_kernel_alibi(
         return
 
     block_start_loc = BLOCK_M * start_m
+    # Query tiles past this request's chunk have no rows to compute; return before
+    # the pass over the cached context instead of masking the result afterwards.
+    if block_start_loc >= cur_batch_query_len:
+        return
 
     # initialize offsets
     offs_n = tl.arange(0, BLOCK_N)
