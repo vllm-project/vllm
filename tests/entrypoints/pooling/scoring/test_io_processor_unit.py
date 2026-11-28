@@ -428,6 +428,41 @@ def test_jina_scoring_preserves_request_error_before_indexing_output():
     assert processor._post_process([failed], n_queries=1) == [failed]
 
 
+@pytest.mark.parametrize(
+    "processor_type", [BiEncoderIOProcessor, LateInteractionIOProcessor]
+)
+def test_embedding_scoring_limits_text_in_multimodal_content(
+    processor_type, scoring_tokenizer
+):
+    """Token limits apply to the text blocks of multimodal content, not only
+    to plain strings, and keep the media blocks."""
+    processor = processor_type.__new__(processor_type)
+    processor.tokenizer = scoring_tokenizer
+    image = {
+        "type": "image_url",
+        "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2)))},
+    }
+    # Offline inputs may also hold untyped media parts.
+    untyped_image = {"image_url": image["image_url"]}
+    data = ScoringData(
+        data_1=[[{"type": "text", "text": "a bc a"}]],
+        data_2=[
+            [image, {"type": "text", "text": "a bc a"}, untyped_image],
+            "a bc a",
+        ],
+    )
+
+    limited = processor._truncate_scoring_data(
+        data, max_tokens_per_query=1, max_tokens_per_doc=2
+    )
+
+    assert limited.data_1 == [[{"type": "text", "text": "a"}]]
+    assert limited.data_2 == [
+        [image, {"type": "text", "text": "a bc"}, untyped_image],
+        "a bc",
+    ]
+
+
 _BLOCK_TEMPLATE = """
 {%- for message in messages -%}
   {{- message.role + ':' -}}

@@ -165,16 +165,12 @@ class ScoringIOProcessor(PoolingIOProcessor):
         data_2 = scoring_data.data_2
         if max_tokens_per_query > 0:
             data_1 = [
-                truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_query)
-                if isinstance(d, str)
-                else d
+                truncate_score_content(d, self.tokenizer, max_tokens_per_query)
                 for d in data_1
             ]
         if max_tokens_per_doc > 0:
             data_2 = [
-                truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_doc)
-                if isinstance(d, str)
-                else d
+                truncate_score_content(d, self.tokenizer, max_tokens_per_doc)
                 for d in data_2
             ]
         return ScoringData(data_1=data_1, data_2=data_2)
