@@ -1584,7 +1584,7 @@ BAKE_MODELS = [
     # Not an fp8 checkpoint: `process_weights_after_loading` swaps the vLLM
     # parameter subclasses out on those, and the plain second `load_weights`
     # this test compares against then cannot run.
-    pytest.param("vllm-project/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
+    pytest.param("vllm/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
 ]
 
 

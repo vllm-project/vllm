@@ -10,7 +10,7 @@ from .mteb_embed_utils import mteb_test_embed_models
 MODELS = [
     ########## BertModel
     EmbedModelInfo(
-        "vllm-project/e5-small",
+        "vllm/e5-small",
         architecture="BertModel",
         mteb_score=0.742285423,
         mteb_tol=2e-3,
@@ -20,18 +20,16 @@ MODELS = [
         is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    EmbedModelInfo("vllm-project/e5-base", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("vllm/e5-base", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("vllm/e5-large", architecture="BertModel", enable_test=False),
     EmbedModelInfo(
-        "vllm-project/e5-large", architecture="BertModel", enable_test=False
-    ),
-    EmbedModelInfo(
-        "vllm-project/multilingual-e5-small",
+        "vllm/multilingual-e5-small",
         architecture="BertModel",
         enable_test=False,
     ),
     ########## XLMRobertaModel
     EmbedModelInfo(
-        "vllm-project/multilingual-e5-base",
+        "vllm/multilingual-e5-base",
         architecture="XLMRobertaModel",
         mteb_score=0.779325955,
         mteb_tol=2e-3,
@@ -42,12 +40,12 @@ MODELS = [
         enable_test=True,
     ),
     EmbedModelInfo(
-        "vllm-project/multilingual-e5-large",
+        "vllm/multilingual-e5-large",
         architecture="XLMRobertaModel",
         enable_test=False,
     ),
     EmbedModelInfo(
-        "vllm-project/multilingual-e5-large-instruct",
+        "vllm/multilingual-e5-large-instruct",
         architecture="XLMRobertaModel",
         enable_test=False,
     ),

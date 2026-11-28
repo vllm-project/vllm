@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import httpx
@@ -19,6 +20,7 @@ from vllm.model_executor.models.molmo2 import (
     build_flat_image_bool_length,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.utils import encode_image_url
 
 from ...utils import build_model_context
@@ -322,3 +324,63 @@ def test_molmo2_render_validates_image_preprocessing():
             assert response.status_code == status, response.text[:512]
             if status == 400:
                 assert "Image preprocessing exceeds" in response.text
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{}, {"num_frames": 4}, {"max_fps": 1}, {"do_sample_frames": False}]
+)
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+@pytest.mark.parametrize("token_prompt", [False, True])
+def test_video_placeholders_follow_processor_sampling(
+    kwargs,
+    kwargs_on_init,
+    token_prompt,
+):
+    """Use the sampled video tokens, including timestamps, on cache misses and hits."""
+    ctx = build_model_context(
+        "allenai/Molmo2-8B",
+        limit_mm_per_prompt={"video": 1},
+        mm_processor_cache_gb=1,
+        mm_processor_kwargs=kwargs if kwargs_on_init else None,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    frames = np.zeros((12, 224, 320, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 4.0,
+        "duration": 3.0,
+        "total_num_frames": 12,
+        "frames_indices": list(range(12)),
+        "video_backend": "opencv",
+        "do_sample_frames": True,
+    }
+    prompt = "<|video|>"
+    hf_processor = processor.info.get_hf_processor()
+    reference = hf_processor(
+        text=prompt,
+        videos=[frames],
+        video_metadata=[{k: v for k, v in metadata.items() if k != "do_sample_frames"}],
+        return_tensors="pt",
+        **({"do_sample_frames": True} | kwargs),
+    )
+    expected_ids = reference["input_ids"][0].tolist()
+    if token_prompt:
+        prompt = [expected_ids[0]] + ctx.tokenizer.encode(
+            prompt, add_special_tokens=False
+        )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    for _ in range(2):
+        processed = processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(
+                {"video": [(frames, deepcopy(metadata))]}
+            ),
+            hf_processor_mm_kwargs={} if kwargs_on_init else kwargs,
+            cache=cache,
+        )
+        data = processed["mm_kwargs"].get_data()
+        num_video_tokens = data["num_video_tokens"]
+        assert isinstance(num_video_tokens, torch.Tensor)
+        assert processed["mm_placeholders"]["video"][0].get_num_embeds() == int(
+            num_video_tokens.sum()
+        )
+        assert processed["prompt_token_ids"] == expected_ids

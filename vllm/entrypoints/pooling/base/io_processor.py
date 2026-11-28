@@ -112,7 +112,6 @@ class PoolingIOProcessor:
                 ),
             )
 
-            mm_config = self.model_config.multimodal_config
             chat_tok_params = request.build_tok_params(
                 self.model_config, self.renderer.default_chat_tok_params
             )
@@ -120,9 +119,6 @@ class PoolingIOProcessor:
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
                 default_template_kwargs,
-                default_media_io_kwargs=(
-                    mm_config.media_io_kwargs if mm_config else None
-                ),
             )
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)

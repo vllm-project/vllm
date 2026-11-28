@@ -326,7 +326,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "GPTJForCausalLM": _HfExamplesInfo(
-        "vllm-project/slovak-gpt-j-405M",
+        "vllm/slovak-gpt-j-405M",
         {"6b": "EleutherAI/gpt-j-6b"},
         min_transformers_version="5.24.0",
         transformers_version_reason={
@@ -408,7 +408,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
-            "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
+            "tiny": "vllm/tiny-random-LlamaForCausalLM",
         },
     ),
     "Llama4ForCausalLM": _HfExamplesInfo(
@@ -424,9 +424,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",
         extras={
-            "130m": "vllm-project/mamba2-130m-hf",
-            "1.3b": "vllm-project/mamba2-1.3b-hf",
-            "random": "vllm-project/mamba2-codestral-v0.1-tiny-random",
+            "130m": "vllm/mamba2-130m-hf",
+            "1.3b": "vllm/mamba2-1.3b-hf",
+            "random": "vllm/mamba2-codestral-v0.1-tiny-random",
         },
     ),
     "MiniCPMForCausalLM": _HfExamplesInfo(
@@ -531,10 +531,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
-    "Qwen3_5ForCausalLM": _HfExamplesInfo("vllm-project/Qwen3.5-0.8B-text-only"),
+    "Qwen3_5ForCausalLM": _HfExamplesInfo("vllm/Qwen3.5-0.8B-text-only"),
     "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
-        "vllm-project/Qwen3.5-35B-A3B-text-only",
-        extras={"native-prefix": "vllm-project/small_qwen3_5_20b"},
+        "vllm/Qwen3.5-35B-A3B-text-only",
+        extras={"native-prefix": "vllm/small_qwen3_5_20b"},
         max_model_len=4096,
     ),
     "Qwen4ExpForCausalLM": _HfExamplesInfo("", is_available_online=False),
@@ -637,28 +637,26 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "LlamaBidirectionalModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
     ),
-    "MistralModel": _HfExamplesInfo("vllm-project/e5-mistral-7b-instruct"),
+    "MistralModel": _HfExamplesInfo("vllm/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base"),
     "NomicBertModel": _HfExamplesInfo(
         "nomic-ai/nomic-embed-text-v2-moe", trust_remote_code=True
     ),
-    "Qwen2Model": _HfExamplesInfo("vllm-project/Qwen2-7B-Instruct-embed-base"),
+    "Qwen2Model": _HfExamplesInfo("vllm/Qwen2-7B-Instruct-embed-base"),
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
     "VoyageQwen3BidirectionalEmbedModel": _HfExamplesInfo("voyageai/voyage-4-nano"),
-    "XLMRobertaModel": _HfExamplesInfo("vllm-project/multilingual-e5-small"),
+    "XLMRobertaModel": _HfExamplesInfo("vllm/multilingual-e5-small"),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlamaNemotronVLModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True
     ),
-    "LlavaNextForConditionalGeneration": _HfExamplesInfo("vllm-project/e5-v"),
+    "LlavaNextForConditionalGeneration": _HfExamplesInfo("vllm/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),
-    "Qwen2VLForConditionalGeneration": _HfExamplesInfo(
-        "vllm-project/dse-qwen2-2b-mrl-v1"
-    ),
+    "Qwen2VLForConditionalGeneration": _HfExamplesInfo("vllm/dse-qwen2-2b-mrl-v1"),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "Terratorch": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
@@ -691,15 +689,13 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
-    "ColUltraVBertForRetrieval": _HfExamplesInfo("vllm-project/ColUltraVBERT"),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo("vllm/ColUltraVBERT"),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ModernVBertModel": _HfExamplesInfo("ModernVBERT/colmodernvbert-merged"),
-    "UltraVBertModel": _HfExamplesInfo("vllm-project/ColUltraVBERT"),
+    "UltraVBertModel": _HfExamplesInfo("vllm/ColUltraVBERT"),
     "ColQwen3": _HfExamplesInfo("TomoroAI/tomoro-colqwen3-embed-4b"),
     "OpsColQwen3Model": _HfExamplesInfo("OpenSearch-AI/Ops-Colqwen3-4B"),
-    "ColQwen3_5": _HfExamplesInfo(
-        "vllm-project/colqwen3.5-4.5B-v3", max_model_len=4096
-    ),
+    "ColQwen3_5": _HfExamplesInfo("vllm/colqwen3.5-4.5B-v3", max_model_len=4096),
     "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
         "nvidia/nemotron-colembed-vl-4b-v2",
     ),
@@ -727,18 +723,16 @@ _REWARD_EXAMPLE_MODELS = {
 }
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
-    "BertForTokenClassification": _HfExamplesInfo("vllm-project/NeuroBERT-NER"),
+    "BertForTokenClassification": _HfExamplesInfo("vllm/NeuroBERT-NER"),
     "ModernBertForTokenClassification": _HfExamplesInfo(
-        "vllm-project/electrical-ner-ModernBERT-base"
+        "vllm/electrical-ner-ModernBERT-base"
     ),
     "OpenAIPrivacyFilterForTokenClassification": _HfExamplesInfo(
         "openai/privacy-filter",
     ),
-    "RobertaForTokenClassification": _HfExamplesInfo(
-        "vllm-project/roberta-large-ner-english"
-    ),
+    "RobertaForTokenClassification": _HfExamplesInfo("vllm/roberta-large-ner-english"),
     "XLMRobertaForTokenClassification": _HfExamplesInfo(
-        "vllm-project/xlm-roberta-base-ner-hrl"
+        "vllm/xlm-roberta-base-ner-hrl"
     ),
 }
 
@@ -758,7 +752,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         max_model_len=4096,
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
-        "vllm-project/sentiment-polish-gpt2-small"
+        "vllm/sentiment-polish-gpt2-small"
     ),
     "GteForSequenceClassification": _HfExamplesInfo(
         "alibaba-nlp-community/gte-multilingual-reranker-base",
@@ -799,13 +793,11 @@ _AUTOMATIC_CONVERTED_MODELS = {
     "LlamaForSequenceClassification": _HfExamplesInfo(
         "Skywork/Skywork-Reward-V2-Llama-3.2-1B"
     ),
-    "Qwen2ForSequenceClassification": _HfExamplesInfo(
-        "vllm-project/Qwen2.5-1.5B-apeach"
-    ),
+    "Qwen2ForSequenceClassification": _HfExamplesInfo("vllm/Qwen2.5-1.5B-apeach"),
     "Qwen3ForSequenceClassification": _HfExamplesInfo(
-        "vllm-project/Qwen3-Reranker-0.6B-seq-cls"
+        "vllm/Qwen3-Reranker-0.6B-seq-cls"
     ),
-    "Qwen3ForTokenClassification": _HfExamplesInfo("vllm-project/Qwen3-0.6B-finetuned"),
+    "Qwen3ForTokenClassification": _HfExamplesInfo("vllm/Qwen3-0.6B-finetuned"),
     "Qwen3VLForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-VL-Reranker-2B",
         is_available_online=False,
@@ -873,7 +865,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
-        extras={"fork": "vllm-project/deepseek-vl2-tiny"},
+        extras={"fork": "vllm/deepseek-vl2-tiny"},
         max_transformers_version="4.48",
         transformers_version_reason={"hf": "HF model is not compatible."},
     ),
@@ -913,9 +905,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
         "LGAI-EXAONE/EXAONE-4.5-33B",
     ),
-    "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
-        "vllm-project/FireRedASR2-LLM-vllm"
-    ),
+    "FireRedASR2ForConditionalGeneration": _HfExamplesInfo("vllm/FireRedASR2-LLM-vllm"),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "FunAudioLLM/Fun-ASR-Nano-2512-vllm"
     ),
@@ -1427,9 +1417,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Nemotron-3.5-Parse",
         trust_remote_code=True,
     ),
-    "RForConditionalGeneration": _HfExamplesInfo(
-        "vllm-project/R-4B", trust_remote_code=True
-    ),
+    "RForConditionalGeneration": _HfExamplesInfo("vllm/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B",
         trust_remote_code=True,
@@ -1679,12 +1667,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
-        "vllm-project/deepseek-v3-random",
-        speculative_model="vllm-project/eagle-deepseek-v3-random",
+        "vllm/deepseek-v3-random",
+        speculative_model="vllm/eagle-deepseek-v3-random",
     ),
     "EagleLlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Meta-Llama-3-8B-Instruct",
-        speculative_model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
+        speculative_model="vllm/EAGLE-LLaMA3-Instruct-8B",
         tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
     ),
     "Eagle3DeepseekV2ForCausalLM": _HfExamplesInfo(
@@ -1699,14 +1687,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
-        speculative_model="vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
+        speculative_model="vllm/EAGLE3-LLaMA3.1-Instruct-8B",
         tokenizer="meta-llama/Llama-3.1-8B-Instruct",
         use_original_num_layers=True,
         max_model_len=10240,
     ),
     "Eagle3MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
-        speculative_model="vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
+        speculative_model="vllm/EAGLE3-LLaMA3.1-Instruct-8B",
         tokenizer="MiniMaxAI/MiniMax-M2",
     ),
     "EagleMistralForCausalLM": _HfExamplesInfo(
@@ -1725,8 +1713,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
     ),
     "EagleLlama4ForCausalLM": _HfExamplesInfo(
-        "vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
-        speculative_model="vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        "vllm/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        speculative_model="vllm/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
@@ -1738,7 +1726,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2.5-VL-7B-Instruct",
-        speculative_model="vllm-project/qwen2.5-vl-7b-eagle3-sgl",
+        speculative_model="vllm/qwen2.5-vl-7b-eagle3-sgl",
     ),
     "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-8B-Instruct",
@@ -1766,8 +1754,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepSeekMTPModel": _HfExamplesInfo(
-        "vllm-project/deepseek_mtp_main_random",
-        speculative_model="vllm-project/deepseek_mtp_draft_random",
+        "vllm/deepseek_mtp_main_random",
+        speculative_model="vllm/deepseek_mtp_draft_random",
     ),
     "DeepseekV32MTPModel": _HfExamplesInfo(
         "nvidia/DeepSeek-V3.2-NVFP4",
@@ -1934,10 +1922,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersEmbeddingModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "TransformersForSequenceClassification": _HfExamplesInfo(
-        "vllm-project/xlm-roberta-base-language-detection",
+        "vllm/xlm-roberta-base-language-detection",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
-        "vllm-project/Ilama-3.2-1B", trust_remote_code=True
+        "vllm/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo(
         "BAAI/Emu3-Chat-hf",

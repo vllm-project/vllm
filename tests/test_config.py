@@ -3579,8 +3579,8 @@ def test_update_config():
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "generate", "none"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "generate", "none"),
@@ -3597,8 +3597,8 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "pooling", "embed"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "pooling", "embed"),
@@ -3836,8 +3836,8 @@ def test_get_pooling_config_from_args():
 @pytest.mark.parametrize(
     ("model_id", "default_pooling_type", "pooling_type"),
     [
-        ("vllm-project/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
-        ("vllm-project/e5-small", "CLS", "MEAN"),  # BertModel
+        ("vllm/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("vllm/e5-small", "CLS", "MEAN"),  # BertModel
     ],
 )
 def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
@@ -4394,7 +4394,7 @@ def test_s3_url_same_model_and_tokenizer_pulls_once(monkeypatch, tmp_path):
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
@@ -4424,13 +4424,13 @@ def test_s3_url_same_model_and_tokenizer_pulls_once(monkeypatch, tmp_path):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4442,7 +4442,7 @@ def test_s3_url_same_model_and_tokenizer_pulls_once(monkeypatch, tmp_path):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4480,7 +4480,7 @@ def test_s3_url_same_model_and_tokenizer_pulls_once(monkeypatch, tmp_path):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/mamba2-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4514,7 +4514,7 @@ def test_is_chunked_prefill_supported(
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
@@ -4544,13 +4544,13 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4562,7 +4562,7 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4600,7 +4600,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/mamba2-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
@@ -5251,7 +5251,7 @@ def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     speculative_config = SpeculativeConfig(
-        model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
+        model="vllm/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
         target_model_config=target_model_config,
         target_parallel_config=ParallelConfig(),
