@@ -164,6 +164,11 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
 
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
+    # 4-bit e2m1 KV cache (Gemma4 global layers, see ops/rocm_kv4_attention.py); set by the model
+    kv4: bool = False
+    kv4_k_scale: float = 1.0
+    kv4_v_scale: float = 1.0
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -221,8 +226,75 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if self._shuffle_kv_layout:
             # (2, B, N, H, hs) -> ((B, N, H, hs), (B, N, H, hs))
             return kv_cache.unbind(0)
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs)); 4-bit rows are hs / 2 bytes
+        hs = self.head_size // 2 if self.kv4 else self.head_size
+        return kv_cache.transpose(1, 2).split(hs, dim=-1)
+
+    def _forward_kv4(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        from vllm.v1.attention.ops.rocm_kv4_attention import (
+            kv4_decode_attention,
+            kv4_dequant_to_fp8,
+            scale_tensor,
+        )
+
+        assert output_scale is None and attn_metadata.causal
+        n = attn_metadata.num_actual_tokens
+        cache = kv_cache.view(torch.uint8)
+        key_cache, value_cache = self._split_kv_cache(cache)
+        cu = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        block_table = attn_metadata.block_table
+        max_q = attn_metadata.max_query_len
+        ks, vs = self.kv4_k_scale, self.kv4_v_scale
+        if max_q == 1:
+            kv4_decode_attention(
+                query[:n], key_cache, value_cache, output[:n], cu, seqused_k, block_table,
+                self.scale, layer._q_scale, ks, vs,
+            )
+            return output
+        nd = getattr(attn_metadata, "num_decodes", 0)
+        ndt = attn_metadata.num_decode_tokens if nd else 0
+        if nd:
+            kv4_decode_attention(
+                query[:ndt], key_cache, value_cache, output[:ndt], cu[: nd + 1], seqused_k[:nd],
+                block_table[:nd], self.scale, layer._q_scale, ks, vs,
+            )
+            cu_prefill = attn_metadata.prefill_query_start_loc
+        else:
+            cu_prefill = cu
+        k, v, bt = kv4_dequant_to_fp8(
+            cache, block_table[nd:], seqused_k[nd:], attn_metadata.max_seq_len
+        )
+        self.unified_attention(
+            q=query[ndt:n],
+            k=k,
+            v=v,
+            out=output[ndt:n],
+            cu_seqlens_q=cu_prefill,
+            max_seqlen_q=max_q,
+            seqused_k=seqused_k[nd:],
+            max_seqlen_k=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=bt,
+            softcap=self.logits_soft_cap,
+            q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+            k_descale=scale_tensor(ks, query.device),
+            v_descale=scale_tensor(vs, query.device),
+            sinks=self.sinks,
+            output_scale=None,
+        )
+        return output
 
     def _shuffle_kv_views(
         self, key_cache: torch.Tensor, value_cache: torch.Tensor
@@ -296,6 +368,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 output[:num_actual_tokens],
                 attn_metadata,
                 layer,
+            )
+
+        if self.kv4:
+            return self._forward_kv4(
+                layer, query, kv_cache, attn_metadata, output, output_scale
             )
 
         key_cache, value_cache = self._split_kv_cache(kv_cache)
