@@ -1731,3 +1731,29 @@ class CompilationConfig:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
         return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
+
+    def get_compile_warmup_sizes(self, max_reachable_tokens: int) -> list[int]:
+        """Sizes to warm up outside cudagraph capture so every compile size
+        and compile range gets compiled.
+
+        `max_reachable_tokens` is min(max_num_batched_tokens,
+        max_num_seqs * max_model_len); larger batches never occur at runtime.
+        Exceeding max_num_seqs * max_model_len would also need a dummy request
+        longer than max_model_len, which overruns the block table in attention.
+        """
+        cg_sizes: list[int] = []
+        if self.cudagraph_mode != CUDAGraphMode.NONE:
+            cg_sizes = self.cudagraph_capture_sizes or []
+        sizes = [
+            x
+            for x in self.compile_sizes or []
+            if isinstance(x, int) and x not in cg_sizes and x <= max_reachable_tokens
+        ]
+        covered = set(cg_sizes) | set(sizes)
+        for compile_range in self.get_compile_ranges():
+            if any(x in compile_range for x in covered):
+                continue
+            size = min(compile_range.end, max_reachable_tokens)
+            if size >= compile_range.start:
+                sizes.append(size)
+        return sizes
