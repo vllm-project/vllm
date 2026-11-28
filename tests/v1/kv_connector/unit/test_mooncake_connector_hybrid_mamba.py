@@ -38,6 +38,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
 )
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -48,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 from .test_mooncake_connector import _stub_worker_shutdown, patch_worker_dependencies
@@ -65,7 +67,10 @@ def noop_shutdown():
 
 
 def make_hybrid_gdn_kv_cache_config(
-    block_size: int, num_blocks: int = 16, enable_prefix_caching: bool = False
+    block_size: int,
+    num_blocks: int = 16,
+    enable_prefix_caching: bool = False,
+    num_speculative_blocks: int = 0,
 ) -> KVCacheConfig:
     gdn_spec = MambaSpec(
         block_size=block_size,
@@ -92,7 +97,8 @@ def make_hybrid_gdn_kv_cache_config(
                 ["model.layers.1.linear_attn"],
                 gdn_spec,
                 manager_config=MambaManager.config(
-                    enable_prefix_caching=enable_prefix_caching
+                    enable_prefix_caching=enable_prefix_caching,
+                    num_speculative_blocks=num_speculative_blocks,
                 ),
             ),
         ],
@@ -187,6 +193,78 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
     attn_pull, gdn_pull = pull.local_block_ids
     assert len(attn_pull) == expected_attn_pull_blocks
     assert len(gdn_pull) == 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+@pytest.mark.parametrize("p_spec_tokens, d_spec_tokens", [(2, 0), (1, 3)])
+def test_hybrid_gdn_pd_exchange_only_the_running_state(
+    enable_prefix_caching: bool, p_spec_tokens: int, d_spec_tokens: int
+):
+    """P and D exchange only the GDN running state, never the speculative
+    scratch slots behind it, so they may run different draft lengths."""
+    block_size = 16
+    # One GDN block holds the prompt state without prefix caching; with it,
+    # the prefill crosses GDN blocks and is split at a block boundary.
+    num_tokens = 3 * block_size + 5 if enable_prefix_caching else 10
+    # P computes and D loads every prompt token but the last.
+    state_index = cdiv(num_tokens - 1, block_size) - 1
+
+    def make_scheduler(kv_role: str, num_spec_tokens: int):
+        vllm_config = create_vllm_config(
+            kv_connector="MooncakeConnector",
+            kv_role=kv_role,
+            block_size=block_size,
+            num_speculative_tokens=num_spec_tokens or None,
+        )
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+        kv_cache_config = make_hybrid_gdn_kv_cache_config(
+            block_size,
+            num_blocks=64,
+            enable_prefix_caching=enable_prefix_caching,
+            num_speculative_blocks=num_spec_tokens,
+        )
+        return create_scheduler(
+            vllm_config,
+            num_blocks=kv_cache_config.num_blocks,
+            kv_cache_config=kv_cache_config,
+        )
+
+    prefill = make_scheduler("kv_producer", p_spec_tokens)
+    p_req = create_request(num_tokens=num_tokens, do_remote_decode=True)
+    p_req.kv_transfer_params["transfer_id"] = "xfer-0"
+    prefill.add_request(p_req)
+    for _ in range(num_tokens):
+        output = prefill.schedule()
+        p_gdn_row = prefill.kv_cache_manager.get_block_ids(p_req.request_id)[1]
+        # Only the last prefill chunk samples a token.
+        prefill_done = p_req.num_computed_tokens == p_req.num_prompt_tokens
+        prefill.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[p_req.request_id],
+                sampled_token_ids=[[0] if prefill_done else []],
+            ),
+        )
+        if p_req.is_finished():
+            break
+    send_meta = prefill.schedule().kv_connector_metadata.reqs_to_send
+    _, (_, p_gdn_send) = send_meta[p_req.request_id]
+
+    decode = make_scheduler("kv_consumer", d_spec_tokens)
+    d_req = create_request(num_tokens=num_tokens, do_remote_prefill=True)
+    d_req.kv_transfer_params.update(
+        transfer_id="xfer-0", remote_bootstrap_addr="prefill-host:8998"
+    )
+    decode.add_request(d_req)
+    recv_meta = decode.schedule().kv_connector_metadata.reqs_to_recv
+    [pull] = recv_meta["my-engine-id"].values()
+    d_gdn_row = decode.kv_cache_manager.get_block_ids(d_req.request_id)[1]
+
+    # One slot on each side, so P's state lands in D's state slot.
+    assert p_gdn_send == [p_gdn_row[state_index]]
+    assert pull.local_block_ids[1] == [d_gdn_row[state_index]]
 
 
 @pytest.mark.cpu_test

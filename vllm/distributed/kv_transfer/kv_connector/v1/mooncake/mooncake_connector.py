@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     check_compressed_kernel_split,
+    clip_ssm_state_blocks,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
 )
@@ -1078,12 +1079,24 @@ class MooncakeConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        # Trailing scratch slots that mamba managers co-allocate per request
+        # for speculative decoding; None for non-SSM groups.
+        self._ssm_spec_blocks = [
+            g.manager_config.params.num_speculative_blocks
+            if isinstance(g.manager_config.params, MambaManager.Params)
+            else None
+            for g in kv_cache_config.transfer_groups
+        ]
 
     def get_sw_clipped_blocks(
         self,
         block_ids: tuple[list[int], ...] | list[list[int]],
     ) -> list[list[int]]:
-        """Clip per-group block IDs to sliding window size."""
+        """Clip per-group block IDs to the blocks P/D exchange.
+
+        Sliding-window groups keep their window. SSM groups keep only the
+        running-state slot, so P and D may run different draft lengths.
+        """
         if len(block_ids) == 0:
             return []
         if len(block_ids) == len(self.kv_cache_config.transfer_group_ids):
@@ -1092,10 +1105,14 @@ class MooncakeConnectorScheduler:
             selected = list(self.kv_cache_config.select_transfer_block_ids(block_ids))
         if len(selected) == 0 or not self._is_hma_required:
             return selected
-        return [
-            blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
-            for i, blocks in enumerate(selected)
-        ]
+        clipped = []
+        for i, blocks in enumerate(selected):
+            if n_sw := self.blocks_per_sw[i]:
+                blocks = blocks[-n_sw:]
+            elif (n_spec_blocks := self._ssm_spec_blocks[i]) is not None:
+                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
+            clipped.append(blocks)
+        return clipped
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
