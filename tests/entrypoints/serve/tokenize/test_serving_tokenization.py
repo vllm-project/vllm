@@ -17,6 +17,8 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.tokenize.api_router import attach_router
 from vllm.entrypoints.serve.tokenize.protocol import (
+    DetokenizeRequest,
+    DetokenizeResponse,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
@@ -173,6 +175,59 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_detokenize_validates_token_ids():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+
+    serving = _build_serving_tokenization(mock_engine)
+
+    request = DetokenizeRequest(model=MODEL_NAME, tokens=[1, 2, 999999999])
+    raw_request = MagicMock(headers={})
+
+    mock_engine.renderer.validate_token_ids.side_effect = VLLMValidationError(
+        "Token id 999999999 is out of vocabulary", parameter="tokens"
+    )
+
+    with pytest.raises(
+        VLLMValidationError, match="Token id 999999999 is out of vocabulary"
+    ) as exc_info:
+        await serving.create_detokenize(request, raw_request)
+
+    assert exc_info.value.parameter == "tokens"
+    mock_engine.renderer.validate_token_ids.assert_called_once_with(
+        [1, 2, 999999999], parameter="tokens"
+    )
+
+
+@pytest.mark.asyncio
+async def test_detokenize_passes_valid_token_ids():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+    mock_engine.renderer.tokenize_prompt_async = AsyncMock(
+        return_value={"prompt": "Hello world"}
+    )
+
+    serving = _build_serving_tokenization(mock_engine)
+
+    request = DetokenizeRequest(model=MODEL_NAME, tokens=[1, 2, 3])
+    raw_request = MagicMock(headers={})
+
+    response = await serving.create_detokenize(request, raw_request)
+
+    assert isinstance(response, DetokenizeResponse)
+    assert response.prompt == "Hello world"
+    mock_engine.renderer.validate_token_ids.assert_called_once_with(
+        [1, 2, 3], parameter="tokens"
     )
 
 
