@@ -32,9 +32,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -52,6 +49,10 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+from vllm.models.deepseek_v4.common.spec_decode import (
+    context_wkv_quant_config,
+    duplicate_context_wkv_weights,
+)
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -70,24 +71,6 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
-_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
-
-
-def _duplicate_context_wkv_weights(
-    weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Load every draft layer's WKV into the cross-layer projection."""
-    for name, weight in weights:
-        yield name, weight
-        match = _CONTEXT_WKV_RE.fullmatch(name)
-        if match is None:
-            continue
-        layer_idx = int(match.group(1))
-        if layer_idx >= num_layers:
-            continue
-        stacked_weight = weight.detach()
-        stacked_weight.shard_id = layer_idx
-        yield f"context_wkv_proj.{match.group(2)}", stacked_weight
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -141,29 +124,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
-        quant_config = vllm_config.quant_config
-        ignored_layers = getattr(quant_config, "ignored_layers", None)
-        wkv_quant_config = (
-            None
-            if quant_config is not None
-            and ignored_layers
-            and hasattr(quant_config, "ignored_layers_match_mode")
-            and is_layer_skipped(
-                prefix=maybe_prefix(
-                    prefix, f"layers.{self.num_hidden_layers}.attn.wkv"
-                ),
-                ignored_layers=ignored_layers,
-                fused_mapping=quant_config.packed_modules_mapping,
-                match_mode=quant_config.ignored_layers_match_mode,
-            )
-            else quant_config
-        )
         self.context_wkv_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [config.head_dim] * self.num_dspark_layers,
             bias=False,
             return_bias=False,
-            quant_config=wkv_quant_config,
+            quant_config=context_wkv_quant_config(
+                vllm_config.quant_config,
+                maybe_prefix(prefix, f"layers.{self.num_hidden_layers}.attn.wkv"),
+            ),
             prefix=maybe_prefix(prefix, "context_wkv_proj"),
             disable_tp=True,
         )
@@ -506,7 +475,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
+        weights = duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
