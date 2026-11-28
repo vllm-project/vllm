@@ -423,6 +423,87 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
 
 
+# rotary_dim 64 runs the row-group kernel, 32 the per-slot fallback.
+@pytest.mark.parametrize("rotary_dim", [64, 32])
+@pytest.mark.parametrize("num_tokens", [1, 64, 513])
+def test_sparse_fp8_insert_applies_kv_scales(rotary_dim, num_tokens):
+    """An FP8 cache insert quantizes k/v with the layer's k/v scales, as
+    reshape_and_cache_flash does, so attention can dequantize with them."""
+    torch.manual_seed(2)
+    device, dtype, eps, block_size = "cuda", torch.bfloat16, 1e-6, 16
+    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    splits = [qsz, kvsz, kvsz, iqsz, HEAD_DIM]
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(4096, rotary_dim, 5_000_000.0, dtype, device)
+    positions = torch.randint(0, 4096, (num_tokens,), dtype=torch.int64, device=device)
+    qkv = torch.randn(num_tokens, sum(splits), dtype=dtype, device=device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    # Distinct non-unit scales that keep k/v / scale inside E4M3's range, so a
+    # kernel that ignores them, or swaps them, writes different codes.
+    k_scale = torch.tensor(0.0234375, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(0.015625, dtype=torch.float32, device=device)
+
+    kv_cache = torch.zeros(
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * HEAD_DIM,
+        dtype=torch.uint8,
+        device=device,
+    )
+    index_cache = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
+    )
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv,
+        weights[0],
+        weights[1],
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        rotary_dim,
+        eps,
+        weights[2],
+        weights[3],
+        num_idx_heads,
+        slot_mapping,
+        None,
+        kv_cache,
+        index_cache,
+        block_size,
+        torch.empty(num_tokens, qsz, dtype=dtype, device=device),
+        torch.empty(num_tokens, iqsz, dtype=dtype, device=device),
+        "fp8",
+        kv_k_scale=k_scale,
+        kv_v_scale=v_scale,
+    )
+
+    _, k_out, v_out, _, _ = qkv.split(splits, dim=-1)
+    expected_kv_cache = torch.zeros_like(kv_cache)
+    expected_k_cache, expected_v_cache = expected_kv_cache.transpose(1, 2).split(
+        HEAD_DIM, dim=-1
+    )
+    ops.reshape_and_cache_flash(
+        k_out.reshape(num_tokens, num_kv_heads, HEAD_DIM),
+        v_out.reshape(num_tokens, num_kv_heads, HEAD_DIM),
+        expected_k_cache,
+        expected_v_cache,
+        slot_mapping,
+        "fp8",
+        k_scale,
+        v_scale,
+    )
+    assert_fp8_cache_close(kv_cache, expected_kv_cache)
+
+
 @pytest.mark.parametrize("num_tokens", [1, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])

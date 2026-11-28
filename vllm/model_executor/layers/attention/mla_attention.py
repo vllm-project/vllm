@@ -463,6 +463,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     supports_pcp_dcp: ClassVar[bool] = False
     # Models using a compatible paged sparse backend may opt in.
     supports_fp8_ds_mla_sliding_window: ClassVar[bool] = False
+    supports_kv_cache_quant: bool = True
 
     def __init__(
         self,

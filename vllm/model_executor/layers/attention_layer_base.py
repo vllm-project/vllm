@@ -21,6 +21,11 @@ class AttentionLayerBase(ABC):
 
     impl: "AttentionImpl"
     supports_dcp: bool = True
+    # Whether quant configs give this layer a KV-cache quant method. Set by the
+    # layers that call `_init_kv_cache_quant`: `Attention`, `MLAAttention`,
+    # Kimi's `MultiHeadLatentAttention` and `MiniMaxM3SparseAttention`. Mamba
+    # states, indexer caches and other layers keep the default.
+    supports_kv_cache_quant: bool = False
     # Set by the speculator on its draft model's layers.
     is_draft_layer: bool = False
     # Name of the layer whose KV cache this layer reads instead of owning one.
