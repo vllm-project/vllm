@@ -194,13 +194,12 @@ class LagunaMoE(nn.Module):
         else:
             self.shared_expert = None
 
-        # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The
-        # checkpoint stores one [num_experts] tensor per MoE layer at
-        # `mlp.experts.e_score_correction_bias`; registering it as a Parameter
-        # on the MoERunner lets the weight loader pick it up and the router
-        # add it during top-k selection. The fused top-k bias router requires
-        # float32 regardless of model dtype.
-        e_score_correction_bias = torch.nn.Parameter(
+        # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664), added by
+        # the router during top-k selection. Checkpoints store it at
+        # `mlp.experts.e_score_correction_bias`, which `hf_to_vllm_mapper` maps
+        # here. The fused top-k bias router requires float32 regardless of
+        # model dtype.
+        self.gate.e_score_correction_bias = nn.Parameter(
             torch.zeros(config.num_experts, dtype=torch.float32),
             requires_grad=False,
         )
@@ -224,7 +223,7 @@ class LagunaMoE(nn.Module):
             scoring_func="sigmoid",
             use_grouped_topk=False,
             apply_router_weight_on_input=bool(config.moe_apply_router_weight_on_input),
-            e_score_correction_bias=e_score_correction_bias,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             routed_scaling_factor=self.routed_scaling_factor,
@@ -569,11 +568,14 @@ class LagunaDecoderLayer(nn.Module):
 @support_torch_compile
 class LagunaModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_suffix={
+            ".experts.e_score_correction_bias": ".gate.e_score_correction_bias",
+        },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
