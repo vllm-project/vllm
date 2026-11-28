@@ -28,7 +28,10 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
+    finalize_mega_moe_weights,
     get_spec_layer_idx_from_weight_name,
+    mega_moe_routed_experts_prefix,
+    reject_mega_moe_reload,
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
@@ -101,6 +104,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
                 routed_scale_mode=RoutedScaleMode.ROUTER,
+                allow_mega_moe=True,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -379,6 +383,11 @@ class DeepseekV32Model(torch.nn.Module):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix=mega_moe_routed_experts_prefix(
+                layer.mlp
+                for layer in self.layers
+                if not isinstance(layer, PPMissingLayer)
+            ),
         )
 
         params_dict = dict(self.named_parameters())
@@ -465,8 +474,16 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
             "wk_weights_proj": ["wk", "weights_proj"],
         }
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.model_config = vllm_config.model_config
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        reject_mega_moe_reload(self, self.model_config)
+        return super().load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self.moe_mlp_layers)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
