@@ -451,8 +451,9 @@ pub(super) struct ChatCompletionStreamResponse {
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
-    /// Set only on the chunk carrying the finish reason.
-    pub kv_transfer_params: Option<Value>,
+    /// Written as `null` on every chunk after the first, like Python; the
+    /// initial role chunk leaves it unset and omits the field.
+    pub kv_transfer_params: Option<Option<Value>>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -486,14 +487,21 @@ pub(super) struct ChatCompletionStreamPrompt {
 pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
+    /// Sent as `null` when logprobs were not requested, as Python does.
+    #[serialize_always]
     pub logprobs: Option<ChatLogProbs>,
     /// Sent as `null` until the choice finishes, as Python and OpenAI do.
     #[serialize_always]
     pub finish_reason: Option<String>,
-    pub stop_reason: Option<Value>,
-    pub token_ids: Option<Vec<u32>>,
-    /// Set on the final chunk only; covers the whole output.
-    pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Outer `None` omits the field (initial role chunk); `Some(None)`
+    /// serializes `null` where Python passes the field explicitly.
+    pub stop_reason: Option<Option<Value>>,
+    /// Same tri-state as `stop_reason`: Python passes `token_ids` on content
+    /// and final chunks and omits it from the initial role chunk.
+    pub token_ids: Option<Option<Vec<u32>>>,
+    /// Set on the final chunk only; covers the whole output. Tri-state like
+    /// `stop_reason`, so a final chunk without versions still serializes `null`.
+    pub weight_versions: Option<Option<Vec<WeightVersionSpan>>>,
 }
 
 /// Mirrors the Python vLLM `DeltaMessage` class.

@@ -897,10 +897,11 @@ impl PendingChatChunk {
         }
 
         let mut chunk = ChatCompletionStreamResponse::new(envelope);
+        chunk.kv_transfer_params = Some(None);
         chunk.choices.push(ChatCompletionStreamChoice {
             delta: self.take_delta(),
             logprobs,
-            token_ids,
+            token_ids: Some(token_ids),
             ..Default::default()
         });
         Some(chunk)
@@ -933,6 +934,7 @@ fn start_chunk(envelope: &Arc<StreamResponseEnvelope>) -> ChatCompletionStreamRe
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             role: Some(AssistantRole),
+            content: Some(String::new()),
             ..Default::default()
         },
         ..Default::default()
@@ -961,8 +963,10 @@ fn block_delta_chunk(
     };
 
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta,
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -975,7 +979,9 @@ fn tool_call_start_chunk(
     name: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
+        token_ids: Some(None),
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
                 index: tool_index,
@@ -999,7 +1005,9 @@ fn tool_call_arguments_chunk(
     delta: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
+        token_ids: Some(None),
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
                 index: tool_index,
@@ -1022,8 +1030,10 @@ fn logprobs_only_chunk(
     logprobs: ChatLogProbs,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         logprobs: Some(logprobs),
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -1050,11 +1060,16 @@ fn final_chunk(
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
-        stop_reason,
-        weight_versions,
+        stop_reason: Some(stop_reason),
+        // Python merges the finishing update into this chunk and reports its
+        // token IDs; this stream flushes each update as its own chunk, so the
+        // final chunk has none to report and serializes null like a request
+        // that did not ask for token IDs.
+        token_ids: Some(None),
+        weight_versions: Some(weight_versions),
         ..Default::default()
     });
-    chunk.kv_transfer_params = kv_transfer_params;
+    chunk.kv_transfer_params = Some(kv_transfer_params);
     Ok(chunk)
 }
 
@@ -1182,25 +1197,37 @@ mod tests {
         .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(chunk.choices[0].stop_reason, Some(json!("stop")));
+        assert_eq!(chunk.choices[0].stop_reason, Some(Some(json!("stop"))));
     }
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false, None, None)
-            .expect("finish reason is valid");
+        let chunk = final_chunk(
+            &stream_envelope(),
+            FinishReason::Length,
+            false,
+            None,
+            None,
+        )
+        .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
-        assert_eq!(chunk.choices[0].stop_reason, None);
+        assert_eq!(chunk.choices[0].stop_reason, Some(None));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false, None, None)
-            .expect("abort is a valid finish reason");
+        let chunk = final_chunk(
+            &stream_envelope(),
+            FinishReason::Abort,
+            false,
+            None,
+            None,
+        )
+        .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
-        assert_eq!(chunk.choices[0].stop_reason, None);
+        assert_eq!(chunk.choices[0].stop_reason, Some(None));
     }
 
     #[test]
@@ -1476,9 +1503,11 @@ mod tests {
             payloads[2]["kv_transfer_params"],
             json!({"remote_block_ids": [1, 2]})
         );
-        for index in [0, 1, 3] {
-            assert!(payloads[index].get("kv_transfer_params").is_none());
-        }
+        // Python omits the field from the role and usage chunks and sends an
+        // explicit null on the content chunk that precedes the finish chunk.
+        assert!(payloads[0].get("kv_transfer_params").is_none());
+        assert_eq!(payloads[1]["kv_transfer_params"], json!(null));
+        assert!(payloads[3].get("kv_transfer_params").is_none());
     }
 
     #[tokio::test]
@@ -1626,14 +1655,17 @@ mod tests {
         assert_eq!(chunks.len(), 3);
         let choice = &chunks[1].choices[0];
         assert_eq!(choice.delta.content.as_deref(), Some("answer"));
-        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        assert_eq!(
+            choice.token_ids.clone().flatten().as_deref(),
+            Some(&[22][..])
+        );
         let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "answer");
         assert!(chunks.iter().all(|chunk| {
             chunk.choices.iter().all(|choice| {
                 choice.delta.reasoning.is_none()
-                    && choice.token_ids.as_deref() != Some(&[11][..])
+                    && choice.token_ids.clone().flatten().as_deref() != Some(&[11][..])
                     && choice
                         .logprobs
                         .as_ref()
@@ -1766,7 +1798,10 @@ mod tests {
         assert_eq!(chunks.len(), 3);
         let choice = &chunks[1].choices[0];
         assert_eq!(choice.delta.content.as_deref(), Some("answer"));
-        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        assert_eq!(
+            choice.token_ids.clone().flatten().as_deref(),
+            Some(&[22][..])
+        );
         let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "answer");
@@ -1776,6 +1811,7 @@ mod tests {
                     && !choice
                         .token_ids
                         .as_ref()
+                        .and_then(|ids| ids.as_ref())
                         .is_some_and(|ids| matches!(ids.as_slice(), [11] | [12] | [13]))
                     && choice
                         .logprobs

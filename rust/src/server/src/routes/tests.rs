@@ -5525,8 +5525,17 @@ async fn openai_return_weight_versions_reports_spans_on_final_choice() {
                     let (finished, unfinished): (Vec<_>, Vec<_>) =
                         choices.iter().partition(|choice| !choice["finish_reason"].is_null());
                     assert_eq!(finished.len(), 1, "{case}");
-                    let expected = opt_in.then_some(&expected);
-                    assert_eq!(finished[0].get("weight_versions"), expected, "{case}");
+                    // Like Python, the chat stream's final chunk serializes an
+                    // explicit null when the request does not opt in. The
+                    // completions stream still omits the field there.
+                    let expected: Option<serde_json::Value> = if opt_in {
+                        Some(expected)
+                    } else if endpoint.starts_with("/v1/chat") {
+                        Some(json!(null))
+                    } else {
+                        None
+                    };
+                    assert_eq!(finished[0].get("weight_versions"), expected.as_ref(), "{case}");
                     for choice in unfinished {
                         assert_eq!(choice.get("weight_versions"), None, "{case}");
                     }
@@ -8389,7 +8398,61 @@ async fn stream_without_include_usage_keeps_existing_shape() {
         );
     }
 
-    assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
+    // Python passes the choice fields explicitly per chunk kind and serializes
+    // with exclude_unset, so unset values are explicit nulls. The initial role
+    // chunk carries an empty content and omits token_ids / kv_transfer_params.
+    let role_choice = &chunks[0]["choices"][0];
+    assert_eq!(role_choice["delta"]["role"], "assistant");
+    assert_eq!(role_choice["delta"]["content"], "", "{role_choice}");
+    assert_eq!(
+        role_choice.get("logprobs"),
+        Some(&serde_json::Value::Null),
+        "initial choice must include logprobs: null: {role_choice}",
+    );
+    assert!(
+        role_choice.get("token_ids").is_none(),
+        "initial choice must omit token_ids: {role_choice}",
+    );
+    assert!(
+        chunks[0].get("kv_transfer_params").is_none(),
+        "initial chunk must omit kv_transfer_params: {}",
+        chunks[0],
+    );
+
+    for chunk in non_final_chunks.iter().skip(1) {
+        let choice = &chunk["choices"][0];
+        assert_eq!(
+            choice.get("logprobs"),
+            Some(&serde_json::Value::Null),
+            "content choice must include logprobs: null: {choice}",
+        );
+        assert_eq!(
+            choice.get("token_ids"),
+            Some(&serde_json::Value::Null),
+            "content choice must include token_ids: null: {choice}",
+        );
+        assert_eq!(
+            chunk.get("kv_transfer_params"),
+            Some(&serde_json::Value::Null),
+            "content chunk must include kv_transfer_params: null: {chunk}",
+        );
+    }
+
+    let final_choice = &final_chunk["choices"][0];
+    assert_eq!(final_choice["finish_reason"], "stop");
+    for field in ["logprobs", "stop_reason", "token_ids", "weight_versions"] {
+        assert_eq!(
+            final_choice.get(field),
+            Some(&serde_json::Value::Null),
+            "final choice must include {field}: null: {final_choice}",
+        );
+    }
+    assert_eq!(
+        final_chunk.get("kv_transfer_params"),
+        Some(&serde_json::Value::Null),
+        "final chunk must include kv_transfer_params: null: {final_chunk}",
+    );
+
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
