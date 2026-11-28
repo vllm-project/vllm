@@ -5,23 +5,26 @@
 # This file contains code copied from the ROCm/aiter project
 # (aiter/ops/flydsl/sparse_mla.py @ a61e02c26a3915011e85b103574c25d457890825).
 # The original source code was licensed under the MIT license. It is carried
-# in-tree so a stock aiter build still gets the kernel; only the imports and
-# this header differ from the original.
+# in-tree so a stock aiter build still gets the kernel; the imports, the
+# gfx942 dispatch and this header differ from the original.
 
-"""FlyDSL sparse MLA forward on the fp8_ds_mla cache (gfx950).
+"""FlyDSL sparse MLA forward on the fp8_ds_mla cache (gfx942, gfx950).
 
 Covers the slice of `rocm_aiter_ops.triton_sparse_mla_fwd` that
 DeepSeek-V3.2 / Kimi-K3 prefill takes: bf16 q, a 656 B fp8_ds_mla record
 cache, kv_lora_rank 512, rope 64, at most 16 heads, bf16 dots, no sink, no
 second segment, no split-K. `flydsl_sparse_mla_fp8ds_supported` says whether
 a call is in that slice; `rocm_aiter_ops` routes it here when
-`VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA=1`.
+`VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA=1`. Each arch has its own kernel
+(`flydsl_sparse_mla_gfx942.py`, `flydsl_sparse_mla_gfx950.py`) behind the
+same launch signature.
 """
 
 import functools
 
 import torch
 
+from vllm.models.kimi_k3.amd.ops import flydsl_sparse_mla_gfx942
 from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_gfx950 import (
     KV_LORA_RANK,
     MAX_HEADS,
@@ -44,19 +47,32 @@ __all__ = [
 # descriptor is sized in bytes (numel * 4) and kept well inside i32.
 _MAX_INDICES = 1 << 29
 
+_BUILDERS = {
+    "gfx942": flydsl_sparse_mla_gfx942.build_sparse_mla_fp8ds_module,
+    "gfx950": build_sparse_mla_fp8ds_module,
+}
+
 
 @functools.cache
-def _get_launcher(num_heads, has_invalid, return_lse):
-    return build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse)
+def _get_launcher(num_heads, has_invalid, return_lse, arch="gfx950"):
+    return _BUILDERS[arch](num_heads, has_invalid, return_lse)
 
 
 @functools.lru_cache(maxsize=16)
-def _is_gfx950(device_index):
+def _kernel_arch(device_index):
+    """The device's arch if it has a kernel here ("gfx942" / "gfx950"), else
+    None."""
     try:
         arch = torch.cuda.get_device_properties(device_index).gcnArchName
     except Exception:  # noqa: BLE001
-        return False
-    return arch.split(":")[0] == "gfx950"
+        return None
+    arch = arch.split(":")[0]
+    return arch if arch in _BUILDERS else None
+
+
+def _device_index(t):
+    index = t.device.index
+    return torch.accelerator.current_device_index() if index is None else index
 
 
 def _kv_rows(kv):
@@ -113,10 +129,10 @@ def flydsl_sparse_mla_fp8ds_supported(
     reads, no sync), so it is safe under CUDA-graph capture. has_invalid and
     return_lse are accepted with either value.
 
-    True iff: gfx950; q is bf16 [T, H, 576] with 1 <= H <= 16, stride(2) == 1,
-    even token/head strides and a 4 B aligned base; kv_buffer has a 16 B
-    aligned base and holds 1-byte fp8_ds_mla records at a 656 B pitch
-    ([N, 656], [N, 1, 656], [N, 1, 1, 656] or an unpadded [nb, block, 656])
+    True iff: gfx942 or gfx950; q is bf16 [T, H, 576] with 1 <= H <= 16,
+    stride(2) == 1, even token/head strides and a 4 B aligned base; kv_buffer
+    has a 16 B aligned base and holds 1-byte fp8_ds_mla records at a 656 B
+    pitch ([N, 656], [N, 1, 656], [N, 1, 1, 656] or an unpadded [nb, block, 656])
     of any size (rows are addressed in 64 bits; slot ids are int32);
     kv_indptr / kv_indices are 1-D int32 or int64 on q's
     device with T + 1 / < 2^29 entries; out, if given, is bf16 [T, H, >= 512]
@@ -126,7 +142,9 @@ def flydsl_sparse_mla_fp8ds_supported(
 
     Not checkable here (it would need a device read): the per-128 KV scales
     must be powers of two <= 2^7, which vLLM's fp8_ds_mla writer guarantees
-    for any latent with |x| <= 57344. See the kernel module docstring.
+    for any latent with |x| <= 57344 on gfx950 (e4m3fn, max 448) and
+    |x| <= 28672 on gfx942 (e4m3fnuz, max 224). See the kernel module
+    docstrings.
     """
     del has_invalid, return_lse  # both are served
     if not (torch.is_tensor(q) and q.is_cuda and q.ndim == 3):
@@ -157,10 +175,7 @@ def flydsl_sparse_mla_fp8ds_supported(
         return False
     if skip_reduce or dot_precision != "bf16":
         return False
-    device_index = q.device.index
-    if device_index is None:
-        device_index = torch.accelerator.current_device_index()
-    if not _is_gfx950(device_index):
+    if _kernel_arch(_device_index(q)) is None:
         return False
     if q.stride(2) != 1 or q.stride(0) % 2 or q.stride(1) % 2:
         return False
@@ -272,7 +287,9 @@ def flydsl_sparse_mla_fp8ds_fwd(
     if n_indices == 0:
         # Every row is empty; the kernel still wants a live index pointer.
         kv_indices = torch.zeros(1, dtype=torch.int32, device=q.device)
-    launcher = _get_launcher(num_heads, bool(has_invalid), bool(return_lse))
+    launcher = _get_launcher(
+        num_heads, bool(has_invalid), bool(return_lse), _kernel_arch(_device_index(q))
+    )
     _run_compiled(
         launcher,
         q,

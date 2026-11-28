@@ -21,10 +21,10 @@ ROW_BYTES = KV_LORA_RANK + 4 * 4 + ROPE_DIM * 2
 @pytest.fixture
 def flydsl_ops(monkeypatch):
     """rocm_aiter_ops with the FlyDSL flag on; yields the FlyDSL launch log."""
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    if not on_gfx950():
-        pytest.skip("FlyDSL sparse MLA is gfx950-only")
+    if not (on_gfx942() or on_gfx950()):
+        pytest.skip("FlyDSL sparse MLA is gfx942 / gfx950-only")
     flydsl = pytest.importorskip("vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla")
     pytest.importorskip("aiter.ops.triton.attention.sparse_mla")
     from vllm._aiter_ops import rocm_aiter_ops
@@ -57,8 +57,10 @@ def flydsl_ops(monkeypatch):
 
 
 def _fp8_ds_mla_cache(num_slots: int, gen: torch.Generator) -> torch.Tensor:
+    """Records in the device's native e4m3 (fnuz on gfx942), pow2 scales, as
+    vLLM's fp8_ds_mla writer stores them."""
     latent = (torch.randn(num_slots, KV_LORA_RANK, generator=gen) * 0.3).to(
-        torch.float8_e4m3fn
+        current_platform.fp8_dtype()
     )
     scales = torch.exp2(torch.randint(-6, 1, (num_slots, 4), generator=gen).float())
     rope = (torch.randn(num_slots, ROPE_DIM, generator=gen) * 0.5).to(torch.bfloat16)
@@ -75,11 +77,25 @@ def _indices(case: str, num_tokens: int, num_slots: int, gen: torch.Generator):
 
     fixed: DCP non-compact prefill, TOPK per row, -1 past the valid count.
     ragged: non-DCP / compact DCP prefill, min(pos + 1, TOPK) valid slots per row.
+    holes: fixed, plus rows with no valid slot, rows shorter than one 64-key
+    tile, and -1 entries inside the valid prefix (has_invalid masks any < 0).
     """
     positions = torch.randint(0, 3 * TOPK, (num_tokens,), generator=gen)
     edges = torch.tensor([0, 1, TOPK - 1, TOPK])[:num_tokens]
     positions[: len(edges)] = edges
     lens = torch.clamp(positions + 1, max=TOPK)
+    if case == "holes":
+        edges = torch.tensor([0, 1, 63, 64, 65, TOPK - 1, TOPK, 0])[:num_tokens]
+        lens = torch.randint(0, TOPK + 1, (num_tokens,), generator=gen)
+        lens[: len(edges)] = edges
+        indices = torch.full((num_tokens, TOPK), -1, dtype=torch.int32)
+        for row, n in enumerate(lens.tolist()):
+            indices[row, :n] = torch.randint(0, num_slots, (n,), generator=gen)
+        holes = torch.rand(num_tokens, TOPK, generator=gen) < 0.1
+        holes[: len(edges)] = False
+        indices[holes] = -1
+        indptr = torch.arange(num_tokens + 1, dtype=torch.int32) * TOPK
+        return indptr.cuda(), indices.flatten().cuda(), True
     if case == "fixed":
         indices = torch.full((num_tokens, TOPK), -1, dtype=torch.int32)
         for row, n in enumerate(lens.tolist()):
@@ -113,9 +129,57 @@ def _run(ops, q, kv, indptr, indices, has_invalid, return_lse, scale):
     return out, lse
 
 
-@pytest.mark.parametrize("case", ["fixed", "ragged"])
+def _torch_reference(q, cache, indptr, indices, scale):
+    """f32 (out, natural-log lse) over each row's entries >= 0; a row with none
+    gives out 0 and lse -inf."""
+    n = cache.shape[0]
+    latent = cache[:, :KV_LORA_RANK].contiguous().view(current_platform.fp8_dtype())
+    scales = cache[:, KV_LORA_RANK : KV_LORA_RANK + 16].contiguous().view(torch.float32)
+    rope = cache[:, KV_LORA_RANK + 16 :].contiguous().view(torch.bfloat16)
+    latent = latent.float().view(n, 4, -1) * scales.view(n, 4, 1)
+    kv = torch.cat([latent.view(n, KV_LORA_RANK), rope.float()], dim=1)
+    num_tokens, num_heads, _ = q.shape
+    out = torch.zeros(num_tokens, num_heads, KV_LORA_RANK, device=q.device)
+    lse = torch.full((num_tokens, num_heads), float("-inf"), device=q.device)
+    bounds = indptr.tolist()
+    for row in range(num_tokens):
+        sel = indices[bounds[row] : bounds[row + 1]]
+        k = kv[sel[sel >= 0].long()]
+        if k.shape[0] == 0:
+            continue
+        s = (q[row].float() @ k.T) * scale
+        lse[row] = torch.logsumexp(s, dim=-1)
+        out[row] = torch.softmax(s, dim=-1) @ k[:, :KV_LORA_RANK]
+    return out, lse
+
+
+def _live_rows(indptr, indices):
+    """Rows with at least one entry >= 0 (the Triton kernel gives NaN on the
+    others)."""
+    bounds = indptr.tolist()
+    return torch.tensor(
+        [
+            bool((indices[bounds[r] : bounds[r + 1]] >= 0).any())
+            for r in range(len(bounds) - 1)
+        ],
+        device=indices.device,
+    )
+
+
+def _assert_close(out, ref):
+    torch.testing.assert_close(out.float(), ref.float(), atol=3e-2, rtol=2e-2)
+    if ref.any():  # no direction to compare otherwise
+        cos = torch.nn.functional.cosine_similarity(
+            out.float().flatten(), ref.float().flatten(), dim=0
+        )
+        assert cos > 0.9999
+
+
+@pytest.mark.parametrize("case", ["fixed", "ragged", "holes"])
 @pytest.mark.parametrize("return_lse", [False, True])
-@pytest.mark.parametrize("num_heads,num_tokens", [(12, 300), (16, 37), (4, 1)])
+@pytest.mark.parametrize(
+    "num_heads,num_tokens", [(12, 300), (16, 37), (8, 160), (1, 70), (4, 1)]
+)
 @torch.inference_mode()
 def test_flydsl_matches_triton(
     flydsl_ops, case: str, return_lse: bool, num_heads: int, num_tokens: int
@@ -137,16 +201,19 @@ def test_flydsl_matches_triton(
     ops._FLYDSL_SPARSE_MLA = False
     ref_out, ref_lse = _run(ops, q, kv, indptr, indices, has_invalid, return_lse, scale)
     assert len(launches) == 1
+    t_out, t_lse = _torch_reference(q, cache, indptr, indices, scale)
 
     assert not out.isnan().any()
-    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
-    cos = torch.nn.functional.cosine_similarity(
-        out.float().flatten(), ref_out.float().flatten(), dim=0
-    )
-    assert cos > 0.9999
+    live = _live_rows(indptr, indices)
+    _assert_close(out[live], ref_out[live])
+    _assert_close(out, t_out)
+    assert not out[~live].any()
     if return_lse:
         assert lse is not None and ref_lse is not None
-        torch.testing.assert_close(lse, ref_lse.view_as(lse), atol=1e-3, rtol=1e-4)
+        torch.testing.assert_close(
+            lse[live], ref_lse.view_as(lse)[live], atol=1e-3, rtol=1e-4
+        )
+        torch.testing.assert_close(lse, t_lse, atol=1e-3, rtol=1e-4)
     else:
         assert lse is None
 
@@ -154,8 +221,9 @@ def test_flydsl_matches_triton(
 @torch.inference_mode()
 def test_flydsl_cache_past_4gib(flydsl_ops) -> None:
     """The non-DCP K3.1 call hands FlyDSL its whole packed block-row space,
-    which spans more than 4 GiB on a real server: slots past that line must
-    be addressed in 64 bits (DMA, scale and rope reads alike)."""
+    which spans more than 4 GiB on a real server: slots past the 2 GiB and
+    4 GiB lines must be addressed in 64 bits (latent, scale and rope reads
+    alike)."""
     ops, launches = flydsl_ops
     span = 5 * 2**30
     num_slots = span // ROW_BYTES
@@ -166,19 +234,22 @@ def test_flydsl_cache_past_4gib(flydsl_ops) -> None:
     num_tokens, num_heads = 64, 16
     small = _fp8_ds_mla_cache(3 * TOPK, gen)
     n = small.shape[0]
-    # The rows that get read, scattered to either side of the 4 GiB line.
-    line = 2**32 // ROW_BYTES + 1
+    # The rows that get read: below 2 GiB, between 2 and 4 GiB, past 4 GiB.
+    lines = [0, 2**31 // ROW_BYTES + 1, 2**32 // ROW_BYTES + 1, num_slots]
+    counts = [n // 3, n // 3, n - 2 * (n // 3)]
     slots = torch.cat(
         [
-            torch.randperm(line, generator=gen)[: n // 2],
-            line + torch.randperm(num_slots - line, generator=gen)[: n - n // 2],
+            lo + torch.randperm(hi - lo, generator=gen)[:c]
+            for lo, hi, c in zip(lines[:-1], lines[1:], counts)
         ]
     ).to("cuda", torch.int64)
     big = torch.empty(num_slots, ROW_BYTES, dtype=torch.uint8, device="cuda")
     big[slots] = small
     indptr, local, has_invalid = _indices("ragged", num_tokens, n, gen)
     indices = slots[local.long()].to(torch.int32)
-    assert int(indices.max()) * ROW_BYTES > 2**32
+    offsets = indices.long() * ROW_BYTES
+    assert int(offsets.max()) > 2**32
+    assert bool(((offsets > 2**31) & (offsets < 2**32)).any())
     q = (
         torch.randn(num_tokens, num_heads, KV_LORA_RANK + ROPE_DIM, generator=gen) * 0.5
     ).to("cuda", torch.bfloat16)
@@ -199,12 +270,11 @@ def test_flydsl_cache_past_4gib(flydsl_ops) -> None:
     )
     assert len(launches) == 2
     assert not out.isnan().any()
-    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
-    cos = torch.nn.functional.cosine_similarity(
-        out.float().flatten(), ref_out.float().flatten(), dim=0
-    )
-    assert cos > 0.9999
+    _assert_close(out, ref_out)
     torch.testing.assert_close(lse, ref_lse.view_as(lse), atol=1e-3, rtol=1e-4)
+    t_out, t_lse = _torch_reference(q, small, indptr, local, scale)
+    _assert_close(out, t_out)
+    torch.testing.assert_close(lse, t_lse, atol=1e-3, rtol=1e-4)
 
 
 @torch.inference_mode()
@@ -358,3 +428,21 @@ def test_flydsl_min_tokens_gate(flydsl_ops, monkeypatch) -> None:
     ops.refresh_env_variables()
     _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
     assert launches == [(12, False, True)]
+
+
+def test_flydsl_min_tokens_default(monkeypatch) -> None:
+    """Unset, the gate is the arch's measured crossover (2048-key rows)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx942
+
+    monkeypatch.delenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", raising=False)
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        expected = 80 if on_gfx942() else 160
+        assert rocm_aiter_ops._flydsl_sparse_mla_min_tokens() == expected
+        monkeypatch.setenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "7")
+        rocm_aiter_ops.refresh_env_variables()
+        assert rocm_aiter_ops._flydsl_sparse_mla_min_tokens() == 7
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
