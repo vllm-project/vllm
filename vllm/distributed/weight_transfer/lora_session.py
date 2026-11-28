@@ -1,20 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side LoRA weight-update session.
+"""Worker-side LoRA weight-update session and HTTP tensor codec.
 
 Supports updating one or more LoRA adapters inside vLLM's unified
 `start_weight_update` -> `update_weights` -> `finish_weight_update`
 lifecycle from:
 1. Weight-transfer backends (NCCL / CUDA IPC, packed or unpacked) via
    `_LoRAWeightSink` (which implements `nn.Module.load_weights`).
-2. Disk directories (`lora_path`), committed on `finish_weight_update`.
+2. Pure HTTP in-memory tensors encoded with `safetensors` + base64
+   (zero pickle, works without `--weight-transfer-config`).
+3. Disk directories (`lora_path`), committed on `finish_weight_update`.
 """
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import pybase64 as base64
 import torch
+from safetensors.torch import load as safetensors_load
+from safetensors.torch import save as safetensors_save
 
 from vllm.config import set_current_vllm_config
 from vllm.lora.request import LoRARequest, _TensorLoRARequest
@@ -56,6 +61,52 @@ class LoRAAdapterUpdateSpec:
             base_model_name=data.get("base_model_name"),
             is_3d_lora_weight=bool(data.get("is_3d_lora_weight", False)),
         )
+
+
+def encode_lora_tensors_http(
+    tensors: Mapping[str, torch.Tensor],
+    lora_name: str | None = None,
+) -> dict[str, Any]:
+    """Encode a mapping of LoRA tensors as a JSON-safe HTTP `update_info` dict.
+
+    Uses `safetensors` serialization (safe, no pickle) + base64.
+    """
+    if not tensors:
+        raise ValueError("tensors must not be empty")
+
+    # safetensors requires contiguous CPU tensors with non-aliased storage.
+    cpu_tensors: dict[str, torch.Tensor] = {}
+    seen_data_ptrs: set[int] = set()
+    for name, tensor in tensors.items():
+        t = tensor.detach().to(device="cpu").contiguous()
+        ptr = t.data_ptr()
+        if ptr in seen_data_ptrs:
+            t = t.clone()
+        seen_data_ptrs.add(t.data_ptr())
+        cpu_tensors[name] = t
+
+    raw = safetensors_save(cpu_tensors)
+    payload: dict[str, Any] = {
+        "safetensors_b64": base64.b64encode(raw).decode("ascii"),
+    }
+    if lora_name is not None:
+        payload["lora_name"] = lora_name
+    return payload
+
+
+def decode_lora_tensors_http(
+    update_info: Mapping[str, Any],
+) -> tuple[dict[str, torch.Tensor], str | None]:
+    """Decode an HTTP `update_info` payload produced by `encode_lora_tensors_http`."""
+    raw_b64 = update_info["safetensors_b64"]
+    if not isinstance(raw_b64, str) or not raw_b64:
+        raise ValueError("'safetensors_b64' must be a non-empty base64 string")
+    raw_bytes = base64.b64decode(raw_b64)
+    tensors = safetensors_load(raw_bytes)
+    lora_name = update_info.get("lora_name")
+    if lora_name is not None and not isinstance(lora_name, str):
+        raise ValueError("'lora_name' must be a string when provided")
+    return tensors, lora_name
 
 
 class _LoRAWeightSink(torch.nn.Module):
@@ -210,11 +261,26 @@ class LoRAWeightUpdateSession:
             worker.weight_transfer_engine.reset_weight_update_target()
         self.sink.stashed.clear()
 
+    def receive_http_tensors(self, update_info: Mapping[str, Any]) -> bool:
+        """If `update_info` carries HTTP safetensors, decode and stash them."""
+        if "safetensors_b64" not in update_info:
+            return False
+        if not self.has_tensor_adapters:
+            raise ValueError(
+                "Received HTTP LoRA tensors, but no adapters in this session "
+                "were configured with peft_config"
+            )
+        tensors, lora_name = decode_lora_tensors_http(update_info)
+        self.sink.load_weights(tensors.items(), default_lora_name=lora_name)
+        return True
+
     def update(self, worker: Any, update_info: dict | list[dict]) -> None:
         """Receive one LoRA weight update chunk on `worker`."""
         with set_current_vllm_config(worker.vllm_config):
             try:
                 local_update_info = self._select_local_update_info(worker, update_info)
+                if self.receive_http_tensors(local_update_info):
+                    return
                 worker._check_weight_transfer_engine()
                 assert worker.weight_transfer_engine is not None
                 if not self.has_tensor_adapters:

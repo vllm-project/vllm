@@ -96,6 +96,18 @@ class HTTPVLLMWeightSyncClient:
             "update_weights", {"update_info": _json_safe_update_payload(update_info)}
         )
 
+    def update_lora_weights_http(
+        self,
+        tensors: dict[str, Any],
+        lora_name: str | None = None,
+    ) -> None:
+        """Send in-memory LoRA tensors over HTTP using safe safetensors encoding."""
+        from vllm.distributed.weight_transfer.lora_session import (
+            encode_lora_tensors_http,
+        )
+
+        self.update_weights(encode_lora_tensors_http(tensors, lora_name=lora_name))
+
     def finish_weight_update(
         self,
         weight_version: str | None = None,

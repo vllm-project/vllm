@@ -15,6 +15,8 @@ from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.lora_session import (
     LoRAAdapterUpdateSpec,
     LoRAWeightUpdateSession,
+    decode_lora_tensors_http,
+    encode_lora_tensors_http,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -415,3 +417,68 @@ def test_http_weight_sync_client_lora_helpers():
         {"lora_adapters": [{"lora_name": "a", "peft_config": PEFT_CFG}]},
     )
     assert posted[1] == ("finish_weight_update", {"reset_prefix_cache": True})
+
+
+def test_http_safetensors_roundtrip_and_aliased_storage():
+    base = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    tensors = {
+        "layer0.lora_A.weight": base,
+        # Aliased view sharing storage with base; safetensors must still succeed.
+        "layer0.lora_B.weight": base.view(4, 4),
+    }
+    payload = encode_lora_tensors_http(tensors, lora_name="adapter_a")
+    assert "safetensors_b64" in payload
+    assert payload["lora_name"] == "adapter_a"
+
+    decoded, lora_name = decode_lora_tensors_http(payload)
+    assert lora_name == "adapter_a"
+    assert set(decoded.keys()) == set(tensors.keys())
+    for key, expected in tensors.items():
+        assert torch.equal(decoded[key], expected)
+
+
+def test_gpu_worker_http_lora_without_weight_transfer_engine():
+    worker = _make_stub_worker(lora_enabled=True, weight_transfer_engine=None)
+    specs = [
+        {
+            "lora_name": "lora_mem",
+            "lora_int_id": 1,
+            "lora_path": "memory://lora_mem@1",
+            "peft_config": PEFT_CFG,
+        }
+    ]
+    w = torch.randn(4, 4)
+
+    with (
+        patch("vllm.v1.worker.gpu_worker.set_current_vllm_config"),
+        patch("vllm.distributed.weight_transfer.lora_session.set_current_vllm_config"),
+    ):
+        Worker.start_weight_update(worker, lora_adapters=specs)
+        Worker.update_weights(worker, encode_lora_tensors_http({"q.lora_A.weight": w}))
+        Worker.finish_weight_update(worker)
+
+    assert worker._weight_update_active is False
+    assert worker._weight_update_lora_session is None
+    worker.model_runner.add_lora.assert_called_once()
+    req = worker.model_runner.add_lora.call_args[0][0]
+    assert isinstance(req, _TensorLoRARequest)
+    assert req.lora_name == "lora_mem"
+    assert req.load_inplace is True
+    assert torch.equal(req._lora_tensors["q.lora_A.weight"], w)
+
+
+def test_http_weight_sync_client_update_lora_weights_http():
+    sync_client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+    posted: list[tuple[str, dict | None]] = []
+
+    def _fake_post(path, json=None):
+        posted.append((path, json))
+        return {"message": "ok"}
+
+    sync_client._post = _fake_post  # type: ignore[method-assign]
+    sync_client.update_lora_weights_http(
+        {"q.lora_A.weight": torch.ones(2, 2)}, lora_name="a"
+    )
+    assert posted[0][0] == "update_weights"
+    assert "safetensors_b64" in posted[0][1]["update_info"]
+    assert posted[0][1]["update_info"]["lora_name"] == "a"
