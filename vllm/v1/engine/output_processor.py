@@ -595,6 +595,7 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        tracer: Any = None,
     ):
         self.collect_stats = collect_stats
         self.tokenizer = tokenizer
@@ -605,6 +606,10 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        # Tracer for request-level spans. Passed through from the engine so
+        # spans are exported to the provider vLLM configured, even if another
+        # integration owns the global tracer provider. #69661
+        self.tracer = tracer
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -1026,6 +1031,7 @@ class OutputProcessor:
             attributes=attributes,
             context=trace_context,
             kind=SpanKind.SERVER,
+            tracer=self.tracer,
         )
 
     def _update_stats_from_output(

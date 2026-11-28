@@ -158,8 +158,13 @@ class AsyncLLM(EngineClient):
         self.observability_config = vllm_config.observability_config
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
+        self.tracer = None
         if tracing_endpoint is not None:
-            init_tracer("vllm.llm_engine", tracing_endpoint)
+            # Keep the returned tracer rather than resolving spans from the
+            # global provider: another integration (e.g. an
+            # auto-instrumentation distribution) may have installed its own
+            # global provider, which would misroute request spans. #69661
+            self.tracer = init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_requests = log_requests
 
@@ -196,6 +201,7 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
+            tracer=self.tracer,
         )
 
         # EngineCore (starts the engine in background process).
