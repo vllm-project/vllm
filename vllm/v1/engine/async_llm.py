@@ -1041,9 +1041,11 @@ class AsyncLLM(EngineClient):
                   `resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to `False` to preserve cache for faster resume.
-                With `mode="keep"`, running requests are preempted and
-                recomputed on resume, and the multimodal processor cache is
-                kept for the requests still queued.
+                With `mode="keep"`, `clear_cache=True` preempts the running
+                requests, which are recomputed on resume, and
+                `clear_cache=False` leaves them in place. Either way the
+                multimodal processor cache is kept for the requests still
+                queued.
 
         """
         if clear_cache and mode != "keep":
