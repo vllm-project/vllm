@@ -26,6 +26,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _ConnectorMetricName,
     _TransferMetricName,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.prefetch import (
+    PREFETCH_REQ_ID,
+    PrefetchJob,
+    PrefetchPlan,
+    decode_prefetch_hashes,
+    plan_prefetch,
+    truncate_plan,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     GroupOffloadConfig,
     RequestGroupState,
@@ -40,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers impo
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -319,6 +328,13 @@ class OffloadingConnectorScheduler:
         self._reset_fence: dict[int, int] = {}
         self._reset_fence_since = 0.0
         self._job_statuses: dict[int, TransferJobStatus] = {}
+        # Prefetch: KV pulled back into the pool ahead of the request that
+        # will hit it. Hinted hashes wait here until a step drains them;
+        # jobs in flight are found by a scan of `_prefetch_jobs`, not by a
+        # request id, because no request exists for them.
+        self._block_pool: BlockPool | None = None
+        self._pending_prefetch_hints: list[tuple[bytes, ...]] = []
+        self._prefetch_jobs: dict[int, PrefetchJob] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
         # flushing in case a block is re-allocated by the KV cache manager.
@@ -910,6 +926,7 @@ class OffloadingConnectorScheduler:
         self._events_tracker.on_new_request(
             req_context, request, self.config.kv_group_configs
         )
+        self._collect_prefetch_hints(request)
 
     def get_num_new_matched_tokens(
         self,
@@ -1410,6 +1427,11 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
+        # Reservations are made before the store handlers see this step:
+        # a pinned block is out of the free queue, so no store trigger can
+        # be handed a block a prefetch already claimed.
+        self._drain_prefetch_hints()
+
         store_jobs: dict[int, TransferJob] = {}
         if self._offloading_enabled and self.access_mode.can_write:
             # Chunks skipped while offloading was off are still offered:
@@ -1466,6 +1488,8 @@ class OffloadingConnectorScheduler:
         workers and their reports come back before on_reset_flushed().
         """
         if self._job_statuses or self._reset_fence:
+            return True
+        if self._pending_prefetch_hints or self._prefetch_jobs:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -1537,6 +1561,7 @@ class OffloadingConnectorScheduler:
                                 "KV offloading: workers reported every job "
                                 "the cache reset flushed"
                             )
+                self._discard_prefetch_job(job_id)
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
@@ -1550,6 +1575,11 @@ class OffloadingConnectorScheduler:
             if job_status.pending_count > 0:
                 continue
             assert job_status.pending_count == 0
+            if job_id in self._prefetch_jobs:
+                # A prefetch has no request state to update, so there is
+                # nothing to update for it here.
+                self._finish_prefetch_job(job_id, job_status)
+                continue
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
@@ -1594,6 +1624,154 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
                 self._remove_request(job_status.req_id)
+
+    def bind_block_pool(self, block_pool: BlockPool) -> None:
+        """Take the GPU block pool that prefetch reservations are made in."""
+        self._block_pool = block_pool
+
+    def _collect_prefetch_hints(self, request: Request) -> None:
+        """Queue the block hashes a request's hint asks to warm.
+
+        The hint rides the request that carries it, but names a prefix that is
+        not this request's own: the point is to have it resident by the time a
+        later request needs it.
+        """
+        hashes = decode_prefetch_hashes(request.kv_hints)
+        if hashes:
+            self._pending_prefetch_hints.append(hashes)
+
+    def _drain_prefetch_hints(self) -> None:
+        """Turn queued hints into reservations and async load jobs.
+
+        Runs inside a step's metadata build, so the job rides the same worker
+        batch as everything else in that step.
+        """
+        hints, self._pending_prefetch_hints = self._pending_prefetch_hints, []
+        if not hints or self._block_pool is None or not self._offloading_enabled:
+            return
+        # A reservation is per block, an offload key is per chunk and group.
+        group_ids = tuple(sorted(self._group_configs_by_id))
+        if not group_ids:
+            return
+        first_group = self._group_configs_by_id[group_ids[0]]
+        for hashes in hints:
+            plan = plan_prefetch(
+                hashes,
+                hashes_per_chunk=first_group.hashes_per_chunk,
+                blocks_per_chunk=self.config.blocks_per_chunk,
+                group_ids=group_ids,
+            )
+            if plan is None:
+                continue
+            req_context = ReqContext(req_id=PREFETCH_REQ_ID)
+            plan = self._servable_prefix(plan, req_context)
+            if plan is None:
+                logger.debug("Prefetch declined: nothing to load")
+                continue
+            if any(
+                plan.block_hashes[0] in job.plan.block_hashes
+                for job in self._prefetch_jobs.values()
+            ):
+                # This prefix is already on its way in. Reserving it twice would
+                # load it twice and publish the same hashes twice, stranding the
+                # reservation that loses the race.
+                logger.debug("Prefetch declined: this prefix is already in flight")
+                continue
+            pinned = self._block_pool.pin_blocks_by_hash(
+                plan.block_hashes, group_ids, first_group.tokens_per_block
+            )
+            if pinned is None:
+                logger.debug(
+                    "Prefetch declined: the pool cannot spare %d block(s)",
+                    len(plan.block_hashes) * len(group_ids),
+                )
+                continue
+            if not pinned:
+                # The GPU cache already serves every hash. A load would still
+                # carry the chunk keys, with no block left for them to land in.
+                logger.debug("Prefetch skipped: the prefix is already resident")
+                continue
+            keys = tuple(
+                key for group_id in group_ids for key in plan.keys_by_group[group_id]
+            )
+            src_spec = self.manager.prepare_load(keys, req_context)
+            dst_spec = GPULoadStoreSpec(
+                plan.dst_block_ids(pinned),
+                group_sizes=plan.group_sizes(pinned),
+                block_indices=plan.block_indices(),
+            )
+            job_id = self._generate_job_id()
+            # Never sync: a prefetch must not be able to fail a step's forward.
+            self._current_batch_load_jobs[job_id] = TransferJob(
+                req_id=PREFETCH_REQ_ID,
+                src_spec=src_spec,
+                dst_spec=dst_spec,
+                sync=False,
+            )
+            self._job_statuses[job_id] = TransferJobStatus(
+                req_id=PREFETCH_REQ_ID,
+                pending_count=self.config.num_workers,
+                keys=keys,
+                is_store=False,
+                is_sync_load=False,
+            )
+            self._prefetch_jobs[job_id] = PrefetchJob(
+                plan=plan, pinned=pinned, req_context=req_context
+            )
+            logger.debug(
+                "Prefetch job %d: %d chunk(s) over %d group(s)",
+                job_id,
+                plan.num_chunks,
+                len(group_ids),
+            )
+
+    def _servable_prefix(
+        self, plan: PrefetchPlan, req_context: ReqContext
+    ) -> PrefetchPlan | None:
+        """How far the tier can serve a plan, as a contiguous prefix."""
+        num_chunks = 0
+        for chunk in range(plan.num_chunks):
+            if any(
+                self.manager.lookup(keys[chunk], req_context) is not LookupResult.HIT
+                for keys in plan.keys_by_group.values()
+            ):
+                break
+            num_chunks += 1
+        return truncate_plan(plan, num_chunks)
+
+    def _finish_prefetch_job(
+        self, job_id: int, job_status: TransferJobStatus
+    ) -> None:
+        """Settle a finished prefetch: publish what landed, free the rest."""
+        job = self._prefetch_jobs.pop(job_id, None)
+        del self._job_statuses[job_id]
+        if job is None:
+            return
+        assert self._block_pool is not None
+        # Either way the tier's hold on the source chunks ends here.
+        self.manager.complete_load(job_status.keys, job.req_context)
+        if job_status.failed:
+            logger.warning(
+                "KV offload prefetch job %d failed; %d reserved block(s) "
+                "returned unpublished.",
+                job_id,
+                sum(len(pinned_set.blocks) for pinned_set in job.pinned),
+            )
+            for pinned_set in job.pinned:
+                self._block_pool.release_pinned(pinned_set)
+            return
+        for pinned_set in job.pinned:
+            # Publish first: once released, the pool may hand the block out.
+            self._block_pool.publish_pinned_hashes(pinned_set)
+            self._block_pool.release_pinned(pinned_set)
+
+    def _discard_prefetch_job(self, job_id: int) -> None:
+        """Drop a prefetch a cache reset made stale, without publishing it."""
+        job = self._prefetch_jobs.pop(job_id, None)
+        if job is None or self._block_pool is None:
+            return
+        for pinned_set in job.pinned:
+            self._block_pool.release_pinned(pinned_set)
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None
@@ -1715,6 +1893,9 @@ class OffloadingConnectorScheduler:
     def _reset_cache(self) -> None:
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._job_statuses.keys())
+        # Nothing hinted survives a reset: the hashes may name blocks the
+        # reset just dropped.
+        self._pending_prefetch_hints.clear()
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
