@@ -2844,6 +2844,7 @@ class HiSparseSourceManager(FullAttentionManager):
                 else None
             ),
             medium=MEDIUM_CPU,
+            sharing_scope=device_pool.sharing_scope,
             event_owner=device_pool,
         )
         self._null_block = self.block_pool.null_block

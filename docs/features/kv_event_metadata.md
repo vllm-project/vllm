@@ -55,7 +55,9 @@ required payload fields are omitted here for clarity:
 With metadata disabled, these same events retain their existing payload fields
 and omit the two metadata keys entirely. Sending the keys with `null` values is
 not the disabled-mode format. Decoders can still accept old events and explicit
-`null` metadata as unknown values.
+`null` metadata as unknown values. Decoders accept unrecognized
+`sharing_scope` strings without rejecting the batch. Consumers can treat
+those values as unknown.
 
 Strict consumers that reject unknown event fields can continue using default
 mode. Update those consumers before opting in. Tolerant consumers can ignore
@@ -104,11 +106,15 @@ source paths alone do not establish that a child event reaches the publisher.
 
 | Resource | Scope declaration |
 | --- | --- |
-| Native GPU prefix cache | `instance` |
-| Native primary CPU offload cache | `instance` |
+| Native GPU and HiSparse host prefix caches | `instance` |
+| SimpleCPUOffload local CPU or disk cache | `instance` |
+| Native primary CPU offload cache | `instance` without a `p2p` secondary tier. Omitted with P2P. |
 | Mooncake Store successful store | `shared` |
 | Filesystem / object-store offload tier | Optional `instance` or `shared` tier configuration |
 | Resource without an explicit declaration | Unknown; key omitted |
+
+With a `p2p` secondary tier, peers can fetch chunks from the publishing
+instance's primary CPU cache. Peer lookups determine which chunks can be fetched.
 
 Resource declarations are retained internally in either publication mode. A
 filesystem path, bucket name, `CPU`/`STORAGE` medium, or `LOCAL`/`REMOTE` locality

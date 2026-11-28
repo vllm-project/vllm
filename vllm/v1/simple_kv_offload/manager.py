@@ -1199,6 +1199,7 @@ class SimpleCPUOffloadScheduler:
                             block_size=event_block_size,
                             lora_id=meta.lora_id if meta else None,
                             medium=self.kv_event_medium,
+                            sharing_scope=self.cpu_block_pool.sharing_scope,
                             lora_name=meta.lora_name if meta else None,
                             extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,

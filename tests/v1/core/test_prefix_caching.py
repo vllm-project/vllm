@@ -1771,7 +1771,7 @@ def test_hisparse_events_report_host_and_device_placement(lookahead):
     assert {
         (event.group_idx, event.medium, event.sharing_scope) for event in stored
     } == {
-        (0, MEDIUM_CPU, None),
+        (0, MEDIUM_CPU, "instance"),
         (1, MEDIUM_GPU, "instance"),
     }
 
@@ -1790,7 +1790,7 @@ def test_hisparse_events_report_host_and_device_placement(lookahead):
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU
-    assert removed.sharing_scope is None
+    assert removed.sharing_scope == "instance"
     assert removed.group_idx == 0
 
 

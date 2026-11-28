@@ -5,6 +5,7 @@
 import logging
 import os
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -18,15 +19,20 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    ReqContext,
+    StoreTrigger,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
 )
+from vllm.v1.kv_offload.cpu import shared_offload_region
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
+from vllm.v1.kv_offload.tiering.p2p.data import nixl
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
@@ -336,6 +342,48 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
             # 32 tokens for each chunk, over a request of 32 chunks.
             "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
         }
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("secondary_tiers", "expected_scope"),
+    [
+        pytest.param([], "instance", id="cpu-only"),
+        pytest.param([{"type": "example"}], "instance", id="non-p2p"),
+        pytest.param([{"type": "p2p", "host": "127.0.0.1", "port": 0}], None, id="p2p"),
+    ],
+)
+def test_primary_cpu_event_scope_with_secondary_tiers(
+    tmp_path, monkeypatch, secondary_tiers, expected_scope
+):
+    monkeypatch.setattr(shared_offload_region, "SHM_PATH", str(tmp_path))
+    monkeypatch.setattr(nixl, "_NixlAgent", None)
+    config = make_offloading_config(
+        cpu_bytes_to_use=SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+        extra_config={"secondary_tiers": secondary_tiers, "tier_poll_interval_s": 0},
+    )
+    manager = TieringOffloadingSpec(
+        replace(config, enable_kv_cache_events=True)
+    ).get_manager()
+    context = ReqContext(req_id="scope")
+    first = make_offload_key(b"first", 0)
+    second = make_offload_key(b"second", 0)
+    trigger = StoreTrigger.ON_COMPUTE
+    try:
+        manager.on_new_request(context)
+        for key in (first, second):
+            prepared = manager.prepare_store([key], context, trigger=trigger)
+            assert prepared is not None and prepared.keys_to_store == [key]
+            manager.complete_store([key], context, trigger=trigger)
+        assert [
+            (event.keys, event.removed, event.sharing_scope)
+            for event in manager.take_events()
+        ] == [
+            ([first], False, expected_scope),
+            ([first], True, expected_scope),
+            ([second], False, expected_scope),
+        ]
     finally:
         manager.shutdown()
 

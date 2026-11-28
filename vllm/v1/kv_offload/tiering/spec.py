@@ -429,7 +429,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 )
                 self._scheduler_mmap = scheduler_mmap
 
-                # Create primary tier (CPU-based)
+                # P2P peers can fetch chunks from the primary CPU cache.
+                has_p2p_tier = any(
+                    tier_config.get("type") == "p2p"
+                    for tier_config in self.secondary_tier_configs
+                )
                 primary_tier = CPUPrimaryTierOffloadingManager(
                     num_chunks=self.num_chunks,
                     cache_policy=self.eviction_policy,
@@ -437,6 +441,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
                     info=self.cpu_info,
+                    sharing_scope=None if has_p2p_tier else "instance",
                 )
 
                 # Create secondary tiers

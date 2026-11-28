@@ -142,10 +142,11 @@ launch command:
 --kv-events-config '{"enable_kv_cache_events":true,"enable_kv_event_metadata":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558"}'
 ```
 
-The native primary CPU cache declares `instance` scope. Other resources reported
-by an offloading connector keep their own declarations; the `CPU` medium alone
-does not establish scope. With metadata enabled, a standalone connector uses
-`source_id: "connector/0"` and its configured connector name.
+The native primary CPU cache declares `instance` scope when there is no `p2p`
+secondary tier. With a `p2p` tier, peers can fetch chunks from that cache, so its
+scope is omitted. The `CPU` medium describes where the chunks are stored.
+With metadata enabled, a standalone connector uses `source_id: "connector/0"`
+and its configured connector name.
 
 `self_describing_kv_events` independently controls complete versus hash-only
 placeholder payloads. Disabling metadata omits `source` and `sharing_scope` from

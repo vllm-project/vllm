@@ -7,7 +7,12 @@ from typing import Any
 import msgspec
 import pytest
 
-from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
+from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+    KVEventBatch,
+)
 
 # Minimal ExternalBlockHash for testing (bytes are a valid ExternalBlockHash).
 _FAKE_HASH: bytes = b"\xab" * 32
@@ -385,8 +390,21 @@ def test_invalid_event_source_rejected_on_decode(source):
         msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=AllBlocksCleared)
 
 
-@pytest.mark.parametrize("scope", ["local", "", "SHARED", True, 1])
-def test_invalid_event_scope_rejected_on_decode(scope):
+@pytest.mark.parametrize("make_event", [_make_block_stored, _make_block_removed])
+def test_unknown_sharing_scope_preserves_the_batch(make_event):
+    known = msgspec.structs.replace(_make_block_removed(), sharing_scope="instance")
+    event = make_event()
+    future_event = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    future_event["sharing_scope"] = "node"
+    payload = msgspec.msgpack.encode([0.0, [known, future_event]])
+    assert msgspec.msgpack.decode(payload, type=KVEventBatch).events == [
+        known,
+        msgspec.structs.replace(event, sharing_scope="node"),
+    ]
+
+
+@pytest.mark.parametrize("scope", [True, 1])
+def test_non_string_event_scope_rejected_on_decode(scope):
     payload = msgspec.msgpack.decode(msgspec.msgpack.encode(_make_block_removed()))
     payload["sharing_scope"] = scope
     with pytest.raises(msgspec.ValidationError):
