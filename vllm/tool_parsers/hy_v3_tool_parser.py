@@ -269,6 +269,8 @@ class HYV3ToolParser(ToolParser):
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        # exact JSON text already sent to the client
+        self._streamed_json_prefix: str = ""
 
         init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
         self.suffix: str = init_kwargs.get("token_suffix") or ""
@@ -404,6 +406,7 @@ class HYV3ToolParser(ToolParser):
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._streamed_json_prefix = ""
 
     def extract_tool_calls_streaming(
         self,
@@ -528,6 +531,28 @@ class HYV3ToolParser(ToolParser):
                     )
                 )
         return deltas
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """Return the shortest suffix that closes the streamed arguments.
+
+        Incremental streaming withholds the closing ``}`` until
+        ``</tool_call>`` arrives, and never closes a string value that is
+        still being streamed.  When generation ends early (max_tokens, a stop
+        sequence, client disconnect) the caller holds an unterminated JSON
+        fragment.  Return the suffix that makes the text already streamed
+        parse; the truncated tail of an open string is what the model
+        actually produced and has already been sent.
+        """
+        prefix = self._streamed_json_prefix
+        if self._streaming_tool_name is None or not prefix:
+            return ""
+        for suffix in ("", "}", '"}'):
+            try:
+                json.loads(prefix + suffix)
+            except ValueError:
+                continue
+            return suffix
+        return ""
 
     def _extract_streaming_incremental(
         self,
@@ -663,6 +688,7 @@ class HYV3ToolParser(ToolParser):
             if end > self._streamed_json_len:
                 argument_diff = snapshot[self._streamed_json_len : end]
                 self._streamed_json_len = end
+            self._streamed_json_prefix = snapshot[:end]
 
         # --- construct return DeltaMessage ---
         delta: DeltaMessage | None
