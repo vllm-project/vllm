@@ -17,6 +17,7 @@ PG_WAIT_TIMEOUT = 1800
 # Env vars that are worker-specific and must NOT be copied from the
 # driver to Ray workers — they are set per-worker after GPU discovery.
 WORKER_SPECIFIC_ENV_VARS: set[str] = {
+    "VLLM_ZYGOTE_ADDRESS",  # Unix socket local to the driver process tree.
     "VLLM_HOST_IP",
     "VLLM_HOST_PORT",
     "VLLM_NIXL_SIDE_CHANNEL_HOST",

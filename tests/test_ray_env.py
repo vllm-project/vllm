@@ -112,6 +112,7 @@ class TestExclusion:
         {
             "VLLM_HOST_IP": "10.0.0.1",
             "VLLM_NIXL_SIDE_CHANNEL_HOST": "10.0.0.1",
+            "VLLM_ZYGOTE_ADDRESS": "/tmp/driver/zygote.sock",
         },
         clear=False,
     )
@@ -119,6 +120,7 @@ class TestExclusion:
         result = get_env_vars_to_copy(exclude_vars=WORKER_SPECIFIC_ENV_VARS)
         assert "VLLM_HOST_IP" not in result
         assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in result
+        assert "VLLM_ZYGOTE_ADDRESS" not in result
 
     @patch.dict(os.environ, {"LMCACHE_LOCAL_CPU": "True"}, clear=False)
     @patch(

@@ -6,6 +6,7 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
+import os
 import sys
 from importlib.util import find_spec
 
@@ -39,6 +40,11 @@ def maybe_run_omni() -> bool:
 def main():
     if maybe_run_omni():
         return
+
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "zygote":
+        from vllm.utils import zygote
+
+        zygote.maybe_start_for_cli(sys.argv)
 
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env

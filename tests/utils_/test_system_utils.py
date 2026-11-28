@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -33,7 +34,7 @@ def test_unique_filepath():
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
 
 
-@pytest.mark.parametrize("start_method", [None, "fork"])
+@pytest.mark.parametrize("start_method", [None, "fork", "zygote"])
 @pytest.mark.parametrize(
     "numa_args, force_spawn",
     [
@@ -64,7 +65,9 @@ def test_numa_bind_cli_start_method(monkeypatch, start_method, numa_args, force_
         monkeypatch.setattr(system_utils, check, lambda: False)
 
     _maybe_force_spawn()
-    expected_method = "spawn" if force_spawn else start_method
+    expected_method = (
+        "spawn" if force_spawn and start_method != "zygote" else start_method
+    )
     assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == expected_method
 
 
@@ -129,3 +132,65 @@ raise SystemExit(1 if hung else proc.exitcode)
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=120)
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize("exit_during_walk", [False, True])
+def test_kill_process_tree_reaps_worker_of_exited_requester(
+    monkeypatch, exit_during_walk
+):
+    from vllm.utils import zygote
+
+    with (
+        subprocess.Popen([sys.executable, "-c", "pass"]) as parent,
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        ) as worker,
+    ):
+        try:
+            if exit_during_walk:
+                children = psutil.Process.children
+
+                def walk(proc, recursive):
+                    if proc.pid == parent.pid:
+                        parent.wait(timeout=5)
+                        raise psutil.NoSuchProcess(proc.pid)
+                    return children(proc, recursive=recursive)
+
+                monkeypatch.setattr(psutil.Process, "children", walk)
+            else:
+                parent.wait(timeout=5)
+            monkeypatch.setattr(
+                zygote,
+                "descendants",
+                lambda pids: [worker.pid] if parent.pid in pids else [],
+            )
+            system_utils.kill_process_tree(parent.pid)
+            assert worker.wait(timeout=5) == -signal.SIGKILL
+        finally:
+            worker.kill()
+
+
+@pytest.mark.parametrize("wsl", [False, True])
+def test_zygote_uses_clean_server_state_and_respects_wsl(monkeypatch, wsl):
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "zygote")
+    monkeypatch.setattr(system_utils, "is_in_ray_actor", lambda: False)
+    monkeypatch.setattr(system_utils, "in_wsl", lambda: wsl)
+    for check in ("cuda_is_initialized", "xpu_is_initialized"):
+        monkeypatch.setattr(system_utils, check, lambda: pytest.fail("queried parent"))
+    expected = "spawn" if wsl else "zygote"
+    assert system_utils.get_mp_context().get_start_method() == expected
+
+
+def test_zygote_respects_ray_actor_spawn(monkeypatch):
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "zygote")
+    monkeypatch.setattr(system_utils, "is_in_ray_actor", lambda: True)
+    monkeypatch.setitem(
+        sys.modules,
+        "ray",
+        SimpleNamespace(
+            get_runtime_context=lambda: SimpleNamespace(gcs_address="cluster-address"),
+        ),
+    )
+    monkeypatch.setenv("RAY_ADDRESS", "")
+    assert system_utils.get_mp_context().get_start_method() == "spawn"
+    assert os.environ["RAY_ADDRESS"] == "cluster-address"

@@ -12,9 +12,10 @@ import multiprocessing
 import os
 import subprocess
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 import psutil
 
@@ -34,7 +35,7 @@ def get_libnuma():
     libnuma = None
     for libnuma_so in ["libnuma.so", "libnuma.so.1"]:
         try:
-            libnuma = ctypes.CDLL(libnuma_so)
+            libnuma = ctypes.CDLL(libnuma_so, use_errno=True)
         except OSError:
             libnuma = None
         if libnuma is not None:
@@ -151,8 +152,8 @@ def _can_auto_bind(
     """
     from shutil import which
 
-    if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
-        logger.debug("Automatic NUMA binding requires the spawn start method.")
+    if envs.VLLM_WORKER_MULTIPROC_METHOD not in ("spawn", "zygote"):
+        logger.debug("Automatic NUMA binding requires spawn or zygote.")
         return False
     if (
         parallel_config.distributed_executor_backend not in ("mp", "uni")
@@ -554,6 +555,73 @@ def _resolve_numactl_args(numactl_args: str) -> str:
     return ""
 
 
+class NumaBinding(TypedDict):
+    cpus: list[int]
+    memory_policy: str | None
+    nodes: list[int]
+
+
+# Captured by Process.start() in the launching thread.
+zygote_numa_binding: ContextVar[NumaBinding | None] = ContextVar(
+    "zygote_numa_binding", default=None
+)
+
+
+def _parse_numa_binding(numactl_args: str) -> NumaBinding:
+    from vllm.utils.cpu_resource_utils import parse_id_list
+
+    binding = NumaBinding(cpus=[], memory_policy=None, nodes=[])
+    for arg in numactl_args.split():
+        flag, value = arg.split("=", 1)
+        ids = parse_id_list(value)
+        if flag == "--physcpubind":
+            binding["cpus"] = ids
+        elif flag == "--cpunodebind":
+            cpus = set()
+            for node in ids:
+                path = Path(f"/sys/devices/system/node/node{node}/cpulist")
+                cpus.update(parse_id_list(path.read_text().strip()))
+            assert hasattr(os, "sched_getaffinity")
+            binding["cpus"] = sorted(cpus & os.sched_getaffinity(0))
+        elif flag in ("--membind", "--preferred", "--preferred-many"):
+            binding["memory_policy"] = flag[2:]
+            binding["nodes"] = ids
+        else:
+            raise ValueError(f"Unsupported zygote NUMA option: {flag}")
+    return binding
+
+
+def _apply_numa_binding(binding: NumaBinding) -> None:
+    """Bind this Linux thread and the threads and processes it creates."""
+    assert hasattr(os, "sched_setaffinity")
+    os.sched_setaffinity(0, binding["cpus"])
+    policy = binding["memory_policy"]
+    if policy is None:
+        return
+
+    # Linux uapi/linux/mempolicy.h
+    mode = {"preferred": 1, "membind": 2, "preferred-many": 5}[policy]
+    nodes = binding["nodes"]
+    word_bits = 8 * ctypes.sizeof(ctypes.c_ulong)
+    mask = (ctypes.c_ulong * (1 + max(nodes) // word_bits))()
+    for node in nodes:
+        mask[node // word_bits] |= 1 << (node % word_bits)
+
+    try:
+        libnuma = get_libnuma()
+        if libnuma is None:
+            raise OSError("libnuma unavailable")
+        # The kernel subtracts one from maxnode before copying the mask.
+        maxnode = ctypes.c_ulong(len(mask) * word_bits + 1)
+        if libnuma.set_mempolicy(mode, mask, maxnode) < 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, os.strerror(errno))
+    except OSError as e:
+        logger.warning(
+            "Could not apply NUMA %s to %s, keeping CPU affinity: %s", policy, nodes, e
+        )
+
+
 @contextmanager
 def configure_subprocess(
     vllm_config: "VllmConfig",
@@ -561,7 +629,7 @@ def configure_subprocess(
     dp_local_rank: int | None = None,
     process_kind: str = "worker",
 ):
-    """Temporarily replace the multiprocessing executable with a numactl wrapper."""
+    """Configure NUMA binding for the next worker or EngineCore launch."""
     parallel_config = vllm_config.parallel_config
     if parallel_config.numa_bind is None:
         # Resolve once in the launching process; spawned children inherit the
@@ -602,6 +670,13 @@ def configure_subprocess(
             parallel_config.numa_bind_nodes = None
             parallel_config._numa_bind_auto = False
         yield
+        return
+    if envs.VLLM_WORKER_MULTIPROC_METHOD == "zygote":
+        token = zygote_numa_binding.set(_parse_numa_binding(numactl_args))
+        try:
+            yield
+        finally:
+            zygote_numa_binding.reset(token)
         return
     if envs.VLLM_WORKER_MULTIPROC_METHOD == "spawn":
         logger.info(

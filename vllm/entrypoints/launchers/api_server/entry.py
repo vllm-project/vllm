@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import multiprocessing
-import multiprocessing.forkserver as forkserver
-import os
 import signal
 import socket
 import tempfile
@@ -38,15 +35,6 @@ async def build_async_engine_client(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncGenerator[EngineClient]:
-    if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
-        # The executor is expected to be mp.
-        # Pre-import heavy modules in the forkserver process
-        logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
-        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
-        forkserver.ensure_running()
-        logger.debug("Forkserver setup complete!")
-
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)

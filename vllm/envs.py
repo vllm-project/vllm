@@ -65,7 +65,8 @@ if TYPE_CHECKING:
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn", "zygote"] = "fork"
+    VLLM_ZYGOTE_ADDRESS: str | None = None
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -951,10 +952,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
     ),
     # Use dedicated multiprocess context for workers.
-    # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
+        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork", "zygote"]
     ),
+    # Internal Unix socket inherited by processes served by the same zygote.
+    "VLLM_ZYGOTE_ADDRESS": lambda: os.getenv("VLLM_ZYGOTE_ADDRESS"),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(
         os.getenv(
@@ -2611,6 +2613,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_ZYGOTE_ADDRESS",
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",

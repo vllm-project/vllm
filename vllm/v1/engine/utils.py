@@ -244,9 +244,12 @@ def _exited_cleanly(proc: BaseProcess) -> bool:
     """Whether `proc` exited with status 0, without reaping it.
 
     Reading `proc.exitcode` would reap the child, racing `shutdown()`'s join;
-    `WNOWAIT` leaves `shutdown()` as the only reaper. The engine is a direct
-    child under both start methods `get_mp_context()` uses (fork and spawn).
+    `WNOWAIT` leaves `shutdown()` as the only reaper of direct children.
     """
+    from vllm.utils.zygote import ZygoteProcess
+
+    if isinstance(proc, ZygoteProcess) and proc.forked_by_zygote:
+        return proc.exitcode == 0
     if not hasattr(os, "waitid"):  # macOS before Python 3.13
         return proc.exitcode == 0
     try:
