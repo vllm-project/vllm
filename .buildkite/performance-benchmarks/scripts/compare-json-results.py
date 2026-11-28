@@ -362,7 +362,7 @@ def _apply_two_decimals(
 # Export helpers (Excel + CSV)
 # -----------------------------
 def _sanitize_sheet_name(name: str) -> str:
-    """Excel sheet constraints:
+    r"""Excel sheet constraints:
       - max 31 chars
       - cannot contain: : \ / ? * [ ]
       - cannot be empty
