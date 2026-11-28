@@ -535,9 +535,13 @@ class MLAAttentionSpec(AttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         if self.alignment is not None:
-            padded = round_up(self.real_page_size_bytes, self.alignment)
-            if padded != self.real_page_size_bytes:
-                object.__setattr__(self, "page_size_padded", padded)
+            # Derive the padding from the current geometry: `replace` and
+            # `copy_with_new_block_size` pass the old `page_size_padded` back in.
+            real = self.real_page_size_bytes
+            padded = round_up(real, self.alignment)
+            object.__setattr__(
+                self, "page_size_padded", padded if padded != real else None
+            )
 
 
 @dataclass(frozen=True, kw_only=True)

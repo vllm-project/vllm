@@ -2330,6 +2330,36 @@ def test_page_size_padded_wins():
     assert spec.page_size_bytes == 65536
 
 
+@pytest.mark.parametrize(
+    ("spec_kwargs", "changes"),
+    [
+        # DeepSeek-V4 fp8 indexer rows (132 B) at 576 B alignment: 64 rows pad
+        # 8448 B to 8640 B, while 48 rows are already aligned (6336 B).
+        ({"block_size": 64, "head_size": 132, "alignment": 576}, {"block_size": 48}),
+        # DeepSeek-V4.1 MXFP8 records (528 B) at 512 B alignment: 16 states pad
+        # 8448 B to 8704 B, while 32 states are already aligned (16896 B).
+        (
+            {
+                "block_size": 32,
+                "head_size": 512,
+                "state_content_bytes": 528,
+                "tokens_per_state": 2,
+                "alignment": 512,
+            },
+            {"tokens_per_state": 1},
+        ),
+    ],
+)
+def test_mla_alignment_padding_follows_rewritten_geometry(spec_kwargs, changes):
+    # A rewritten spec (`replace`, `copy_with_new_block_size`) must page like a
+    # fresh one instead of keeping the padding derived for the old geometry.
+    spec = MLAAttentionSpec(num_kv_heads=1, dtype=torch.uint8, **spec_kwargs)
+    fresh = MLAAttentionSpec(
+        num_kv_heads=1, dtype=torch.uint8, **(spec_kwargs | changes)
+    )
+    assert replace(spec, **changes).page_size_bytes == fresh.page_size_bytes
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
 
