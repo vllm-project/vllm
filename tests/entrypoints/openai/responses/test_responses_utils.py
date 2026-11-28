@@ -1049,3 +1049,34 @@ class TestBuildResponseOutputItemsStatus:
         assert message.status == "completed"
         assert first.status == "completed"
         assert last.status == "incomplete"
+
+
+@pytest.mark.parametrize(
+    ("input_items", "expected"),
+    [
+        (
+            [
+                {"role": "system", "content": "a"},
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "b"}],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            [("system", "inst\n\na\n\nb"), ("user", "hi")],
+        ),
+        (
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "a"},
+            ],
+            [("system", "inst"), ("user", "hi"), ("system", "a")],
+        ),
+    ],
+)
+def test_instructions_merge_only_leading_system_items(input_items, expected):
+    msgs = construct_input_messages(
+        request_instructions="inst", request_input=input_items
+    )
+    assert [(m["role"], m["content"]) for m in msgs] == expected
