@@ -294,7 +294,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
         arg_value_extender=_glm47_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=False,
-        validate_tool_names=True,
+        validate_tool_names=False,
     )
 
 
