@@ -356,7 +356,8 @@ class KernelConfig:
       activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels with MXFP4, MXFP8,
-      NVFP4 or BF16 experts on SM100, or MXFP4 or 128x128 block-FP8 on SM90
+      NVFP4 or BF16 experts on SM100, or MXFP4, 128x128 block-FP8 or
+      (Inkling2) NVFP4 on SM90
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels

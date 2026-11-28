@@ -6,8 +6,8 @@ Each `MEGA_MOE_*` format is one row of the feature matrix. MX weights and
 activations carry one UE8M0 scale per 1x32 block (`MEGA_MOE_MXFP4_SM90`
 activations use one FP32 scale per 1x128 block). NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
-scales each token by its own FP32 scale. `MEGA_MOE_FP8_BLOCK_SM90` weights
-carry one FP32 scale per 128x128 block.
+scales each token by its own FP32 scale; `MEGA_MOE_NVFP4_SM90` dispatches BF16.
+`MEGA_MOE_FP8_BLOCK_SM90` weights carry one FP32 scale per 128x128 block.
 """
 
 import math
@@ -23,6 +23,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
@@ -208,6 +209,18 @@ MEGA_MOE_FP8_BLOCK_SM90 = replace(
     routed=_FP8_BLOCK_WEIGHT,
     shared=(_FP8_BLOCK_WEIGHT,),
 )
+# NVFP4 routed experts decoded to BF16 on SM90, with BF16 tokens; the weights
+# come from `transform_nvfp4_weights_for_sm90_mega_moe`.
+MEGA_MOE_NVFP4_SM90 = MegaMoEWeightFormat(
+    name="nvfp4_sm90",
+    mma_type="bf16xnvfp4",
+    kernel="bf16_nvfp4_mega_moe",
+    routed=_NVFP4_WEIGHT,
+    shared=(),
+    hidden_quant=None,
+    activations=frozenset({"situ"}),
+    sm90=True,
+)
 
 
 def check_deep_gemm_mega_moe_supported(
@@ -227,8 +240,8 @@ def check_deep_gemm_mega_moe_supported(
     if current_platform.is_device_capability(90, device_id=device_id):
         if not (weight_format.sm90 or weight_format == MEGA_MOE_MXFP4):
             raise NotImplementedError(
-                "DeepGEMM MegaMoE on SM90 supports MXFP4 and block-FP8 experts "
-                f"only, not {weight_format.name}."
+                "DeepGEMM MegaMoE on SM90 supports MXFP4, block-FP8 and the "
+                f"SM90 NVFP4 format only, not {weight_format.name}."
             )
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
@@ -391,6 +404,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @staticmethod
+    def _group() -> GroupCoordinator:
+        """The ranks one launch dispatches to and shares the symmetric buffer with."""
+        return get_ep_group()
 
     @property
     def has_fused_shared_experts(self) -> bool:
@@ -808,7 +826,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-        group = get_ep_group().device_group
+        group = self._group().device_group
         key = (
             id(group),
             torch.accelerator.current_device_index(),
@@ -863,7 +881,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
         args = (
-            get_ep_group().world_size,
+            self._group().world_size,
             self.num_experts,
             self.get_symm_buffer().num_max_tokens_per_rank,
             num_tokens,
@@ -923,7 +941,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return extract_layer_index(self.prefix)
 
     def _synchronize_first_launch(self) -> None:
-        ep_group = get_ep_group()
+        ep_group = self._group()
         key = (id(ep_group.cpu_group), torch.accelerator.current_device_index())
         if key in self._synchronized_ep_groups:
             return
@@ -940,7 +958,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             dp_metadata = get_forward_context().dp_metadata
             if dp_metadata is not None:
                 num_dp_tokens = int(dp_metadata.num_tokens_across_dp_cpu.sum())
-                return cdiv(num_dp_tokens, get_ep_group().world_size)
+                return cdiv(num_dp_tokens, self._group().world_size)
         # Warmup: every rank runs the same token counts.
         return num_tokens
 
@@ -1048,6 +1066,14 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 hidden_quant=fmt.hidden_quant,
                 eplb_state=self.eplb_state,
             )
+        if fmt == MEGA_MOE_NVFP4_SM90:
+            del kwargs["activation_clamp"]
+            kwargs.update(
+                l1_global_scales=self.w13_weight_scale_2,
+                l2_global_scales=self.w2_weight_scale_2,
+            )
+        else:
+            kwargs["fast_math"] = self.fast_math
 
         if self.has_fused_shared_experts:
             kwargs["shared_l1_weights"] = self._kernel_weights("shared_l1")
@@ -1058,7 +1084,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.l1_weights,
             self.l2_weights,
             symm_buffer,
-            fast_math=self.fast_math,
             **kwargs,
         )
         if shared_experts is not None:
