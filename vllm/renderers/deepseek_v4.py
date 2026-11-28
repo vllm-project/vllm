@@ -116,6 +116,10 @@ class DeepseekV4Renderer(BaseHfRenderer[DeepseekV4Tokenizer]):
 
 
 class DeepseekV41Renderer(DeepseekV4Renderer):
+    _server_owned_chat_template_kwargs = SERVER_OWNED_CHAT_TEMPLATE_KWARGS | {
+        "image_order"
+    }
+
     def _apply_chat_template(self, *args, **kwargs):
         image_order: list[int] = []
         kwargs["image_order"] = image_order

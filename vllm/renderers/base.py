@@ -81,7 +81,15 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 SERVER_OWNED_CHAT_TEMPLATE_KWARGS = frozenset(
-    {"tokenize", "padding", "max_length", "tokenizer_kwargs"}
+    {
+        "tokenize",
+        "padding",
+        "max_length",
+        "tokenizer_kwargs",
+        "tools",
+        "conversation",
+        "messages",
+    }
 )
 HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS = SERVER_OWNED_CHAT_TEMPLATE_KWARGS | {
     "return_dict",
@@ -128,7 +136,7 @@ class BaseRenderer(ABC, Generic[_T]):
             return
         if reserved := cls._server_owned_chat_template_kwargs & kwargs.keys():
             raise VLLMValidationError(
-                "chat_template_kwargs contains server-owned tokenizer options: "
+                "chat_template_kwargs contains server-owned options: "
                 f"{', '.join(sorted(reserved))}.",
                 parameter="chat_template_kwargs",
             )

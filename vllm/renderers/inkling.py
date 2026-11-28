@@ -26,6 +26,7 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
+from .base import SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 from .hf import BaseHfRenderer
 from .inkling_encoding import (
     CONTENT_MODEL_END_SAMPLING,
@@ -118,6 +119,8 @@ class _HfBackedTmlTokenizer:
 
 
 class InklingRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,

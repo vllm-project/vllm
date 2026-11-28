@@ -45,11 +45,41 @@ assert chatml_jinja_path.exists()
         ("padding", False),
         ("max_length", 8),
         ("tokenizer_kwargs", {}),
+        ("tools", []),
+        ("conversation", []),
+        ("messages", []),
     ],
 )
 def test_reject_request_tokenizer_options(key, value):
     with pytest.raises(VLLMValidationError, match=key) as exc:
         HfRenderer.validate_request_chat_template_kwargs({key: value})
+    assert exc.value.parameter == "chat_template_kwargs"
+
+
+def test_renderers_reject_server_owned_chat_template_kwargs():
+    from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
+    from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
+    from vllm.renderers.inkling import InklingRenderer
+    from vllm.renderers.kimi_k3 import KimiK3Renderer
+    from vllm.renderers.mistral import MistralRenderer
+
+    for renderer_cls in (
+        HfRenderer,
+        MistralRenderer,
+        DeepseekV32Renderer,
+        DeepseekV4Renderer,
+        DeepseekV41Renderer,
+        KimiK3Renderer,
+        InklingRenderer,
+    ):
+        for key in ("tools", "conversation", "messages"):
+            with pytest.raises(VLLMValidationError, match=key) as exc:
+                renderer_cls.validate_request_chat_template_kwargs({key: []})
+            assert exc.value.parameter == "chat_template_kwargs"
+        renderer_cls.validate_request_chat_template_kwargs({"enable_thinking": False})
+
+    with pytest.raises(VLLMValidationError, match="image_order") as exc:
+        DeepseekV41Renderer.validate_request_chat_template_kwargs({"image_order": []})
     assert exc.value.parameter == "chat_template_kwargs"
 
 
