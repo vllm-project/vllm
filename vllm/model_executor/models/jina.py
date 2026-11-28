@@ -27,9 +27,9 @@ from ..layers.pooler.tokwise import (
     TokenPoolingMethodOutputItem,
 )
 from .interfaces import SupportsLateInteraction
-from .interfaces_base import VllmModelForPooling
-from .llama import LlamaForCausalLM
+from .interfaces_base import VllmModelForPooling, default_pooling_type
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
+from .transformers import TransformersEmbeddingModel
 from .utils import (
     AutoWeightsLoader,
     StageMissingLayer,
@@ -140,9 +140,10 @@ class JinaForRankingPool(StepPool):
         return embeds_list
 
 
-# jina-embeddings-v5-text-small wraps Qwen3-0.6B-Base with four task-specific
-# LoRA adapters. This implementation merges the selected adapter into the base
-# weights at load time to avoid any runtime dependency on peft.
+# jina-embeddings-v5 (-small on Qwen3-0.6B-Base, -nano on EuroBERT-210m)
+# wraps the base model with four task-specific LoRA adapters. This
+# implementation merges the selected adapter into the base weights at load time
+# to avoid any runtime dependency on peft.
 #
 # Task selection:
 #     Pass --hf-overrides '{"jina_task": "retrieval"}' to select one of:
@@ -209,8 +210,8 @@ def _build_lora_pairs(
     return dict(lora_pairs)
 
 
-def _setup_jina_v5_task_and_pooler(model: nn.Module, vllm_config: VllmConfig) -> None:
-    """Shared init for jina-embeddings-v5 wrappers: select task + build pooler."""
+def _setup_jina_v5_task(model: nn.Module, vllm_config: VllmConfig) -> None:
+    """Shared task selection for jina-embeddings-v5 wrappers."""
     model._model_name = vllm_config.model_config.model
     model._revision = vllm_config.model_config.revision
 
@@ -225,15 +226,11 @@ def _setup_jina_v5_task_and_pooler(model: nn.Module, vllm_config: VllmConfig) ->
         )
         model._task = _DEFAULT_TASK
 
-    pooler_config = vllm_config.model_config.pooler_config
-    assert pooler_config is not None
-    model.pooler = DispatchPooler.for_embedding(pooler_config)
 
-
-def _load_jina_v5_weights(
+def _merge_jina_v5_weights(
     model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
-) -> set[str]:
-    """Shared loader: merge the selected task LoRA adapter into the base weights."""
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Merge the selected task LoRA adapter into base weights."""
     lora_pairs: dict[str, dict[str, torch.Tensor]] = {}
     scaling = 1.0
 
@@ -256,25 +253,18 @@ def _load_jina_v5_weights(
             len(lora_pairs),
         )
 
-    def _merge_weights(
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        for name, tensor in weights:
-            clean_name = name
-            if clean_name.startswith("model."):
-                clean_name = clean_name[len("model.") :]
+    for name, tensor in weights:
+        clean_name = name
+        if clean_name.startswith("model."):
+            clean_name = clean_name[len("model.") :]
 
-            if clean_name in lora_pairs:
-                pair = lora_pairs[clean_name]
-                if "A" in pair and "B" in pair:
-                    lora_A = pair["A"].to(device=tensor.device, dtype=tensor.dtype)
-                    lora_B = pair["B"].to(device=tensor.device, dtype=tensor.dtype)
-                    tensor = tensor + (lora_B @ lora_A) * scaling
-            yield name, tensor
-
-    loader = AutoWeightsLoader(model, ignore_unexpected_prefixes=["lm_head."])
-    weights = _merge_weights(weights)
-    return loader.load_weights(weights, mapper=model.hf_to_vllm_mapper)
+        if clean_name in lora_pairs:
+            pair = lora_pairs[clean_name]
+            if "A" in pair and "B" in pair:
+                lora_A = pair["A"].to(device=tensor.device, dtype=tensor.dtype)
+                lora_B = pair["B"].to(device=tensor.device, dtype=tensor.dtype)
+                tensor = tensor + (lora_B @ lora_A) * scaling
+        yield name, tensor
 
 
 class JinaEmbeddingsV5DecoderModel(Qwen3ForCausalLM, VllmModelForPooling):
@@ -296,37 +286,35 @@ class JinaEmbeddingsV5DecoderModel(Qwen3ForCausalLM, VllmModelForPooling):
             targets=(LogitsProcessor, ParallelLMHead),
         ):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
-        _setup_jina_v5_task_and_pooler(self, vllm_config)
+        _setup_jina_v5_task(self, vllm_config)
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return _load_jina_v5_weights(self, weights)
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["lm_head."])
+        return loader.load_weights(
+            _merge_jina_v5_weights(self, weights),
+            mapper=self.hf_to_vllm_mapper,
+        )
 
 
-class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
-    """jina-embeddings-v5 with a bidirectional EuroBERT (Llama) encoder backbone.
+@default_pooling_type(seq_pooling_type="LAST")
+class JinaEmbeddingsV5EncoderModel(TransformersEmbeddingModel):
+    """jina-embeddings-v5 with a bidirectional EuroBERT encoder backbone.
 
     Used by encoder checkpoints such as jina-embeddings-v5-text-nano
-    (`is_decoder=False`). EuroBERT is architecturally a bidirectional Llama, so
-    the LlamaModel backbone switches to EncoderOnlyAttention when the config
-    carries `is_causal=False` (set by `JinaEmbeddingsV5ModelConfig`).
+    (`is_decoder=False`), backed by upstream Transformers `EuroBertModel`
+    with `LAST` pooling and load-time task LoRA merging.
     """
 
-    is_pooling_model = True
-    hf_to_vllm_mapper = LlamaForCausalLM.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_prefix={"": "model."}
-    )
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        with no_init_weights(
-            self,
-            lambda mod: StageMissingLayer("output", mod),
-            targets=(LogitsProcessor, ParallelLMHead),
-        ):
-            super().__init__(vllm_config=vllm_config, prefix=prefix)
-        _setup_jina_v5_task_and_pooler(self, vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.ignore_unexpected_prefixes.append("lm_head.")
+        _setup_jina_v5_task(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return _load_jina_v5_weights(self, weights)
+        return super().load_weights(_merge_jina_v5_weights(self, weights))
 
 
 class JinaEmbeddingsV5Model(JinaEmbeddingsV5DecoderModel):
