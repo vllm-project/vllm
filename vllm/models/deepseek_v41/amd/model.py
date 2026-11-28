@@ -1349,10 +1349,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            refill_derived(layer, "hc_attn_fn_broadcast", broadcast)
 
 
 def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
