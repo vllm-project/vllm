@@ -876,6 +876,14 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
             assert config.static_k in (None, k)
 
 
+def test_qwen4_exp_sm100_shared_expert_gate_plans() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS[(1, 2560)]
+
+    assert sorted(plans) == [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16]
+    for num_tokens, config in plans.items():
+        assert config.num_rows == num_tokens
+
+
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
