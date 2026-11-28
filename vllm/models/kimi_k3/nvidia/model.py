@@ -710,11 +710,15 @@ class KimiDecoderLayer(nn.Module):
         )
 
         use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        # SP from DP alone is not validated with PP.
+        dp_sp = (
+            parallel_config.data_parallel_size > 1
+            and parallel_config.pipeline_parallel_size == 1
+        )
         self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
+            parallel_config.enable_expert_parallel
             and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
+            and (use_mega_moe or dp_sp)
         )
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
@@ -988,11 +992,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.use_attn_res = self.attn_res_block_size is not None
         parallel_config = vllm_config.parallel_config
         use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        # SP from DP alone is not validated with PP.
+        dp_sp = (
+            parallel_config.data_parallel_size > 1
+            and parallel_config.pipeline_parallel_size == 1
+        )
         self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
+            parallel_config.enable_expert_parallel
             and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
+            and (use_mega_moe or dp_sp)
         )
 
         self.vocab_size = config.vocab_size
@@ -1217,7 +1225,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                     forward_context.is_padding, hidden_states
                 )
             hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Currently, SP is not supported with PP"
+            if residual is not None:
+                residual = sp_shard(residual)
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1269,11 +1278,22 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
+            if self.use_sequence_parallel:
+                # The next stage shards again; send the full token set.
+                hidden_size = hidden_states.shape[-1]
+                residual_shape = residual.shape[1:]
+                packed = torch.cat(
+                    [hidden_states, residual.flatten(1), *aux_hidden_states], dim=-1
+                )
+                packed = sp_all_gather(packed)[:full_num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    [hidden_size, residual.flatten(1).shape[-1]]
+                    + [hidden_size] * len(aux_hidden_states),
+                    dim=-1,
+                )
+                residual = residual.unflatten(1, residual_shape)
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
