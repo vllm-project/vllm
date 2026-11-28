@@ -1172,10 +1172,12 @@ def test_arena_release_survives_intervening_flush_from_another_tensor():
     assert writer.write_tensor(t) == idx_a  # a's slot must NOT be leaked.
 
 
-def test_arena_oversize_falls_back():
+def test_arena_oversize_falls_back(caplog_vllm):
     writer, _ = _make_arena(n_reader=1, slot_bytes=1 << 20, n_slots=2)
     big = torch.empty((1 << 20) + 4096, dtype=torch.uint8)
-    assert writer.write_tensor(big) is None
+    with caplog_vllm.at_level("INFO", logger=shm_tensor_arena.logger.name):
+        assert writer.write_tensor(big) is None
+    assert "does not fit one slot" in caplog_vllm.text
 
 
 def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list, list[int]]:

@@ -110,7 +110,8 @@ A second shared-memory region created alongside the existing `ShmRingBuffer`:
   `Handle`. Queues with remote readers get no arena and keep today's behavior.
 - Pages are allocated lazily by the kernel on first write, so arenas on queues
   that never carry big tensors (e.g. worker→engine response queues) cost
-  approximately nothing beyond the (virtual) reservation.
+  approximately nothing beyond the (virtual) reservation, until a reader pins
+  the arena (see §5).
 
 ### 2.2 Writer path — arena diversion, composing with `_reduce_tensor`
 
@@ -277,7 +278,10 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
   ≥2 node-local readers *and* carries tensors ≥ `MIN_MB`; at TP=1, or for small
   payloads, it adds nothing and everything takes the out-of-band path.
 - **Shared-memory reservation.** The arena reserves `slots × slot_bytes` of
-  `/dev/shm` (default 2 GB, lazily paged). Like `ShmRingBuffer`, creation is
+  `/dev/shm` (default 2 GiB). Nothing is pinned until a reader rebuilds its
+  first tensor; then, on CUDA-alike platforms, the reader `cudaHostRegister`s
+  the whole mapping, which allocates and page-locks all of it (`n_slots x
+  slot_bytes`, 2 GiB by default). Like `ShmRingBuffer`, creation is
   guarded by a free-space check (`check_shm_free_space`), so an undersized
   `/dev/shm` fails fast with a clear error instead of a `SIGBUS` the first
   time a tensor is copied into pages beyond tmpfs capacity.

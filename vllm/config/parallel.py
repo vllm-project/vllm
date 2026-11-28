@@ -383,7 +383,9 @@ class ParallelConfig:
     vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
     most beneficial for multimodal serving with large images and tensor
     parallelism. Active only when all queue readers are node-local; reserves
-    slots in `/dev/shm`."""
+    slots in `/dev/shm` and, once a reader has rebuilt its first tensor, pins
+    all `n_slots x slot_bytes` of it (2 GiB by default) as page-locked host
+    memory on CUDA-alike platforms."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
