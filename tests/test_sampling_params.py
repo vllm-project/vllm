@@ -3,13 +3,73 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import msgspec
 import pytest
 
-from vllm import SamplingParams
+from vllm import SamplingParams, envs
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
+
+
+@pytest.mark.parametrize("ignore_eos", [False, True])
+@pytest.mark.parametrize(
+    ("eos_token_id", "configured_eos_ids"),
+    [(30, [30, 40]), (None, 40)],
+)
+def test_generation_config_keeps_explicit_stop_ids_within_transport_limit(
+    monkeypatch, ignore_eos, eos_token_id, configured_eos_ids
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_STOP_TOKEN_IDS", 2)
+    params = SamplingParams(stop_token_ids=[10, 20], ignore_eos=ignore_eos)
+
+    params.update_from_generation_config(
+        {"eos_token_id": configured_eos_ids}, eos_token_id
+    )
+
+    expected_all_ids = {10, 20, 40}
+    if eos_token_id is not None:
+        expected_all_ids.add(eos_token_id)
+    assert params.stop_token_ids == [10, 20]
+    assert params.all_stop_token_ids == expected_all_ids
+    assert params.stop_token_ids_set == ({10, 20} if ignore_eos else expected_all_ids)
+    assert params.eos_token_id == (None if ignore_eos else eos_token_id)
+
+    rehydrated = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(params), type=SamplingParams
+    )
+    assert rehydrated == params
+
+
+@pytest.mark.parametrize(
+    ("stop_token_ids", "cached_stop_ids", "eos_token_id"),
+    [
+        pytest.param([10, 20], None, 30, id="legacy-eos"),
+        pytest.param([10], None, None, id="ignored-eos"),
+        pytest.param([10], [20], 30, id="separate-eos"),
+    ],
+)
+def test_rehydrates_stop_membership_from_rust(
+    stop_token_ids, cached_stop_ids, eos_token_id
+):
+    wire = {
+        "stop_token_ids": stop_token_ids,
+        "_all_stop_token_ids": [10, 20, 30],
+    }
+    if eos_token_id is not None:
+        wire["_eos_token_id"] = eos_token_id
+    if cached_stop_ids is not None:
+        wire["_stop_token_ids_set"] = cached_stop_ids
+
+    decoder = msgspec.msgpack.Decoder(SamplingParams)
+    params = decoder.decode(msgspec.msgpack.encode(wire))
+
+    assert params.stop_token_ids == stop_token_ids
+    assert params.stop_token_ids_set == ({10} if eos_token_id is None else {10, 20})
+    assert params.all_stop_token_ids == {10, 20, 30}
+    assert params.eos_token_id == eos_token_id
+    assert decoder.decode(msgspec.msgpack.encode(params)) == params
 
 
 @dataclass(slots=True)

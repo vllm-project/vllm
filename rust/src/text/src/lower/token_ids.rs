@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashSet;
 use std::result::Result;
 
 use thiserror::Error;
@@ -8,6 +9,8 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::SamplingLimits;
 
+const MAX_STOP_TOKEN_IDS_ENV: &str = "VLLM_MAX_STOP_TOKEN_IDS";
+const DEFAULT_MAX_STOP_TOKEN_IDS: usize = 128;
 const MAX_NUM_BAD_WORDS_ENV: &str = "VLLM_MAX_NUM_BAD_WORDS";
 const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
 const MAX_BAD_WORDS_TOTAL_TOKENS_ENV: &str = "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS";
@@ -37,6 +40,8 @@ pub enum TokenIdsError {
         count: usize,
         max: usize,
     },
+    #[error("Too many stop_token_ids: {count}. The max number is {max}.")]
+    TooManyStopTokenIds { count: usize, max: usize },
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -59,6 +64,7 @@ impl TokenIdsError {
             | Self::TooManyTokenizedBadWords { .. } => Some("bad_words"),
             Self::TooManyBadWords { parameter, .. }
             | Self::TooManyBadWordTokens { parameter, .. } => *parameter,
+            Self::TooManyStopTokenIds { .. } => Some("stop_token_ids"),
             Self::OutOfVocab { parameter, .. } => Some(parameter),
         }
     }
@@ -86,6 +92,20 @@ fn validate_param(
 
 fn env_limit(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+}
+
+/// Normalize the explicit stop list before sending it to Python engine-core.
+pub(super) fn normalize_stop_token_ids(
+    mut stop_token_ids: Vec<u32>,
+) -> Result<Vec<u32>, TokenIdsError> {
+    let mut seen = HashSet::new();
+    stop_token_ids.retain(|token_id| seen.insert(*token_id));
+    let count = stop_token_ids.len();
+    let max = env_limit(MAX_STOP_TOKEN_IDS_ENV, DEFAULT_MAX_STOP_TOKEN_IDS);
+    if count > max {
+        return Err(TokenIdsError::TooManyStopTokenIds { count, max });
+    }
+    Ok(stop_token_ids)
 }
 
 /// The per-request cap on bad-word sequences.
@@ -159,7 +179,7 @@ pub(crate) fn validate_vocab_range(
 ) -> Result<(), TokenIdsError> {
     validate_param(
         "stop_token_ids",
-        params.stop_token_ids.iter().copied(),
+        params.stop_token_ids.iter().chain(&params.stop_token_ids_set).copied(),
         limits.model_vocab_size,
     )?;
 

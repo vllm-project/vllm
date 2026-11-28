@@ -289,6 +289,7 @@ class InputProcessor:
         sampling_params._eos_token_id = None
         sampling_params.stop = []
         sampling_params.stop_token_ids = []
+        sampling_params._stop_token_ids_set = frozenset()
         sampling_params._all_stop_token_ids = set()
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:

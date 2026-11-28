@@ -4013,6 +4013,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
+            stop_token_ids_set: BTreeSet::new(),
             logit_bias: None,
             allowed_token_ids: None,
             bad_words_token_ids: None,

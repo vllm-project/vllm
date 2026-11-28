@@ -87,6 +87,9 @@ backend on the server and pause generation during updates, as shown there.
 are started elsewhere and this node should run only the Rust frontend. The frontend still uses
 the global `--data-parallel-size` to determine how many engines it expects to join the shared handshake.
 
+Use matching vLLM revisions for the Rust frontend and its external Python engines so
+both apply the same request protocol.
+
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
   --headless \

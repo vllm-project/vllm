@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import weakref
 
 import pytest
@@ -73,6 +74,41 @@ def test_multiple_sampling_params(llm: LLM):
     # sampling_params is None, default params should be applied
     outputs = llm.generate(PROMPTS, sampling_params=None)
     assert len(PROMPTS) == len(outputs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_generation_config_eos_respects_ignore_eos(vllm_runner, tmp_path):
+    additional_eos = 10
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": additional_eos})
+    )
+
+    with vllm_runner(
+        MODEL_NAME,
+        generation_config=str(tmp_path),
+        max_model_len=64,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,
+    ) as runner:
+        sampling_params = [
+            SamplingParams(
+                temperature=0,
+                allowed_token_ids=[additional_eos],
+                max_tokens=3,
+                ignore_eos=ignore_eos,
+                stop_token_ids=explicit_stop_ids,
+            )
+            for ignore_eos, explicit_stop_ids in (
+                (False, []),
+                (True, []),
+                (True, [additional_eos]),
+            )
+        ]
+        outputs = runner.llm.generate([PROMPTS[0]] * 3, sampling_params)
+
+    assert [
+        (out.outputs[0].finish_reason, out.outputs[0].stop_reason) for out in outputs
+    ] == [("stop", additional_eos), ("length", None), ("stop", additional_eos)]
 
 
 def test_multiple_priority(llm: LLM):

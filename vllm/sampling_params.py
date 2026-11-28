@@ -653,9 +653,16 @@ class SamplingParams(
             self.min_p = 0.0
             self._verify_greedy_sampling()
 
-        # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
-        self._stop_token_ids_set = frozenset(self.stop_token_ids)
+        # Engine requests may carry configured EOS stops in the cached
+        # membership. The full set can also contain EOS IDs for min_tokens
+        # masking when the sender disabled EOS stopping.
+        if self.ignore_eos:
+            self._stop_token_ids_set = frozenset(self.stop_token_ids)
+        else:
+            self._stop_token_ids_set = self._stop_token_ids_set.union(
+                self.stop_token_ids
+            )
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -817,25 +824,18 @@ class SamplingParams(
             self._eos_token_id = eos_token_id
 
         if eos_token_id is not None:
-            # Add the eos token id into the sampling_params to support
-            # min_tokens processing.
             self._all_stop_token_ids.add(eos_token_id)
 
-        # Update eos_token_id for generation
+        # Keep model EOS IDs separate from the bounded explicit list, which
+        # the engine validates again when decoding the request.
         if (eos_ids := generation_config.get("eos_token_id")) is not None:
-            # it can be either int or list of int
-            eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
-            if eos_token_id is not None:
-                # We don't need to include the primary eos_token_id in
-                # stop_token_ids since it's handled separately for stopping
-                # purposes.
-                eos_ids.discard(eos_token_id)
-            if eos_ids:
-                self._all_stop_token_ids.update(eos_ids)
-                if not self.ignore_eos:
-                    assert self.stop_token_ids is not None
-                    eos_ids.update(self.stop_token_ids)
-                    self.stop_token_ids = list(eos_ids)
+            self._all_stop_token_ids.update(
+                (eos_ids,) if isinstance(eos_ids, int) else eos_ids
+            )
+        if self.ignore_eos:
+            self._stop_token_ids_set = frozenset(self.stop_token_ids or ())
+        else:
+            self._stop_token_ids_set = frozenset(self._all_stop_token_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:

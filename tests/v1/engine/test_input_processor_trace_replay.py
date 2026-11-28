@@ -50,6 +50,7 @@ def test_normalize_trace_replay_params():
     assert params.ignore_eos is True
     assert params.eos_token_id is None
     assert params.stop_token_ids == []
+    assert params.stop_token_ids_set == frozenset()
     assert params.all_stop_token_ids == set()
 
     request = _make_request(params)
