@@ -7,6 +7,13 @@ Please visit the HF collection of [quantized INT4 checkpoints of popular LLMs re
 !!! note
     INT4 computation is supported on NVIDIA GPUs with compute capability > 8.0 (Ampere, Ada Lovelace, Hopper, Blackwell).
 
+## Qwen3.5 and Qwen3.6 MoE shared-expert gates
+
+For Qwen3.5 and Qwen3.6 MoE checkpoints, vLLM can load a `shared_expert_gate`
+stored with compressed-tensors `pack-quantized` symmetric, groupwise INT4 weights.
+The loader expands the gate to a floating-point weight during model startup.
+Checkpoints that store the gate in floating point use the same inference path.
+
 ## Prerequisites
 
 To use INT4 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:

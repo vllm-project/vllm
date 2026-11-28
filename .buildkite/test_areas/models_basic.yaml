@@ -592,6 +592,7 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/utils.py
   - vllm/models/qwen3_5/
+  - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_next.py
   - tests/models/qwen3_5/
   commands:
@@ -611,6 +612,7 @@ steps:
       - vllm/model_executor/layers/mamba/gdn
       - vllm/models/minimax_m3/amd/ops/gemma_rmsnorm.py
       - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_next.py
       - vllm/config/vllm.py
       - vllm/_aiter_ops.py

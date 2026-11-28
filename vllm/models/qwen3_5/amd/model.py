@@ -89,6 +89,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5MoeProcessingInfo,
     Qwen3_5ProcessingInfo,
+    load_qwen3_5_weights,
 )
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_next import (
@@ -700,8 +701,7 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_qwen3_5_weights(self, weights, self.hf_to_vllm_mapper)
 
     def get_mrope_input_positions(
         self,
@@ -851,8 +851,7 @@ class Qwen3_5ForConditionalGeneration(
         return self.language_model.compute_logits_local(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_qwen3_5_weights(self, weights, self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

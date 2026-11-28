@@ -25,7 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 from torch import nn
@@ -99,6 +99,7 @@ from .utils import (
     _merge_multimodal_embeddings,
     extract_layer_index,
     get_fused_shared_expert_layers,
+    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
@@ -106,7 +107,123 @@ from .utils import (
     spec_decode_needs_target_embed,
 )
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.compressed_tensors import (
+        compressed_tensors as ct,
+    )
+
 logger = init_logger(__name__)
+
+
+def load_qwen3_5_weights(
+    model: nn.Module,
+    weights: Iterable[tuple[str, torch.Tensor]],
+    mapper: WeightsMapper,
+) -> set[str]:
+    """Load Qwen weights, expanding packed scalar gates for the float layer."""
+    quant_config = getattr(model, "quant_config", None)
+    if quant_config is None and hasattr(model, "language_model"):
+        quant_config = model.language_model.quant_config
+    if quant_config is not None and quant_config.get_name() == "compressed-tensors":
+        weights = _unpack_shared_expert_gates(model, weights, mapper, quant_config)
+    return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
+
+
+def _unpack_shared_expert_gates(
+    model: nn.Module,
+    weights: Iterable[tuple[str, torch.Tensor]],
+    mapper: WeightsMapper,
+    quant_config: "ct.CompressedTensorsConfig",
+) -> Iterable[tuple[str, torch.Tensor]]:
+    from compressed_tensors.compressors.pack_quantized.helpers import unpack_from_int32
+    from compressed_tensors.quantization import QuantizationArgs, dequantize
+
+    required = {"weight_packed", "weight_scale", "weight_shape"}
+    suffixes = tuple(f".mlp.shared_expert_gate.{p}" for p in (*required, "weight"))
+    parts_by_gate: dict[str, dict[str, torch.Tensor]] = {}
+    ordinary: set[str] = set()
+    unpacked: set[str] = set()
+    # A gate can span shards. Keep pending parts only for this load.
+    for name, tensor in weights:
+        if not name.endswith(suffixes):
+            yield name, tensor
+            continue
+
+        source_gate, _, part = name.rpartition(".")
+        target = mapper.map_name(f"{source_gate}.weight")
+        if target is None or is_pp_missing_parameter(target, model):
+            yield name, tensor
+            continue
+        if part == "weight":
+            if target in unpacked or target in parts_by_gate:
+                raise ValueError(f"Conflicting weights for {target!r}")
+            ordinary.add(target)
+            yield name, tensor
+            continue
+
+        if target in ordinary or target in unpacked:
+            raise ValueError(f"Conflicting weights for {target!r}")
+        parts = parts_by_gate.setdefault(target, {})
+        if part in parts:
+            raise ValueError(f"Duplicate {part!r} for {target!r}")
+        parts[part] = tensor
+        if parts.keys() != required:
+            continue
+        del parts_by_gate[target]
+        gate_name = target.removesuffix(".weight")
+        gate = model.get_submodule(gate_name)
+        scheme = quant_config.get_scheme_dict(gate, gate_name) or {}
+        args = scheme.get("weights")
+        if (
+            scheme.get("format") != "pack-quantized"
+            or not isinstance(args, QuantizationArgs)
+            or args.type != "int"
+            or args.num_bits != 4
+            or not args.symmetric
+            or args.strategy != "group"
+            or args.dynamic
+            or args.actorder not in (None, "weight", "static")
+            or scheme.get("input_activations") is not None
+        ):
+            raise ValueError(
+                f"Packed shared-expert gate {gate_name!r} requires a symmetric "
+                "groupwise compressed-tensors INT4 weight scheme"
+            )
+
+        shape_tensor = parts["weight_shape"]
+        if shape_tensor.dtype != torch.int64 or shape_tensor.shape != (2,):
+            raise ValueError(f"Invalid weight_shape for {gate_name!r}")
+        shape = torch.Size(shape_tensor.tolist())
+        group_size = cast(int, args.group_size)
+        packed = parts["weight_packed"]
+        scale = parts["weight_scale"]
+        if (
+            shape != gate.weight.shape
+            or shape[1] % group_size
+            or packed.shape != (1, (shape[1] + 7) // 8)
+            or not scale.is_floating_point()
+            or scale.shape != (1, shape[1] // group_size)
+        ):
+            raise ValueError(
+                f"Invalid packed shared-expert gate shape for {gate_name!r}"
+            )
+        unpacked.add(target)
+        yield (
+            f"{source_gate}.weight",
+            dequantize(
+                unpack_from_int32(packed, args.num_bits, shape),
+                scale,
+                args=args,
+                dtype=gate.weight.dtype,
+            ),
+        )
+
+    if parts_by_gate:
+        missing = {
+            name: sorted(required - parts.keys())
+            for name, parts in parts_by_gate.items()
+        }
+        raise ValueError(f"Incomplete packed shared-expert gate weights: {missing}")
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -446,8 +563,7 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_qwen3_5_weights(self, weights, self.hf_to_vllm_mapper)
 
     def get_mrope_input_positions(
         self,
@@ -614,8 +730,7 @@ class Qwen3_5ForConditionalGeneration(
         return self.language_model.compute_logits_local(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_qwen3_5_weights(self, weights, self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
