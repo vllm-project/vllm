@@ -102,6 +102,38 @@ Divide the increase in `vllm:prefix_cache_hits` by the increase in `vllm:prefix_
 
 For per-request counts, start the server with `--enable-prompt-tokens-details` to get `usage.prompt_tokens_details.cached_tokens` from `/v1/chat/completions` and `/v1/completions` (streaming needs `stream_options: {"include_usage": true}`). `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`.
 
+## Measuring cache effectiveness
+
+The Prometheus-compatible `/metrics` endpoint exposes two cumulative token
+counters:
+
+- `vllm:prefix_cache_queries`: prompt tokens queried in the prefix cache.
+- `vllm:prefix_cache_hits`: prompt tokens found in the prefix cache.
+
+Their ratio measures token reuse, rather than the fraction of requests that had
+at least one hit. For example, this PromQL query calculates the aggregate hit
+ratio over a five-minute window:
+
+```promql
+sum(rate(vllm:prefix_cache_hits[5m]))
+/
+clamp_min(sum(rate(vllm:prefix_cache_queries[5m])), 1)
+```
+
+Use counter deltas over an isolated interval when comparing two fixed
+workloads. Keep request ordering, prompt and output lengths, concurrency, and
+the initial cache state constant. A fresh engine provides the cleanest empty
+cache. In a development-only environment, the cache-management API can reset
+the prefix cache when no requests are active; do not enable development
+endpoints in production.
+
+Report the token hit ratio together with time to first token (TTFT), request
+latency, and token throughput. A high hit ratio does not imply the same
+percentage improvement in end-to-end performance: APC removes shared prefill
+work, while queueing, scheduling, and decoding still take time. Cache capacity,
+eviction, request routing across replicas, and full-block alignment can also
+change the observed ratio.
+
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
