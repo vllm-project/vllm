@@ -316,3 +316,97 @@ def test_cp_generation(
         method="generate",
         is_multimodal=False,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="FlashAttention 3 requires Hopper",
+)
+@pytest.mark.parametrize("has_sinks", [False, True])
+@pytest.mark.parametrize("chunked_prefill", [False, True])
+@create_new_process_for_each_test()
+def test_flash_attention_dcp_sinks(
+    vllm_runner, tmp_path, num_gpus_available, has_sinks, chunked_prefill
+):
+    """DCP must preserve sink logits in prefill, context extension and decode."""
+    from safetensors.torch import save_file
+    from transformers import GraniteConfig, GraniteForCausalLM
+
+    from vllm import SamplingParams, TokensPrompt
+
+    if num_gpus_available < 2:
+        pytest.skip("DCP requires two GPUs")
+
+    config = GraniteConfig(
+        architectures=["GraniteForCausalLM"],
+        vocab_size=256,
+        hidden_size=512,
+        intermediate_size=1024,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        max_position_embeddings=128,
+        attention_multiplier=128**-0.5,
+        embedding_multiplier=1.0,
+        residual_multiplier=1.0,
+        logits_scaling=1.0,
+        attention_sinks=has_sinks,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = GraniteForCausalLM(config)
+    weights = model.state_dict()
+    if has_sinks:
+        # Distinct per-head logits expose missing or misaligned sink contributions.
+        weights["model.layers.0.self_attn.sinks"] = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    config.save_pretrained(tmp_path)
+    save_file(weights, tmp_path / "model.safetensors")
+
+    prompts = [TokensPrompt(prompt_token_ids=list(range(3, 3 + n))) for n in (8, 80)]
+    outputs = []
+    for dcp_size in (1, 2):
+        with vllm_runner(
+            str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+            attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 3},
+            max_model_len=128,
+            max_logprobs=config.vocab_size,
+            logprobs_mode="raw_logprobs",
+            max_num_seqs=2,
+            max_num_batched_tokens=32 if chunked_prefill else 128,
+            enable_chunked_prefill=chunked_prefill,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            kv_cache_memory_bytes=64 * 1024 * 1024,
+        ) as runner:
+            results = runner.llm.generate(
+                prompts,
+                SamplingParams(
+                    temperature=0,
+                    max_tokens=4,
+                    ignore_eos=True,
+                    allowed_token_ids=[1],
+                    logprobs=config.vocab_size,
+                ),
+                use_tqdm=False,
+            )
+        # Fix the decode trajectory while comparing the unmasked model logprobs.
+        outputs.append(
+            torch.tensor(
+                [
+                    [
+                        [
+                            step[token_id].logprob
+                            for token_id in range(config.vocab_size)
+                        ]
+                        for step in result.outputs[0].logprobs
+                    ]
+                    for result in results
+                ]
+            )
+        )
+    torch.testing.assert_close(outputs[0], outputs[1], atol=0.02, rtol=0)
