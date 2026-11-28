@@ -20,7 +20,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
+from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames, VideoLoader
 from ..video_decoders import (
     SampledFramesCharge,
     charging_sampled_frames,
@@ -106,7 +106,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
     def __init__(
         self,
         image_io: ImageMediaIO,
-        num_frames: int = 32,
+        num_frames: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -133,13 +133,18 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
     def load_bytes(
         self, data: bytes
     ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
+        num_frames = self.num_frames
+        if num_frames is None:
+            num_frames = getattr(
+                self.video_loader, "default_num_frames", VideoLoader.default_num_frames
+            )
         budget = getattr(self.image_io, "decoded_budget", None)
         # Decoders charge the sampled frames before decoding them, so an
         # oversized sample is rejected before its frames are allocated.
         frames_charge = None if budget is None else SampledFramesCharge(budget.charge)
         with charging_sampled_frames(frames_charge):
             video = self.video_loader.load_bytes(
-                data, num_frames=self.num_frames, **self.kwargs
+                data, num_frames=num_frames, **self.kwargs
             )
         frames = video[0] if isinstance(video, tuple) else video
         shape = getattr(frames, "shape", None)
@@ -163,9 +168,14 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 "image/jpeg",
             )
 
-            if self.num_frames > 0:
-                frame_parts = data.split(",", self.num_frames)[: self.num_frames]
-            elif self.num_frames == 0:
+            max_frames = (
+                self.num_frames
+                if self.num_frames is not None
+                else VideoLoader.default_num_frames
+            )
+            if max_frames > 0:
+                frame_parts = data.split(",", max_frames)[:max_frames]
+            elif max_frames == 0:
                 raise ValueError("num_frames must be greater than 0 or -1")
             else:
                 frame_parts = data.split(",")
