@@ -503,6 +503,7 @@ def _register_overlaid_mla_worker(
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
+    worker._conv_decomp = None
     worker.kv_cache_layout = "LBNHC"
     worker.host_buffer_kv_cache_layout = "LBNHC"
     worker._physical_blocks_per_logical_kv_block = 1
@@ -1263,6 +1264,7 @@ def _make_remote_meta(
         kv_cache_layout=worker.kv_cache_layout,
         block_size=remote_kernel_block_size,
         ssm_sizes=remote_ssm_sizes,
+        conv_rows=worker._conv_decomp.conv_rows if worker._conv_decomp else 0,
         attn_backend_name=worker.backend_name,
         physical_blocks_per_logical_kv_block=remote_ppl,
         region_members=region_members,
@@ -2706,9 +2708,10 @@ _REAL_MODELS = {
 _LAYOUT_PREFERENCE = ["LBNHC", "LBHNC", "BLNHC", "BLHNC", "BHLNC", "LHBNC"]
 
 
-def _real_model_side(model, layout):
+def _real_model_side(model, layout, layers=None):
     """Plan and allocate one side's KV caches the way the engine does, with
-    just enough blocks for one request of one or two blocks per group."""
+    just enough blocks for one request of one or two blocks per group.
+    `layers` replaces the model's layers at its block size."""
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
     from vllm.v1.core.kv_cache_planning import (
         get_global_kv_cache_groups,
@@ -2716,7 +2719,8 @@ def _real_model_side(model, layout):
     )
     from vllm.v1.worker.utils import allocate_kv_cache
 
-    block_size, layers = _REAL_MODELS[model]
+    block_size, model_layers = _REAL_MODELS[model]
+    layers = model_layers if layers is None else layers
     vllm_config = create_vllm_config(
         block_size=block_size, max_model_len=block_size, kv_role="kv_both"
     )
@@ -2907,6 +2911,35 @@ def test_real_model_layout_pull_copies_every_page(model, p_layout, d_layout):
     for t in storages.values():
         raw = torch.empty(0, dtype=torch.uint8).set_(t.untyped_storage())
         assert not raw.any(), "D bytes outside the request's pages changed"
+
+
+@pytest.mark.cpu_test
+def test_real_model_pull_refuses_peer_with_other_conv_rows():
+    """A GDN conv state holds `conv_kernel - 1 + num_speculative_tokens` rows,
+    and the reader finds the peer's conv sub-projections from its own row
+    count. With MTP n=1 on P and n=3 on D, Qwen3-Next pads both Mamba pages
+    to the same attention page, so only the row count tells them apart: D
+    must refuse P instead of decoding from misplaced conv state."""
+
+    def side(engine_id, num_spec):
+        layers = [
+            (
+                "model.layers.0.linear_attn",
+                _mamba(((8192, 3 + num_spec), (32, 128, 128)), _GDN),
+            ),
+            ("model.layers.3.self_attn.attn", _attn(2, 256)),
+        ]
+        return _real_model_worker(
+            engine_id, *_real_model_side("Qwen3-Next-80B-A3B", None, layers)
+        )
+
+    p, d = side("P", num_spec=1), side("D", num_spec=3)
+    decode = msgspec.msgpack.Decoder(NixlAgentMetadata).decode
+    p_meta = decode(p.xfer_handshake_metadata.agent_metadata_bytes)
+    d_meta = decode(d.xfer_handshake_metadata.agent_metadata_bytes)
+    assert p_meta.block_lens == d_meta.block_lens
+    with pytest.raises(RuntimeError, match="conv state rows differ"):
+        _register_remote_agents(d, p_meta, 1)
 
 
 _PP_TARGET_LAYERS = [f"model.layers.{i}.self_attn.attn" for i in range(4)]

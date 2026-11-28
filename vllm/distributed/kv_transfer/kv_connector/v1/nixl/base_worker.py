@@ -2136,6 +2136,7 @@ class NixlBaseConnectorWorker:
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
             ple_block_len=self._ple_block_len,
+            conv_rows=0 if self._conv_decomp is None else self._conv_decomp.conv_rows,
             attn_backend_name=self.backend_name,
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
@@ -2703,6 +2704,18 @@ class NixlBaseConnectorWorker:
             raise RuntimeError(
                 "Packed KV block rows differ between P and D. Use the same "
                 "VLLM_KV_CACHE_LAYOUT and block size on both sides."
+            )
+        # The remote conv sub-projection offsets come from the local row count.
+        if (
+            self._conv_decomp is not None
+            and self._conv_decomp.conv_rows != nixl_agent_meta.conv_rows
+        ):
+            raise RuntimeError(
+                "Mamba conv state rows differ between P and D: "
+                f"local={self._conv_decomp.conv_rows}, "
+                f"remote={nixl_agent_meta.conv_rows}. The conv state holds "
+                "conv_kernel - 1 + num_speculative_tokens rows, so P and D "
+                "must use the same num_speculative_tokens."
             )
         pairs = self._pair_regions(nixl_agent_meta, remote_pp_stage=remote_pp_size > 1)
         if remote_pp_size > 1 and not pairs.groups_match:
