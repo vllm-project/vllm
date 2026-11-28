@@ -45,6 +45,8 @@ from vllm.v1.engine.core import (
 )
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
+from vllm.v1.fault_tolerance.engine_core_sentinel import EngineCoreSentinel
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -790,6 +792,33 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+def test_paused_survivors_can_resume_after_scale_down(monkeypatch):
+    core, _ = _cadenced_dp_engine_core(monkeypatch, [(False, True), (False, False)], 1)
+    core.engine_index = 0
+    core.output_queue = MagicMock()
+    core.model_executor = MagicMock(failure_callback=None)
+    core.scheduler = MagicMock()
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
+    core.enable_fault_tolerance = True
+    config = core.vllm_config.parallel_config
+    config.data_parallel_size = 2
+    sentinel = core.ft_sentinel = EngineCoreSentinel(core, config)
+    monkeypatch.setattr(sentinel, "_prepare_round", MagicMock())
+    monkeypatch.setattr(sentinel, "_recover_and_vote", MagicMock())
+    monkeypatch.setattr(ParallelConfig, "has_unfinished_dp", lambda *_: False)
+
+    core._pause_complete()
+    core.engines_running = core._has_global_unfinished_reqs(False)
+    sentinel.scale_down(FaultToleranceRequest("scale_down", {"removed_dp_ranks": [1]}))
+
+    # Resume as soon as recovery completes, before the next engine step.
+    core.resume_scheduler()
+    assert not core.ignore_start_dp_wave
+    assert core.engines_running
+    assert core._has_global_unfinished_reqs(False)
 
 
 @pytest.mark.parametrize(
