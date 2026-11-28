@@ -44,6 +44,7 @@ from .ops.decode_moe import (
     supports_decode_moe_prep,
     supports_sort_quant,
 )
+from .ops.skinny_gemm import project_columns
 
 if TYPE_CHECKING:
     from .model import MuseSparkMoE, TokenShard
@@ -149,7 +150,7 @@ class MuseSparkDecodeMoE:
             pooled = shard.gather(pooler(hidden_states)[0])
         else:
             router_logits = moe._router_logits(hidden_states, reduce_splits=False)
-            pooled = pooler(hidden_states)[0]
+            pooled = project_columns(pooler, hidden_states, moe.shard_pooler, shard)
         topk_weights, topk_ids, normed = decode_moe_prep(
             router_logits.contiguous(),
             router.expert_bias,
@@ -185,7 +186,7 @@ class MuseSparkDecodeMoE:
             out = shard.reduce_scatter(out)
         else:
             out = tensor_model_parallel_all_reduce(out)
-        return unpooler(out)[0]
+        return project_columns(unpooler, out, moe.shard_unpooler, shard)
 
 
 def _stage_kernels(
