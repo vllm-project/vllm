@@ -161,7 +161,25 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Store each head's K and V as two slots of packed data + block scales."""
+        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
+            return spec
+        from dataclasses import replace
+
+        from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+
+        return replace(
+            spec,
+            num_head_slots=2 * spec.num_kv_heads,
+            state_content_bytes=nvfp4_kv_cache_full_dim(spec.head_size)
+            * get_dtype_size(spec.dtype),
+            kv_head_major_slots=True,
+        )
 
     @staticmethod
     def get_name() -> str:
@@ -206,9 +224,12 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         # is listed first because these layers publish two head slots while the
         # indexer publishes one, and mixed HNC shapes need a block-compact
         # layout to share the block-id pool.
+        # NVFP4 stores each head's K and V as two head-major slots inside a
+        # block, so the block-compact LBHNC layout is required for the Triton
+        # reader (and matches the layout the SM100 MSA kernels index).
         if _minimax_m3_aiter_sparse_pa_requested():
             return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
-        return super().supported_kv_cache_layouts()
+        return (KVCacheLayout.LBHNC,)
 
 
 @dataclass
@@ -452,7 +473,8 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         self.scale = scale
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.kv_cache_dtype = kv_cache_dtype
-        self.use_fp8_kv = is_quantized_kv_cache(kv_cache_dtype)
+        self.use_nvfp4_kv = get_kv_quant_mode(kv_cache_dtype).is_nvfp4
+        self.use_fp8_kv = is_quantized_kv_cache(kv_cache_dtype) and not self.use_nvfp4_kv
         if "e5m2" in kv_cache_dtype:
             self.kv_cache_fp8_dtype = (
                 torch.float8_e5m2fnuz
@@ -521,8 +543,16 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         kv_cache = (
             kv_cache.view(self.kv_cache_fp8_dtype) if self.use_fp8_kv else kv_cache
         )
-        k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
-        v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
+        k_scale = (
+            getattr(layer, "_k_scale", None)
+            if (self.use_fp8_kv or self.use_nvfp4_kv)
+            else None
+        )
+        v_scale = (
+            getattr(layer, "_v_scale", None)
+            if (self.use_fp8_kv or self.use_nvfp4_kv)
+            else None
+        )
 
         # Decode [:nd]: split-K over the selected blocks (request-major chunks).
         if main_md.num_decodes > 0:
@@ -583,6 +613,9 @@ def minimax_m3_use_flashinfer_msa(
     """
     if not (current_platform.is_cuda() and topk_blocks == 16):  # msa_topk_select
         return False
+    if get_kv_quant_mode(kv_cache_dtype).is_nvfp4:
+        # NVFP4 pages are served by the SM100 MSA or the SM120 Triton reader.
+        return False
     if current_platform.is_device_capability(90):
         # FlashInfer's SM90 MSA ops take fp8 E4M3 main and index caches with
         # bf16 queries, GQA groups of 8 or 16, and 1, 2 or 4 index heads.
@@ -625,8 +658,10 @@ def select_main_backend_and_impl_cls(
     FlashInfer MSA attend when the caller passes the
     `minimax_m3_use_flashinfer_msa` verdict; MI355 uses AITER sparse PA with
     shuffle KV cache layout; Other platforms and FP8 E5M2 fall back to Triton.
-    NVFP4 is MSA-only. The MSA/FlashInfer modules are imported lazily to avoid
-    import errors on unsupported platforms.
+    On SM120 (no tcgen05/TMEM) NVFP4 also falls back to Triton: the Triton
+    kernels dequantize the packed E2M1 slots on load. The MSA/FlashInfer
+    modules are imported lazily to avoid import errors on unsupported
+    platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
         num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
@@ -654,13 +689,22 @@ def select_main_backend_and_impl_cls(
             topk_blocks,
         )
         return MiniMaxM3SparseRocmNvfp4Backend, MiniMaxM3SparseRocmNvfp4Impl
-    if use_nvfp4 and (use_aiter_sparse_pa or not use_msa):
+    if (
+        use_nvfp4
+        and (use_aiter_sparse_pa or not use_msa)
+        and not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        )
+    ):
         raise ValueError(
             "MiniMax M3 sparse attention supports an NVFP4 KV cache only with "
-            f"the SM100 MSA backend (kv_cache_dtype={kv_cache_dtype}, "
-            f"topk_blocks={topk_blocks})"
+            "the SM100 MSA backend or the SM120 Triton reader "
+            f"(kv_cache_dtype={kv_cache_dtype}, topk_blocks={topk_blocks})"
         )
-    use_flashinfer_msa = use_flashinfer_msa and not use_msa and not use_aiter_sparse_pa
+    use_flashinfer_msa = (
+        use_flashinfer_msa and not use_nvfp4 and not use_msa and not use_aiter_sparse_pa
+    )
     if use_aiter_sparse_pa:
         selected = "AITER_SPARSE_PA"
     elif use_msa:
