@@ -42,6 +42,7 @@ vLLM is flexible and easy to use with:
 
 - Seamless integration with popular Hugging Face models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
+- [Reinforcement learning (RL) rollouts](https://docs.vllm.ai/en/latest/training/) with policy weight synchronization and integration with external training frameworks
 - Tensor, pipeline, data, expert, and context parallelism for distributed inference
 - Streaming outputs
 - Generation of structured outputs using xgrammar or guidance
@@ -76,6 +77,7 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 
 - [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
+- [Generate reinforcement learning rollouts](https://docs.vllm.ai/en/latest/training/)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
 ## Contributing

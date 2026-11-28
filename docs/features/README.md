@@ -1,5 +1,7 @@
 # Features
 
+For [reinforcement learning (RL) rollouts](../training/README.md), vLLM provides high-throughput generation, policy weight synchronization, and controls for sharing GPU memory and coordinating generation with external training frameworks.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

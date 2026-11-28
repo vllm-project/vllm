@@ -6,4 +6,4 @@ Then, vLLM supports the following usage patterns:
 
 - [Inference and Serving](../serving/offline_inference.md): Run a single instance of a model.
 - [Deployment](../deployment/docker.md): Scale up model instances for production.
-- [Training](../training/README.md): Train or fine-tune a model.
+- [Training and RL](../training/README.md): Generate reinforcement learning rollouts, score teacher outputs, and coordinate inference with external training frameworks.

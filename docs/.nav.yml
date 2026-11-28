@@ -18,7 +18,7 @@ nav:
       - deployment/*
       - deployment/frameworks
       - deployment/integrations
-    - Training: training
+    - Training & RL: training
     - Configuration:
       - configuration/*
       - TPU: https://docs.vllm.ai/projects/tpu/en/latest/
