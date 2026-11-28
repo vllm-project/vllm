@@ -77,6 +77,8 @@ class DecodeConfig:
             reasons.append("does not support routed-expert capture")
         if config.kernel_config.moe_backend != "aiter":
             reasons.append("requires --moe-backend aiter")
+        if getattr(config.quant_config, "moe_input_rotation_sizes", None):
+            reasons.append("does not support MoE input Hadamard rotation")
         layers = text_config.num_hidden_layers
         sparse_layers = [
             i

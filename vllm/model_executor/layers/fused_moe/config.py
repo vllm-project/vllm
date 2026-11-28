@@ -289,6 +289,10 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Width of the block Hadamard rotation that the checkpoint applied to both
+    # GEMM inputs; the experts must rotate the activations the same way.
+    input_rotation_size: int | None = None
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"

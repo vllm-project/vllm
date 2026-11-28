@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    block_hadamard_rotate_activation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -380,6 +383,7 @@ def rocm_aiter_fused_experts(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    inter_hadamard: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -484,6 +488,7 @@ def rocm_aiter_fused_experts(
         shared_w2_scale=shared_w2_scale,
         shared_expert_id=shared_expert_id,
         q_dtype_a=q_dtype_a,
+        inter_hadamard=inter_hadamard,
     )
 
 
@@ -761,6 +766,27 @@ class AiterMxfp4Experts(AiterExperts):
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        # Set for Quark checkpoints whose experts were quantized after a block
+        # Hadamard rotation of both GEMM inputs (w13 and w2 are pre-rotated).
+        self.rotation_size = quant_config.input_rotation_size
+        if self.rotation_size is not None:
+            if not rocm_aiter_ops.fused_moe_supports_inter_hadamard():
+                raise NotImplementedError(
+                    "Rotated MXFP4 experts need an AITER fused_moe that accepts "
+                    "inter_hadamard."
+                )
+            if moe_config.use_mori_epv1_kernels:
+                raise NotImplementedError(
+                    "MoRI dispatches pre-quantized activations, so the hidden "
+                    "states cannot be rotated before the first GEMM."
+                )
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -779,4 +805,56 @@ class AiterMxfp4Experts(AiterExperts):
         return on_gfx950() and not on_gfx1250()
 
     def _extra_fused_moe_kwargs(self) -> dict:
-        return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+        kwargs = mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+        if self.rotation_size is not None:
+            kwargs["inter_hadamard"] = self.rotation_size
+        return kwargs
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        if self.rotation_size is not None:
+            if a1q_scale is not None or hidden_states.dtype not in (
+                torch.bfloat16,
+                torch.float16,
+            ):
+                raise ValueError(
+                    "Rotated MXFP4 experts need unquantized bf16/fp16 hidden "
+                    f"states, got {hidden_states.dtype} with "
+                    f"a1q_scale={'set' if a1q_scale is not None else 'None'}."
+                )
+            hidden_states = block_hadamard_rotate_activation(
+                hidden_states, self.rotation_size
+            )
+        super().apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )

@@ -143,6 +143,10 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
             _sparse_pa_ok(model.layers),
             "AITER sparse PA off (needs VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1)",
         ),
+        (
+            not getattr(vllm_config.quant_config, "moe_input_rotation_sizes", None),
+            "MoE input rotation",
+        ),
     )
     for ok, why in checks:
         if not ok:
