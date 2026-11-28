@@ -992,6 +992,39 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
     ), f"decode returned non-finite log-probs: {tops}"
 
 
+def test_write_parallel_sampling_hands_every_sibling_its_kv():
+    """With `n > 1` every sibling shares the proxy's transfer id, yet each
+    decode sibling must get the full prompt from prefill, the request must
+    complete, and prefill must free every sibling's blocks."""
+    arch = ARCHS["qwen3_dense"]
+    case = Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT)
+    overrides = _arch_overrides(arch)
+    n = 3
+    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, prefill, decode):
+        prompt = _prompts([SHORT_PROMPT_LEN])[0]
+        hits_before = _external_hits(decode)
+        response = requests.post(
+            f"{proxy_url}/v1/completions",
+            json={
+                "model": arch.model,
+                "prompt": prompt,
+                "max_tokens": MAX_TOKENS,
+                "temperature": 1.0,
+                "n": n,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        hits = _external_hits(decode) - hits_before
+        _wait_for_prefill_blocks_freed(prefill)
+
+    assert len(response.json()["choices"]) == n
+    expected = n * _expected_external_hits([prompt], arch.hybrid, read_mode=False)
+    assert hits == expected, (
+        f"decode reported {hits} external prefix-cache hits, expected {expected}"
+    )
+
+
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))
 def test_corrupted_prefill_state_is_detected(arch_name: str):
     """Negative control: KV computed with different values must fail."""

@@ -929,10 +929,24 @@ class MoRIIOConnectorScheduler:
         there shortens a prompt whose cache hit was already measured against
         the full length. On a full hit that leaves `num_computed_tokens ==
         num_tokens` and trips the scheduler's `num_new_tokens > 0` assert.
+
+        In WRITE mode the `n` children of a parallel sampling request share the
+        router's `transfer_id`, but P must write each child into its own D
+        sibling's blocks. Both sides name child `i` `f"{i}_{parent_id}"`, so
+        each child derives the transfer id `f"{transfer_id}#{i}"` here, before
+        anything is keyed by it.
         """
+        params = request.kv_transfer_params
+        if self.mode == MoRIIOMode.WRITE and params and params.get("transfer_id"):
+            index, sep, _ = request.request_id.partition("_")
+            if sep and index.isdigit():
+                # Siblings can share one params dict: replace it, don't mutate.
+                request.kv_transfer_params = params = {
+                    **params,
+                    "transfer_id": f"{params['transfer_id']}#{index}",
+                }
         if not (self.is_producer and self._has_mamba):
             return
-        params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_mamba_request_for_prefill(request)
 

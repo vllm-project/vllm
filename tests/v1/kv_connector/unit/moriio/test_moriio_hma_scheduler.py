@@ -1902,6 +1902,29 @@ def test_on_new_request_truncates_only_hybrid_producers(
     assert len(request.prompt_token_ids) == expected_prompt_len
 
 
+@pytest.mark.parametrize(
+    "mode,request_id,expected",
+    [
+        (MoRIIOMode.WRITE, "1_cmpl-a-0-1234", "tx-1#1"),
+        (MoRIIOMode.WRITE, "cmpl-a-0-1234", "tx-1"),
+        (MoRIIOMode.READ, "1_cmpl-a-0-1234", "tx-1"),
+    ],
+)
+def test_on_new_request_gives_write_siblings_their_own_transfer_id(
+    mode, request_id, expected
+):
+    """WRITE pairs P child `i` with D child `i`, so parallel sampling siblings
+    must not share the router's transfer id; their shared params stay intact."""
+    shared = {"do_remote_prefill": True, "transfer_id": "tx-1"}
+    request = _mk_request([10, 11, 12], params=shared)
+    request.request_id = request_id
+
+    _FakeScheduler(mode=mode).on_new_request(request)
+
+    assert request.kv_transfer_params["transfer_id"] == expected
+    assert shared["transfer_id"] == "tx-1"
+
+
 def test_read_rematch_after_alloc_keeps_queued_transfer():
     """Clearing the flag blocks another external hit, not the queued READ."""
     sched = _make_read_scheduler()
