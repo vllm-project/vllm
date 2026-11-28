@@ -863,3 +863,68 @@ def test_decode_attention_sliding_window(H_Q, H_KV, D_QK, D_V, is_mla, sliding_w
         sliding_window=sliding_window,
     )
     torch.testing.assert_close(o.float(), ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "H_Q,H_KV",
+    [
+        (48, 2),  # group of 24 (GLM-4-32B at TP 1): > BLOCK_H and not a multiple
+        (40, 2),  # group of 20: > BLOCK_H and not a multiple
+        (16, 2),  # group of 8: < BLOCK_H
+        (32, 2),  # group of 16: multiple of BLOCK_H
+        (64, 2),  # group of 32: multiple of BLOCK_H
+    ],
+)
+def test_decode_attention_gqa_group_above_tile(H_Q, H_KV):
+    """Each query head must read its own KV head when a GQA group is wider than
+    the grouped kernel's BLOCK_H tile, also when it is not a multiple of it.
+
+    With a group of 24 and BLOCK_H=16, the old head-tile mapping assigned heads
+    24-31 to KV head 0 instead of KV head 1.
+    """
+    set_random_seed(0)
+    B, L, D_QK, PAGE_SIZE = 2, 20, 64, 16
+    num_pages = 128
+    num_kv_splits = 2
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    max_pages = cdiv(L, PAGE_SIZE)
+
+    req_to_page = torch.randint(0, num_pages, (B, max_pages), device=DEVICE_TYPE)
+    req_to_token = req_to_page.unsqueeze(-1) * PAGE_SIZE + torch.arange(
+        PAGE_SIZE, device=DEVICE_TYPE
+    )
+    req_to_token = req_to_token.reshape(B, -1)[:, :L].contiguous()
+
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k_buffer = torch.randn(
+        num_pages, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    v_buffer = torch.randn(
+        num_pages, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    o = torch.zeros(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    attn_logits = torch.empty(
+        (B, H_Q, num_kv_splits, D_QK + 1), dtype=torch.float32, device=DEVICE_TYPE
+    )
+    b_seq_len = torch.full((B,), L, dtype=torch.int32, device=DEVICE_TYPE)
+
+    decode_attention_fwd(
+        q,
+        k_buffer,
+        v_buffer,
+        o,
+        lse,
+        req_to_page,
+        b_seq_len,
+        attn_logits,
+        num_kv_splits,
+        sm_scale,
+        PAGE_SIZE,
+    )
+
+    ref = _decode_reference(
+        q, k_buffer, v_buffer, req_to_page, b_seq_len, PAGE_SIZE, sm_scale
+    )
+    torch.testing.assert_close(o.float(), ref, atol=2e-2, rtol=2e-2)
