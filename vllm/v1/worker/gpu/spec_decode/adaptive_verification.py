@@ -316,6 +316,7 @@ class AdaptiveVerificationManager:
         Run these inside StepTimingCollector.collect(), then hand the block's
         timings to set_initial_cost_curves."""
         max_num_tokens = self.req_states.max_num_batched_tokens
+        max_num_reqs = self.req_states.max_num_reqs
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
         # (piecewise/eager) and linear extrapolation badly underestimates
@@ -327,12 +328,24 @@ class AdaptiveVerificationManager:
                 size = min(size * 2, max_num_tokens)
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
+        query_len = self.num_speculative_steps + self.num_bonus_tokens
+        context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
         for num_tokens in capture_sizes + sorted(tail_sizes):
-            for _ in range(_PROFILE_REPLAYS):
-                yield {
-                    "num_tokens": num_tokens,
-                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
-                }
+            # Dummy runs on FULL graphs keep only uniform request counts.
+            tokens_per_req = max(
+                n for n in range(1, query_len + 1) if num_tokens % n == 0
+            )
+            request_counts = {num_tokens // tokens_per_req}
+            if num_tokens in capture_sizes and num_tokens <= max_num_reqs:
+                # One-token runs price the drafter.
+                request_counts.add(num_tokens)
+            for num_reqs in request_counts:
+                for _ in range(_PROFILE_REPLAYS):
+                    yield {
+                        "num_tokens": num_tokens,
+                        "num_reqs": num_reqs,
+                        "context_len": context_len,
+                    }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
@@ -348,10 +361,15 @@ class AdaptiveVerificationManager:
         # and request counts — unlike token counts — collide across execution
         # modes, so only graph-replay samples may price the draft curve.
         draft_curve = median_curve(
-            (s.num_reqs, s.drafter_ms) for s in samples if s.full_cudagraph
+            (s.num_reqs, s.drafter_ms)
+            for s in samples
+            if s.full_cudagraph and s.num_reqs == s.num_target_tokens
         )
+        # Skip the one-token drafter runs.
         verify_curve = median_curve(
-            (s.num_target_tokens, s.forward_ms) for s in samples
+            (s.num_target_tokens, s.forward_ms)
+            for s in samples
+            if s.num_reqs < s.num_target_tokens or s.num_reqs == 1
         )
         self.set_cost_curves(draft_curve, verify_curve)
 

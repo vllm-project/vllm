@@ -345,7 +345,7 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
 
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
-    manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
+    manager.req_states = SimpleNamespace(max_num_batched_tokens=256, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
     curves: dict[str, list[tuple[int, float]]] = {}
@@ -355,31 +355,34 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
         lambda draft, verify: curves.update(draft=draft, verify=verify),
     )
 
-    timings = [
-        StepTimingSample(
-            forward_ms=float(batch["num_tokens"]),
-            drafter_ms=1.0,
-            num_target_tokens=batch["num_tokens"],
-            num_reqs=batch["num_tokens"] // 8,
-            # Only the captured sizes replay a graph; the tail sizes run eager.
-            full_cudagraph=batch["num_tokens"] <= 1024,
+    timings = []
+    for batch in manager.batches_to_profile([8, 20, 64]):
+        num_reqs = batch.get("num_reqs", min(batch["num_tokens"], 64))
+        timings.append(
+            StepTimingSample(
+                forward_ms=float(batch["num_tokens"] + num_reqs),
+                drafter_ms=float(num_reqs),
+                num_target_tokens=batch["num_tokens"],
+                num_reqs=num_reqs,
+                # Only the captured sizes replay a graph; the tail sizes run eager.
+                full_cudagraph=batch["num_tokens"] <= 64,
+            )
         )
-        for batch in manager.batches_to_profile([8, 1024])
-    ]
     manager.set_initial_cost_curves(timings)
 
     # Tail beyond the last capture size: 1.5x then doubling to the max.
     assert curves["verify"] == [
-        (8, 8.0),
-        (1024, 1024.0),
-        (1536, 1536.0),
-        (2048, 2048.0),
-        (4096, 4096.0),
+        (8, 9.0),
+        (20, 24.0),
+        (64, 72.0),
+        (96, 108.0),
+        (128, 144.0),
+        (256, 288.0),
     ]
     # Eager batches must not contribute to the draft curve: keyed by request
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
-    assert curves["draft"] == [(1, 1.0), (128, 1.0)]
+    assert curves["draft"] == [(8, 8.0), (20, 20.0), (64, 64.0)]
 
 
 def test_compact_batch_preserves_totals_and_bounds():

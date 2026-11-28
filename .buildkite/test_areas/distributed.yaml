@@ -107,6 +107,7 @@ steps:
   - vllm/entrypoints/serve/instrumentator/health.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/utils.py
   commands:
@@ -115,6 +116,9 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - pytest -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+  - >-
+    pytest -v -s
+    v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py::test_moe_mtp_dp_survives_idle_transitions
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
   # Batch-sharded sampling requires TP=2
