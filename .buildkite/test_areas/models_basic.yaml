@@ -481,6 +481,7 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
   - vllm/v1/attention/backends/mla/index_group.py
   - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
+  - vllm/utils/deep_gemm.py
   - tests/models/qwen4_exp/
   commands:
     - >-

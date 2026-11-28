@@ -15,13 +15,13 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
-from ..common.qsa_indexer import (
-    QSACompressedKeyCache,
-    QSAIndexerMetadata,
-    QSARawKeyCache,
-    canonical_qsa_rope_positions,
-)
+from ..common.qsa_indexer import canonical_qsa_rope_positions
 from .ops.qsa_prepare import qsa_prepare
+from .qsa_indexer_metadata import (
+    NvidiaQSACompressedKeyCache,
+    NvidiaQSARawKeyCache,
+    QSAIndexerMetadata,
+)
 
 if TYPE_CHECKING:
     from .qsa import Qwen4ExpQSAAttention
@@ -177,7 +177,7 @@ class QSAIndexer(nn.Module):
                 "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
-        self.raw_key_cache = QSARawKeyCache(
+        self.raw_key_cache = NvidiaQSARawKeyCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
@@ -186,7 +186,7 @@ class QSAIndexer(nn.Module):
             compress_ratio=self.compress_ratio,
             vllm_config=vllm_config,
         )
-        self.compressed_key_cache = QSACompressedKeyCache(
+        self.compressed_key_cache = NvidiaQSACompressedKeyCache(
             head_size=self.index_head_dim,
             dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
@@ -453,6 +453,7 @@ class QSAIndexer(nn.Module):
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
                 self.topk_backend,
+                deepgemm_prefill=compressed_metadata.deepgemm_prefill,
             )
         expand_qsa_block_indices(
             block_indices,
