@@ -257,6 +257,37 @@ class LutBSm107Experts(_LutBExpertsBase):
             self.moe_sum(cache3, output, topk_ids, expert_map)
 
 
+def select_lut_b_moe_experts(
+    moe: FusedMoEConfig,
+) -> type[LutBEmulationTritonExperts | LutBSm107Experts]:
+    if moe.moe_backend not in ("auto", "emulation"):
+        raise ValueError(
+            f"moe_backend={moe.moe_backend!r} is not supported for LUT-B MoE; "
+            "expected 'auto' or 'emulation'."
+        )
+    if moe.moe_backend == "emulation":
+        return LutBEmulationTritonExperts
+
+    native_shape = (
+        moe.hidden_dim % LUT_B_SM107_TILE_K == 0
+        and moe.intermediate_size_per_partition % LUT_B_SM107_TILE_N == 0
+    )
+    supported, reason = LutBSm107Experts.is_supported_config(
+        LutBSm107Experts,
+        moe,
+        kLutBStatic,
+        kMxfp8Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    if supported and native_shape:
+        return LutBSm107Experts
+
+    if reason is None:
+        reason = "hidden and intermediate sizes must be multiples of 128"
+    logger.info_once("LUT-B MoE falls back to emulation: %s", reason)
+    return LutBEmulationTritonExperts
+
+
 def make_lut_b_moe_kernel(
     experts_cls: type[_LutBExpertsBase],
     moe_config: FusedMoEConfig,
