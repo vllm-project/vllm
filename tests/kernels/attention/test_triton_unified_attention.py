@@ -9,7 +9,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops import triton_unified_attention as attention
 from vllm.v1.attention.ops.triton_attention_helpers import (
@@ -954,6 +954,106 @@ def test_triton_unified_attn(
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+@pytest.mark.parametrize(
+    "seq_lens",
+    [[(1, 32000)], [(1, 32000), (1, 8191), (1, 300)], [(3, 24000), (3, 517)]],
+)
+@pytest.mark.parametrize("num_par_softmax_segments", [16, 64])
+@pytest.mark.parametrize("num_heads", [(8, 2), (5, 1)])
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("q_dtype", QDTYPES)
+@torch.inference_mode()
+def test_triton_unified_attn_split_k_long_context(
+    seq_lens: list[tuple[int, int]],
+    num_par_softmax_segments: int,
+    num_heads: tuple[int, int],
+    head_size: int,
+    q_dtype: torch.dtype | None,
+) -> None:
+    """Split-K decode and verify at 16 and 64 segments with contexts long enough
+    that every segment covers many tiles (64 segments are used on SM120 and
+    gfx942 for small batches; the other tests here cover 16 segments, short
+    contexts only)."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    query_lens = [q for q, _ in seq_lens]
+    kv_lens_list = [kv for _, kv in seq_lens]
+    max_query_len, max_kv_len = max(query_lens), max(kv_lens_list)
+    num_seqs, block_size, num_blocks = len(seq_lens), 16, 4096
+    scale = head_size**-0.5
+
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16
+    )
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32)
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, cdiv(max_kv_len, block_size)), dtype=torch.int32
+    )
+
+    q, k, v = query, key_cache, value_cache
+    q_descale = k_descale = v_descale = None
+    kv_quant_mode = KVQuantMode.NONE
+    if q_dtype is not None:
+        q_descale = torch.tensor(0.75, dtype=torch.float32)
+        k_descale = torch.full((num_seqs, num_kv_heads), 0.5, dtype=torch.float32)
+        v_descale = torch.full((num_seqs, num_kv_heads), 0.25, dtype=torch.float32)
+        q = (query / 0.75).to(q_dtype)
+        k = (key_cache / 0.5).to(q_dtype)
+        v = (value_cache / 0.25).to(q_dtype)
+        kv_quant_mode = KVQuantMode.FP8_PER_TENSOR
+
+    seq_threshold_3D = 8
+    rows = seq_threshold_3D * max_query_len
+    segm = (rows, num_query_heads, num_par_softmax_segments)
+    output = torch.empty_like(query)
+    unified_attention(
+        q=q,
+        k=k,
+        v=v,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=torch.empty(
+            (*segm, next_power_of_2(head_size)), dtype=torch.float32
+        ),
+        softmax_segm_max=torch.empty(segm, dtype=torch.float32),
+        softmax_segm_expsum=torch.empty(segm, dtype=torch.float32),
+        kv_quant_mode=kv_quant_mode,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+    )
+    tol = 1.5e-1 if q_dtype is not None else 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize(
