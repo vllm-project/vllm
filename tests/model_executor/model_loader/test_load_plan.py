@@ -605,19 +605,21 @@ def test_mirror_buffer_falls_back(loader, reason):
 
 
 @pytest.mark.parametrize(
-    "loader,shape,param_shape",
+    "loader,shape,param_shape,writes",
     [
-        (lambda p, w: p.copy_(w.unflatten(0, (2, 3))), (6, 4), (2, 3, 4)),
-        (lambda p, w: p.copy_(w.split([2, 4])[1]), (6, 4), (4, 4)),
-        (lambda p, w: p.copy_(w.t().contiguous()[1:3]), (4, 6), (2, 4)),
-        (lambda p, w: p.__setitem__(1, w), (4,), (2, 4)),
+        (lambda p, w: p.copy_(w.unflatten(0, (2, 3))), (6, 4), (2, 3, 4), 1),
+        (lambda p, w: p.copy_(w.split([2, 4])[1]), (6, 4), (4, 4), 1),
+        (lambda p, w: p.copy_(w.t().contiguous()[1:3]), (4, 6), (2, 4), 1),
+        (lambda p, w: p.__setitem__(1, w), (4,), (2, 4), 1),
+        # one tensor into two shards, as Gemma-4's K=V layers load k_proj
+        (lambda p, w: (p[0].copy_(w), p[1].copy_(w.detach())), (4,), (2, 4), 2),
     ],
-    ids=["unflatten", "split", "contiguous", "setitem"],
+    ids=["unflatten", "split", "contiguous", "setitem", "detach"],
 )
-def test_view_ops_stay_direct(loader, shape, param_shape):
+def test_view_ops_stay_direct(loader, shape, param_shape, writes):
     make, shapes = _single(loader, shape=shape, param_shape=param_shape)
     _, plan = _check_plan_equals_cold_start(make, shapes)
-    assert plan.get_dest("layer.weight") is not None
+    assert len(plan.get_dest("layer.weight")) == writes
 
 
 @pytest.mark.parametrize(
