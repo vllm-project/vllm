@@ -913,10 +913,41 @@ class MistralParser(ParserEngine):
         return super().extract_reasoning(model_output, request)
 
     def _accept_tool_name(self, name: str) -> bool:
-        # Once `[ARGS]` or the opening `{` has moved the slot past its name,
-        # that name is final, empty included. Emitting the call with ""
-        # surfaces the malformed generation instead of dropping it.
-        return self._is_valid_tool_name(name)
+        return bool(name.strip()) and self._is_valid_tool_name(name)
+
+    def _handle_tool_end(
+        self,
+        event: SemanticEvent,
+        deltas: list[DeltaToolCall],
+    ) -> None:
+        super()._handle_tool_end(event, deltas)
+        if (
+            0 <= event.tool_index < len(self._tool_slots)
+            and not self._tool_slots[event.tool_index].name.strip()
+        ):
+            logger.warning_once(
+                "Dropping Mistral tool call with a blank function name."
+            )
+
+    def _events_to_delta(
+        self,
+        events: list[SemanticEvent],
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        delta = super()._events_to_delta(events, finished=finished)
+        if delta and delta.tool_calls:
+            # Rejected slots must not leave gaps in client-visible call indices.
+            # Every tool delta is emitted after its slot's `name_sent` is set,
+            # so each emitted index is present in the mapping.
+            indices = {
+                idx: emitted_idx
+                for emitted_idx, idx in enumerate(
+                    i for i, slot in enumerate(self._tool_slots) if slot.name_sent
+                )
+            }
+            for call in delta.tool_calls:
+                call.index = indices[call.index]
+        return delta
 
     def _try_extract_name(self, idx: int) -> str | None:
         # No JSON-embedded "name" key in this format; the slot name is final.

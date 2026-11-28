@@ -36,7 +36,11 @@ from vllm.entrypoints.generate.base.protocol import (
     StructuralTagResponseFormat,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
@@ -841,19 +845,14 @@ def test_extract_tool_calls_v11_without_args_skipped(mistral_tool_parser):
     assert result.content is None
 
 
-def test_extract_tool_calls_malformed_name_before_marker_emits_empty_name(
+def test_extract_tool_calls_malformed_name_before_marker_is_dropped(
     mistral_tool_parser,
 ):
-    model_output = 'bash[TOOL_CALLS]{"command": "cat file.py"}'
     result = mistral_tool_parser.extract_tool_calls(
-        model_output, request=_DUMMY_REQUEST
+        'bash[TOOL_CALLS]{"command": "cat file.py"}', request=_DUMMY_REQUEST
     )
-    assert result.tools_called
-    assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].function.name == ""
-    assert result.tool_calls[0].function.arguments == json.dumps(
-        {"command": "cat file.py"}
-    )
+    assert not result.tools_called
+    assert result.tool_calls == []
     assert result.content == "bash"
 
 
@@ -872,25 +871,17 @@ def test_extract_tool_calls_well_formed_name_unaffected(mistral_tool_parser):
 def test_extract_tool_calls_empty_name_unparsable_args_no_crash(
     mistral_tool_parser,
 ):
-    # Empty name AND args that never form valid JSON: still emitted (raw
-    # text as arguments) instead of raising.
-    model_output = "bash[TOOL_CALLS]{not valid json at all"
     result = mistral_tool_parser.extract_tool_calls(
-        model_output, request=_DUMMY_REQUEST
+        "bash[TOOL_CALLS]{not valid json at all", request=_DUMMY_REQUEST
     )
-    assert result.tools_called
-    assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].function.name == ""
-    assert result.tool_calls[0].function.arguments == "{not valid json at all"
+    assert not result.tools_called
+    assert result.tool_calls == []
     assert result.content == "bash"
 
 
 def test_extract_tool_calls_streaming_malformed_name_before_marker(
     mistral_tool_parser,
 ):
-    # Streaming counterpart: once the args start the slot can never go back to
-    # naming, so the (empty) name is already final and streams immediately
-    # alongside the args.
     model_output = 'bash[TOOL_CALLS]{"command": "cat file.py"}'
     mid_delta = mistral_tool_parser.extract_tool_calls_streaming(
         previous_text="",
@@ -903,23 +894,13 @@ def test_extract_tool_calls_streaming_malformed_name_before_marker(
     )
     assert mid_delta is not None
     assert mid_delta.content == "bash"
-    assert len(mid_delta.tool_calls) == 1
-    assert mid_delta.tool_calls[0].function.name == ""
-    assert mid_delta.tool_calls[0].function.arguments == '{"command": "cat file.py"'
-
-    final_delta = mistral_tool_parser.finish_streaming()
-    assert final_delta is not None
-    assert len(final_delta.tool_calls) == 1
-    assert final_delta.tool_calls[0].function.name is None
-    assert final_delta.tool_calls[0].function.arguments == "}"
+    assert not mid_delta.tool_calls
+    assert mistral_tool_parser.finish_streaming() is None
 
 
 def test_extract_tool_calls_parallel_malformed_then_well_formed(
     mistral_tool_parser,
 ):
-    # A malformed empty-name call followed by a well-formed one must not
-    # regress into brace-splitting: nested braces in the second call's
-    # arguments must stay intact, and both calls must be correctly separated.
     model_output = (
         'bash[TOOL_CALLS]{"command": "ls"}'
         '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}'
@@ -928,11 +909,9 @@ def test_extract_tool_calls_parallel_malformed_then_well_formed(
         model_output, request=_DUMMY_REQUEST
     )
     assert result.tools_called
-    assert len(result.tool_calls) == 2
-    assert result.tool_calls[0].function.name == ""
-    assert result.tool_calls[0].function.arguments == json.dumps({"command": "ls"})
-    assert result.tool_calls[1].function.name == "submit"
-    assert result.tool_calls[1].function.arguments == json.dumps(
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "submit"
+    assert result.tool_calls[0].function.arguments == json.dumps(
         {"answer": {"nested": 1}}
     )
     assert result.content == "bash"
@@ -2811,16 +2790,16 @@ _MALFORMED_MATRIX_CASES = [
         # content before the marker, then generation jumps straight to
         # args (no NAME slot, no [ARGS]).
         'bash[TOOL_CALLS]{"command": "cat file.py"}',
-        [""],
-        [json.dumps({"command": "cat file.py"})],
+        [],
+        [],
         "bash",
         id="malformed_single",
     ),
     pytest.param(
         # 2x2 corner: name skipped, `[ARGS]` token present.
         'bash[TOOL_CALLS][ARGS]{"command": "cat file.py"}',
-        [""],
-        [json.dumps({"command": "cat file.py"})],
+        [],
+        [],
         "bash",
         id="malformed_single_args_token",
     ),
@@ -2835,12 +2814,10 @@ _MALFORMED_MATRIX_CASES = [
         id="parallel_wellformed",
     ),
     pytest.param(
-        # parallel malformed x2: both calls skip the NAME slot entirely
-        # (marker immediately followed by `{`), each ending with an empty
-        # name and correctly separated (nested-brace) arguments.
+        # Both malformed calls are dropped, including their nested arguments.
         'bash[TOOL_CALLS]{"command": "ls"}[TOOL_CALLS]{"answer": {"nested": 1}}',
-        ["", ""],
-        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        [],
+        [],
         "bash",
         id="parallel_malformed",
     ),
@@ -2849,8 +2826,8 @@ _MALFORMED_MATRIX_CASES = [
         # the NAME slot but enter TOOL_ARGS via `[ARGS]` instead of `{`.
         'bash[TOOL_CALLS][ARGS]{"command": "ls"}'
         '[TOOL_CALLS][ARGS]{"answer": {"nested": 1}}',
-        ["", ""],
-        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        [],
+        [],
         "bash",
         id="parallel_malformed_args_token",
     ),
@@ -2861,8 +2838,8 @@ _MALFORMED_MATRIX_CASES = [
         # second call's nested-brace args must not bleed into each other.
         'bash[TOOL_CALLS]{"command": "ls"}'
         '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}',
-        ["", "submit"],
-        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        ["submit"],
+        [json.dumps({"answer": {"nested": 1}})],
         "bash",
         id="mixed_malformed_then_wellformed",
     ),
@@ -2871,8 +2848,8 @@ _MALFORMED_MATRIX_CASES = [
         # TOOL_ARGS via `[ARGS]` instead of `{`, second call well-formed.
         'bash[TOOL_CALLS][ARGS]{"command": "ls"}'
         '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}',
-        ["", "submit"],
-        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        ["submit"],
+        [json.dumps({"answer": {"nested": 1}})],
         "bash",
         id="mixed_malformed_args_token_then_wellformed",
     ),
@@ -2880,8 +2857,8 @@ _MALFORMED_MATRIX_CASES = [
         # mixed: well-formed first call, malformed second call (NAME slot
         # skipped entirely for the second call).
         '[TOOL_CALLS]bash[ARGS]{"command": "ls"}[TOOL_CALLS]{"answer": {"nested": 1}}',
-        ["bash", ""],
-        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        ["bash"],
+        [json.dumps({"command": "ls"})],
         None,
         id="mixed_wellformed_then_malformed",
     ),
@@ -2904,7 +2881,7 @@ def test_malformed_tool_call_matrix_non_streaming(
 
     result = parser.extract_tool_calls_from_content(model_output, request)
 
-    assert result.tools_called
+    assert result.tools_called == bool(expected_names)
     assert [tc.function.name for tc in result.tool_calls] == expected_names
     assert [tc.function.arguments for tc in result.tool_calls] == expected_args
     assert result.content == expected_content
@@ -2943,10 +2920,96 @@ def test_extract_tool_calls_real_captured_malformed_output(mistral_tokenizer):
 
     result = parser.extract_tool_calls_from_content(_REAL_LEAK_CONTENT, request)
 
-    assert result.tools_called
-    assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].function.name == ""
-    assert result.tool_calls[0].function.arguments == json.dumps(
-        {"command": "cd /testbed && git diff xarray/core/weighted.py"}
-    )
+    assert not result.tools_called
+    assert result.tool_calls == []
     assert result.content == "bash"
+
+
+@pytest.mark.parametrize("name", ["", " ", "\t\n"])
+@pytest.mark.parametrize("separator", ["", "[ARGS]"])
+def test_blank_tool_name_emits_no_stream_deltas(
+    mistral_tokenizer, name, separator, caplog, disable_log_dedup
+):
+    """A rejected start must not leave argument continuations or tool finish reason."""
+    request = _malformed_matrix_request()
+    parser = MistralParser(mistral_tokenizer, request.tools)
+    processor = ChatStreamProcessor(
+        request, parser, enable_auto_tools=True, parser_cls=MistralParser
+    )
+    chunks = ["[TOOL_CALLS]", name + separator, "{", "}"]
+    calls = []
+    for i, chunk in enumerate(chunks):
+        step = processor.step(
+            chunk,
+            encode_mistral_output(mistral_tokenizer, chunk),
+            "stop" if i == len(chunks) - 1 else None,
+            [1],
+        )
+        if step.delta:
+            calls.extend(step.delta.tool_calls or [])
+    assert calls == []
+    assert step.finish_reason == "stop"
+    assert "Dropping Mistral tool call with a blank function name." in caplog.text
+
+
+@pytest.mark.parametrize("name", ["", " ", "\t\n"])
+@pytest.mark.parametrize("separator", ["", "[ARGS]"])
+def test_blank_tool_name_is_not_a_non_streaming_call(
+    mistral_tokenizer, name, separator
+):
+    parser = MistralParser(mistral_tokenizer)
+    result = parser.extract_tool_calls_from_content(
+        f"[TOOL_CALLS]{name}{separator}{{}}", _malformed_matrix_request()
+    )
+    assert not result.tools_called
+    assert result.tool_calls == []
+
+
+@pytest.mark.parametrize("parallel_tool_calls", [True, False])
+@pytest.mark.parametrize("chunk_size", [1, 8, 1000])
+def test_valid_call_after_rejected_name_has_contiguous_index(
+    mistral_tokenizer, parallel_tool_calls, chunk_size
+):
+    request = _malformed_matrix_request()
+    request.parallel_tool_calls = parallel_tool_calls
+    parser = MistralParser(mistral_tokenizer, request.tools)
+    processor = ChatStreamProcessor(
+        request, parser, enable_auto_tools=True, parser_cls=MistralParser
+    )
+    text = '[TOOL_CALLS]{}[TOOL_CALLS]bash[ARGS]{"command":"ls"}'
+    tokens = encode_mistral_output(mistral_tokenizer, text)
+    calls = []
+    for i in range(0, len(tokens), chunk_size):
+        ids = tokens[i : i + chunk_size]
+        step = processor.step(
+            mistral_tokenizer.decode(ids, skip_special_tokens=False),
+            ids,
+            "stop" if i + chunk_size >= len(tokens) else None,
+            [1],
+        )
+        if step.delta:
+            calls.extend(step.delta.tool_calls or [])
+    assert calls
+    assert {call.index for call in calls} == {0}
+    functions = [call.function for call in calls if call.function is not None]
+    assert [function.name for function in functions if function.name] == ["bash"]
+    assert json.loads("".join(function.arguments or "" for function in functions)) == {
+        "command": "ls"
+    }
+    assert step.finish_reason == "tool_calls"
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named", "none"])
+def test_nonblank_names_keep_existing_choice_policy(mistral_tokenizer, tool_choice):
+    request = _malformed_matrix_request()
+    request.tool_choice = (
+        ChatCompletionNamedToolChoiceParam(type="function", function={"name": "bash"})
+        if tool_choice == "named"
+        else tool_choice
+    )
+    parser = MistralParser(mistral_tokenizer, request.tools)
+    result = parser.extract_tool_calls_from_content(
+        "[TOOL_CALLS]unknown_tool[ARGS]{}", request
+    )
+    expected = [] if tool_choice == "none" else ["unknown_tool"]
+    assert [call.function.name for call in result.tool_calls] == expected

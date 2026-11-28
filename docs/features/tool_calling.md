@@ -252,6 +252,14 @@ Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional Mistral function-calling models are compatible as well.
 
+For v11+ tool-call output, calls with empty or whitespace-only function names
+are dropped, including their streaming argument deltas. A warning is logged once
+on the server, not returned to the client. Valid calls that follow are retained.
+If no valid call remains, the response does not use the `tool_calls` finish
+reason; the underlying stop or length finish reason is retained. Nonblank tool
+names and tool-choice grammar constraints are unchanged. This does not change
+the pre-v11 JSON-array format.
+
 Known issues:
 
 1. Mistral 7B struggles to generate parallel tool calls correctly.
