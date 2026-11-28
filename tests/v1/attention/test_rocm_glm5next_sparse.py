@@ -112,6 +112,7 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
 
 @pytest.mark.parametrize(
     (
+        "gfx11",
         "kv_cache_dtype",
         "head_size",
         "num_prefills",
@@ -121,17 +122,20 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
         "expected",
     ),
     [
-        ("auto", 512, 1, 0, 0, 32, True),
-        ("auto", 512, 1, 2, 2, 32, True),
-        ("auto", 512, 0, 2, 2, 1, True),
-        ("fp8", 512, 1, 0, 0, 32, False),
-        ("auto", 576, 1, 0, 0, 32, False),
-        ("auto", 512, 0, 2, 4, 2, True),
-        ("auto", 512, 0, 2, 12, 6, True),
-        ("auto", 512, 0, 0, 0, 0, False),
+        (False, "auto", 512, 1, 0, 0, 32, True),
+        (False, "auto", 512, 1, 2, 2, 32, True),
+        (False, "auto", 512, 0, 2, 2, 1, True),
+        (False, "fp8", 512, 1, 0, 0, 32, False),
+        (False, "auto", 576, 1, 0, 0, 32, False),
+        (True, "auto", 576, 1, 0, 0, 32, True),  # gfx11 has no AITER sparse MLA
+        (False, "auto", 512, 0, 2, 4, 2, True),
+        (False, "auto", 512, 0, 2, 12, 6, True),
+        (False, "auto", 512, 0, 0, 0, 0, False),
     ],
 )
 def test_rocm_sparse_triton_route(
+    monkeypatch,
+    gfx11,
     kv_cache_dtype,
     head_size,
     num_prefills,
@@ -141,6 +145,7 @@ def test_rocm_sparse_triton_route(
     expected,
 ):
     """Validate Triton routing for prefill, decode, and MTP verification."""
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: gfx11)
     assert (
         _use_rocm_sparse_triton(
             kv_cache_dtype=kv_cache_dtype,
@@ -176,6 +181,7 @@ def test_rocm_long_bf16_prefill_dispatch(
 ):
     """Check the new dispatch gate using CPU tensors and intercepted kernels."""
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
 
     class KernelSelected(Exception):
         pass
