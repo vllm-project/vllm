@@ -348,7 +348,7 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
 __device__ __forceinline__ int ld_acquire(int* ptr) {
   int state = 0;
 #if defined(USE_ROCM)
-  state = __hip_atomic_load(ptr, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
+  state = __scoped_atomic_load_n(ptr, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
 #elif (__CUDA_ARCH__ >= 700)
   asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                : "=r"(state)
