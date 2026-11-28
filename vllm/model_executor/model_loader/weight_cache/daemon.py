@@ -162,6 +162,7 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     build_manifest,
 )
 from vllm.platforms import current_platform
+from vllm.plugins import load_general_plugins
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -629,6 +630,8 @@ def _run_daemon(
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
         configure_logging(logging_config)
+    # As in engine workers, so models and compile cache keys match theirs.
+    load_general_plugins()
     daemon = WeightCacheDaemon(
         vllm_config,
         global_rank,
