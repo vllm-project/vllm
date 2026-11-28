@@ -111,20 +111,16 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
 | `--ec-consumer-zmq-addrs` | Mooncake EC consumer control addresses, aligned with `--decode-servers-urls`. Required for `ECMooncakeConnector`. Supported only in E+PD mode (`--prefill-servers-urls disable`). |
 | `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
+| `--enable-per-video-kwargs-slicing` | Enable processor-side partitioning of request-level per-video kwargs. Requires compatible encoder processors and EC consumer cache hashing. Defaults to off. |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
-With `--enable-per-video-kwargs-slicing`, a request with non-empty
-`mm_processor_kwargs` carries each encoder child's original video position.
-Qwen3-VL selects that video's
-`fps` or `num_frames` from the effective processor kwargs. HYV4 and HYV4-Flash VL
-select `second_per_grid_ts` and require one interval per video. The flag defaults
-to off. Enable it after updating encoders to support positional requests and
-EC consumers to use compatible video cache hashing. Request-level multimodal
-kwargs still follow the server's `--trust-request-mm-kwargs` policy. Ordinary
-video requests can use this proxy flag with trust disabled. For positional
-lists in server configuration alone, the proxy sends no position metadata.
+Request-level multimodal kwargs remain subject to the server's existing
+`--trust-request-mm-kwargs` policy. Requests without processor overrides do not
+require additional trust settings. Partitioning of server-configured per-video
+lists alone is not supported.
 
-With audio extracted from video, put per-video `fps` or `num_frames` lists inside
+When using `--enable-per-video-kwargs-slicing` with audio extracted from video,
+put per-video `fps` or `num_frames` lists inside
 `mm_processor_kwargs.videos_kwargs` so the audio cache keys match across stages.
 
 ### Dynamic registration
