@@ -67,8 +67,9 @@ class PPHandler:
     def __init__(
         self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
     ):
-        self.is_last_rank = get_pp_group().is_last_rank
-        self.last_rank = get_pp_group().last_rank
+        self.pp_group = get_pp_group()
+        self.is_last_rank = self.pp_group.is_last_rank
+        self.last_rank = self.pp_group.last_rank
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
         self.device = device
@@ -80,7 +81,7 @@ class PPHandler:
         # with pp_size None placeholders so the first pp_size consumes are no-ops.
         # None means no postprocess is pending for that step (broadcast skipped).
         # Only XPU can disable microbatching via VLLM_XPU_PP_MICROBATCH.
-        ring_depth = get_pp_group().world_size
+        ring_depth = self.pp_group.world_size
         if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
             ring_depth = 1
         self.queue: deque[PendingRecv | None] = (
@@ -93,7 +94,7 @@ class PPHandler:
         self.req_idx_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Dedicated subgroup for the sampled-token broadcast.
-        self.broadcast_group = get_pp_group().make_sibling_device_group(
+        self.broadcast_group = self.pp_group.make_sibling_device_group(
             group_desc="pp_broadcast"
         )
         # Whether sampled tokens were broadcast this step.
@@ -251,7 +252,7 @@ class PPHandler:
         if self.sampled_tokens_broadcast:
             with torch.cuda.stream(self.broadcast_stream):
                 self.broadcast_stream.wait_stream(self.main_stream)
-                torch.distributed.broadcast(
+                self.pp_group.sibling_broadcast(
                     draft_tokens, src=self.last_rank, group=self.broadcast_group
                 )
                 draft_tokens.record_stream(self.broadcast_stream)
@@ -278,10 +279,10 @@ class PPHandler:
                 num_reqs, sample_len, dtype=torch.int64, device=self.device
             )
             combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
-            torch.distributed.broadcast(
+            self.pp_group.sibling_broadcast(
                 sampled_tokens, src=self.last_rank, group=self.broadcast_group
             )
-            torch.distributed.broadcast(
+            self.pp_group.sibling_broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
             draft_tokens = None
@@ -289,7 +290,7 @@ class PPHandler:
                 draft_tokens = sampled_tokens.new_empty(
                     num_reqs, self.num_speculative_steps
                 )
-                torch.distributed.broadcast(
+                self.pp_group.sibling_broadcast(
                     draft_tokens, src=self.last_rank, group=self.broadcast_group
                 )
             event = self.broadcast_stream.record_event()
@@ -336,13 +337,13 @@ class PPHandler:
             self.broadcast_stream.wait_stream(self.main_stream)
             # receive() allocates the same width on the other ranks.
             assert sampled_token_ids.shape[-1] == self._sample_len(input_batch)
-            torch.distributed.broadcast(
+            self.pp_group.sibling_broadcast(
                 sampled_token_ids.contiguous(),
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
             combined = torch.stack((num_sampled, num_rejected), dim=0)
-            torch.distributed.broadcast(
+            self.pp_group.sibling_broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
             for tensor in (sampled_token_ids, num_sampled, num_rejected):

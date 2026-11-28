@@ -144,6 +144,17 @@ def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
     return tuple(group.kv_cache_specs[name] for name in group.layer_names)
 
 
+def resolve_store_pp_rank(parallel_config: Any, ranks_per_stage: int) -> int:
+    """Pipeline stage of this worker, which namespaces its KV keys."""
+    stage_rank = getattr(parallel_config, "pipeline_stage_rank", None)
+    if stage_rank is not None:
+        # One stage per instance: worker ranks are stage-local.
+        return stage_rank
+    return (
+        parallel_config.rank // ranks_per_stage
+    ) % parallel_config.pipeline_parallel_size
+
+
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
     """Resolve the common Store TP requested by connector config."""
     if extra_config.get("enable_store_tp_lcm") is True:
@@ -1601,9 +1612,9 @@ class MooncakeStoreWorker:
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Workers are laid out as PP x PCP x TP, TP innermost.
-        self.pp_rank = (
-            parallel_config.rank // (self.tp_size * self.pcp_size)
-        ) % self.pp_size
+        self.pp_rank = resolve_store_pp_rank(
+            parallel_config, self.tp_size * self.pcp_size
+        )
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
