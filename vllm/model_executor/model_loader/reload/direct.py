@@ -35,6 +35,7 @@ from vllm.model_executor.utils import (
     is_weights_pre_processed,
     storage_view,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -315,7 +316,8 @@ def _checkpoint_views(
         ckpt = getattr(t, "_ckpt", None)
         if ckpt is None:
             continue  # no layout: created by post-load processing, derived
-        if _layout(t) == ckpt[1]:
+        view = current_platform.get_direct_reload_checkpoint_view(t)
+        if view is None and _layout(t) == ckpt[1]:
             continue
         if ckpt[0] is not model._ckpt_owner:
             # shared from another model (a target lm_head in a draft): this
@@ -324,6 +326,13 @@ def _checkpoint_views(
                 f"direct reload: {name} is shared from another model and its "
                 "post-load processing changed its layout"
             )
+        if view is not None:
+            if view.device != t.device or _layout(view) != ckpt[1]:
+                raise RuntimeError(
+                    f"direct reload: {name} has an incompatible platform checkpoint view"
+                )
+            views.append((t, view))
+            continue
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
         if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
