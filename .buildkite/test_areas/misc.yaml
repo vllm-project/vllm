@@ -818,6 +818,7 @@ steps:
   timeout_in_minutes: 35
   source_file_dependencies: &cpu-async-engine-deps
   - vllm/assets/
+  - vllm/collect_env.py
   - vllm/config/
   - vllm/device_allocator/
   - vllm/connections.py
@@ -860,6 +861,7 @@ steps:
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
   - tests/test_cmake_utils.py
+  - tests/test_collect_env.py
   - tests/test_connections.py
   - tests/test_embedded_commit.py
   - tests/test_envs.py
@@ -910,6 +912,7 @@ steps:
   - tests/device_allocator
   device: cpu-small
   commands:
+  - pytest -v -s test_collect_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py

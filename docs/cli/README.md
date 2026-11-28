@@ -244,11 +244,16 @@ See [vllm bench throughput](./bench/throughput.md) for the full reference of all
 
 ## collect-env
 
-Start collecting environment information.
+Collect environment information for bug reports.
 
 ```bash
 vllm collect-env
 ```
+
+On ROCm, the GPU section reports ROCm, HIP, and MIOpen versions with
+backend-appropriate labels. The environment section includes set variables
+starting with `ROCM`, `HIP`, `HSA_`, `MIOPEN`, and `RCCL`, in addition to
+vLLM's other reported variables.
 
 ## download-kernels
 
