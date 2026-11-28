@@ -71,6 +71,17 @@ def _is_sm90() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _is_h20() -> bool:
+    if (
+        current_platform.get_device_capability() != (9, 0)
+        or "H20" not in current_platform.get_device_name()
+    ):
+        return False
+    device = torch.accelerator.current_device_index()
+    return current_platform.num_compute_units(device) == 78
+
+
+@lru_cache(maxsize=1)
 def _is_sm100() -> bool:
     """True on sm_100 (B200/GB200): selects the sm_100 tuning table."""
     return current_platform.get_device_capability() == (10, 0)
@@ -160,7 +171,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         columns = tile * BLOCK_N + column_offsets
         selected_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
-            mask=columns < TOPK,
+            mask=columns < tl.minimum(valid_count, TOPK),
             other=-1,
         )
         safe_token = tl.maximum(selected_token, 0)
@@ -632,6 +643,8 @@ def _select_config(
     use_prefill_config: bool,
     num_columns: int,
     is_fp8: bool = False,
+    *,
+    qsa_shape: tuple[int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """Select (block_n, num_warps, num_tiles, num_splits) for the kernel.
 
@@ -651,6 +664,14 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = _select_sm90_config(
             base_programs, use_prefill_config, is_fp8
         )
+        if (
+            is_fp8
+            and num_kv_heads == 1
+            and 1 <= num_rows < 8
+            and qsa_shape == (6, 256, 1600)
+            and _is_h20()
+        ):
+            num_warps = 8
     elif _is_sm100():
         BLOCK_N, target_splits, num_warps = _select_sm100_config(
             base_programs, use_prefill_config, is_fp8
@@ -831,7 +852,14 @@ def _qsa_sparse_paged_splitk(
     else:
         selection_width = indices.shape[1]
     block_n, partial_warps, num_tiles, num_splits = _select_config(
-        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width, is_fp8
+        q.shape[0],
+        k_cache.shape[2],
+        use_prefill_config,
+        selection_width,
+        is_fp8,
+        qsa_shape=(q.shape[1], q.shape[2], k_cache.shape[1])
+        if k_cache.dtype == torch.float8_e4m3fn and not physical_indices
+        else None,
     )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
@@ -961,7 +989,14 @@ def warmup_qsa_sparse_paged_attention(
     # Every config the dispatch can pick for this group size.
     profiles = {
         _select_config(
-            num_rows, num_kv_heads, use_prefill_config, selection_width, is_fp8
+            num_rows,
+            num_kv_heads,
+            use_prefill_config,
+            selection_width,
+            is_fp8,
+            qsa_shape=(num_query_heads, head_dim, key_cache.shape[1])
+            if cache_dtype == torch.float8_e4m3fn and not physical_indices
+            else None,
         )
         for num_rows in range(1, 8193)
         for use_prefill_config in (False, True)
