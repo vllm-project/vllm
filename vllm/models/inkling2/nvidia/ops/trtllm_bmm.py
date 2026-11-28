@@ -142,8 +142,10 @@ def expert_plan(
     rows = tokens * topk
     max_ctas = min(num_experts, rows) + (rows - min(num_experts, rows)) // tile
     if not use_sm100_kernels():
-        # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
-        return ExpertPlan(tile, max_ctas, (0, 0))
+        # No TRT-LLM-gen kernels (Hopper, SM12x): only `route`'s layout. The
+        # Triton kernels take MAX_CTAS as a constexpr, so round this upper
+        # bound up to a power of two to share compiled kernels across sizes.
+        return ExpertPlan(tile, 1 << (max_ctas - 1).bit_length(), (0, 0))
     names = configs(nvfp4, tile)
     keys = _KERNELS[(nvfp4, tile)]
     kernels = []
