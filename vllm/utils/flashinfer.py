@@ -1069,6 +1069,19 @@ if has_flashinfer():
         mutates_args=["k"],  # k tensor is modified in-place
     )
 
+    # On GB10 (SM121), FlashInfer's CUTLASS NVFP4 GEMMs slow down 2-3x once A
+    # outgrows the L2 (an 8192 x 5120 x 17408 GEMM runs at 113 TFLOP/s against
+    # 290 when split). Rows are independent and the swizzled block scales come
+    # in 128-row tiles, so a problem with more than 12 MiB of A runs as row
+    # slices of at most 8 MiB of A, but at least 1024 rows, into one output.
+    _GB10_SPLIT_A_BYTES = 12 << 20
+    _GB10_SLICE_A_BYTES = 8 << 20
+    _GB10_MIN_SLICE_ROWS = 1024
+
+    @functools.cache
+    def _is_gb10() -> bool:
+        return current_platform.is_device_capability((12, 1))
+
     def _flashinfer_mm_fp4(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1082,6 +1095,35 @@ if has_flashinfer():
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+        m, row_bytes = A.shape  # packed FP4: two values per byte
+        rows_per_slice = max(
+            _GB10_MIN_SLICE_ROWS, _GB10_SLICE_A_BYTES // row_bytes // 128 * 128
+        )
+        if (
+            backend == "cutlass"
+            and m * row_bytes > _GB10_SPLIT_A_BYTES
+            and m > rows_per_slice
+            and not use_8x4_sf_layout
+            and _is_gb10()
+        ):
+            out = torch.empty(m, B.shape[1], dtype=dtype, device=A.device)
+            for start in range(0, m, rows_per_slice):
+                rows = min(rows_per_slice, m - start)
+                flashinfer_mm_fp4_(
+                    A[start : start + rows],
+                    B,
+                    A_scale[start : start + cdiv(rows, 128) * 128],
+                    B_scale,
+                    g_scale,
+                    dtype,
+                    out=out[start : start + rows],
+                    block_size=block_size,
+                    use_8x4_sf_layout=use_8x4_sf_layout,
+                    use_nvfp4=use_nvfp4,
+                    backend=backend,
+                )
+            return out
 
         return flashinfer_mm_fp4_(
             A,

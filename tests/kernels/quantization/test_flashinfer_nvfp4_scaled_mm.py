@@ -176,6 +176,45 @@ def test_flashinfer_nvfp4_gemm(
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
 
 
+# More than 12 MiB of A, which the GB10 CUTLASS path splits into row slices:
+# 2048 rows for 4096 bytes per row, the 1024-row minimum for 8192; both leave a
+# partial last slice.
+@pytest.mark.parametrize("shape", [(4100, 256, 4096), (2100, 256, 8192)])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((12, 1)),
+    reason="Row splitting only applies on GB10 (SM121).",
+)
+@torch.inference_mode()
+def test_flashinfer_nvfp4_gemm_gb10_row_split(shape: tuple[int, int, int]) -> None:
+    """The split GEMM gives the same output, bit for bit, as one FlashInfer call."""
+    import flashinfer
+
+    set_random_seed(42)
+    m, n, packed_k = shape
+    k = packed_k * 2
+    a = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    b = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
+    a_global_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a.abs().max()).float()
+    b_global_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b.abs().max()).float()
+    alpha = 1.0 / (a_global_scale * b_global_scale)
+    a_fp4, a_sf = ops.scaled_fp4_quant(a, a_global_scale)
+    b_fp4, b_sf = ops.scaled_fp4_quant(b, b_global_scale)
+
+    out = flashinfer_scaled_fp4_mm(
+        a_fp4, b_fp4, a_sf, b_sf, alpha, torch.bfloat16, backend="cutlass"
+    )
+    whole = flashinfer.mm_fp4(
+        a_fp4,
+        b_fp4.t(),
+        a_sf.view(torch.uint8),
+        b_sf.view(torch.uint8).t(),
+        alpha,
+        torch.bfloat16,
+        backend="cutlass",
+    )
+    assert torch.equal(out, whole)
+
+
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
