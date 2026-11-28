@@ -1400,17 +1400,17 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(vllm:request_queue_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])",
+          "expr": "rate(vllm:request_queue_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])\n/\nrate(vllm:request_queue_time_seconds_count{model_name=\"$model_name\"}[$__rate_interval])",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "Mean",
           "range": true,
           "refId": "A",
           "useBackend": false
         }
       ],
-      "title": "Queue Time",
+      "title": "Mean Queue Time",
       "type": "timeseries"
     },
     {
@@ -1500,7 +1500,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(vllm:request_prefill_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])",
+          "expr": "rate(vllm:request_prefill_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])\n/\nrate(vllm:request_prefill_time_seconds_count{model_name=\"$model_name\"}[$__rate_interval])",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -1515,7 +1515,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(vllm:request_decode_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])",
+          "expr": "rate(vllm:request_decode_time_seconds_sum{model_name=\"$model_name\"}[$__rate_interval])\n/\nrate(vllm:request_decode_time_seconds_count{model_name=\"$model_name\"}[$__rate_interval])",
           "hide": false,
           "instant": false,
           "legendFormat": "Decode",
@@ -1523,7 +1523,7 @@
           "refId": "B"
         }
       ],
-      "title": "Requests Prefill and Decode Time",
+      "title": "Mean Requests Prefill and Decode Time",
       "type": "timeseries"
     },
     {
