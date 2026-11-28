@@ -88,7 +88,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
         prepare_forward: Callable[[int, dict[str, Any] | None], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """``prepare_forward(num_reqs, attn_metadata)`` is captured ahead of the
+        """`prepare_forward(num_reqs, attn_metadata)` is captured ahead of the
         query forward."""
 
         def create_forward_fn(

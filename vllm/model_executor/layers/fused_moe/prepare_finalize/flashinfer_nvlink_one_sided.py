@@ -14,8 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    restore_dispatched_scale_layout,
+)
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
@@ -143,16 +145,18 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             topk_ids,
             topk_weights,
             hidden_states_scale=dispatch_x_sf,
-            max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
         recv_x_sf = received.hidden_states_scale
         if recv_x_sf is not None:
             x_sf_width = recv_x_sf.shape[-1]
-            # Apply scale interleaving only for CUTLASS (not TRT-LLM)
-            if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
-                recv_x_sf = recv_x_sf.view(-1, x_sf_width)
-                recv_x_sf = recv_x_sf.view(torch.uint8)
-                recv_x_sf = nvfp4_block_scale_interleave(recv_x_sf)
+            # Swizzle after the A2A if the MoE kernel expects swizzled scales.
+            recv_x_sf = restore_dispatched_scale_layout(
+                recv_x_sf.view(-1, x_sf_width),
+                quant_config.quant_dtype,
+                quant_config.is_scale_swizzled,
+            )
+            assert recv_x_sf is not None
             recv_x_sf = recv_x_sf.view(-1, x_sf_width)
         return (
             received.hidden_states,

@@ -85,10 +85,10 @@ For more advanced usage, including parallel tool calls and different model-speci
 
 ## Named Function Calling
 
-vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
-high-quality one. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+vLLM supports named function calling in the chat completion API when the server runs a tool parser. Start the server with both `--enable-auto-tool-choice` and `--tool-call-parser`. vLLM loads the parser named by `--tool-call-parser` only when `--enable-auto-tool-choice` is also set. Without a loaded parser, a request with a named `tool_choice` returns HTTP 400. Requests to models in the official Mistral format and to gpt-oss models are not rejected by this check.
 
-vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+The function call is constrained with structured outputs. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a high-quality one. How far the arguments are held to the tool's parameter schema depends on the parser and on the tool's `strict` field; see [Constrained Decoding Behavior](#constrained-decoding-behavior). On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
@@ -96,11 +96,13 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
 
+The Responses API also accepts tools declared in the `input` list through `additional_tools` items (`{"type": "additional_tools", "role": "developer", "tools": [...]}`), as sent by clients such as Codex. vLLM appends their tools to the request's `tools` in input order, so they are offered to the model exactly like top-level tools.
+
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Like named function calling, it uses structured outputs and needs a tool parser, with the same server flags and the same exceptions. Without a loaded parser, a request with `tool_choice='required'` returns HTTP 400.
 
-When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output follows the schema defined in the `tools` parameter as described in [Constrained Decoding Behavior](#constrained-decoding-behavior). On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 ## None Function Calling
 
@@ -163,7 +165,7 @@ The floor never relaxes a constraint the request would already receive: tools th
 To enable this feature, you should set the following flags:
 
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. It tells vLLM that you want to enable the model to generate its own tool calls when it
-deems appropriate.
+deems appropriate. vLLM loads the tool parser selected by `--tool-call-parser` only when this flag is set, so [named](#named-function-calling) and [required](#required-function-calling) function calling also need it.
 * `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers
 will continue to be added in the future. You can also register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
@@ -192,8 +194,9 @@ vllm serve <model> \
     --reasoning-parser hf
 ```
 
-Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
-field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
+Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the field the selected parser
+needs: `reasoning_content` (or its legacy alias `thinking`) for reasoning, `tool_calls` for tool calls. The `hf` parser cannot be combined with
+other reasoning or tool call parsers.
 
 When streaming, each tool call is emitted whole once its region parses. A call cut off before its closer, for example by a closer that is also a
 stop token, is parsed from the text generated so far; a call that does not parse is dropped.
@@ -261,7 +264,7 @@ Known issues:
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-3. With the official Mistral format (`--tokenizer_mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
+3. With the official Mistral format (`--tokenizer-mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
    Chat Completions tool calls are constrained by [mistral-common](https://github.com/mistralai/mistral-common)'s grammar.
    For `tool_choice="required"` and named tool choice, this grammar allows content, including reasoning, before the tool calls, and the model is not told that a call is required.
    A call is therefore not guaranteed: the model can keep answering in text until `max_tokens` (`finish_reason="length"`).
@@ -275,19 +278,19 @@ Recommended flags:
 
 2. To use the Transformers format when available:
 
-    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+    `--tokenizer-mode hf --config-format hf --load-format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 !!! note
     Models officially released by Mistral AI have two possible formats:
 
     1. The official format that is used by default with `auto` or `mistral` arguments:
 
-        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        `--tokenizer-mode mistral --config-format mistral --load-format mistral`
         This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
 
     2. The Transformers format, when available, that is used with `hf` arguments:
 
-        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+        `--tokenizer-mode hf --config-format hf --load-format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -368,15 +371,6 @@ Known issues:
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
-
-### Jamba Models (`jamba`)
-
-AI21's Jamba-1.5 models are supported.
-
-* `ai21labs/AI21-Jamba-1.5-Mini`
-* `ai21labs/AI21-Jamba-1.5-Large`
-
-Flags: `--tool-call-parser jamba`
 
 ### xLAM Models (`xlam`)
 
@@ -599,9 +593,9 @@ Flags: `--tool-call-parser apertus`
 
 The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
 Enable tool calling with `--enable-auto-tool-choice`,
-`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
-alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
-their original channel semantics, including recipient-less tool-parser content.
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark` is an
+alias for both parsers. The `muse_glimmer` entry points keep their original channel semantics, including
+recipient-less tool-parser content.
 
 The parsers route `to=self` and recipient-less messages to reasoning,
 `to=user` and `to=commentary` messages to content, and tool recipients to
@@ -609,7 +603,7 @@ ATEM tool-call extraction. `to=developer` messages are omitted. Framing
 special tokens are preserved for parsing and removed from surfaced content.
 
 The Rust frontend also provides a Muse unified parser under `muse` and
-`musespark1x`, and selects it automatically for Muse Spark model names.
+`musespark`, and selects it automatically for Muse Spark model names.
 Existing automatic parser selection for Muse Glimmer is unchanged.
 
 Parser availability alone does not enable Muse Spark model execution.
@@ -628,6 +622,18 @@ reasoning.
 Flags: `--enable-auto-tool-choice --tool-call-parser zaya --reasoning-parser zaya`
 
 `zaya_xml` is an alias of `zaya`.
+
+### Ripple Models (`ripple`)
+
+Supported models:
+
+* `ricursiveAI/Ripple-65B-Preview`
+* `ricursiveAI/Ripple-65B-Preview-NVFP4`
+
+Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
+optional `<think>` block. Pair it with `--reasoning-parser ripple`.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

@@ -3,21 +3,29 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
+)
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -74,13 +82,13 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
-    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
+    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
     by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
     Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
-    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,
     or decode it to a floating-point power of two. Floating-point inputs are
     accepted only when the original E8M0 byte can be recovered losslessly.
     This function does not quantize or round arbitrary scales.
@@ -136,7 +144,8 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
     if has_kv_transfer:
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
-            "connector; DeepSeek V4 keeps the Triton sparse attention."
+            "connector that may load non-canonical KV; DeepSeek V4 keeps the "
+            "Triton sparse attention."
         )
         return False
     return True
@@ -144,13 +153,80 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
 
 # aiter's sparse MLA prefill is slower than gather + OPUS at 128 heads per
 # rank, so prefill takes it only up to 64; decode takes it at any head count.
+# A plain fp8 cache takes it at any head count too: gather + OPUS only decodes
+# the packed fp8_ds_mla record.
 _AITER_SPARSE_MLA_PREFILL_MAX_HEADS = 64
 
 
-def _aiter_sparse_mla_prefill_enabled(num_heads: int, has_kv_transfer: bool) -> bool:
-    return (
-        _aiter_sparse_mla_enabled(has_kv_transfer)
-        and num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
+def _aiter_sparse_mla_prefill_enabled(
+    num_heads: int, has_kv_transfer: bool, plain_fp8_kv: bool
+) -> bool:
+    return _aiter_sparse_mla_enabled(has_kv_transfer) and (
+        plain_fp8_kv or num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
+    )
+
+
+def _register_plain_fp8_kv_scales(layer: torch.nn.Module, use_aiter: bool) -> None:
+    """Unit q / KV scales for a per-tensor fp8 cache. Same buffer names as
+    FlashInfer's, so the shared SWA insert, compressor and DSpark find them."""
+    if not (use_aiter and _ON_GFX950):
+        raise ValueError(
+            "--kv-cache-dtype fp8_e4m3 needs gfx950 and the aiter sparse MLA "
+            "kernel (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1), which is off "
+            "with a KV connector"
+        )
+    for name in (
+        "_flashinfer_fp8_q_scale",
+        "_flashinfer_fp8_q_scale_inv",
+        "_flashinfer_fp8_kv_scale",
+    ):
+        layer.register_buffer(
+            name, torch.ones(1, dtype=torch.float32), persistent=False
+        )
+
+
+def _plain_fp8_sparse_mla(
+    layer: Any,
+    q: torch.Tensor,
+    output: torch.Tensor | None,
+    swa_k_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_indptr: torch.Tensor,
+    compressed_k_cache: torch.Tensor | None,
+    topk_indices: torch.Tensor | None,
+    topk_indptr: torch.Tensor | None,
+    positions: torch.Tensor | None = None,
+    output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> None:
+    """Sparse MLA through aiter on per-tensor fp8 rows, with fp8 dots. RoPE
+    lives inside the 512-wide row, so it runs the rope-free geometry. Both
+    caches share one KV scale. The store can apply inverse RoPE and MXFP8."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    assert output_mxfp8 is None or positions is not None
+    rocm_aiter_ops.triton_sparse_mla_fwd(
+        q,
+        swa_k_cache,
+        output,
+        layer.scale,
+        swa_indptr,
+        swa_indices,
+        kv_lora_rank=layer.head_dim,
+        qk_rope_head_dim=0,
+        q_scale=layer._flashinfer_fp8_q_scale,
+        kv_scale=layer._flashinfer_fp8_kv_scale,
+        attn_sink=layer.attn_sink[: q.shape[1]],
+        extra_kv_buffer=compressed_k_cache,
+        extra_kv_indptr=topk_indptr,
+        extra_kv_indices=topk_indices,
+        # The ragged builders remove padding from each live index range.
+        has_invalid=False,
+        dot_precision="fp8",
+        inv_rope_positions=positions,
+        inv_rope_cos_sin_cache=(
+            None if positions is None else layer.rotary_emb.cos_sin_cache
+        ),
+        out_mxfp8=output_mxfp8,
     )
 
 
@@ -394,32 +470,33 @@ def _pack_global_topk_ragged_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-
     out_start = tl.load(topk_indptr_ptr + token_idx)
     out_end = tl.load(topk_indptr_ptr + token_idx + 1)
     out_len = out_end - out_start
-    if block_idx * BLOCK_SIZE >= out_len:
+    if out_len == 0:
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-    mask = (offset < out_len) & (offset < topk)
-    local_idx = tl.load(
-        topk_indices_ptr + token_idx * topk_indices_stride + offset,
-        mask=mask,
-        other=-1,
-    )
-    valid = mask & (local_idx >= 0)
-    block_indices = local_idx // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=valid,
-        other=0,
-    )
-    block_offsets = local_idx % block_size
-    slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
-    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+    written = 0
+    for start in range(0, topk, BLOCK_SIZE):
+        offset = start + tl.arange(0, BLOCK_SIZE)
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offset,
+            mask=offset < topk,
+            other=-1,
+        )
+        valid = (offset < topk) & (local_idx >= 0)
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+            mask=valid,
+            other=0,
+        )
+        slot_ids = block_numbers * block_size + local_idx % block_size
+        rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
+        tl.store(
+            global_topk_ragged_ptr + out_start + written + rank, slot_ids, mask=valid
+        )
+        written += tl.sum(valid.to(tl.int32), axis=0)
 
 
 # The strides and the state block size depend on the KV cache layout; keeping
@@ -538,8 +615,8 @@ def compress_pool(
     overlap: bool,
 ) -> DispatchSpec:
     """Pool each boundary token's compressor states into a bf16 row of
-    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
-    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    `pooled_k`, one program per token. Tensor inputs bind to the kernel's
+    `<name>_ptr` arguments; the same launch spec drives the JIT warmup."""
     return (pooled_k.shape[0],), dict(
         state_cache_stride0=state_cache.stride(0),
         state_cache_stride1=state_cache.stride(1),
@@ -581,8 +658,8 @@ def compute_global_topk_ragged_indices_and_indptr(
         device=topk_indices.device,
     )
     if global_topk_ragged.numel() > 0:
-        block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+        block = min(triton.next_power_of_2(topk), 1024)
+        _pack_global_topk_ragged_kernel[(num_tokens,)](
             global_topk_ragged,
             topk_indptr,
             topk_indices,
@@ -766,7 +843,8 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             self.vllm_config.model_config.get_num_attention_heads(
                 self.vllm_config.parallel_config
             ),
-            self.vllm_config.kv_transfer_config is not None,
+            kv_connector_may_load_foreign_kv(self.vllm_config),
+            self.vllm_config.cache_config.cache_dtype == "fp8_e4m3",
         )
 
     def build(
@@ -832,6 +910,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
 
 
 class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    # fp8_e4m3 selects plain per-tensor fp8 KV rows instead of the UE8M0
+    # block-scaled fp8_ds_mla record; aiter sparse MLA only.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        *DeepseekV4SparseMLABackend.supported_kv_cache_dtypes,
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
@@ -855,7 +940,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
-        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        self._has_foreign_kv_writer = kv_connector_may_load_foreign_kv(vllm_config)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -877,11 +962,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
         self._use_aiter_sparse_mla_decode = _aiter_sparse_mla_enabled(
-            self._has_kv_transfer
+            self._has_foreign_kv_writer
         )
+        self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
         self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
-            self.n_local_heads, self._has_kv_transfer
+            self.n_local_heads, self._has_foreign_kv_writer, self._plain_fp8_kv
         )
+        if self._plain_fp8_kv:
+            _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla_decode)
+
+    def _uses_fp8_ds_mla_layout(self) -> bool:
+        return get_current_vllm_config().cache_config.cache_dtype != "fp8_e4m3"
 
     def _run_sequential_pipeline(
         self,
@@ -897,7 +988,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._run_parallel_input_projections(hidden_states)
             )
             qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 qr,
                 kv,
@@ -931,7 +1022,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 None,
                 None,
@@ -984,14 +1075,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             finally:
                 self.aux_stream_list = saved_streams
-            return
-
-        # Re-check: forward's gate ran inside a captured segment that
-        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
-        ):
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
@@ -1116,7 +1199,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not (
+                getattr(linear, "aiter_bpreshuffled", False)
+                or is_weights_pre_processed()
+            ):
                 replace_parameter(
                     linear,
                     "weight",
@@ -1430,8 +1516,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         assert output.shape == q.shape, (
             f"output buffer shape {output.shape} must match q shape {q.shape}"
         )
-        assert output.dtype == q.dtype, (
-            f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
+        # A per-tensor fp8 cache comes with an fp8 q; the output stays bf16.
+        expected_dtype = torch.bfloat16 if q.dtype == torch.float8_e4m3fn else q.dtype
+        assert output.dtype == expected_dtype, (
+            f"output buffer dtype {output.dtype} must be {expected_dtype} "
+            f"for q dtype {q.dtype}"
         )
 
         forward_context = get_forward_context()
@@ -1610,7 +1699,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
-                self._has_kv_transfer,
+                self._has_foreign_kv_writer,
                 not swa_only and kv_cache is not None,
             ),
         )
@@ -1835,6 +1924,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        if self._plain_fp8_kv:
+            _plain_fp8_sparse_mla(
+                self,
+                q,
+                output,
+                swa_k_cache,
+                swa_indices,
+                swa_indptr,
+                compressed_k_cache,
+                topk_indices,
+                topk_indptr,
+                positions=positions,
+            )
+            return
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the
         # store applies the inverse RoPE.

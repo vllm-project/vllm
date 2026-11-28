@@ -10,8 +10,8 @@ use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPrep
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::{MmModality, MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
 pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
@@ -32,9 +32,10 @@ impl MultimodalModelInfo {
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
-        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Image.to_string(),
-        })?;
+        let support = self
+            .image
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Image))?;
         let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
@@ -76,6 +77,7 @@ impl MultimodalModelInfo {
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
+            let images = images.iter().collect::<Vec<_>>();
             Ok(processor.preprocess_with_context(&images, &preprocessing_context)?)
         })
         .await

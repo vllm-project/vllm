@@ -17,7 +17,7 @@ use self::format::{
 };
 use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
 use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
-use crate::error::Result;
+use crate::error::{Result, bail_invalid_continue_final_message, invalid_continue_final_message};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
     AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
@@ -233,7 +233,8 @@ impl HfChatRenderer {
             .chat_template
             .as_ref()
             .map(|template| self.compile_template(template.clone(), self.request_template_fuel))
-            .transpose()?;
+            .transpose()
+            .map_err(request_template_error)?;
         let model_template = if request.tools().is_empty() {
             None
         } else {
@@ -290,11 +291,9 @@ impl HfChatRenderer {
                 template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
             })
-            .map_err(|error| match error.thrown_message() {
-                Some(message) => Error::ChatTemplateThrown {
-                    message: message.to_owned(),
-                },
-                None => Error::ChatTemplate(error.to_report_string()),
+            .map_err(|error| Error::ChatTemplateRender {
+                message: (error.thrown_message().map(str::to_owned))
+                    .unwrap_or_else(|| error.to_report_string()),
             })?;
 
         let prompt = match &final_message_text {
@@ -324,6 +323,16 @@ impl ChatRenderer for HfChatRenderer {
 
     fn renders_request_chat_template(&self) -> bool {
         true
+    }
+}
+
+/// A request's own chat template that fails to compile blames
+/// `chat_template`, where the model's template failing to compile is this
+/// process's error.
+fn request_template_error(error: Error) -> Error {
+    match error {
+        Error::ChatTemplate(message) => Error::InvalidRequestChatTemplate { message },
+        error => error,
     }
 }
 
@@ -359,10 +368,17 @@ enum TemplateContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TemplateContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image,
     Video,
     Audio,
+    /// Kept structured, like Python, for templates that expand the referenced
+    /// tool.
+    ToolReference {
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -576,6 +592,9 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
                     Ok(TemplateContentPart::Audio)
                 }
+                ChatContentPart::ToolReference { name } => {
+                    Ok(TemplateContentPart::ToolReference { name: name.clone() })
+                }
             })
             .collect(),
     }
@@ -589,9 +608,9 @@ fn to_template_string_content(
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
             // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
-            // media as its modality's placeholder in place, empty text parts are dropped, and
-            // the segments are joined with "\n". Python's default moves placeholders to the
-            // front instead.
+            // media as its modality's placeholder in place, a tool reference as the tool's
+            // name, empty text parts are dropped, and the segments are joined with "\n".
+            // Python's default moves placeholders to the front instead.
             let segments: Vec<&str> = parts
                 .iter()
                 .filter(|part| !part.is_empty_text())
@@ -608,6 +627,7 @@ fn to_template_string_content(
                             .and_then(|multimodal| multimodal.audio_token.as_deref())
                             .ok_or(Error::UnsupportedMultimodalContent("audio"))
                     }
+                    ChatContentPart::ToolReference { name } => Ok(name.as_str()),
                 })
                 .collect::<Result<_>>()?;
             Ok(segments.join("\n"))
@@ -637,14 +657,14 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Resul
             TemplateContentPart::Text { text } => Some(text),
             TemplateContentPart::Image
             | TemplateContentPart::Video
-            | TemplateContentPart::Audio => None,
+            | TemplateContentPart::Audio
+            | TemplateContentPart::ToolReference { .. } => None,
         }),
     };
     let text = text.ok_or_else(|| {
-        Error::ChatTemplate(
+        invalid_continue_final_message!(
             "continue_final_message is set but there is no text to continue \
              in the final message"
-                .to_string(),
         )
     })?;
 
@@ -664,13 +684,13 @@ fn truncate_prompt_at_continue_final_message_tag(
         .rfind(CONTINUE_FINAL_MESSAGE_TAG.trim_end())
         .filter(|_| rendered.contains(final_message_text.trim()));
     let Some(tag_loc) = tag_loc else {
-        return Err(Error::ChatTemplate(format!(
+        bail_invalid_continue_final_message!(
             "continue_final_message is set but the final message does not appear \
              in the prompt after applying the chat template! This can happen if \
              the chat template deletes portions of the final message. Final \
              message to continue: {}",
             final_message_text.trim(),
-        )));
+        );
     };
 
     if rendered[tag_loc..].starts_with(CONTINUE_FINAL_MESSAGE_TAG) {
@@ -718,7 +738,7 @@ mod tests {
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
         GenerationPromptMode, ResolvedToolContext,
     };
-    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
+    use crate::{AssistantContentBlock, ChatRenderer, Error, ErrorKind, InputAudioFormat, Result};
 
     const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
@@ -838,7 +858,7 @@ mod tests {
     fn audio_request() -> ChatRequest {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
-            ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
+            ChatContentPart::input_audio("dGVzdA==", Some(InputAudioFormat::Wav)),
             ChatContentPart::audio_url("https://example.com/demo.mp3"),
             ChatContentPart::text("b"),
         ])])
@@ -1203,7 +1223,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(error, Error::ChatTemplate(_)));
+        assert!(matches!(error, Error::InvalidContinueFinalMessage { .. }));
+        assert_eq!(
+            error.kind(),
+            ErrorKind::invalid_param("continue_final_message")
+        );
     }
 
     #[test]
@@ -1217,10 +1241,10 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+            matches!(&error, Error::ChatTemplateRender { message } if message == "No user query found in messages."),
             "expected an exception thrown by the template, got: {error:?}"
         );
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
@@ -1247,7 +1271,7 @@ mod tests {
             name: "lookup".to_string(),
             arguments: "{}".to_string(),
         });
-        let request = sample_request(vec![
+        let messages = vec![
             ChatMessage::assistant_blocks(
                 ["a", "", "b"]
                     .map(|text| AssistantContentBlock::Text {
@@ -1268,7 +1292,27 @@ mod tests {
                 ],
                 "call_1",
             ),
-        ]);
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::tool_reference("get_weather"),
+                ],
+                "call_1",
+            ),
+        ];
+        let weather = ChatTool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: Some(true),
+        };
+        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            ..sample_request(Vec::new())
+        };
         let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
         let rendered: String = [
             ChatTemplateContentFormatOption::String,
@@ -1294,12 +1338,14 @@ mod tests {
             "x\ny"
             "x"
             "x\n<image>"
+            "x\nget_weather"
             OpenAi:
             [{"type": "text", "text": "a"}, {"type": "text", "text": ""}, {"type": "text", "text": "b"}]
             []
             "x\ny"
             "x"
             [{"type": "text", "text": "x"}, {"type": "image"}]
+            [{"type": "text", "text": "x"}, {"type": "tool_reference", "name": "get_weather"}]
         "#]].assert_eq(&rendered);
     }
 
@@ -1456,13 +1502,53 @@ mod tests {
 
         let error = renderer.render(&request).unwrap_err();
         assert!(matches!(error, Error::UntrustedRequestChatTemplate));
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
 
         request.chat_options.chat_template = None;
         assert_eq!(
             renderer.render(&request).unwrap().prompt.into_text().unwrap(),
             "hello"
         );
+    }
+
+    /// A request template that does not compile is the request's error, as
+    /// Python answers a Jinja `TemplateError` with 400; the same template as
+    /// the model's own fails the renderer at load instead.
+    #[test]
+    fn malformed_request_template_is_a_request_error() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+        request.chat_options.chat_template = Some("{% if %}".to_string());
+
+        let error = render(None, &request).unwrap_err();
+
+        assert!(
+            matches!(error, Error::InvalidRequestChatTemplate { .. }),
+            "expected an invalid request template, got: {error:?}"
+        );
+        assert_eq!(error.kind(), ErrorKind::invalid_param("chat_template"));
+        let error = render(Some("{% if %}"), &sample_request(vec![])).unwrap_err();
+        assert!(matches!(error, Error::ChatTemplate(_)));
+        assert_eq!(error.kind(), ErrorKind::Internal);
+    }
+
+    /// A template that fails while rendering is the request's error without
+    /// a `param`, whether the model or the request supplied it, as Python
+    /// answers a Jinja `TemplateError` with 400.
+    #[test]
+    fn template_render_failure_is_a_request_error() {
+        let template = "{{ messages[0].content | no_such_filter }}";
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+        let model_error = render(Some(template), &request).unwrap_err();
+        request.chat_options.chat_template = Some(template.to_string());
+        let request_error = render(None, &request).unwrap_err();
+
+        for error in [model_error, request_error] {
+            assert!(
+                matches!(error, Error::ChatTemplateRender { .. }),
+                "{error:?}"
+            );
+            assert_eq!(error.kind(), ErrorKind::invalid_request(), "{error:?}");
+        }
     }
 
     #[test]
@@ -1474,7 +1560,7 @@ mod tests {
         assert!(render(Some(template), &request).is_ok());
 
         request.chat_options.chat_template = Some(template.to_string());
-        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+        let Err(Error::ChatTemplateRender { message }) = render(None, &request) else {
             panic!("expected the request template to run out of fuel");
         };
         expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);

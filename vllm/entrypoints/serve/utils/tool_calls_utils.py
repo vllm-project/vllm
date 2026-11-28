@@ -43,12 +43,12 @@ def resolve_finish_reason(
     request: ChatCompletionRequest | None,
     tool_calls_made: bool,
 ) -> str:
-    """Map the engine finish reason to the OpenAI chat ``finish_reason``.
+    """Map the engine finish reason to the OpenAI chat `finish_reason`.
 
-    ``tool_calls`` is reported only when the choice actually carries tool
-    calls, the engine stopped on its own (a ``length`` cut stays visible so
+    `tool_calls` is reported only when the choice actually carries tool
+    calls, the engine stopped on its own (a `length` cut stays visible so
     clients can tell a truncated call from a complete one) and the caller did
-    not force a single named tool, for which OpenAI reports ``stop``.
+    not force a single named tool, for which OpenAI reports `stop`.
     """
     finish_reason = engine_finish_reason or "stop"
     forced_named_tool = request is not None and isinstance(

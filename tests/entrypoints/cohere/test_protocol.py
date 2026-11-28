@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/entrypoints/cohere/protocol.py``.
+"""Unit tests for `vllm/entrypoints/cohere/protocol.py`.
 
-The module is mostly a thin wrapper around the official ``cohere`` SDK
+The module is mostly a thin wrapper around the official `cohere` SDK
 types plus a few local additions:
 
-* :class:`CohereError` envelope.
-* :class:`CohereChatV2Request` (model and messages required,
-  ``max_tokens`` non-negative).
-* :class:`CohereChatV2Response` plus the usage / logprob helpers.
-* The streaming event subclasses that bake a wire-format ``type``
-  discriminator into ``model_dump()`` so SSE consumers can demux on it.
+* `CohereError` envelope.
+* `CohereChatV2Request` (model and messages required,
+  `max_tokens` non-negative).
+* `CohereChatV2Response` plus the usage / logprob helpers.
+* The streaming event subclasses that bake a wire-format `type`
+  discriminator into `model_dump()` so SSE consumers can demux on it.
 """
 
 import pytest
@@ -168,9 +168,9 @@ class TestCohereChatV2Response:
 
 
 class TestStreamingEventTypeField:
-    """Each event subclass adds a ``type: Literal[...]`` field with a
-    default so ``model_dump()`` always emits the wire-format discriminator
-    (the parent SDK classes don't declare ``type`` as a Pydantic field).
+    """Each event subclass adds a `type: Literal[...]` field with a
+    default so `model_dump()` always emits the wire-format discriminator
+    (the parent SDK classes don't declare `type` as a Pydantic field).
     """
 
     @pytest.mark.parametrize(

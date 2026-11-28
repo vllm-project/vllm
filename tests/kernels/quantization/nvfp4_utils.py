@@ -111,10 +111,10 @@ def dequant_nvfp4_kv_cache(
         global_scale: checkpoint dequant scale (k_scale or v_scale).
         head_size: head dimension.
         block_size: page size.
-        swizzled_scales: whether ``block_scale`` is in the 4x4-swizzled
-            layout of the SM100 trtllm-gen kernel. ``reshape_and_cache_flash``
-            writes K scales linearly and V scales swizzled, so pass ``False``
-            for K and ``True`` for V.
+        swizzled_scales: whether `block_scale` is in the 4x4-swizzled
+            layout of the SM100 trtllm-gen kernel. `reshape_and_cache_flash`
+            writes K scales linearly and V scales swizzled, so pass `False`
+            for K and `True` for V.
 
     Returns:
         [..., num_heads, block_size, head_size] float32.

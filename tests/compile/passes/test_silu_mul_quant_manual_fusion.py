@@ -19,6 +19,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.kernels.linear import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -211,6 +213,64 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
             atol=5e-2,
             rtol=5e-2,
         )
+
+
+# M > 1 checks the scale layout: the CUTLASS block kernel reads column-major
+# activation scales, and row-major ones only coincide with them at M = 1.
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 64, 512])
+@pytest.mark.parametrize("hidden_size", [256, 1024])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUTLASS block FP8 only")
+def test_manual_fusion_fp8_dynamic_128_with_cutlass_block_linear(
+    num_tokens: int, hidden_size: int
+):
+    """End to end kFp8Dynamic128Sym fusion into the CUTLASS block-FP8 linear."""
+    supported, reason = CutlassFp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    if (SiluAndMul, kFp8Dynamic128Sym) not in _FUSED_ACT_QUANT:
+        pytest.skip("kFp8Dynamic128Sym fusion not available")
+
+    dtype = torch.bfloat16
+    g = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(
+        num_tokens, hidden_size * 2, generator=g, device="cuda", dtype=dtype
+    )
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none"]),
+    )
+    with set_current_vllm_config(config):
+        silu_and_mul = SiluAndMul()
+        fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_quant_key=kFp8Static128BlockSym,
+            force_kernel=CutlassFp8BlockScaledMMKernel,
+            input_dtype=dtype,
+            out_dtype=dtype,
+            device="cuda",
+        )
+        assert fp8_linear.kernel.input_quant_key() == kFp8Dynamic128Sym
+
+        y_unfused = maybe_fused_act_quant(silu_and_mul, x, fp8_linear)
+        assert isinstance(y_unfused, torch.Tensor)
+        result_unfused = fp8_linear(y_unfused)
+
+        expose_input_quant_key(fp8_linear, fp8_linear.kernel)
+        y_fused = maybe_fused_act_quant(silu_and_mul, x, fp8_linear)
+        assert isinstance(y_fused, QuantizedActivation)
+        assert y_fused.quant_key == kFp8Dynamic128Sym
+        assert y_fused.scale.shape == (num_tokens, hidden_size // 128)
+        if num_tokens > 1:
+            assert y_fused.scale.stride() == (1, num_tokens)
+        result_fused = fp8_linear(y_fused)
+
+        assert result_fused.shape == result_unfused.shape
+        # The fused kernel quantizes the fp32 product while the unfused path
+        # rounds it to BF16 first, so some FP8 values differ by one step: about
+        # 1% relative RMS. Row-major scales would give about 50% at M > 1.
+        diff = (result_fused.float() - result_unfused.float()).norm()
+        assert diff / result_unfused.float().norm() < 0.03
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -19,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
@@ -40,6 +43,7 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.s3_transport import S3MMReference
 from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -50,6 +54,7 @@ logger = init_logger(__name__)
 ####### Tokens IN <> Tokens OUT #######
 
 OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
+MMTensorReference: TypeAlias = S3MMReference
 
 
 class ParseContext(BaseModel):
@@ -68,6 +73,9 @@ class ParseContext(BaseModel):
     ) = "none"
     parallel_tool_calls: bool | None = True
     include_reasoning: bool = True
+    return_tokens_as_token_ids: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     """Template kwargs with the render server's defaults already applied,
     without the API server only entries a handler keeps out of the engine."""
@@ -112,9 +120,14 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions in the span that receive embeddings; `None` means all."""
+
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have `length` entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -148,6 +161,14 @@ class MultiModalFeatures(BaseModel):
     `None` for metadata-only (cache-hit) responses.
     """
 
+    kwargs_refs: dict[str, list[MMTensorReference | None]] | None = None
+    """Per-modality references to processed tensors in external storage.
+
+    Each value is a list parallel to `mm_hashes[modality]`. The server
+    downloads each referenced SafeTensors object before engine submission.
+    An item can set `kwargs_data` or `kwargs_refs`, but not both.
+    """
+
     mm_metadata: dict[str, list[str | None]] | None = None
     """Per-modality serialized metadata for disaggregated prefill.
 
@@ -169,10 +190,12 @@ class MultiModalFeatures(BaseModel):
             )
         if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
             raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+        if self.kwargs_refs is not None and set(self.kwargs_refs) != modalities:
+            raise ValueError("kwargs_refs must use the same modalities as mm_hashes")
         if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
             raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
-        flattened_ranges: list[tuple[int, int]] = []
+        spans: dict[tuple[int, int], list[tuple[str, list[bool] | None]]] = {}
         for modality in modalities:
             num_hashes = len(self.mm_hashes[modality])
             num_placeholders = len(self.mm_placeholders[modality])
@@ -188,6 +211,21 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} kwargs_data and mm_hashes must have the same length"
                 )
+            if self.kwargs_refs is not None:
+                refs = self.kwargs_refs[modality]
+                if len(refs) != num_hashes:
+                    raise ValueError(
+                        f"{modality} kwargs_refs and mm_hashes must have the same "
+                        "length"
+                    )
+                data = (self.kwargs_data or {}).get(modality, [None] * num_hashes)
+                if any(
+                    d is not None and r is not None
+                    for d, r in zip(data, refs, strict=True)
+                ):
+                    raise ValueError(
+                        f"{modality} items cannot set both kwargs_data and kwargs_refs"
+                    )
             if (
                 self.mm_metadata is not None
                 and len(self.mm_metadata[modality]) != num_hashes
@@ -195,19 +233,29 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (offset, end), (next_offset, _) in zip(
-            flattened_ranges, flattened_ranges[1:]
-        ):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
+            for placeholder in self.mm_placeholders[modality]:
+                spans.setdefault((placeholder.offset, placeholder.length), []).append(
+                    (modality, placeholder.is_embed)
                 )
+
+        # Placeholders must not overlap, except that items of different
+        # modalities may share one span when they embed disjoint positions:
+        # Qwen2.5-Omni and Qwen3-Omni place a video and its audio track this
+        # way with `use_audio_in_video`.
+        end = 0
+        for (offset, length), items in sorted(spans.items()):
+            masks = [is_embed or [True] * length for _, is_embed in items]
+            if (
+                offset < end
+                or len({modality for modality, _ in items}) < len(items)
+                or any(sum(position) > 1 for position in zip(*masks))
+            ):
+                raise ValueError(
+                    "mm_placeholders must be non-overlapping, except that items "
+                    "of different modalities may share one span with disjoint "
+                    "is_embed masks"
+                )
+            end = offset + length
         return self
 
 
@@ -251,30 +299,32 @@ class GenerateRequest(BaseModel):
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     content_parts: list[dict[str, Any]] | None = None
-    """Raw multimodal input; server resolves media. Mutually exclusive
-    with `features`."""
+    """Raw multimodal input; server resolves media and expands its
+    placeholders. With `features`, these placeholders must follow the
+    last `features` range, which is left as is."""
 
-    @model_validator(mode="after")
-    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
-        if self.content_parts and self.features:
-            raise ValueError("content_parts and features are mutually exclusive")
-        return self
+    _metadata_only_requires_ec: ClassVar[bool] = True
 
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
         if self.ec_transfer_params:
             return self
         kwargs_data = features.kwargs_data or {}
+        kwargs_refs = features.kwargs_refs or {}
         for modality, metadata_items in (features.mm_metadata or {}).items():
-            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+            n = len(metadata_items)
+            kwargs_items = kwargs_data.get(modality, [None] * n)
+            ref_items = kwargs_refs.get(modality, [None] * n)
             if any(
-                metadata is not None and kwargs is None
-                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+                metadata is not None and kwargs is None and ref is None
+                for metadata, kwargs, ref in zip(
+                    metadata_items, kwargs_items, ref_items, strict=True
+                )
             ):
                 raise ValueError(
                     "metadata-only multimodal items require ec_transfer_params"
@@ -342,8 +392,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=-(2**63),
-        le=2**63 - 1,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -372,6 +422,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -463,6 +514,17 @@ class GenerateRequest(BaseModel):
         )
 
 
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    _metadata_only_requires_ec: ClassVar[bool] = False
+
+
 class GenerateLogProb(BaseModel):
     """A single (token, logprob) candidate on the generate wire protocol.
 
@@ -479,7 +541,7 @@ class GenerateLogProb(BaseModel):
 class GenerateLogProbsContent(GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
-    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    `top_logprobs` is a list, not a dict: JSON turns dict keys into strings
     and the order would be implicit. It is in the engine's order: the sampled
     token first, then the remaining candidates in rank order.
     """
@@ -490,7 +552,7 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    ``content`` holds one entry per generated token.
+    `content` holds one entry per generated token.
     """
 
     content: list[GenerateLogProbsContent] | None = None
@@ -594,6 +656,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -637,6 +703,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -664,6 +734,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
+
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
@@ -722,10 +800,8 @@ class DerenderChatRequest(BaseModel):
     """
 
     prompt_tokens: int | None = None
-    """Prompt token count for usage; defaults to 0 if omitted.
-
-    GenerateResponse carries only output tokens; the caller already has
-    len(GenerateRequest.token_ids) from the render step.
+    """Prompt token count for usage. If omitted, falls back to
+    `generate_response.usage.prompt_tokens`, then to 0.
     """
 
     prompt_token_ids: list[NonNegativeInt] | None = None
@@ -770,7 +846,8 @@ class DerenderCompletionRequest(BaseModel):
     list[GenerateRequest] returned by /v1/completions/render."""
 
     prompt_tokens: list[int] | None = None
-    """One prompt token count per response; each defaults to 0 if omitted.
+    """One prompt token count per response. If omitted, each falls back to
+    that response's `usage.prompt_tokens`, then to 0.
 
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
@@ -879,7 +956,7 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial `role: "assistant"` delta has been emitted.
+    """True once the initial role delta (and any `echo` text) has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).
@@ -889,13 +966,13 @@ class DerenderStreamState(BaseModel):
     """Trailing sampled token IDs carried across chunks so byte-fallback
     (U+FFFD) correction during logprob placeholder resolution has context
     at chunk boundaries. Bounded to the 4-token window that
-    ``_correct_decoded_token`` reads."""
+    `_correct_decoded_token` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
     """Cumulative length of reported logprob tokens, including special tokens.
-    Seeds ``text_offset`` for completion
+    Seeds `text_offset` for completion
     streaming logprobs so offsets stay absolute across chunks, mirroring
-    ``initial_text_offset`` in the generate streaming path."""
+    `initial_text_offset` in the generate streaming path."""
 
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.

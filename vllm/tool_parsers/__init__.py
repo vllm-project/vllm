@@ -118,10 +118,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "internlm2_tool_parser",
         "Internlm2ToolParser",
     ),
-    "jamba": (
-        "jamba_tool_parser",
-        "JambaToolParser",
-    ),
     "lfm2": (
         "lfm2_tool_parser",
         "Lfm2ToolParser",
@@ -183,17 +179,17 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Plamo3EngineToolParser",
     ),
     "muse": (
-        "muse_tool_parser",
-        "MuseToolParser",
+        "muse_engine_tool_parser",
+        "MuseEngineToolParser",
     ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",
         "MuseGlimmerToolParser",
     ),
     # Alias of "muse".
-    "musespark1x": (
-        "muse_tool_parser",
-        "MuseToolParser",
+    "musespark": (
+        "muse_engine_tool_parser",
+        "MuseEngineToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",
@@ -221,6 +217,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "qwen3_xml": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
+    ),
+    "ripple": (
+        "ripple_engine_tool_parser",
+        "RippleEngineToolParser",
     ),
     "seed_oss": (
         "seed_oss_engine_tool_parser",

@@ -6,7 +6,8 @@ import hashlib
 import inspect
 import os
 import pickle
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
@@ -23,7 +24,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable
@@ -33,6 +33,32 @@ except ImportError:
 assert isinstance(SerializableCallable, type)
 
 logger = init_logger(__name__)
+
+
+def read_code_files(files: Iterable[Path]) -> dict[Path, str | None]:
+    """Read traced source files. Files that can't be read map to None."""
+    contents: dict[Path, str | None] = {}
+    for path in files:
+        try:
+            contents[path] = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            # e.g. <string> from exec() or <frozen ...> modules
+            if not str(path).startswith("<"):
+                logger.warning("Failed to read file %s", path)
+            contents[path] = None
+    return contents
+
+
+def get_code_factors(contents: Mapping[Path, str | None]) -> list[dict[str, str]]:
+    """Per-file factors for the compile cache key, sorted by path."""
+    code_factors: list[dict[str, str]] = []
+    for path, content in sorted(contents.items()):
+        entry = {"path": str(path)}
+        # Dynamically generated code (e.g. <string> from exec) can't be checked.
+        if content is not None and not str(path).startswith("<"):
+            entry["hash"] = hash_factors({"content": content})
+        code_factors.append(entry)
+    return code_factors
 
 
 class StandaloneCompiledArtifacts:
@@ -190,7 +216,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         optimized_call: Callable[..., Any],
         is_encoder: bool = False,
         vllm_backend: Any | None = None,
-        sym_tensor_indices: list[int] | None = None,
         aot_autograd_config: dict[str, Any] | None = None,
         execution_code: str | None = None,
         submod_names: list[str] | None = None,
@@ -203,7 +228,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.is_encoder = is_encoder
         self.shape_env = None
         self.vllm_backend = vllm_backend
-        self.sym_tensor_indices = sym_tensor_indices
         self.execution_code = execution_code
         self.submod_names = submod_names
         self.consts = consts
@@ -267,27 +291,18 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
+        for _, submod in state["graph_module"].named_children():
             if hasattr(submod, "graph"):
                 for node in submod.graph.nodes:
                     node.meta.pop("source_fn_stack", None)
                     node.meta.pop("nn_module_stack", None)
 
-        if state.get("sym_tensor_indices"):
-            # put tensor inputs on meta device since their data
-            # isn't needed, yet we need the meta for make_copy_and_call
-            state["example_inputs"] = pytree.tree_map_only(
-                torch.Tensor,
-                lambda inp: torch.empty_like(inp, device="meta"),
-                state["example_inputs"],
-            )
-        else:
-            # mask off all tensor inputs since they are large and not needed.
-            state["example_inputs"] = pytree.tree_map_only(
-                torch.Tensor,
-                lambda inp: torch.empty_like(inp, device="meta"),
-                state["example_inputs"],
-            )
+        # mask off all tensor inputs since they are large and not needed.
+        state["example_inputs"] = pytree.tree_map_only(
+            torch.Tensor,
+            lambda inp: torch.empty_like(inp, device="meta"),
+            state["example_inputs"],
+        )
 
         state["graph_module"] = cls.serialize_graph_module(state["graph_module"])
         state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
@@ -413,6 +428,20 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         return "VllmSerializableFunction"
 
 
+def compute_env_and_config_hashes(
+    vllm_config: VllmConfig,
+) -> tuple[str, str, dict[str, object], dict[str, object]]:
+    """Return the hashed environment factors, config hash, and raw factors.
+    Both AOT and JIT cache paths rely on this helper to ensure their cache keys
+    stay in sync.
+    """
+    env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
+    config_factors = vllm_config.compile_factors()
+    config_hash = hash_factors(config_factors)
+    return env_hash, config_hash, env_factors, config_factors
+
+
 def reconstruct_serializable_fn_from_mega_artifact(
     state: dict[str, Any],
     standalone_compile_artifacts: "StandaloneCompiledArtifacts",
@@ -444,7 +473,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     Args:
         fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
-            prefix, sym_tensor_indices, is_encoder, etc.
+            prefix, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing
             pre-compiled artifacts for each submodule/shape combination.
         vllm_config: The vLLM configuration.
@@ -457,7 +486,6 @@ def reconstruct_serializable_fn_from_mega_artifact(
     """
     from vllm.compilation.backends import (
         VllmBackend,
-        make_copy_and_call,
         wrap_with_cudagraph_if_needed,
     )
     from vllm.compilation.piecewise_backend import PiecewiseBackend
@@ -547,23 +575,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
             state["graph_module"], fake_mode=fake_mode
         )
 
-    if compilation_config.cudagraph_copy_inputs:
-        sym_tensor_indices = state["sym_tensor_indices"]
-        input_buffers = [
-            torch.empty_like(
-                state["example_inputs"][idx], device=vllm_config.device_config.device
-            )
-            for idx in sym_tensor_indices
-        ]
-        optimized_call = make_copy_and_call(
-            sym_tensor_indices, input_buffers, runtime_callable
-        )
-    else:
-        optimized_call = runtime_callable
-
     fn = VllmSerializableFunction(
         **state,
-        optimized_call=optimized_call,
+        optimized_call=runtime_callable,
         vllm_backend=None,
     )
     return fn
@@ -571,14 +585,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
 def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors = []
-    # 0. factors come from the env, for example, The values of
-    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
+    # 0/1. factors come from env and vllm config.
+    env_hash, config_hash, _, _ = compute_env_and_config_hashes(vllm_config)
     factors.append(env_hash)
-
-    # 1. factors come from the vllm_config (it mainly summarizes how the
-    #    model is created)
-    config_hash = vllm_config.compute_hash()
     factors.append(config_hash)
 
     # 2. inductor factors if applicable
@@ -586,34 +595,3 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
         factors.extend(get_inductor_factors())
 
     return factors
-
-
-def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
-    items = list(sorted(file_contents.items(), key=lambda x: x[0]))
-    hash_content = []
-    for filepath, content in items:
-        hash_content.append(filepath)
-        if filepath == "<string>":
-            # This means the function was dynamically generated, with
-            # e.g. exec(). We can't actually check these.
-            continue
-        hash_content.append(content)
-    result: str = safe_hash(
-        "\n".join(hash_content).encode(), usedforsecurity=False
-    ).hexdigest()
-    return result
-
-
-def _compute_code_hash(files: set[str]) -> str:
-    logger.debug(
-        "Traced files (to be considered for compilation cache):\n%s", "\n".join(files)
-    )
-    file_contents = {}
-    for filepath in files:
-        # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
-        if not os.path.isfile(filepath):
-            file_contents[filepath] = ""
-        else:
-            with open(filepath) as f:
-                file_contents[filepath] = f.read()
-    return _compute_code_hash_with_content(file_contents)

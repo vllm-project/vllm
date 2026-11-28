@@ -31,8 +31,14 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     parse_questions,
 )
+from vllm.entrypoints.openai.decisions.adapters import make_read_question
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
-from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
+from vllm.entrypoints.openai.decisions.protocol import (
+    ChoiceAnswer,
+    DecisionRequest,
+    ScoreLevel,
+    ScoreQuestion,
+)
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -624,6 +630,7 @@ async def test_joint_schema_reads_every_question_at_once(joint_schema):
     assert tokenizer.decode(ids) == JOINT_SCHEMA_PROMPT
     assert prompt["cache_salt"] == "salt"
     assert params.task == "token_classify"
+    assert params.use_activation is True
     schema = params.extra_kwargs["joint_schema"]
     assert schema["question_types"] == [1, 0, 2]
     assert schema["option_counts"] == [3, 2, 3]
@@ -930,6 +937,34 @@ async def test_d3_takes_more_options_than_letters(d3):
 
 
 @pytest.mark.asyncio
+async def test_decisions_serving_unlabeled_choices_exceed_label_limit(d3):
+    """Exercise the serving layer directly with an unlabeled read strategy.
+
+    D3's classify task is not exposed at `/v1/decisions` by HTTP initialization.
+    This fixture bypasses that initialization to test the serving option limit.
+    """
+    serving, engine, tokenizer = d3
+    create = OpenAIServingDecisions(serving.models, serving.strategy).create_decisions
+    choices = [{"value": f"option {i}"} for i in range(40)]
+    response = await create(
+        DecisionRequest(
+            model=D3_REQUEST["model"],
+            input="",
+            questions=[{"type": "choice", "instructions": "x", "choices": choices}],
+        )
+    )
+    assert not isinstance(response, ErrorResponse), response
+    text = tokenizer.decode(engine.encode.call_args.args[0]["prompt_token_ids"])
+    # The decisions adapter names each option by its value's JSON text.
+    assert '\nZ: "option 25": \nAA: "option 26": \n' in text
+    assert '\nAN: "option 39": \n\n' in text
+    (answer,) = response.answers
+    assert isinstance(answer, ChoiceAnswer)
+    assert len(answer.probabilities) == 40
+    assert math.fsum(p.probability for p in answer.probabilities) == pytest.approx(1)
+
+
+@pytest.mark.asyncio
 async def test_d3_rejects_instructions(d3):
     serving, engine, _ = d3
     response = await serving.create_decision(
@@ -941,36 +976,59 @@ async def test_d3_rejects_instructions(d3):
 
 
 @pytest.mark.parametrize(
-    "type_name,criteria,ask",
+    "q,ask",
     [
         (
-            "choice",
-            {"billing": "Charges", "app_fault": None},
-            "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
-            "Reply with the option code only.",
+            build_question(
+                "q", "choice", "Which?", {"billing": "Charges", "app_fault": None}, 26
+            ),
+            (
+                "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
+                "Reply with the option code only."
+            ),
         ),
         (
-            "choice",
-            {"a": "Berlin", "b": "Paris"},
+            build_question("q", "choice", "Which?", {"a": "Berlin", "b": "Paris"}, 26),
             "Which?\n\nOptions:\na Berlin\nb Paris\n\nReply with the option code only.",
         ),
         (
-            "noul",
-            {"true": "asks to cancel", "false": "anything else"},
-            "Which?\nYes: asks to cancel\nNo: anything else\n\n"
-            "Reply with yes or no only.",
+            build_question(
+                "q",
+                "noul",
+                "Which?",
+                {"true": "asks to cancel", "false": "anything else"},
+                26,
+            ),
+            (
+                "Which?\nYes: asks to cancel\nNo: anything else\n\n"
+                "Reply with yes or no only."
+            ),
         ),
         (
-            "score",
-            ["low", "high"],
+            build_question("q", "score", "Which?", ["low", "high"], 26),
             "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
+        ),
+        pytest.param(
+            make_read_question(
+                0,
+                ScoreQuestion(
+                    type="score",
+                    instructions="Which?",
+                    levels=[
+                        ScoreLevel(label="damage", description="cosmetic"),
+                        ScoreLevel(label="damage", description="unusable"),
+                    ],
+                ),
+            ),
+            "Which?\n\n0 damage - cosmetic\n1 damage - unusable\n\n"
+            "Reply with a single digit 0-1 only.",
+            id="decisions-score-descriptions",
         ),
     ],
 )
-def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
+def test_liquid_prompt_matches_the_checkpoint(q, ask):
     # The wording of prompt.py in LiquidAI/d1-3B, which the model was trained on.
     strategy = object.__new__(LiquidStrategy)
-    q = build_question("q", type_name, "Which?", criteria, 26)
     assert strategy._content(strategy.render_state(None), q) == ask
     assert strategy._content("Hi.", q) == f"Hi.\n\n\nQUESTION:\n{ask}"
     state = strategy.render_state({"k": "é"})

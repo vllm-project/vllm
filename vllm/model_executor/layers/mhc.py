@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+from functools import cache
 
 import torch
 
@@ -31,6 +32,7 @@ HAS_TILELANG_MHC = _has_tilelang_mhc()
 HAS_AITER_MHC = is_aiter_found_and_supported()
 
 
+@cache
 def _has_aiter_mhc_fused() -> bool:
     if not HAS_AITER_MHC:
         return False
@@ -41,6 +43,7 @@ def _has_aiter_mhc_fused() -> bool:
     return callable(mhc_fused_post_pre)
 
 
+@cache
 def _aiter_mhc_op_accepts_norm(op_name: str) -> bool:
     if not HAS_AITER_MHC:
         return False
@@ -68,9 +71,6 @@ def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
     return on_gfx950()
 
 
-HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
-HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
-HAS_AITER_MHC_FUSED_NORM = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
 HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM = (
     _has_aiter_mhc_fused_post_pre_delayed_rms_norm()
 )
@@ -118,6 +118,10 @@ class MHCPreOp(CustomOp):
     @classmethod
     def enabled(cls) -> bool:
         return True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._aiter_supports_norm = _aiter_mhc_op_accepts_norm("mhc_pre")
 
     def forward_cuda(
         self,
@@ -167,7 +171,7 @@ class MHCPreOp(CustomOp):
         if _aiter_mhc_supported(
             residual,
             norm_weight,
-            supports_norm=HAS_AITER_MHC_PRE_NORM,
+            supports_norm=self._aiter_supports_norm,
         ):
             return torch.ops.vllm.mhc_pre_aiter(
                 residual,
@@ -309,15 +313,17 @@ class MHCPreOp(CustomOp):
 class MHCPreDelayedOp(CustomOp):
     """MHC pre block using the pre-mix carried from the previous sublayer.
 
-    Same gates as :class:`MHCPreOp`, but the stream collapse applies the
-    caller's ``pre_mix`` and this sublayer's pre-mix is returned for the next
+    Same gates as `MHCPreOp`, but the stream collapse applies the
+    caller's `pre_mix` and this sublayer's pre-mix is returned for the next
     sublayer seam.
 
-    Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix`` also
+    Passing `sublayer_out` / `post_layer_mix` / `comb_res_mix` also
     applies the preceding post block, which lets AITER fold it into the pre
     projection and saves a launch. Returns residual, post_mix, comb_mix,
-    layer_input, next_pre_mix; ``residual`` is the caller's own tensor when
-    no post is requested.
+    layer_input, next_pre_mix; `residual` is the caller's own tensor when
+    no post is requested. `fn_packed`, `fn` packed by
+    `rocm_aiter_ops.mega_mhc_pack_fn`, runs the fused ROCm seam as one
+    Mega-MHC launch; other paths ignore it.
     """
 
     # --8<-- [end:mhc_pre_delayed]
@@ -361,6 +367,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = self._maybe_post(
             residual, sublayer_out, post_layer_mix, comb_res_mix
@@ -399,6 +406,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # aiter's fused delayed seam: post-mix, gate projection, and the
         # collapse with the carried pre-mix and its RMSNorm. It always applies
@@ -412,9 +420,21 @@ class MHCPreDelayedOp(CustomOp):
             residual_out = (
                 torch.empty_like(residual) if sublayer_out is not None else None
             )
-            rest = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter(
+            if fn_packed is not None and norm_weight.dtype == torch.bfloat16:
+                from vllm._aiter_ops import rocm_aiter_ops
+
+                seam, weight = (
+                    rocm_aiter_ops.mhc_mega_post_pre_delayed_rms_norm,
+                    fn_packed,
+                )
+            else:
+                seam, weight = (
+                    torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter,
+                    fn,
+                )
+            rest = seam(
                 residual,
-                fn,
+                weight,
                 hc_scale,
                 hc_base,
                 rms_eps,
@@ -531,6 +551,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = self._maybe_post(
             residual, sublayer_out, post_layer_mix, comb_res_mix
@@ -779,6 +800,11 @@ class MHCFusedPostPreOp(CustomOp):
     def enabled(cls) -> bool:
         return True
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._use_aiter = _has_aiter_mhc_fused()
+        self._aiter_supports_norm = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -836,10 +862,10 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if HAS_AITER_MHC_FUSED and _aiter_mhc_supported(
+        if self._use_aiter and _aiter_mhc_supported(
             residual,
             norm_weight,
-            supports_norm=HAS_AITER_MHC_FUSED_NORM,
+            supports_norm=self._aiter_supports_norm,
         ):
             return torch.ops.vllm.mhc_fused_post_pre_aiter(
                 x,

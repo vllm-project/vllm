@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 from argparse import ArgumentError
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit import utils as connector_utils
 from vllm.config import ModelConfig
+from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -251,6 +256,11 @@ def test_extensible_kv_cache_from_cli():
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA"
 )
+# ROCm refuses single-chunk KV cache access, which POSIX fd importers need.
+requires_cuda_not_rocm = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="requires CUDA, not ROCm",
+)
 
 
 @requires_cuda
@@ -310,6 +320,13 @@ def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
 
+_EXPORTS_FD_CONNECTOR = {
+    "kv_connector": "ExportsKVCacheTestConnector",
+    "kv_role": "kv_both",
+    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+}
+
+
 def _fake_executor(vllm_config, collective_rpc):
     from types import MethodType, SimpleNamespace
 
@@ -357,11 +374,24 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
 
 
+@requires_cuda_not_rocm
+def test_extensible_kv_cache_does_not_fall_back_under_a_posix_fd_importer():
+    """The torch allocator's KV cache cannot be exported as POSIX file
+    descriptors, so a failed VMM probe stops startup instead."""
+    vllm_config = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    fake = _fake_executor(vllm_config, lambda method: [None])
+    with pytest.raises(RuntimeError, match="no VMM support"):
+        fake.disable_extensible_kv_cache("no VMM support")
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+
+
 def test_all_reduce_int(monkeypatch):
     """A MIN all-reduce by default; without a group or with a single rank, the
     value stands."""
-    from types import SimpleNamespace
-
     import torch.distributed as dist
 
     from vllm.distributed.utils import all_reduce_int
@@ -387,8 +417,6 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
     """Elastic EP scale-up skips warmup and reuses the profiled KV cache size,
     so nothing would measure an extensible cache: it stays off by default and an
     explicit request is an error."""
-    from types import SimpleNamespace
-
     import vllm.platforms
     from vllm.config.vllm import VllmConfig
 
@@ -402,7 +430,6 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
         ),
-        use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(enable_elastic_ep=True),
         kv_transfer_config=None,
@@ -435,17 +462,19 @@ def test_kv_transfer_registers_kv_cache_memory(
 ):
     """Connectors whose workers register the device KV cache with UCX or RDMA,
     also when nested in MultiConnector."""
-    from vllm.config.kv_transfer import KVTransferConfig
-
     if multi:
+        # Children use their own kv_buffer_device, not MultiConnector's.
         transfer = KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
-            kv_buffer_device=buffer_device,
             kv_connector_extra_config={
                 "connectors": [
                     {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
-                    {"kv_connector": connector, "kv_role": "kv_both"},
+                    {
+                        "kv_connector": connector,
+                        "kv_role": "kv_both",
+                        "kv_buffer_device": buffer_device,
+                    },
                 ]
             },
         )
@@ -456,6 +485,141 @@ def test_kv_transfer_registers_kv_cache_memory(
     assert transfer.registers_kv_cache_memory() is registers
 
 
+@pytest.mark.parametrize(
+    ("connector", "access"),
+    [
+        ("RegistersKVCacheTestConnector", KVCacheAccess.REGISTERS),
+        ("ExportsKVCacheTestConnector", KVCacheAccess.EXPORTS_FD),
+        ("TestExampleConnector", KVCacheAccess.IN_PROCESS),
+    ],
+)
+@pytest.mark.parametrize("multi", [False, True])
+def test_external_connector_kv_cache_access(connector, access, multi):
+    """External connectors (kv_connector_module_path) declare how they reach
+    the device KV cache through a classmethod, also when nested in
+    MultiConnector."""
+    child = {
+        "kv_connector": connector,
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+    }
+    if multi:
+        transfer = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+                    child,
+                ]
+            },
+        )
+    else:
+        transfer = KVTransferConfig(**child)
+    assert transfer.kv_cache_access() == access
+    assert transfer.registers_kv_cache_memory() is bool(access)
+
+
+_NIXL_ACCESS = KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
+_LEGACY_IPC = KVCacheAccess.LEGACY_IPC
+
+# vLLM's LMCacheMPConnector imports the optional lmcache package, which is
+# only installed on some platforms (e.g. not on XPU).
+requires_lmcache = pytest.mark.skipif(
+    importlib.util.find_spec("lmcache") is None,
+    reason="lmcache is not installed",
+)
+
+
+@pytest.mark.parametrize(
+    ("children", "access"),
+    [
+        (["OffloadingConnector"], KVCacheAccess.IN_PROCESS),
+        (["OffloadingConnector", "NixlConnector"], _NIXL_ACCESS),
+        pytest.param(
+            ["NixlConnector", "LMCacheMPConnector"],
+            _NIXL_ACCESS | _LEGACY_IPC,
+            marks=requires_lmcache,
+        ),
+    ],
+)
+def test_multi_connector_kv_cache_access(children, access):
+    """MultiConnector needs what any of its children needs."""
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": child,
+                    "kv_role": "kv_both",
+                    "kv_buffer_device": "cuda",
+                }
+                for child in children
+            ]
+        },
+    )
+    assert transfer.kv_cache_access() == access
+
+
+@pytest.mark.parametrize(
+    ("connector_cls_name", "access"),
+    [
+        ("TestExampleConnector", KVCacheAccess.LEGACY_IPC),
+        ("RegistersKVCacheTestConnector", KVCacheAccess.REGISTERS),
+    ],
+)
+def test_lmcache_mp_connector_without_hook_uses_legacy_ipc(
+    monkeypatch, connector_cls_name, access
+):
+    """The lmcache package's LMCacheMPConnector replaces vLLM's when installed,
+    and may predate the classmethod: it shares the KV cache through legacy CUDA
+    IPC unless it overrides it."""
+    connector_cls = getattr(connector_utils, connector_cls_name)
+    monkeypatch.setattr(
+        KVConnectorFactory, "get_connector_class", lambda config: connector_cls
+    )
+    transfer = KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    assert transfer.kv_cache_access() == access
+
+
+def _nixl_config_for_extensible_kv_cache(
+    monkeypatch, *, rocm, requested, imex_channel, transfer=None
+):
+
+    import vllm.platforms
+
+    if transfer is None:
+        transfer = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
+        )
+    # Import the connector, which the config asks, before stubbing the platform.
+    transfer.kv_cache_access()
+    monkeypatch.setattr(
+        vllm.platforms,
+        "current_platform",
+        # MultiConnector builds each child's KVTransferConfig, whose
+        # kv_buffer_device defaults to the platform's device_type.
+        SimpleNamespace(
+            device_type="cuda", is_cuda_alike=lambda: True, is_rocm=lambda: rocm
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.utils.vmm_driver.imex_channel_available", lambda: imex_channel
+    )
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            _extensible_kv_cache_resolved=False,
+            enable_extensible_kv_cache=requested,
+            kv_cache_memory_bytes=None,
+            num_gpu_blocks_override=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(enable_elastic_ep=False),
+        kv_transfer_config=transfer,
+    )
+
+
 @pytest.mark.parametrize("rocm", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_for_rocm_registering_connector(
@@ -464,30 +628,10 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
     connector that registers the KV cache keeps the extensible cache off there
     by default and an explicit request is an error; CUDA is unaffected."""
-    from types import SimpleNamespace
-
-    import vllm.platforms
-    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.config.vllm import VllmConfig
 
-    monkeypatch.setattr(
-        vllm.platforms,
-        "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
-    )
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            _extensible_kv_cache_resolved=False,
-            enable_extensible_kv_cache=requested,
-            kv_cache_memory_bytes=None,
-            num_gpu_blocks_override=None,
-        ),
-        use_v2_model_runner=True,
-        attention_config=SimpleNamespace(hisparse_config=None),
-        parallel_config=SimpleNamespace(enable_elastic_ep=False),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
-        ),
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch, rocm=rocm, requested=requested, imex_channel=True
     )
     if rocm and requested:
         with pytest.raises(ValueError, match="ROCm"):
@@ -497,15 +641,50 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     assert config.cache_config.enable_extensible_kv_cache is not rocm
 
 
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_on_for_rocm_fd_exporting_connector(monkeypatch, requested):
+    """Exporting the KV cache to another process through POSIX file descriptors
+    involves no UCX or RDMA registration, so ROCm keeps the extensible cache."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch,
+        rocm=True,
+        requested=requested,
+        imex_channel=False,
+        transfer=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache
+
+
+@pytest.mark.parametrize(
+    "requested, imex_channel, enabled",
+    [(None, False, False), (True, False, True), (None, True, True)],
+)
+def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
+    monkeypatch, caplog_vllm, requested, imex_channel, enabled
+):
+    """Without a channel NIXL within a host would fall back to TCP. An explicit
+    request, for transfers across hosts, is honored. Turning the cache off by
+    default says how to get it back."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch, rocm=False, requested=requested, imex_channel=imex_channel
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache is enabled
+    assert ("--enable-extensible-kv-cache" in caplog_vllm.text) is (not enabled)
+
+
+@requires_lmcache
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
     """LMCacheMPConnector shares the KV cache through legacy CUDA IPC, which
     cannot export driver-mapped memory on any platform."""
-    from types import SimpleNamespace
-
     import vllm.platforms
-    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.config.vllm import VllmConfig
 
     lmcache = {"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both"}
@@ -518,10 +697,16 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
         if multi
         else KVTransferConfig(**lmcache)
     )
+    # Import the connector, which the config asks, before stubbing the platform.
+    transfer.kv_cache_access()
     monkeypatch.setattr(
         vllm.platforms,
         "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: False),
+        # MultiConnector builds each child's KVTransferConfig, whose
+        # kv_buffer_device defaults to the platform's device_type.
+        SimpleNamespace(
+            device_type="cuda", is_cuda_alike=lambda: True, is_rocm=lambda: False
+        ),
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -530,7 +715,6 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
         ),
-        use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(enable_elastic_ep=False),
         kv_transfer_config=transfer,
@@ -543,14 +727,64 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
         assert config.cache_config.enable_extensible_kv_cache is False
 
 
+@requires_cuda_not_rocm
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (dict(kv_cache_memory_bytes=1 << 30), "kv_cache_memory_bytes"),
+        (dict(enable_extensible_kv_cache=False), "it is disabled"),
+    ],
+)
+def test_posix_fd_importer_needs_the_extensible_kv_cache(kwargs, match):
+    """Only the extensible KV cache is exportable as POSIX file descriptors:
+    without it the connector's import would fail later, less clearly."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+        **kwargs,
+    )
+    with pytest.raises(ValueError, match=match):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def test_posix_fd_importer_keeps_the_extensible_kv_cache_next_to_nixl(
+    monkeypatch,
+):
+    """NIXL alone keeps the cache off without an IMEX channel, but an fd
+    importer (LMCache) needs it."""
+    from vllm.config.vllm import VllmConfig
+
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                    "kv_buffer_device": "cuda",
+                },
+                _EXPORTS_FD_CONNECTOR,
+            ]
+        },
+    )
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch,
+        rocm=False,
+        requested=None,
+        imex_channel=False,
+        transfer=transfer,
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache
+
+
 @requires_cuda
 @pytest.mark.parametrize("multi", [False, True])
 def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
     """A connector's custom memory pool (Mooncake NVLink/BAREX) must own the KV
     allocation, which the driver-mapped extensible cache bypasses: the feature
     stays off by default and an explicit request is an error."""
-    from vllm.config.kv_transfer import KVTransferConfig
-
     mooncake = {
         "kv_connector": "MooncakeStoreConnector",
         "kv_role": "kv_both",
@@ -577,7 +811,6 @@ def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
 
 @requires_cuda
 def test_extensible_kv_cache_connector_needs_block_compact_layout():
-    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
     def make_config():

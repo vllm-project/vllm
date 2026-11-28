@@ -287,7 +287,7 @@ async def test_prompt_logprobs_raises_error(
             prompt=None,
             max_tokens=5,
             temperature=0.0,
-            extra_body={"prompt_embeds": encoded_embeds, "prompt_logprobs": True},
+            extra_body={"prompt_embeds": encoded_embeds, "prompt_logprobs": 1},
         )
 
 

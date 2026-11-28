@@ -53,7 +53,7 @@ def _prune_configs(configs, named_args, **kwargs):
     """Reject configs that exceed the GPU's shared-memory budget.
 
     BLOCK_Q and BLOCK_D load fp16 tiles of size [BLOCK_*, d_pad] — the
-    kernels index with ``tl.arange(0, d_pad)``, so the estimate must use
+    kernels index with `tl.arange(0, d_pad)`, so the estimate must use
     the padded dimension, not the real one (d=513 pads to 1024 and
     nearly doubles the tile) — and the [BLOCK_Q, BLOCK_D] score tile is
     fp32.  Total:

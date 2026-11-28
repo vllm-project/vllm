@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -169,18 +171,20 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
+        """Static per-tensor and dynamic per-token activations can be quantized
+        outside the kernel: neither is padded, and cutlass_scaled_mm takes the
+        `(M, 1)` token scales as is."""
+        key = self.config.activation_quant_key
+        if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
+            return key
         return None
 
     @staticmethod
     def _pad_to_alignment(
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
     ) -> torch.Tensor:
-        """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``."""
+        """Pad tensor `x` along `dim` to the next multiple of
+        `alignment`."""
         remainder = x.shape[dim] % alignment
         if remainder == 0:
             return x
@@ -276,10 +280,22 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
-                "The device compute capability of"
-                f"{compute_capability} is not supported.",
+                (
+                    "The device compute capability of "
+                    f"{compute_capability} is not supported."
+                ),
             )
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Dynamic group-128 activations can be quantized outside the kernel
+        when no token padding is needed. The producer must write the scales
+        column-major, `(M, K // 128)` with strides `(1, M)`, as `self.quant_fp8`
+        does."""
+        key = self.config.activation_quant_key
+        if key == kFp8Dynamic128Sym and self.get_output_padding() is None:
+            return key
+        return None
 
     @classmethod
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
@@ -291,8 +307,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
         return True, None
 

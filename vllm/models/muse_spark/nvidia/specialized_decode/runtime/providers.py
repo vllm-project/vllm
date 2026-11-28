@@ -7,12 +7,12 @@ One decode step is: the stock embedding, then per layer the input boundary
 core, o_proj partial), the attention boundary (all-reduce + dual norm into the
 MoE) and the MoE (router, routing, pooler, routed experts, tail, unpooler), then
 the final boundary (the last boundary with the final norm). Each block after the
-embedding is implemented by a provider; ``LAYOUTS`` picks the provider of every
+embedding is implemented by a provider; `LAYOUTS` picks the provider of every
 block per TP size.
 
 Shapes below use b rows (b <= PREPARED_MAX), H = HIDDEN and P = POOLED. Every
 provider launches on the current stream; one that forks a side stream joins it
-before ``run`` returns.
+before `run` returns.
 """
 
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, TypeAlias
@@ -47,9 +47,9 @@ class Step(NamedTuple):
 
 
 class BuildContext(NamedTuple):
-    """What ``Provider.build`` receives, once, after the weights are loaded."""
+    """What `Provider.build` receives, once, after the weights are loaded."""
 
-    # The stock MuseSpark1xModel; providers read it and never modify it.
+    # The stock MuseSparkModel; providers read it and never modify it.
     backbone: nn.Module
     tp: int
     rank: int
@@ -68,9 +68,9 @@ class BuildContext(NamedTuple):
 
 
 class Provider(Protocol):
-    """``build`` runs once after load, before KV binding and CUDA graph capture:
+    """`build` runs once after load, before KV binding and CUDA graph capture:
     every rendezvous, weight view, compile, warm-up and constant happens there.
-    ``run`` is graph-capturable, allocates nothing and takes no per-step constant.
+    `run` is graph-capturable, allocates nothing and takes no per-step constant.
     """
 
     @classmethod
@@ -88,9 +88,9 @@ class Provider(Protocol):
 
 class BoundaryProvider(Provider, Protocol):
     """The input and final boundaries: all-gather of the MoE's unpooler column
-    blocks from ``slot``, then post_ffn_norm, the gated add into ``stream`` (fp32
+    blocks from `slot`, then post_ffn_norm, the gated add into `stream` (fp32
     [b, H], in place) and the next pre-norm (the next layer's pre_qkv_proj_norm;
-    model.norm for the final boundary) into ``out`` (bf16 [b, H]). ``aux`` (fp32
+    model.norm for the final boundary) into `out` (bf16 [b, H]). `aux` (fp32
     [b, H]) receives the updated stream when the next layer is an aux layer."""
 
     def run(
@@ -102,40 +102,20 @@ class BoundaryProvider(Provider, Protocol):
     ) -> None: ...
 
 
-class AttentionProvider(Provider, Protocol):
-    """The attention: QKV front (QKV GEMM, QK norm, RoPE, KV insert), the
-    attention core with o-norm and sigmoid gate, and o_proj. ``x`` bf16 [b, H]
-    in; returns the bf16 [b, H] tensor holding this rank's row-parallel o_proj
-    partial (before the all-reduce)."""
-
-    def run(self, step: Step, metadata: Any, x: torch.Tensor) -> torch.Tensor: ...
-
-
 class AttentionBoundaryProvider(Provider, Protocol):
-    """The attention boundary: all-reduce of ``partial`` (bf16 [b, H]),
-    post_attn_norm, the gated add into ``stream`` (fp32 [b, H], in place) and
-    pre_ffn_norm into ``out`` (bf16 [b, H])."""
+    """The attention boundary: all-reduce of `partial` (bf16 [b, H]),
+    post_attn_norm, the gated add into `stream` (fp32 [b, H], in place) and
+    pre_ffn_norm into `out` (bf16 [b, H])."""
 
     def run(
         self, partial: torch.Tensor, stream: torch.Tensor, out: torch.Tensor
     ) -> None: ...
 
 
-class MoEProvider(Provider, Protocol):
-    """The MoE: router (fp32 GateLinear [b, H] -> [b, NUM_EXPERTS]), routing
-    (``RoutedTopk``), pooler GEMM and gather + pre_expert_norm + quant
-    (``ExpertsInput``), the routed experts (``RoutedExpertsOps`` ->
-    ``UnfinalizedExperts``), the tail (post_expert_norm, weighted sum, EP
-    combine) and the unpooler GEMM, whose [b, H / tp] column block is published,
-    zero-copy, into the mailbox of the next boundary (bound at build)."""
-
-    def run(self, x: torch.Tensor) -> None: ...
-
-
 class RoutedTopk(NamedTuple):
     """Exactly the pair the stock layer hands the routed experts op: global
     expert ids and their renormalized, scaled weights, as
-    fused_musespark1x_routing returns them."""
+    fused_muse_spark_routing returns them."""
 
     # int32 [b, TOP_K]
     ids: torch.Tensor
@@ -173,7 +153,7 @@ class RoutedExpertsOps(Protocol):
 
     def nvfp4_plan(self, layer: int, inputs: ExpertsInput, topk: RoutedTopk) -> Any:
         """Host only: how the NVFP4 call for these inputs runs from routing
-        metadata (its ``metadata`` is what the routing writes), or None."""
+        metadata (its `metadata` is what the routing writes), or None."""
         ...
 
     def routed_experts(
@@ -205,7 +185,7 @@ class QkvAttention:
     cutedsl/attention/qkv_front.py: QKV + o-gate GEMM, QK norm, RoPE and the
     K/V insert), attn2 (the CuTe kernel of cutedsl/attention/attn2.py: paged
     attention of the 8-token verify step with the o-norm and sigmoid gate) and
-    the o_proj partial (``OProjection``: cuBLAS; at TP8 the package GEMM, which
+    the o_proj partial (`OProjection`: cuBLAS; at TP8 the package GEMM, which
     also publishes the partial into the attention boundary's mailbox)."""
 
     def __init__(
@@ -250,6 +230,7 @@ class QkvAttention:
         reason = cute_ops.unsupported_attn2(attn) or cute_ops.unsupported_projection(
             attn
         )
+        reason = reason or cute_ops.unsupported_kv_cache(attn.attn)
         if reason is None and (
             attn.use_attn_temperature_tuning or not attn.fused_qk_norm_rope_kv_insert
         ):
@@ -257,7 +238,6 @@ class QkvAttention:
         if reason is not None:
             raise ValueError(f"layer {layer.layer_idx}: {reason}")
         n = attn.qkv_proj.weight.shape[0]
-        cute_ops.prepare_qkv_front(n, BATCHES)
         qkv = _scratch(ctx, "qkv", (PREPARED_MAX, n), torch.bfloat16)
         out = _scratch(
             ctx,
@@ -270,10 +250,11 @@ class QkvAttention:
         # deployment's, so the captured launch fits every step); the split
         # merge's workspace is shared by the layers, which run in order, sized
         # for the full-attention layers' splits (a window only lowers them)
-        # and zeroed once (every launch leaves its counters zero).
+        # and zeroed once (every launch leaves its counters zero). Both
+        # kernels compile once the cache is bound (prepare_kv): its page size
+        # is the KV cache manager's.
         window = cute_ops.attn2_window(attn.attn.sliding_window, ctx.max_context)
         num_splits = cute_ops.attn2_splits(ctx.max_context, window, attn.num_kv_heads)
-        cute_ops.prepare_attn2(ctx.max_context, window, attn.num_kv_heads, num_splits)
         workspace = None
         if cute_ops.attn2_split_kernel(ctx.max_context, window):
             size = cute_ops.attn2_workspace_bytes(
@@ -301,21 +282,31 @@ class QkvAttention:
     def prepare_kv(self) -> None:
         from . import cute_ops
 
-        kv_cache = self.attn.attn.kv_cache
+        attention = self.attn.attn
+        kv_cache = attention.kv_cache
         if not isinstance(kv_cache, torch.Tensor) or kv_cache.numel() == 0:
             return
-        if not cute_ops.kv_cache_layout_ok(kv_cache, self.num_kv_heads):
+        if not cute_ops.kv_cache_layout_ok(attention, kv_cache):
             raise ValueError(
-                f"{self.layer_name}: KV cache {tuple(kv_cache.shape)} "
-                f"{kv_cache.stride()} {kv_cache.dtype} is not the 16-byte aligned "
-                f"bf16 [pages, {self.num_kv_heads}, 16, 128] layout with dense "
-                "pages the decode kernels read"
+                f"{self.layer_name}: {attention.kv_cache_dtype} KV cache "
+                f"{tuple(kv_cache.shape)} {kv_cache.stride()} {kv_cache.dtype} is "
+                f"not a layout of {self.num_kv_heads} KV heads the decode kernels "
+                "read (16-byte aligned dense pages of 16 or 32 slots)"
             )
+        layout = cute_ops.kv_layout(attention, kv_cache)
+        cute_ops.prepare_qkv_front(self.weight.shape[0], BATCHES, layout)
+        cute_ops.prepare_attn2(
+            self.max_context,
+            self.window,
+            self.num_kv_heads,
+            self.num_splits,
+            fmt=layout,
+        )
 
     def front_call(
         self, step: Step, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """(kv_cache, slot_mapping) of this layer's QKV front call on ``x``
+        """(kv_cache, slot_mapping) of this layer's QKV front call on `x`
         (the step's attention input) into its qkv rows in the current forward
         context, or None if the kernel does not take the call. Host state
         only: shapes, dtypes, strides and alignment, the same on every rank
@@ -336,6 +327,7 @@ class QkvAttention:
             kv_cache,
             self.num_kv_heads,
             self.qkv[: x.shape[0]],
+            cute_ops.kv_quant(self.attn.attn),
         ):
             return None
         return kv_cache, slot_mapping
@@ -352,6 +344,8 @@ class QkvAttention:
                 f"{self.layer_name}: the QKV front cannot take this step"
             )
         kv_cache, slot_mapping = call
+        # Read at the call: the scales are loaded after the build.
+        kv_quant = cute_ops.kv_quant(self.attn.attn)
         qkv = self.qkv[:b]
         cute_ops.launch_qkv_front(
             x,
@@ -362,6 +356,7 @@ class QkvAttention:
             kv_cache,
             qkv,
             self.eps,
+            kv_quant,
         )
         q, gate = cute_ops.split_qkv(qkv, self.num_kv_heads)
         decode = metadata.decode
@@ -378,6 +373,7 @@ class QkvAttention:
             window=self.window,
             num_splits=self.num_splits,
             workspace=self.workspace,
+            kv_quant=kv_quant,
         )
         return self.oproj.run(out, self.partial[:b])
 
@@ -398,15 +394,15 @@ def router_tier(router: nn.Module) -> str | None:
 
 class RoutedMoE:
     """The MoE: the stock router (GateLinear, asserted on a vLLM-native tier), the
-    routing short tail (``RoutedTopk``; the BF16 edge layers route inside the
-    experts op), the pooler (``ExpertsInput`` or ``ExpertsInputBf16``), the routed
-    experts (``RoutedExpertsOps`` -> ``UnfinalizedExperts``), the tail and the
+    routing short tail (`RoutedTopk`; the BF16 edge layers route inside the
+    experts op), the pooler (`ExpertsInput` or `ExpertsInputBf16`), the routed
+    experts (`RoutedExpertsOps` -> `UnfinalizedExperts`), the tail and the
     unpooler GEMM, which publishes this rank's column block zero-copy into the
     next boundary's mailbox.
 
     With the short tail, the router and the routing run on an aux stream while the
     pooler runs on the current one, joined before the routed experts. The fork and
-    join are issued directly, not through ``maybe_execute_in_parallel``, which runs
+    join are issued directly, not through `maybe_execute_in_parallel`, which runs
     both sides in series under this model's breakable CUDA graph capture. The BF16
     edge layers stay in series: their router logits feed the experts op on the
     current stream."""
@@ -455,7 +451,7 @@ class RoutedMoE:
         tail: Any,
         mailbox: Any,
     ) -> "RoutedMoE":
-        """``mailbox``: the LamportMailbox of the boundary after this layer."""
+        """`mailbox`: the LamportMailbox of the boundary after this layer."""
         from vllm.utils.torch_utils import aux_stream
 
         from ..cutedsl.gemm.unpooler import Unpooler

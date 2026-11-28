@@ -15,7 +15,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, KVCacheSpec
 
 from .csa_tail_ring import Step5CSATailRing
 
@@ -23,9 +24,9 @@ from .csa_tail_ring import Step5CSATailRing
 class Step5SparseSummaryCache:
     """FP8 summaries of each block's closed eight-token regions.
 
-    ``mean`` is ``[blocks, block_size // 8, 256]``; blocks may be strided. A
+    `mean` is `[blocks, block_size // 8, 256]`; blocks may be strided. A
     region is summarized once, by its eighth row, from the rows waiting in
-    ``Step5CSATailRing``; this cache holds no per-request state.
+    `Step5CSATailRing`; this cache holds no per-request state.
     """
 
     def __init__(self, mean: torch.Tensor):
@@ -117,7 +118,7 @@ class Step5SparseSummaryBackend(AttentionBackend):
 class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
     """One 256-byte FP8 summary per eight tokens, beside the DSA layer's KV.
 
-    It is a full-attention layer with ``tokens_per_state=8`` and the main block
+    It is a full-attention layer with `tokens_per_state=8` and the main block
     size, so it shares the DSA layer's KV cache group and block IDs, and is
     prefix cached and transferred like any other page.
     """
@@ -140,11 +141,11 @@ class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Step5SparseSummaryBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         block_size = vllm_config.cache_config.block_size
         if block_size % 8:
             raise ValueError("Step5 KV blocks must align to eight-token regions")
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=256,
@@ -152,6 +153,7 @@ class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
             dtype=torch.uint8,
             tokens_per_state=8,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [blocks, 1, block_size // 8, 256] -> [blocks, block_size // 8, 256]

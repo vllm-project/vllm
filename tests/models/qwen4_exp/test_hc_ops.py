@@ -10,6 +10,7 @@ from vllm.models.qwen4_exp.nvidia.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
+    hc_down_silu_sm100,
     hc_gate_mix,
     hc_silu,
     hc_up_gate_mix,
@@ -34,9 +35,21 @@ requires_sm90 = pytest.mark.skipif(
     reason="fused HC down+SiLU requires SM90+",
 )
 requires_hc_up_gate_mix = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(90)
+        or (
+            current_platform.is_device_capability_family(100)
+            and hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
+        )
+    ),
+    reason="fused HC up+gate mix requires SM90 or an SM100-family build",
+)
+
+
+requires_hc_down_silu_sm100 = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100)
-    or not hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix"),
-    reason="fused HC up+gate mix requires an SM100-family build",
+    or not hasattr(torch.ops._C, "qwen4_exp_hc_down_silu"),
+    reason="fused HC down+SiLU SM100 requires an SM100-family build",
 )
 
 
@@ -164,9 +177,36 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     )
 
 
+@requires_hc_down_silu_sm100
+# One M per config the cost model picks on 148-152 SMs (1-SM split-K 16/8, 2-SM
+# split-K 5/2/2, persistent BM 64/128 x BN 112/176), mostly with M tails.
+# M = 40000 runs several tiles per CTA pair, so both TMEM accumulators get reused.
+@pytest.mark.parametrize(
+    "num_tokens", [1, 129, 384, 1025, 2048, 4097, 5000, 8192, 40000]
+)
+def test_hc_down_silu_sm100(num_tokens: int) -> None:
+    gen = torch.Generator(device="cuda").manual_seed(num_tokens)
+    kwargs = dict(dtype=torch.bfloat16, device="cuda", generator=gen)
+    xn = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, **kwargs)
+    w_down = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, **kwargs) * HYPER_HIDDEN_SIZE**-0.5
+    # The padding rows must never contribute to the outputs.
+    w_down[LORA_RANK + HC :] = float("nan")
+
+    actual_lr, actual_inj = hc_down_silu_sm100(xn, w_down)
+
+    # fp32 reference: the kernel applies SiLU on the fp32 accumulator, before
+    # the bf16 cast.
+    down_ref = F.linear(xn.float(), w_down.float())
+    lr_ref = down_ref[:, :LORA_RANK] / HC
+    expected_lr = (lr_ref * torch.sigmoid(lr_ref)).bfloat16()
+    expected_inj = down_ref[:, LORA_RANK : LORA_RANK + HC].bfloat16()
+    torch.testing.assert_close(actual_lr, expected_lr, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(actual_inj, expected_inj, atol=1e-2, rtol=1e-2)
+
+
 @requires_hc_up_gate_mix
-# 1 and 1023 use the single-CTA configuration, 4097 the CTA-pair one.
-@pytest.mark.parametrize("num_tokens", [1, 1023, 4097])
+# Cover the serving cutoff and the Blackwell CTA-pair boundary.
+@pytest.mark.parametrize("num_tokens", [1, 512, 1023, 1599, 1600, 4097])
 def test_hc_up_gate_mix(num_tokens: int) -> None:
     # lowrank is a column slice of the merged down+inject output, as in the model.
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -180,3 +220,22 @@ def test_hc_up_gate_mix(num_tokens: int) -> None:
     expected = hc_gate_mix(xn, F.linear(lowrank, w_up), HC)
 
     torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+
+
+def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
+    """Checkpoints carry only the down and block-inject rows, not the padding."""
+    from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+    from vllm.models.qwen4_exp.nvidia.hyperconnection import GatedResidual
+
+    hc = GatedResidual(HyperConnectionConfig())
+    assert hc.pad_size > 0
+    linear = hc.input_mix_weight_down_block_inject
+    with torch.no_grad():
+        linear.weight.fill_(1.0)
+    for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
+        weight = torch.full((rows, hc.hyper_hidden_size), 2.0)
+        weight.shard_id = shard_id
+        set(linear.load_weights([("weight", weight)]))
+    assert (linear.weight[: hc.hc_lowrank + hc.hc_count] == 2).all()
+    assert not linear.weight[hc.hc_lowrank + hc.hc_count :].any()
+    assert linear.pop_missing_shards() == []

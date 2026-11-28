@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
 
 
-@dataclass
+@dataclass(slots=True)
 class LocalAttentionTestData:
     # Input parameters
     batch_spec: BatchSpec

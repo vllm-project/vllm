@@ -52,7 +52,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1170;gfx1171;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -457,7 +457,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/gptq/q_gemm.cu"
     "csrc/pos_encoding_kernels.cu"
-    "csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cu"
+    # Fused MUSE-Spark qknorm/rope/kv-insert is instantiated one unit per
+    # head_dim: with the whole op in one unit it is one of the longest compiles
+    # of a 9-arch build. _api keeps the public entry point and forwards on
+    # head_dim.
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_api.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.cu"
     "csrc/fused_qknorm_rope_kernel.cu"
     "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
     "csrc/layernorm_kernels.cu"
@@ -466,8 +473,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
-    "csrc/topk.cu"
-    "csrc/mamba/selective_scan_fwd.cu"
+    "csrc/attention/dsa/topk/top_k_per_row.cu"
+    "csrc/attention/dsa/topk/topk.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
     "csrc/custom_all_gather_reduce_scatter.cu"
@@ -479,6 +486,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+    # CUDA-only: the tanh.approx inline PTX does not hipify.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/mamba/gdn_prefill_conv.cu")
+    # The f32x2 path needs an sm_103a image (see GDN_HAS_F32X2).
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/mamba/gdn_prefill_conv.cu"
+        CUDA_ARCHS "10.3a")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
@@ -641,9 +658,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/cooperative_topk.cu")
+        "csrc/attention/dsa/topk/cooperative_topk.cu")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/cooperative_topk.cu"
+        SRCS "csrc/attention/dsa/topk/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
     endif()
 
@@ -786,6 +803,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
+  endif()
+
+  # HY V4 iHC boundary (mma.sync BF16). Requires SM90+.
+  cuda_archs_sm90plus(HY_V4_IHC_ARCHS "${CUDA_ARCHS}")
+  if(HY_V4_IHC_ARCHS)
+    set(HY_V4_IHC_SRCS "csrc/hy_v4_ihc_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${HY_V4_IHC_SRCS}"
+      CUDA_ARCHS "${HY_V4_IHC_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${HY_V4_IHC_SRCS}")
+    message(STATUS "Building hy_v4_ihc_boundary for archs: ${HY_V4_IHC_ARCHS}")
+  else()
+    message(STATUS "Not building hy_v4_ihc_boundary as no compatible archs "
+                   "found (requires SM90+).")
   endif()
 
   #
@@ -1140,7 +1171,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_GDN_DECODE_ARCHS)
     set(FUSED_GDN_DECODE_SRC
-      "csrc/gdn/fused_gdn_decode_kernel.cu")
+      "csrc/gdn/fused_gdn_decode_kernel.cu"
+      "csrc/gdn/fused_gdn_decode_16bit_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_GDN_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")
@@ -1171,6 +1203,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
   endif()
 
+  # Inkling2's fused all-reduce uses NVLink multicast and thread-block
+  # clusters. The mixes and norms of its kernels must not contract into FMAs.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(INKLING2_KERNEL_ARCHS)
+    set(INKLING2_KERNEL_SRCS
+      "csrc/inkling2/allreduce_conv_mix.cu"
+      "csrc/inkling2/conv_mix.cu"
+      "csrc/inkling2/seq_parallel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${INKLING2_KERNEL_SRCS}"
+      CUDA_ARCHS "${INKLING2_KERNEL_ARCHS}")
+    set_property(SOURCE ${INKLING2_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${INKLING2_KERNEL_SRCS}")
+    message(STATUS
+      "Building Inkling2 kernels for archs: ${INKLING2_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1195,12 +1251,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "10.0f" "${CUDA_ARCHS}")
   endif()
   if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
-    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC "csrc/qwen4_exp/hc_up_gate_mix.cu")
+    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC
+      "csrc/qwen4_exp/hc_up_gate_mix.cu"
+      "csrc/qwen4_exp/hc_down_silu.cu")
     set_gencode_flags_for_srcs(
       SRCS "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}"
       CUDA_ARCHS "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}")
-    message(STATUS "Building Qwen4Exp HC up+gate mix for archs: "
+    message(STATUS "Building Qwen4Exp HC SM100 kernels for archs: "
       "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
   endif()
 
@@ -1222,7 +1280,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC "csrc/attention/dsa/fused_mqa_topk/fused_mqa_topk.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
@@ -1318,6 +1376,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_BEAM_KERNELS=1)
     endif()
+    if(INKLING2_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_INKLING2_KERNELS=1)
+    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
@@ -1357,11 +1419,28 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt.cu"
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1404,6 +1483,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+
+  # Rubin LUT-B MoE GEMM; tcgen05 decompress::lut::b needs CUDA 13.4.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+    cuda_archs_loose_intersection(LUT_B_MOE_ARCHS "10.7f" "${CUDA_ARCHS}")
+  endif()
+  if(LUT_B_MOE_ARCHS)
+    set(LUT_B_MOE_SRC "csrc/moe/lut_b_moe_sm107.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LUT_B_MOE_SRC}"
+      CUDA_ARCHS "${LUT_B_MOE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${LUT_B_MOE_SRC}")
+    message(STATUS "Building LUT-B MoE for archs: ${LUT_B_MOE_ARCHS}")
+  endif()
   # moe marlin arches
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
@@ -1516,11 +1608,44 @@ target_compile_definitions(_moe_C_stable_libtorch PRIVATE
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+  if(LUT_B_MOE_ARCHS)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_ENABLE_LUT_B_MOE=1)
+  endif()
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (gfx9xx is wave64, every other supported
+  # arch is wave32 - that is what Utils::get_warp_size() returns). Keep the
+  # ^gfx9 predicate below in sync with the __GFX9__ branch of
+  # Utils::get_warp_size() in csrc/core/cuda_compat.h.
+  set(TOPK_WAVE_ONLY_DEFINE "")
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (non-gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
@@ -1546,6 +1671,34 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The skinny GEMM launchers are split per kernel family: the kernels (and the
+  # device code they instantiate) are shared through skinny_gemms.cuh, but each
+  # family gets its own translation unit so ninja compiles them in parallel.
+  set(VLLM_SKINNY_SRC
+    "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_swmmac.cu"
+    "csrc/rocm/skinny_gemms_wvsplitk.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkq.cu")
+
+  # The int4 skinny GEMM is instantiated one unit per N_in (a template over
+  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
+  # build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
+  # with extern template keeping the device code in the per-N_in units.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
+  # Both families are built into _rocm_C_skinny below.
+  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
+
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
   # single file serialized ~10 min of device code generation onto one core. The
@@ -1636,8 +1789,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/skinny_gemms_int4.cu"
+    ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
     ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
@@ -1654,15 +1806,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    set(VLLM_SKINNY_SRC
-      "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
@@ -1696,6 +1844,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     set(VLLM_ROCM_HAS_GFX115X ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/rdna35_gdn_chunked.cu")
+  endif()
+
+  # The W4A8 MoE decode kernel supports every gfx11 GPU (gfx1100-gfx1103,
+  # gfx1150, gfx1151), so it does not need gfx1100 in the target list.
+  set(VLLM_ROCM_HAS_GFX11 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")
+    set(VLLM_ROCM_HAS_GFX11 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_w4a8_decode_rdna3.cu")
+  endif()
+
+  # RDNA3.5 attention kernels (gfx1151 only).
+  set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
+  if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
+    set(VLLM_ROCM_HAS_RDNA_ATTN ON)
+    include(cmake/rocm_rdna_attn.cmake)
+    rdna_attn_target(_rocm_C_rdna_attn "gfx1151")
+    list(APPEND VLLM_ROCM_EXT_SRC "csrc/rocm/rdna_registry.cu")
   endif()
 
   define_extension_target(
@@ -1734,6 +1900,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(VLLM_ROCM_HAS_GFX115X)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)
+  endif()
+  if(VLLM_ROCM_HAS_RDNA_ATTN)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
+  endif()
+  if(VLLM_ROCM_HAS_GFX11)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX11)
   endif()
 endif()
 

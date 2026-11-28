@@ -14,10 +14,20 @@ pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
+from functools import partial
+from types import FunctionType, MethodType
 
 import torch
 
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.activation import (
+    GELU,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
+from vllm.model_executor.layers.fusion.act_nvfp4_quant import (
+    _act_nvfp4_max_rows,
+    act_nvfp4_quant,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -71,7 +81,10 @@ def _silu_and_mul_fp8_dynamic_block(
     num_groups = d // group_size
 
     result = torch.empty((num_tokens, d), dtype=FP8_DTYPE, device=x.device)
-    scales = torch.empty((num_tokens, num_groups), dtype=torch.float32, device=x.device)
+    # Column-major scales, the layout the CUTLASS block-FP8 consumer reads.
+    scales = torch.empty(
+        (num_groups, num_tokens), dtype=torch.float32, device=x.device
+    ).t()
 
     torch.ops._C.silu_and_mul_per_block_quant(
         out=result,
@@ -79,7 +92,7 @@ def _silu_and_mul_fp8_dynamic_block(
         scales=scales,
         group_size=group_size,
         scale_ub=None,
-        is_scale_transposed=False,
+        is_scale_transposed=True,
     )
 
     return QuantizedActivation(
@@ -170,6 +183,57 @@ def _relu_squared_static_fp8_quant_supported(
     )
 
 
+def _uses_native_relu_squared(act_fn: torch.nn.Module) -> bool:
+    if not isinstance(act_fn, ReLUSquaredActivation):
+        return False
+    forward = act_fn._forward_method
+    if type(forward) is FunctionType:
+        try:
+            # Dynamo handles this direct attribute access when unwrapping a
+            # compiled bound method; getattr(..., default) loses that handling.
+            forward = forward._torchdynamo_inline  # type: ignore[attr-defined]
+        except AttributeError:
+            return False
+    return (
+        type(forward) is MethodType
+        and forward.__func__ is ReLUSquaredActivation.forward_native
+    )
+
+
+def _act_nvfp4_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """Return whether the Triton act + NVFP4 producer can consume this input."""
+    scale = getattr(linear, "input_global_scale_inv", None)
+    return (
+        x.is_cuda
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and x.ndim == 2
+        and x.shape[-1] > 0
+        and x.shape[-1] % 16 == 0
+        and x.shape[0] <= _act_nvfp4_max_rows(x.shape[-1])
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
+    )
+
+
+def _relu_squared_nvfp4_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    return (
+        # CUDA ReLU2 suppresses NaNs; this producer matches native semantics.
+        _uses_native_relu_squared(act_fn)
+        and _act_nvfp4_quant_supported(act_fn, x, linear)
+    )
+
+
 # Optional per-entry predicates preserve the unconditional fallback contract
 # for producers whose supported inputs are narrower than their registry key.
 _FUSED_ACT_QUANT_SUPPORT: dict[
@@ -191,6 +255,15 @@ if current_platform.is_cuda_alike():
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
+
+# The Triton act + NVFP4 producer uses Blackwell FP4/FP8 conversion PTX.
+if current_platform.is_cuda() and current_platform.has_device_capability(100):
+    _RELU2_NVFP4_KEY = (ReLUSquaredActivation, kNvfp4Dynamic)
+    _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = partial(act_nvfp4_quant, act="relu2")
+    _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported
+    _GELU_NVFP4_KEY = (GELU, kNvfp4Dynamic)
+    _FUSED_ACT_QUANT[_GELU_NVFP4_KEY] = partial(act_nvfp4_quant, act="gelu")
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_NVFP4_KEY] = _act_nvfp4_quant_supported
 
 
 def maybe_fused_act_quant(

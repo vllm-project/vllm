@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""E2E tests for ``include_reasoning`` with non-Harmony reasoning models.
+"""E2E tests for `include_reasoning` with non-Harmony reasoning models.
 
 Verifies that reasoning content is included by default and suppressed
-when ``include_reasoning=False``, for both streaming and non-streaming
+when `include_reasoning=False`, for both streaming and non-streaming
 Chat Completions, while reasoning tokens remain represented in usage.
 """
 

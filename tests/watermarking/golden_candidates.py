@@ -27,6 +27,7 @@ from vllm.v1.watermarking import (
     create_prf,
     create_watermarker,
 )
+from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 GOLDEN_SCHEMA_VERSION = 3
@@ -72,7 +73,7 @@ class GoldenGuardError(ValueError):
     """A candidate is too weak or too unstable to be frozen as a golden."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DeterministicGenerationFixture:
     vocabulary_size: int = 128
     num_tokens: int = 64
@@ -91,7 +92,7 @@ class DeterministicGenerationFixture:
         return (values.to(torch.float32) / self.logit_denominator).unsqueeze(0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkingSchemeConfig:
     context_width: int = 4
     generation_alpha: float = 0.1
@@ -102,7 +103,7 @@ class WatermarkingSchemeConfig:
     p_value_threshold: float = 0.01
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GenerationTrace:
     routing_draws: int
     key_b_routed: int | None
@@ -172,7 +173,7 @@ DETECTOR_FACTORIES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkingCandidate:
     id: str
     scheme: WatermarkingAlgorithm
@@ -228,6 +229,8 @@ class WatermarkingCandidate:
         """
         config = self._watermark_config()
         detector = self._detector()
+        assert isinstance(detector, GumbelWatermarkDetector)
+        assert isinstance(detector.prf, PhiloxPRF)
         key_b_prf = getattr(detector, "key_b_prf", None)
         dual_key = self.scheme == "dual_key_gumbel"
         return {
@@ -304,7 +307,7 @@ class WatermarkingCandidate:
     ) -> dict:
         """Generate, detect and trace this candidate into one golden entry.
 
-        ``detection_token_ids`` runs detection over stored tokens instead of
+        `detection_token_ids` runs detection over stored tokens instead of
         the freshly generated ones, so a token drift and a detection drift are
         reported independently.
         """
@@ -860,7 +863,7 @@ def compare_entries(produced: dict, golden: dict) -> list[str]:
 
 
 def compare_golden(candidate: WatermarkingCandidate, golden: dict) -> list[str]:
-    """Return one line per field of ``candidate`` that drifted from ``golden``."""
+    """Return one line per field of `candidate` that drifted from `golden`."""
     return compare_entries(candidate.golden_entry(golden["generation"]), golden)
 
 

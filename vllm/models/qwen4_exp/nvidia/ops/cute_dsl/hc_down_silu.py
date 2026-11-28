@@ -3,13 +3,14 @@
 """Adapted from vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py.
 
 Fused Qwen4Exp mHC down projection + SiLU epilogue, where
-columns < lora_rank get ``silu(bf16(acc) / hc_count)``, the hc_count
-injection-logit columns pass through as ``bf16(acc)``, and the pad columns
+columns < lora_rank get `silu(bf16(acc) / hc_count)`, the hc_count
+injection-logit columns pass through as `bf16(acc)`, and the pad columns
 are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
 The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
-both with PDL. The model uses its Linear module above M=48.
+both with PDL. Above M=48 the model runs the SM100 tcgen05 down+inject+SiLU
+kernel (`hc_down_silu_sm100`); elsewhere it uses its Linear module.
 """
 
 import logging

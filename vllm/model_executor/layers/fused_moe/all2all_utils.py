@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    AllToAllBatchedPrepareAndFinalize,
     BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
@@ -38,6 +39,7 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
+    has_mooncake_ep,
     has_moonep,
     has_mori,
     has_nixl_ep,
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlashInferOneSidedDispatchLayout:
     dispatch_format: "QuantFormat"
     extra_payload_bytes_per_token: int = 0
@@ -120,6 +122,11 @@ if current_platform.is_cuda_alike():
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
         from .prepare_finalize.mori_epv2 import MoriEPv2PrepareAndFinalize
+    if has_mooncake_ep():
+        from .prepare_finalize.mooncake_ep import (
+            MOONCAKE_EP_QUANT_BLOCK_SHAPE,
+            MooncakeEPPrepareAndFinalize,
+        )
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -298,9 +305,6 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
-        vllm_config = get_current_vllm_config()
-        use_cudagraph = not vllm_config.model_config.enforce_eager
-
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
@@ -309,7 +313,6 @@ def maybe_make_prepare_finalize(
             num_experts=moe.num_experts,
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
-            use_cudagraph=use_cudagraph,
             sp_size=moe.moe_parallel_config.sp_size,
         )
 
@@ -421,6 +424,12 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
+            max_num_tokens=(
+                get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            ),
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
         )
 
@@ -442,11 +451,60 @@ def maybe_make_prepare_finalize(
             extra_payload_bytes_per_token=dispatch_layout.extra_payload_bytes_per_token,
         )
 
+    elif moe.use_alltoall_batched_kernels and allow_new_interface:
+        if current_platform.is_xpu() and not use_monolithic:
+            prepare_finalize = AllToAllBatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                rank=moe.moe_parallel_config.ep_rank,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+            )
+            logger.info_once("XPU MoE EP: using AllToAllBatchedPrepareAndFinalize.")
+        else:
+            prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+                use_monolithic=use_monolithic,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=all2all_manager.world_size,
+            )
+
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_mooncake_ep_kernels:
+        assert quant_config is not None
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_local_experts=moe.num_local_experts,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == MOONCAKE_EP_QUANT_BLOCK_SHAPE
+        )
+
+        prepare_finalize = MooncakeEPPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.max_num_ep_ranks,
+            expert_capacity=moe.num_local_experts * all2all_manager.max_num_ep_ranks,
+            use_fp8_dispatch=use_fp8_dispatch,
+            global_to_physical=global_to_physical,
         )
 
     elif moe.use_nixl_ep_kernels:

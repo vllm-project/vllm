@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tool-call parsing for the unified Cohere Command parser.
 
-The ``cohere_command3`` / ``cohere_command4`` tool parsers are registry shims;
-``CohereCommandParser`` (resolved through ``ParserManager``) does the parsing.
+The `cohere_command3` / `cohere_command4` tool parsers are registry shims;
+`CohereCommandParser` (resolved through `ParserManager`) does the parsing.
 """
 
 from __future__ import annotations
@@ -38,14 +38,14 @@ DUMMY_TOOLS = [
 VARIANTS = (("cohere_command3", "RESPONSE"), ("cohere_command4", "TEXT"))
 
 
-@dataclass
+@dataclass(slots=True)
 class ExpectedToolCall:
     id: str
     name: str
     arguments: dict
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolCallCase:
     parser_name: str
     model_output: str
@@ -129,7 +129,7 @@ def _tool_request() -> ChatCompletionRequest:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingResult:
     tool_calls: dict[int, dict]
     reasoning: str | None

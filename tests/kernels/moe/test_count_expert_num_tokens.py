@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     topk_ids: torch.Tensor
     expert_map: torch.Tensor | None = None

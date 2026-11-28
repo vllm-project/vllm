@@ -114,9 +114,9 @@ def get_vit_attn_backend(
 
 
 def get_multimodal_config() -> MultiModalConfig | None:
-    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    """Return the current `MultiModalConfig`, or `None` when no engine
     config context is active (e.g., during unit tests) or when the current
-    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    `model_config` does not carry a `multimodal_config` (e.g., minimal
     stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
@@ -126,10 +126,10 @@ def get_multimodal_config() -> MultiModalConfig | None:
 
 def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     """Return the padded hidden size for FP8 ViT encoder attention, or
-    ``None`` when FP8 is not enabled.
+    `None` when FP8 is not enabled.
 
-    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
-    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    cuDNN FP8 prefill attention requires `head_dim` to be a multiple of
+    16. For non-aligned `head_dim` (e.g. 72), Q/K/V are padded to the
     nearest multiple of 16.
     """
     mm_cfg = get_multimodal_config()
@@ -476,13 +476,38 @@ def run_dp_sharded_mrope_vision_model(
             vision_model.spatial_merge_size * vision_model.spatial_merge_size
         )
 
+    # rope_2d towers pool frames in the patch merger, so t adds no output rows.
+    if rope_type == "rope_2d":
+        patches_per_output_image = [
+            math.prod(grid_thw[-2:]) // embed_dim_reduction_factor
+            for grid_thw in grid_thw_list
+        ]
+    else:
+        patches_per_output_image = [
+            patch_size // embed_dim_reduction_factor for patch_size in patches_per_image
+        ]
+    output_len_per_rank = [
+        sum(
+            patches_per_output_image[i]
+            for i in image_to_tp_rank[
+                cum_gpu_sample_counts[rank] : cum_gpu_sample_counts[rank + 1]
+            ]
+        )
+        for rank in range(tp_size)
+    ]
+
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
     # padded to this length for tensor_model_parallel_all_gather
     # to work
-    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    max_len_per_rank = max(output_len_per_rank)
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # Ranks without images all-gather placeholders of this dtype, so it must
+    # match the output dtype of ranks with images; the first parameter's dtype
+    # can differ (e.g. an fp32 patch embedding in a bf16 tower).
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -542,14 +567,8 @@ def run_dp_sharded_mrope_vision_model(
     rank_embeddings = list[torch.Tensor]()
     for rank in range(tp_size):
         start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (
-            grouped_pixel_values_len[rank] // embed_dim_reduction_factor
-        )
+        end_idx = start_idx + output_len_per_rank[rank]
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
-
-    patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
-    ]
 
     # Reconstruct embeddings in the original order
     original_order_embeddings = [None] * len(grid_thw_list)

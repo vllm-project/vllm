@@ -11,7 +11,7 @@ use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 
-use crate::{Result, Tokenizer};
+use crate::{Result, Tokenizer, parse_checkpoint_json};
 
 /// Default regex pattern used when loading tiktoken from a BPE file. This is
 /// the same `cl100k_base` pattern that HuggingFace transformers uses as its
@@ -376,7 +376,7 @@ impl LoadedTiktokenConfig {
             .filter(|p| p.exists())
             .and_then(|config_path| {
                 let content = std::fs::read_to_string(&config_path).ok()?;
-                serde_json::from_str(&content).ok()
+                parse_checkpoint_json(&content).ok()
             })
             .map(|config: TiktokenTokenizerConfig| config.added_tokens_decoder)
             .unwrap_or_default();
@@ -386,7 +386,7 @@ impl LoadedTiktokenConfig {
             .filter(|p| p.exists())
             .and_then(|config_path| {
                 let content = std::fs::read_to_string(&config_path).ok()?;
-                serde_json::from_str(&content).ok()
+                parse_checkpoint_json(&content).ok()
             });
         let vocab_size_from_config = model_config.as_ref().and_then(|c| c.effective_vocab_size());
 
@@ -516,7 +516,7 @@ impl Tokenizer for TiktokenTokenizer {
     fn vocab_size(&self) -> usize {
         // Exclusive upper bound on token ids the tokenizer can decode (BPE base
         // tokens plus the registered special/reserved slots), used to range-check
-        // `allowed_token_ids` so tiktoken models are not exempt from validation.
+        // `bad_words` token IDs so tiktoken models are not exempt from validation.
         self.metadata.vocab_upper_bound as usize
     }
 }
@@ -531,7 +531,9 @@ fn detect_bpe_pattern(config: &TiktokenModelConfig) -> &'static str {
     let model_type = config.effective_model_type();
 
     match model_type {
-        Some("kimi" | "kimi_k2" | "kimi_k25" | "kimi_k3" | "deepseek_v3") => KIMI_PATTERN,
+        Some("kimi" | "kimi_k2" | "kimi_k25" | "kimi_k3" | "kimi_k31" | "deepseek_v3") => {
+            KIMI_PATTERN
+        }
         _ => CL100K_BASE_PATTERN,
     }
 }
@@ -817,6 +819,7 @@ mod tests {
     fn tiktoken_detects_kimi_pattern_from_model_type() {
         let kimi = config_json!({ "model_type": "kimi_k25" });
         let kimi_k3 = config_json!({ "model_type": "kimi_k3" });
+        let kimi_k31 = config_json!({ "model_type": "kimi_k31" });
         let baseten_kimi = config_json!({ "model_type": "deepseek_v3" });
         let nested_kimi = config_json!({
             "model_type": "composite_wrapper",
@@ -831,6 +834,7 @@ mod tests {
 
         assert_eq!(detect_bpe_pattern(&kimi), KIMI_PATTERN);
         assert_eq!(detect_bpe_pattern(&kimi_k3), KIMI_PATTERN);
+        assert_eq!(detect_bpe_pattern(&kimi_k31), KIMI_PATTERN);
         assert_eq!(detect_bpe_pattern(&baseten_kimi), KIMI_PATTERN);
         assert_eq!(detect_bpe_pattern(&nested_kimi), CL100K_BASE_PATTERN);
         assert_eq!(detect_bpe_pattern(&generic), CL100K_BASE_PATTERN);

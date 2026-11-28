@@ -21,6 +21,7 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     _resolve_watermark_key,
@@ -253,8 +254,12 @@ def test_speculative_decoding_uses_fixed_dual_key_roles():
         deduplicate_contexts_max_history=None,
     )
 
+    assert isinstance(target, GumbelWatermarker)
+    assert isinstance(target.prf, PhiloxPRF)
     assert target.prf.key == derive_watermark_key(42, b"key_b")
     assert draft is not None
+    assert isinstance(draft.watermarker, GumbelWatermarker)
+    assert isinstance(draft.watermarker.prf, PhiloxPRF)
     assert draft.watermarker.prf.key == derive_watermark_key(42, b"key_a")
     assert draft.num_speculative_steps == 3
     assert draft.state.deduplicate_contexts == "all"
@@ -505,11 +510,15 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
         any_greedy=lambda idx_mapping_np: False,
     )
     sampler.use_fp64_gumbel = False
-    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
-        2, 1, dtype=torch.int64
+    monkeypatch.setattr(
+        sampler,
+        "_get_contexts",
+        lambda expanded_idx_mapping: torch.zeros(2, 1, dtype=torch.int64),
     )
-    sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: (
-        torch.tensor([True, False])
+    monkeypatch.setattr(
+        sampler,
+        "_get_repeated_contexts",
+        lambda expanded_idx_mapping, contexts: torch.tensor([True, False]),
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
@@ -550,13 +559,19 @@ def test_gpu_sampler_skips_partial_contexts_independently_of_deduplication(
         any_greedy=lambda idx_mapping_np: False,
     )
     sampler.use_fp64_gumbel = False
-    sampler._get_contexts = lambda expanded_idx_mapping: torch.tensor(
-        [[-1 if partial else 0], [0]]
+    monkeypatch.setattr(
+        sampler,
+        "_get_contexts",
+        lambda expanded_idx_mapping: torch.tensor([[-1 if partial else 0], [0]]),
     )
-    sampler._get_repeated_contexts = lambda *args: (
-        pytest.fail("context deduplication should not run")
-        if scope == "none"
-        else torch.zeros(2, dtype=torch.bool)
+    monkeypatch.setattr(
+        sampler,
+        "_get_repeated_contexts",
+        lambda *args: (
+            pytest.fail("context deduplication should not run")
+            if scope == "none"
+            else torch.zeros(2, dtype=torch.bool)
+        ),
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
@@ -774,12 +789,25 @@ def test_repeated_context_mask_max_history_accelerator_parity(
         *inputs, max_history=max_history, include_prompt=include_prompt
     )
     actual = repeated_context_mask(
-        *(value.cuda() for value in inputs),
+        *_cuda_mask_inputs(inputs),
         max_history=max_history,
         include_prompt=include_prompt,
     ).cpu()
 
     assert torch.equal(actual, expected)
+
+
+def _cuda_mask_inputs(
+    inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    tokens, indices, prompt_lens, total_lens, contexts = inputs
+    return (
+        tokens.cuda(),
+        indices.cuda(),
+        prompt_lens.cuda(),
+        total_lens.cuda(),
+        contexts.cuda(),
+    )
 
 
 @pytest.mark.skipif(
@@ -798,7 +826,7 @@ def test_repeated_context_mask_partial_context_accelerator_parity():
         *inputs, include_prompt=True, skip_partial_context=True
     )
     actual = repeated_context_mask(
-        *(value.cuda() for value in inputs),
+        *_cuda_mask_inputs(inputs),
         include_prompt=True,
         skip_partial_context=True,
     ).cpu()
@@ -806,11 +834,13 @@ def test_repeated_context_mask_partial_context_accelerator_parity():
     assert torch.equal(actual, expected)
 
 
-def _unaligned_max_history_inputs() -> tuple[torch.Tensor, ...]:
+def _unaligned_max_history_inputs() -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """One row whose only repeated context ends at position 680.
 
     680 is not a multiple of the kernel's 512-position block, so the scan window
-    selected by ``max_history`` starts in the middle of a block.
+    selected by `max_history` starts in the middle of a block.
     """
     history = list(range(1_000, 2_200))
     history[676:680] = [1, 2, 3, 4]
@@ -836,7 +866,7 @@ def test_repeated_context_mask_unaligned_max_history_accelerator_parity(
 
     reference = repeated_context_mask(*inputs, max_history=max_history)
     actual = repeated_context_mask(
-        *(value.cuda() for value in inputs), max_history=max_history
+        *_cuda_mask_inputs(inputs), max_history=max_history
     ).cpu()
 
     assert torch.equal(reference, torch.tensor([expected]))
@@ -1181,6 +1211,76 @@ def test_speculative_context_repetition_accelerator_parity(
         expected, torch.tensor([False, False, False, False, expected_last])
     )
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(),
+                reason="requires a CUDA-like accelerator",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "include_prompt,expected_repeated,expected_watermarked",
+    [
+        (False, [False] * 5, [True] * 4),
+        (True, [True, True, False, True, False], [False, False, True, False]),
+    ],
+    ids=["single_turn", "all"],
+)
+def test_speculative_contexts_compare_prompt_tokens(
+    device, include_prompt, expected_repeated, expected_watermarked
+):
+    """Width 3, prompt `[9, 5, 7]`, output `[8]`, drafts `[5, 7, 8, 6]`. The
+    context `[5, 7, 8]` repeats two prompt tokens and the output token, which
+    only `include_prompt=True` (scope `all`) searches. `[8, 5, 7]` and
+    `[7, 8, 6]` occur nowhere earlier and stay unrepeated."""
+    all_token_ids = torch.tensor(
+        [[9, 5, 7, 8, 0, 0, 0, 0, 0]], dtype=torch.int32, device=device
+    )
+    prompt_lens = torch.tensor([3], dtype=torch.int32, device=device)
+    total_lens = torch.tensor([4], dtype=torch.int32, device=device)
+    # Contexts hold -1 at prompt positions.
+    contexts = torch.tensor(
+        [[-1, -1, 8], [-1, 8, 5], [8, 5, 7], [5, 7, 8], [7, 8, 6]], device=device
+    )
+    positions = torch.arange(5, device=device)
+
+    repeated = repeated_context_mask(
+        all_token_ids,
+        torch.zeros_like(positions),
+        prompt_lens,
+        total_lens,
+        contexts,
+        include_prompt=include_prompt,
+        history_offsets=positions,
+        local_positions=positions,
+        num_speculative_steps=4,
+    )
+    prior_contexts = torch.zeros(1, 4, 3, dtype=contexts.dtype, device=device)
+    watermarked = [
+        draft_watermarking_mask(
+            all_token_ids,
+            torch.tensor([0], device=device),
+            prompt_lens,
+            total_lens,
+            prior_contexts,
+            contexts[step : step + 1],
+            positions[step : step + 1],
+            torch.tensor([True], device=device),
+            max_history=None,
+            include_prompt=include_prompt,
+        ).item()
+        for step in range(4)
+    ]
+
+    assert (repeated.tolist(), watermarked) == (expected_repeated, expected_watermarked)
 
 
 @pytest.mark.skipif(

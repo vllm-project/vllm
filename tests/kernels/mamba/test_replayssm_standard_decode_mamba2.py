@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Standard (autoregressive) decode correctness for the Mamba2 ReplaySSM kernels.
 
-ReplaySSM caches the recent SSM inputs ``(x, dt, B)`` in a small ring buffer and
+ReplaySSM caches the recent SSM inputs `(x, dt, B)` in a small ring buffer and
 reconstructs / reads out the recurrent state on the fly, writing the full state
 back to HBM only when the buffer flushes. This file checks that, over a
 multi-step decode, the ReplaySSM output_only kernel reproduces the exact SSM
@@ -14,17 +14,17 @@ For every step we assert, against trusted oracles driven one token at a time:
     kernel's exact arithmetic (including its bf16 reconstruction), at every
     precision,
   * when the state is fp32, the output also matches the baseline decode kernel
-    (``selective_state_update``); at bf16 state the baseline legitimately
+    (`selective_state_update`); at bf16 state the baseline legitimately
     differs -- it downcasts the fp32 state to bf16 every step, while ReplaySSM
     accumulates a whole buffer in fp32 and is the more accurate path,
   * when state and activations are both fp32, the output also matches the exact
-    elementwise ``selective_state_update_ref``,
+    elementwise `selective_state_update_ref`,
   * the cached inputs match the reference cache management,
   * the checkpoint state matches the reference (and the baseline at fp32 state).
 
 State and activation/buffer precision are swept independently. Nemotron-3
-defaults to fp32 SSM state (``mamba_ssm_cache_dtype=float32``), but bf16 state is
-also supported; the buffer dtype follows the activation dtype and ``dt_cache``
+defaults to fp32 SSM state (`mamba_ssm_cache_dtype=float32`), but bf16 state is
+also supported; the buffer dtype follows the activation dtype and `dt_cache`
 is always fp32.
 """
 
@@ -33,6 +33,7 @@ import torch
 
 from tests.kernels.mamba.utils import (
     allocate_update_caches,
+    requires_triton_stochastic_rounding,
     selective_state_update_ref,
     selective_state_update_replayssm_output_only_ref,
 )
@@ -92,10 +93,11 @@ def _run_standard_decode(
     use_dt_bias: bool,
     desync_write_pos: bool = False,
     seed: int = 0,
+    philox_rounds: int | None = None,
 ) -> None:
-    """Drive ``num_steps`` decode steps and check every path against the
-    trusted recurrence. ``state_dtype`` is the recurrent-state precision;
-    ``act_dtype`` is the activation/buffer precision."""
+    """Drive `num_steps` decode steps and check every path against the
+    trusted recurrence. `state_dtype` is the recurrent-state precision;
+    `act_dtype` is the activation/buffer precision."""
     device = "cuda"
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(torch.float32 if both_fp32 else torch.bfloat16)
@@ -202,6 +204,8 @@ def _run_standard_decode(
             is_flush=is_flush,
             max_cache_len=max_cache_len,
             out=out_cached,
+            enable_stochastic_rounding=philox_rounds is not None,
+            cache_philox_rounds=philox_rounds or 0,
         )
         selective_state_update_replayssm_output_only(
             state_cached, x, dt, A, B, C, bc_pre=bc_pre, **common
@@ -344,6 +348,26 @@ def test_replayssm_standard_decode_real_geometry(
         has_z=True,
         dt_softplus=True,
         use_dt_bias=True,
+    )
+
+
+@requires_triton_stochastic_rounding
+@pytest.mark.parametrize("philox_rounds", [0, 5])
+def test_replayssm_standard_decode_stochastic_rounding(philox_rounds: int):
+    _run_standard_decode(
+        state_dtype=torch.float16,
+        act_dtype=torch.bfloat16,
+        batch=4,
+        nheads=128,
+        headdim=64,
+        ngroups=8,
+        dstate=128,
+        max_cache_len=16,
+        num_steps=33,
+        has_z=True,
+        dt_softplus=True,
+        use_dt_bias=True,
+        philox_rounds=philox_rounds,
     )
 
 
@@ -536,8 +560,8 @@ def test_replayssm_standard_decode_tp_head_shard_equivalence(
     """Tensor-parallel correctness at the kernel boundary (single GPU).
 
     The kernel has no cross-rank communication, so head sharding must be exactly
-    separable: one run over all heads must equal concatenating ``tp`` independent
-    per-rank runs on ``nheads // tp`` heads and ``ngroups // tp`` groups. This
+    separable: one run over all heads must equal concatenating `tp` independent
+    per-rank runs on `nheads // tp` heads and `ngroups // tp` groups. This
     guards the per-rank divisors and group->head mapping the state-shape wiring
     relies on. The real TP1==TP2 engine check lives in the v1/e2e suite."""
     state_dtype, act_dtype = precision

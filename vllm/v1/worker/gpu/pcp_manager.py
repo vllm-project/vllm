@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PCPBatchMetadata:
     """Per-step metadata of a PCP rank-local batch."""
 
@@ -39,7 +40,7 @@ class PCPBatchMetadata:
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -170,8 +171,13 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
             )
-        if supports_mm_inputs:
-            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
+        if supports_mm_inputs and not (
+            current_platform.is_cuda()
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP supports MM inputs only for DeepSeek-V4.1 on CUDA."
+            )
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
@@ -260,7 +266,7 @@ class PCPManager:
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
     ) -> Iterator[tuple[int, int, int]]:
-        """Yield ``(request index, query offset, length)`` for one PCP rank.
+        """Yield `(request index, query offset, length)` for one PCP rank.
 
         PCP=4 partitions each prefill into eight chunks:
 

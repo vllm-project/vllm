@@ -24,7 +24,7 @@ The fused modules own no parameters: their forwards read the weights of the
 eager layer they replace directly via the captured owner reference.
 
 NOTE: The reference implementation also offers a cross-layer post+pre fusion
-(``HpcIHCPostPre``) that folds one segment's post into the next segment's pre.
+(`HpcIHCPostPre`) that folds one segment's post into the next segment's pre.
 It requires reworking the decoder-layer forward scheduling and is not ported
 here. TODO: add it once the decoder dataflow is restructured for it.
 """

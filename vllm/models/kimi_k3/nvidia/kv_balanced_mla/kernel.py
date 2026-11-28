@@ -208,10 +208,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :param is_var_split_kv: Whether to use variable split KV
         :type is_var_split_kv: bool
         :param window_left: Sliding-window span, or -1 for full history. When
-            non-negative, query row ``q_tok`` of the ``seq_len_q`` block sees
-            keys ``[max(0, K - seq_len_q - window_left + q_tok), k_bound)``:
-            the whole block plus ``window_left`` tokens of history, which is
-            the mask a block drafter's ``sliding_attention`` layers declare.
+            non-negative, query row `q_tok` of the `seq_len_q` block sees
+            keys `[max(0, K - seq_len_q - window_left + q_tok), k_bound)`:
+            the whole block plus `window_left` tokens of history, which is
+            the mask a block drafter's `sliding_attention` layers declare.
         :type window_left: int
         :param reducer_d_tiles: Number of disjoint D512 output bands (1, 2 or 4)
         :type reducer_d_tiles: int
@@ -2053,46 +2053,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         for v in cutlass.range_constexpr(params.vec):
                             rAccO[v] += tPrP[v, split, 0].to(self.acc_dtype) * lse_scale
         return
-
-    @staticmethod
-    def get_split_kv(
-        B: int,
-        S: int,
-        K: int,
-        mma_qk_tiler_mn: tuple,
-        max_active_blocks: int,
-        m_ctas_per_tile: int = 2,
-    ) -> int:
-        """Get the proper split_kv value for the MLA kernel based on parameters.
-
-        :param B: Batch size
-        :type B: int
-        :param S: Sequence length
-        :type S: int
-        :param K: Sequence length
-        :type K: int
-        :param mma_qk_tiler_mn: MLA tiling parameters
-        :type mma_qk_tiler_mn: tuple
-        :param max_active_blocks: Maximum number of active blocks
-        :type max_active_blocks: int
-        :param m_ctas_per_tile: Number of CTAs launched in M for one logical tile
-        :type m_ctas_per_tile: int
-        :return: Split_kv value
-        :rtype: int
-        """
-        max_splits = ceil_div(K, mma_qk_tiler_mn[1])
-        blocks_per_batch = max(1, max_active_blocks // B // (S * m_ctas_per_tile))
-        split_heur = min(max_splits, blocks_per_batch)
-        k_waves = ceil_div(max_splits, split_heur)
-        split_wave_aware = ceil_div(max_splits, k_waves)
-        max_split_kv = 64 if m_ctas_per_tile == 1 else 32
-        return min(split_wave_aware, max_split_kv)
-
-    @staticmethod
-    def get_split_kv_simplified(B: int, S: int, max_active_blocks: int) -> int:
-        blocks_per_batch = max(1, max_active_blocks // B // (S * 2))
-        max_split_kv = 32
-        return min(blocks_per_batch, max_split_kv)
 
     @cute.jit
     def get_k_tile_count(
@@ -4464,7 +4424,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
     @cute.jit
     def _store_rows(self, tTR_rAcc, tTR_gO, tTR_cO, scale, store_dtype, H):
-        """Scale the accumulator rows, convert and store them (rows < ``H``).
+        """Scale the accumulator rows, convert and store them (rows < `H`).
 
         Subtiled elementwise + STG: elementwise of subtile N+1 overlaps with STG
         of subtile N via instruction-level parallelism. tTR_rAcc shape:

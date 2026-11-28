@@ -8,12 +8,14 @@ the Triton, FlashInfer, or CPU backend based on the configured
 the backend defaults to 'cpu'.
 """
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cache
 
 import torch
 
+from vllm.config.cache import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -79,15 +81,16 @@ def plan_replayssm_decode(
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
-    ``ring_pos[slot]`` counts the tokens buffered since the slot's last
+    `ring_pos[slot]` counts the tokens buffered since the slot's last
     full-state write. For each decode row this writes the step's
-    ``write_pos``/``is_flush`` (read by every layer of the cache group) and
+    `write_pos`/`is_flush` (read by every layer of the cache group) and
     advances the slot's counter, so the runner supplies no ring metadata.
     Prefill resets the counters in the same layer.
 
-    With ``align_block_size`` > 0 (mamba ``align`` prefix caching), the ring
-    restarts at each block's first step and flushes on the step completing a
-    block; ``seq_lens`` must then hold each row's sequence length.
+    With `align_block_size` > 0 (prefix caching, see
+    `get_replayssm_align_block_size`), the ring restarts at the first step of
+    every `align_block_size` tokens and flushes on the step completing them;
+    `seq_lens` must then hold each row's sequence length.
     """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
@@ -112,6 +115,20 @@ def plan_replayssm_decode(
         pad_slot_id,
         BLOCK=block,
     )
+
+
+def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -> int:
+    """`plan_replayssm_decode` alignment for a Mamba group with prefix caching.
+
+    A prefix-cache hit may resume a request at any prefix match unit inside a
+    Mamba block, as a one-token decode in a copied block whose ring counter
+    belongs to another request. Restarting the ring on every unit makes that
+    step start from the exact cached state; with a unit that is a multiple of
+    the ring length this adds no flushes.
+    """
+    if cache_config.prefix_match_unit is None:
+        return block_size
+    return math.gcd(block_size, cache_config.prefix_match_unit)
 
 
 class MambaSSUBackend(ABC):
@@ -284,7 +301,7 @@ class CPUSSUBackend(MambaSSUBackend):
     """CPU SSU backend using the compiled C++ VSX/scalar kernel.
 
     On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
-    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
+    the vectorized C++ kernel registered as `torch.ops._C.selective_state_update_cpu`.
     That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
     scalar fallback elsewhere) and is parallelised with OpenMP across heads.
 
@@ -294,7 +311,7 @@ class CPUSSUBackend(MambaSSUBackend):
 
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
-        from vllm import _custom_ops as ops
+        from vllm import _cpu_ops as ops
 
         self._cpp_kernel = ops.selective_state_update_cpu
         logger.info("CPUSSUBackend: using compiled C++ selective_state_update kernel.")
@@ -390,11 +407,16 @@ def selective_state_update_replayssm_flashinfer(
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
+    rand_seed: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
 ) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
+    """Run FlashInfer checkpointing SSU with model-owned tracker metadata.
+
+    With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
+    refreshed by the caller each step; without one, a seed is drawn here.
+    """
     if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
             "FlashInfer ReplaySSM has not been initialized. "
@@ -417,11 +439,12 @@ def selective_state_update_replayssm_flashinfer(
     if scratch is not None:
         cb_scaled, cumAdt_vec, cb_old = scratch
 
-    rand_seed = (
-        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
-        if enable_stochastic_rounding
-        else None
-    )
+    if not enable_stochastic_rounding:
+        rand_seed = None
+    elif rand_seed is None:
+        rand_seed = torch.randint(
+            0, 2**32, (1,), device=state.device, dtype=torch.int64
+        )
     return _flashinfer_replayssm_kernel(
         state,
         x_cache,
@@ -459,10 +482,10 @@ def initialize_mamba_ssu_backend(
 ) -> None:
     """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
     if not any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.mamba_type
-        in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
+        isinstance(spec, MambaSpec)
+        and spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
         for g in kv_cache_config.kv_cache_groups
+        for spec in g.kv_cache_specs.values()
     ):
         return
 
