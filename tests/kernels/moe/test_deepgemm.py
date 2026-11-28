@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
+    deepgemm_unpermute_and_reduce,
     ep_gather,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.warmup import deep_gemm_warmup
 from vllm.utils.deep_gemm import (
     calc_diff,
     is_deep_gemm_supported,
@@ -137,6 +139,63 @@ def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_ep_scatter_gather_warmup_prevents_runtime_jit(monkeypatch, workspace_init):
+    from triton import knobs
+
+    hidden_size = 128
+    local_num_experts = 4
+    global_num_experts = 8
+    topk = 2
+    expert_map = torch.full((global_num_experts,), -1, device="cuda", dtype=torch.int32)
+    expert_map[:local_num_experts] = torch.arange(
+        local_num_experts, device="cuda", dtype=torch.int32
+    )
+
+    deep_gemm_warmup.EP_SCATTER_GATHER_WARMUP_CACHE.clear()
+    deep_gemm_warmup._deepgemm_ep_scatter_gather_warmup(
+        hidden_size=hidden_size,
+        local_num_experts=local_num_experts,
+        global_num_experts=global_num_experts,
+        topk=topk,
+        device=torch.device("cuda"),
+        output_dtype=torch.bfloat16,
+        block_size=128,
+        pack_ue8m0=False,
+        use_psum_layout=False,
+        has_expert_map=True,
+    )
+    torch.cuda.synchronize()
+
+    def unexpected_compile(**kwargs):
+        name = kwargs["fn"].name
+        if name in ("_fwd_kernel_ep_scatter_2", "_fwd_kernel_ep_gather"):
+            pytest.fail(f"Runtime compiled {name} after explicit warmup")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(knobs.runtime, "jit_cache_hook", unexpected_compile)
+        aq = torch.zeros((1, hidden_size), device="cuda", dtype=torch.float8_e4m3fn)
+        aq_scale = torch.zeros((1, 1), device="cuda", dtype=torch.float32)
+        topk_ids = torch.zeros((1, topk), device="cuda", dtype=torch.int32)
+        permuted, _, _, inv_perm, _ = deepgemm_moe_permute(
+            aq=aq,
+            aq_scale=aq_scale,
+            topk_ids=topk_ids,
+            local_num_experts=local_num_experts,
+            expert_map=expert_map,
+            expert_tokens_meta=None,
+        )
+        deepgemm_unpermute_and_reduce(
+            a=torch.empty_like(permuted, dtype=torch.bfloat16),
+            topk_ids=topk_ids,
+            topk_weights=torch.ones((1, topk), device="cuda"),
+            inv_perm=inv_perm,
+            expert_map=expert_map,
+            output=torch.empty((1, hidden_size), device="cuda", dtype=torch.bfloat16),
+        )
+        torch.cuda.synchronize()
 
 
 def make_block_quant_fp8_weights(

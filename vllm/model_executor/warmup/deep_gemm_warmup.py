@@ -21,18 +21,28 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
+    deepgemm_moe_permute,
+    deepgemm_unpermute_and_reduce,
+)
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
+    scales_shape_stride_dtype,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     _import_deep_gemm,
     fp8_einsum,
     fp8_gemm_nt,
+    fp8_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
     get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
@@ -143,6 +153,31 @@ def _deep_gemm_linear_data(
     return provider.get_deep_gemm_warmup_weights(module)
 
 
+def _batched_masked_gemm_data(
+    module: torch.nn.Module,
+) -> (
+    tuple[
+        BatchedDeepGemmExperts,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]
+    | None
+):
+    provider = getattr(module, "deep_gemm_masked_warmup_provider", None)
+    if not isinstance(provider, BatchedDeepGemmExperts):
+        return None
+
+    w1 = getattr(module, "w13_weight", None)
+    w2 = getattr(module, "w2_weight", None)
+    w1_scale = provider.w1_scale
+    w2_scale = provider.w2_scale
+    if not all(isinstance(x, torch.Tensor) for x in (w1, w2, w1_scale, w2_scale)):
+        return None
+    return provider, w1, w2, w1_scale, w2_scale
+
+
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
         return False
@@ -166,6 +201,133 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
     fused_experts = moe_kernel.impl.fused_experts
     return isinstance(fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
+
+
+def _deepgemm_ep_scatter_gather_data(
+    module: torch.nn.Module,
+) -> tuple[int, int, int, int, torch.device, torch.dtype, int, bool, bool, bool] | None:
+    if not _fused_moe_grouped_gemm_may_use_deep_gemm(module):
+        return None
+    assert isinstance(module, MoERunner)
+
+    moe_kernel = module._quant_method.moe_kernel
+    assert moe_kernel is not None
+    experts = moe_kernel.impl.fused_experts
+    if isinstance(experts, TritonOrDeepGemmExperts):
+        experts = experts.experts
+    assert isinstance(experts, DeepGemmExperts)
+
+    w13, _, _, _, topk = _extract_data_from_fused_moe_module(module)
+    config = experts.moe_config
+    scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+    pack_ue8m0 = experts.mxfp8 or scale_fmt == DeepGemmQuantScaleFMT.UE8M0
+    use_psum_layout = (
+        not experts.mxfp8
+        and (
+            current_platform.is_device_capability_family(90)
+            or (
+                current_platform.is_device_capability_family(100)
+                and scale_fmt == DeepGemmQuantScaleFMT.UE8M0
+            )
+        )
+        and config.activation
+        in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+    )
+    assert experts.block_shape is not None
+    return (
+        w13.size(2),
+        w13.size(0),
+        config.num_experts,
+        topk,
+        w13.device,
+        config.in_dtype,
+        experts.block_shape[1],
+        pack_ue8m0,
+        use_psum_layout,
+        config.moe_parallel_config.use_ep,
+    )
+
+
+EP_SCATTER_GATHER_WARMUP_CACHE: set[tuple] = set()
+
+
+def _deepgemm_ep_scatter_gather_warmup_key(*args) -> tuple:
+    device = args[4]
+    return (*args[:4], device.type, device.index, *args[5:])
+
+
+@torch.inference_mode()
+def _deepgemm_ep_scatter_gather_warmup(
+    hidden_size: int,
+    local_num_experts: int,
+    global_num_experts: int,
+    topk: int,
+    device: torch.device,
+    output_dtype: torch.dtype,
+    block_size: int,
+    pack_ue8m0: bool,
+    use_psum_layout: bool,
+    has_expert_map: bool,
+    pbar: tqdm | None = None,
+) -> None:
+    args = (
+        hidden_size,
+        local_num_experts,
+        global_num_experts,
+        topk,
+        device,
+        output_dtype,
+        block_size,
+        pack_ue8m0,
+        use_psum_layout,
+        has_expert_map,
+    )
+    key = _deepgemm_ep_scatter_gather_warmup_key(*args)
+    if key in EP_SCATTER_GATHER_WARMUP_CACHE:
+        return
+
+    num_tokens = 1
+    aq = torch.zeros(
+        (num_tokens, hidden_size), device=device, dtype=torch.float8_e4m3fn
+    )
+    scale_dtype = torch.uint8 if pack_ue8m0 else torch.float32
+    aq_scale = torch.zeros(
+        (num_tokens, hidden_size // block_size), device=device, dtype=scale_dtype
+    )
+    topk_ids = torch.zeros((num_tokens, topk), device=device, dtype=torch.int32)
+    expert_map = None
+    if has_expert_map:
+        expert_map = torch.full(
+            (global_num_experts,), -1, device=device, dtype=torch.int32
+        )
+        local_experts = min(local_num_experts, global_num_experts)
+        expert_map[:local_experts] = torch.arange(
+            local_experts, device=device, dtype=torch.int32
+        )
+
+    permuted, _, _, inv_perm, _ = deepgemm_moe_permute(
+        aq=aq,
+        aq_scale=aq_scale,
+        topk_ids=topk_ids,
+        local_num_experts=local_num_experts,
+        expert_map=expert_map,
+        expert_tokens_meta=None,
+        block_size=block_size if pack_ue8m0 else None,
+        use_psum_layout=use_psum_layout,
+    )
+    deepgemm_unpermute_and_reduce(
+        a=torch.empty(permuted.shape, device=device, dtype=output_dtype),
+        topk_ids=topk_ids,
+        topk_weights=torch.ones((num_tokens, topk), device=device, dtype=torch.float32),
+        inv_perm=inv_perm,
+        expert_map=expert_map,
+        output=torch.empty(
+            (num_tokens, hidden_size), device=device, dtype=output_dtype
+        ),
+    )
+    EP_SCATTER_GATHER_WARMUP_CACHE.add(key)
+    if pbar is not None:
+        pbar.update(1)
 
 
 # Model construction already imports the model modules. Avoid importing them here.
@@ -395,6 +557,69 @@ def _deepgemm_fp8_einsum_warmup(
 
 
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
+
+GROUPED_FP8_GEMM_NT_MASKED_WARMUP_CACHE: set[tuple] = set()
+
+
+def _get_grouped_masked_expected_m_values(
+    max_m: int, n: int, device: torch.device
+) -> list[int]:
+    if envs.VLLM_DEEP_GEMM_WARMUP == "full":
+        return [*range(16, max_m, 16), max_m]
+    assert envs.VLLM_DEEP_GEMM_WARMUP == "relax"
+    candidates = _generate_optimal_warmup_m_values(max_m, n, device)
+    values = {16, max_m}
+    values.update(min(max_m, cdiv(m, 16) * 16) for m in candidates)
+    return sorted(m for m in values if 0 < m <= max_m)
+
+
+def _deepgemm_grouped_fp8_gemm_nt_masked_warmup(
+    provider: BatchedDeepGemmExperts,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    pbar: tqdm | None = None,
+) -> None:
+    assert provider.max_num_tokens is not None
+    assert provider.num_dispatchers is not None
+    max_m = provider.max_num_tokens * provider.num_dispatchers
+    scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+
+    def _warmup(w: torch.Tensor, w_scale: torch.Tensor) -> None:
+        num_experts, n, k = w.shape
+        key = (w.size(), max_m, scale_fmt)
+        if key in GROUPED_FP8_GEMM_NT_MASKED_WARMUP_CACHE:
+            return
+
+        a, out = current_workspace_manager().get_simultaneous(
+            ((num_experts, max_m, k), torch.float8_e4m3fn),
+            ((num_experts, max_m, n), torch.bfloat16),
+        )
+        scale_shape, scale_stride, scale_dtype = scales_shape_stride_dtype(
+            num_experts, max_m, k // 128, scale_fmt
+        )
+        a_scale = torch.zeros(
+            scale_shape,
+            dtype=scale_dtype,
+            device=w.device,
+        ).as_strided(scale_shape, scale_stride)
+        masked_m = torch.full((num_experts,), max_m, dtype=torch.int32, device=w.device)
+        for expected_m in _get_grouped_masked_expected_m_values(max_m, n, w.device):
+            fp8_m_grouped_gemm_nt_masked(
+                (a, a_scale),
+                (w, w_scale),
+                out,
+                masked_m,
+                expected_m,
+            )
+            if pbar is not None:
+                pbar.update(1)
+
+        GROUPED_FP8_GEMM_NT_MASKED_WARMUP_CACHE.add(key)
+
+    _warmup(w1, w1_scale)
+    _warmup(w2, w2_scale)
 
 
 def _get_grouped_gemm_params(
@@ -630,6 +855,22 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+def deepgemm_grouped_fp8_gemm_nt_masked_warmup(
+    model: torch.nn.Module, pbar: tqdm | None = None
+) -> None:
+    for module in model.modules():
+        if (data := _batched_masked_gemm_data(module)) is not None:
+            _deepgemm_grouped_fp8_gemm_nt_masked_warmup(*data, pbar=pbar)
+
+
+def deepgemm_ep_scatter_gather_warmup(
+    model: torch.nn.Module, pbar: tqdm | None = None
+) -> None:
+    for module in model.modules():
+        if (data := _deepgemm_ep_scatter_gather_data(module)) is not None:
+            _deepgemm_ep_scatter_gather_warmup(*data, pbar=pbar)
+
+
 def deepgemm_fp8_einsum_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
 ):
@@ -654,9 +895,32 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
     seen_einsum_keys: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
+    seen_masked_keys: set[tuple] = set(GROUPED_FP8_GEMM_NT_MASKED_WARMUP_CACHE)
+    seen_ep_keys: set[tuple] = set(EP_SCATTER_GATHER_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
+        if (ep_data := _deepgemm_ep_scatter_gather_data(m)) is not None:
+            ep_key = _deepgemm_ep_scatter_gather_warmup_key(*ep_data)
+            if ep_key not in seen_ep_keys:
+                total += 1
+                seen_ep_keys.add(ep_key)
+        if (masked_data := _batched_masked_gemm_data(m)) is not None:
+            provider, w1, w2, _, _ = masked_data
+            assert provider.max_num_tokens is not None
+            assert provider.num_dispatchers is not None
+            masked_max_m = provider.max_num_tokens * provider.num_dispatchers
+            scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+            for w in (w1, w2):
+                key = (w.size(), masked_max_m, scale_fmt)
+                if key not in seen_masked_keys:
+                    total += len(
+                        _get_grouped_masked_expected_m_values(
+                            masked_max_m, w.size(1), w.device
+                        )
+                    )
+                    seen_masked_keys.add(key)
+            continue
         if (einsum_data := _fp8_einsum_warmup_data(m)) is not None:
             einsum_key = _get_fp8_einsum_warmup_key(*einsum_data)
             if einsum_key not in seen_einsum_keys:
@@ -700,9 +964,13 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+            deepgemm_grouped_fp8_gemm_nt_masked_warmup(model, pbar)
+            deepgemm_ep_scatter_gather_warmup(model, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_fp8_einsum_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
+        deepgemm_grouped_fp8_gemm_nt_masked_warmup(model, None)
+        deepgemm_ep_scatter_gather_warmup(model, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)

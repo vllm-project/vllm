@@ -328,6 +328,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.deep_gemm_masked_warmup_provider = self
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
