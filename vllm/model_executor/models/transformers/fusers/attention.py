@@ -36,13 +36,18 @@ def _is_interface_lookup(node: ast.expr | None) -> bool:
     )
 
 
+def _parse(forward: Callable) -> ast.Module | None:
+    try:
+        source = inspect.getsource(inspect.unwrap(forward))
+        return ast.parse(textwrap.dedent(source))
+    except (AttributeError, OSError, SyntaxError, TypeError):
+        return None
+
+
 @cache
 def interface_call(forward: Callable) -> ast.Call | None:
     """The attention interface call in `forward`, if it makes exactly one."""
-    try:
-        source = inspect.getsource(inspect.unwrap(forward))
-        tree = ast.parse(textwrap.dedent(source))
-    except (AttributeError, OSError, SyntaxError, TypeError):
+    if (tree := _parse(forward)) is None:
         return None
 
     # Find the names of the local variables that read from the interface lookup
@@ -63,6 +68,27 @@ def interface_call(forward: Callable) -> ast.Call | None:
         and node.func.id in names
     ]
     return calls[0] if len(calls) == 1 else None
+
+
+@cache
+def cache_offset_arg(forward: Callable) -> str | None:
+    """The argument `forward` adds to `self.layer_idx` to get its cache layer, if any.
+
+    Looped models run a module more than once per forward pass and give each pass
+    its own cache layer this way (e.g. Dory's `cache_offset`, HRM-Text's
+    `cycle_offset`)."""
+    if (tree := _parse(forward)) is None:
+        return None
+    params = inspect.signature(forward).parameters
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            continue
+        operands = {ast.unparse(node.left), ast.unparse(node.right)}
+        if "self.layer_idx" in operands and len(operands) == 2:
+            (arg,) = operands - {"self.layer_idx"}
+            if arg in params:
+                return arg
+    return None
 
 
 def _resolve(node: ast.expr, module: nn.Module) -> object:
@@ -90,6 +116,8 @@ class AttentionFuser(BaseFuser):
     """Source of the `scaling=` the module hands the interface, if it hands one."""
     s_aux_expr: ast.expr | None = None
     """Source of the `s_aux=` the module hands the interface, if it hands one."""
+    cache_offset_arg: str | None = None
+    """The argument that offsets the module's cache layer, see `cache_offset_arg`."""
 
     def info(self, name: str) -> str:
         return f"Found: {name} ({self.source_cls}) -> attention interface"
@@ -108,6 +136,7 @@ class AttentionFuser(BaseFuser):
             source_cls=type(module).__name__,
             scale_expr=scale_expr,
             s_aux_expr=s_aux_expr,
+            cache_offset_arg=cache_offset_arg(type(module).forward),
         )
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:

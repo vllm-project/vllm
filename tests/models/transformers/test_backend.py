@@ -84,6 +84,7 @@ def check_implementation(
     kwargs_ref: dict[str, Any] | None = None,
     kwargs_test: dict[str, Any] | None = None,
     num_fused: dict[str, int] | None = None,
+    num_loops: int = 1,
     **kwargs,
 ):
     if num_fused is None:
@@ -111,7 +112,7 @@ def check_implementation(
         from vllm.model_executor.layers.attention import Attention
 
         counts = model_test.apply_model(partial(count_modules, cls=Attention))
-        assert counts == [num_layers] * tp_size
+        assert counts == [num_layers * num_loops] * tp_size
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -242,6 +243,21 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         model="vllm/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
+    )
+
+
+def test_looped_model(
+    hf_runner: type[HfRunner], vllm_runner: type[VllmRunner], example_prompts: list[str]
+) -> None:
+    """Each pass of a looped model through its shared layers has its own KV cache."""
+    pytest.importorskip("transformers.models.nanbeige")
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        "Nanbeige/Nanbeige4.2-3B",
+        kwargs_test={"model_impl": "transformers"},
+        num_loops=2,
     )
 
 
@@ -845,6 +861,7 @@ def test_attention_dispatch_is_required():
     model = SimpleNamespace(
         text_config=SimpleNamespace(num_hidden_layers=1),
         attention_fusers={},
+        cache_offsets={},
         _get_attn_cls=lambda: None,
         _pp_indices=lambda: (0, 1),
     )

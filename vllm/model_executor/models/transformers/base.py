@@ -17,6 +17,7 @@
 """Transformers modeling backend base class."""
 
 import os
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from copy import deepcopy
@@ -43,6 +44,7 @@ from transformers.conversion_mapping import (
 from transformers.core_model_loading import rename_source_key
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
+from vllm.compilation.wrapper import remove_bytecode_hooks
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -142,6 +144,10 @@ NESTED_ATTN_SCALE_MAPPER = WeightsMapper(
 checkpoint KV-cache scales belong to the nested vLLM `Attention`, but the cache scale
 mapper skips them because they already end in `.attn.k_scale`."""
 
+VLLM_ATTN_KWARG = "vllm_attn"
+"""Keyword argument in which a looped model's attention module hands the attention
+interface the vLLM `Attention` instance of the call's cache layer."""
+
 
 class PPMissingScalar(PPMissingLayer):
     """A `PPMissingLayer` that returns a scalar zero instead of its input.
@@ -155,6 +161,13 @@ class PPMissingScalar(PPMissingLayer):
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         return self.zero
+
+
+class NoAttention(nn.Module):
+    """Stands in for vLLM attention in the forward pass of `_find_cache_offsets`."""
+
+    def forward(self, query: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        return query
 
 
 class PreTrainedModelClasses(NamedTuple):
@@ -209,7 +222,8 @@ class Base(
         self.attention_fusers: dict[int, tuple[str, AttentionFuser]] = {}
         """`layer_idx` -> the qualname and fuser of the module computing that
         layer's attention, populated by `recursive_replace` for
-        `_create_attention_instances`."""
+        `_create_attention_instances`. A looped model's modules have one entry per
+        cache layer, at `layer_idx` plus each call's offset."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._layer_names: dict[int, str] = {}
@@ -244,6 +258,9 @@ class Base(
             init_on_device_without_buffers("meta"),
         ):
             self.model: PreTrainedModel = self._create_model()
+        self.cache_offsets = self._find_cache_offsets()
+        """Attention module qualname -> the cache offset of each of its calls, for the
+        modules a looped model calls once per cache layer."""
 
         # LoRA matches embeddings by the last part of their name, which varies by model
         input_embeddings = set(self.model.get_input_embeddings().modules())
@@ -342,6 +359,39 @@ class Base(
         Text models have none. Multi-modal ones override this.
         """
         return {}
+
+    def _find_cache_offsets(self) -> dict[str, list[int]]:
+        """Find the offsets that a looped model's attention modules add to their
+        `layer_idx` (see `cache_offset_arg`), by running a meta-device copy of
+        `self.model` on one token. vLLM's attention interface needs no masks."""
+
+        def attention_modules(model: nn.Module):
+            for name, module in model.named_modules():
+                fuser = AttentionFuser.match(None, module)
+                if fuser is not None and fuser.validate(module, self.vllm_config):
+                    yield f"model.{name}", module, fuser.cache_offset_arg
+
+        if not any(arg for _, _, arg in attention_modules(self.model)):
+            return {}
+        with torch.device("meta"):
+            model = AutoModel.from_config(**self._from_config_kwargs)
+        offsets: dict[str, list[int]] = defaultdict(list)
+        for name, module, arg in attention_modules(model):
+            setattr(module, VLLM_ATTN_ATTR, NoAttention())
+            if arg is not None:
+                module.register_forward_pre_hook(
+                    lambda m, args, kwargs, name=name, arg=arg: offsets[name].append(
+                        kwargs.get(arg, 0)
+                    ),
+                    with_kwargs=True,
+                )
+        context = set_forward_context(None, self.vllm_config, skip_compiled=True)
+        with torch.device("meta"), context:
+            model(input_ids=torch.zeros(1, 1, dtype=torch.long), use_cache=False)
+        # The copy's decoder is compile-decorated, and its bytecode hook would pin it
+        remove_bytecode_hooks(model)
+        # A module called once, without an offset, is not looped
+        return {name: o for name, o in offsets.items() if o != [0]}
 
     @cached_property
     def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
@@ -503,6 +553,11 @@ class Base(
         """Apply the model's pipeline parallelization plan."""
         if self.pp_group.world_size <= 1:
             return
+        if self.cache_offsets:
+            raise ValueError(
+                "Transformers modeling backend does not support pipeline "
+                "parallelism for looped models."
+            )
 
         module, names = self._pp_split
         if not self.model.supports_pp_plan:
@@ -674,16 +729,18 @@ class Base(
 
             if (
                 isinstance(fuser, AttentionFuser)
-                and (index := fuser.layer_index(module)) is not None
+                and (layer := fuser.layer_index(module)) is not None
             ):
-                if index in self.attention_fusers:
-                    other, _ = self.attention_fusers[index]
-                    raise ValueError(
-                        f"Layer {index} dispatches attention from more than one "
-                        f"module ({other} and {prefix}), which one vLLM attention "
-                        "layer cannot serve."
-                    )
-                self.attention_fusers[index] = (prefix, fuser)
+                for offset in self.cache_offsets.get(prefix, [0]):
+                    index = layer + offset
+                    if index in self.attention_fusers:
+                        other, _ = self.attention_fusers[index]
+                        raise ValueError(
+                            f"Layer {index} dispatches attention from more than one "
+                            f"module ({other} and {prefix}), which one vLLM attention "
+                            "layer cannot serve."
+                        )
+                    self.attention_fusers[index] = (prefix, fuser)
 
             orig_to_new_stacked.update(fuser.orig_to_new_stacked(prefix))
 
@@ -826,8 +883,12 @@ class Base(
         layer_types = getattr(text_config, "layer_types", None)
 
         start, end = self._pp_indices()
+        indices: Iterable[int] = range(start, end)
+        if self.cache_offsets:
+            # A looped model has a cache layer for each pass through a layer
+            indices = sorted({*indices, *self.attention_fusers})
 
-        for i in range(start, end):
+        for i in indices:
             if i not in self.attention_fusers:
                 layer = (
                     f"{i} ({layer_types[i]})"
@@ -840,10 +901,15 @@ class Base(
                 )
             attn_prefix, attn_fuser = self.attention_fusers[i]
             attn_module = self.get_submodule(attn_prefix)
+            layer_idx = attn_module.layer_idx
+            attn_name = f"{attn_prefix}.{VLLM_ATTN_ATTR}"
+            if i != layer_idx:
+                # Named after its cache layer, which vLLM reads off the name
+                attn_name = re.sub(rf"\.{layer_idx}\.", f".{i}.", attn_name, count=1)
 
-            # `[i]` is the whole-model config unless the checkpoint is
+            # `[layer_idx]` is the whole-model config unless the checkpoint is
             # heterogeneous, in which case it is this layer's own geometry.
-            arch_config = self.model_config.model_arch_config[i]
+            arch_config = self.model_config.model_arch_config[layer_idx]
             num_heads = self.model_config.get_num_attention_heads(
                 self.parallel_config, arch_config
             )
@@ -857,7 +923,7 @@ class Base(
                 scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, f"{attn_prefix}.{VLLM_ATTN_ATTR}"),
+                prefix=maybe_prefix(prefix, attn_name),
             )
 
             if attn_cls is MLAAttention:
@@ -889,7 +955,7 @@ class Base(
                 )
 
                 # Handle interleaved sliding window attention
-                if layer_types and layer_types[i] == "sliding_attention":
+                if layer_types and layer_types[layer_idx] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
                 # Handle attention sinks
                 if (sinks := attn_fuser.sinks(attn_module)) is not None:
@@ -905,7 +971,20 @@ class Base(
             # module rather than index by `module.layer_idx`, an `int` that bakes
             # layer identity into the traced graph and so costs one compiled
             # artifact per layer.
-            setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
+            if attn_prefix not in self.cache_offsets:
+                setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
+                continue
+            # A looped model's module holds one per cache layer, keyed by offset, and
+            # hands the attention interface the one of each call
+            if not hasattr(attn_module, VLLM_ATTN_ATTR):
+                setattr(attn_module, VLLM_ATTN_ATTR, nn.ModuleDict())
+
+                def select(module, args, kwargs, arg=attn_fuser.cache_offset_arg):
+                    attn = getattr(module, VLLM_ATTN_ATTR)[str(kwargs.get(arg, 0))]
+                    return args, kwargs | {VLLM_ATTN_KWARG: attn}
+
+                attn_module.register_forward_pre_hook(select, with_kwargs=True)
+            getattr(attn_module, VLLM_ATTN_ATTR)[str(i - layer_idx)] = attn_instance
 
         attn_prefixes = (prefix for prefix, _ in self.attention_fusers.values())
         if any(p.endswith(f".{VLLM_ATTN_ATTR}") for p in attn_prefixes):
