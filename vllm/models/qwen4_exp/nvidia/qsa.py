@@ -795,7 +795,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.uint8):
+        # uint8 storage must hold e4m3 bytes (not, e.g., fp8_e5m2): Q and the
+        # kernels assume e4m3.
+        if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.uint8) or (
+            self.kv_cache_torch_dtype == torch.uint8
+            and self.kv_cache_dtype not in ("fp8", "fp8_e4m3")
+        ):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires BF16 or FP8-e4m3 (uint8) cache storage"
             )
