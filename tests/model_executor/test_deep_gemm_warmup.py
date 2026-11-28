@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -93,6 +94,124 @@ def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
 
     provider = getattr(layer, "deep_gemm_warmup_provider", None)
     assert provider is (None if is_bmm else kernel)
+
+
+@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float16])
+def test_grouped_fp4_warmup_uses_runtime_layout_and_recipes(
+    monkeypatch, output_dtype
+) -> None:
+    """MXFP4 weights are K/2-packed and SM100 uses prefix-sum group metadata;
+    startup warmup must compile that exact DeepGEMM specialization."""
+    e, n, k = 4, 256, 128
+    w1 = torch.empty((e, 2 * n, k // 2), dtype=torch.uint8)
+    w2 = torch.empty((e, k, n // 2), dtype=torch.uint8)
+    w1_scale = torch.empty((e, 2 * n, k // 32), dtype=torch.float32)
+    w2_scale = torch.empty((e, k, n // 32), dtype=torch.float32)
+    grouped_layout = torch.zeros((128,), dtype=torch.int32)
+
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "_get_grouped_gemm_params",
+        lambda *args: (128, 128, [(128, 128, grouped_layout)]),
+    )
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "current_platform",
+        SimpleNamespace(is_device_capability_family=lambda family: family == 100),
+    )
+    monkeypatch.setattr(
+        deep_gemm_warmup.DeepGemmQuantScaleFMT,
+        "from_oracle",
+        lambda: deep_gemm_warmup.DeepGemmQuantScaleFMT.UE8M0,
+    )
+
+    class FakeWorkspaceManager:
+        @staticmethod
+        def get_simultaneous(*specs):
+            return tuple(torch.empty(shape, dtype=dtype) for shape, dtype in specs)
+
+    monkeypatch.setattr(
+        deep_gemm_warmup, "current_workspace_manager", FakeWorkspaceManager
+    )
+    alignments = []
+
+    @contextmanager
+    def fake_mk_alignment_scope(alignment):
+        alignments.append(alignment)
+        yield
+
+    monkeypatch.setattr(deep_gemm_warmup, "mk_alignment_scope", fake_mk_alignment_scope)
+    calls = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "m_grouped_fp8_fp4_gemm_nt_contiguous",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    deep_gemm_warmup.GROUPED_FP8_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.clear()
+    deep_gemm_warmup._deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+        w1,
+        w2,
+        w1_scale,
+        w2_scale,
+        num_topk=2,
+        max_tokens=64,
+        output_dtype=output_dtype,
+    )
+
+    assert len(calls) == 2
+    for (activation, _), (weight, _), output, layout in (call[0] for call in calls):
+        assert activation.shape[-1] == weight.shape[-1] * 2
+        assert weight.dtype == torch.int8
+        assert output.dtype == output_dtype
+        assert layout.shape == (e,)
+    assert all(call[1]["use_psum_layout"] for call in calls)
+    assert all(call[1]["recipe_a"] == (1, 128) for call in calls)
+    assert all(call[1]["recipe_b"] == (1, 32) for call in calls)
+    assert alignments == [128, 128]
+
+
+def test_grouped_fp4_experts_are_discovered_by_model_warmup(monkeypatch) -> None:
+    from vllm.model_executor.layers.fused_moe import MoERunner
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+
+    experts = object.__new__(DeepGemmFP4Experts)
+    object.__setattr__(experts, "moe_config", SimpleNamespace(in_dtype=torch.bfloat16))
+    quant_method = SimpleNamespace(
+        moe_kernel=SimpleNamespace(impl=SimpleNamespace(fused_experts=experts))
+    )
+    routed_experts = torch.nn.Module()
+    routed_experts.quant_method = quant_method
+    routed_experts.w13_weight = torch.empty((4, 256, 64), dtype=torch.uint8)
+    routed_experts.w2_weight = torch.empty((4, 128, 128), dtype=torch.uint8)
+    routed_experts.w13_weight_scale = torch.empty((4, 256, 4))
+    routed_experts.w2_weight_scale = torch.empty((4, 128, 8))
+    routed_experts.top_k = 2
+
+    runner = object.__new__(MoERunner)
+    object.__setattr__(runner, "routed_experts", routed_experts)
+    calls = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "_deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    model = SimpleNamespace(modules=lambda: iter([runner]))
+    deep_gemm_warmup.deepgemm_grouped_fp8_fp4_gemm_nt_contiguous_warmup(
+        model, max_tokens=64
+    )
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] is routed_experts.w13_weight
+    assert args[1] is routed_experts.w2_weight
+    assert args[2] is routed_experts.w13_weight_scale
+    assert args[3] is routed_experts.w2_weight_scale
+    assert args[4:] == (2, 64, torch.bfloat16)
+    assert kwargs == {"pbar": None}
 
 
 def test_mega_moe_predicate_matches_only_native_mega_moe_layers(monkeypatch) -> None:
