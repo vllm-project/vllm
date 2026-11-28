@@ -30,6 +30,7 @@ _VOCAB = {
     "<|im_end|>": 12,
     "<tool_call>": 13,
     "</tool_call>": 14,
+    "<|im_start|>": 15,
 }
 
 _TOOLS = [
@@ -306,6 +307,24 @@ class TestThinking:
 
         assert reasoning == "Answer: 111"
         assert content == ""
+
+
+def test_prompt_closed_thinking_is_content(mock_tokenizer, request_obj):
+    """MiniCPM-V 4.7's template closes an empty `<think></think>` in the
+    prompt when thinking is off, which is its default."""
+    parser = _make_parser(mock_tokenizer)
+    # <|im_start|>u<|im_end|><|im_start|>a<think></think>
+    parser.set_prompt_token_ids([15, ord("u"), 12, 15, ord("a"), 10, 11])
+    output = "2 + 2 = 4."
+    output_ids = [ord(char) for char in output]
+
+    reasoning, content, _ = parser.parse(
+        output, request_obj, model_output_token_ids=output_ids
+    )
+
+    assert reasoning is None
+    assert content == output
+    assert parser.count_reasoning_tokens(output_ids) == 0
 
 
 class TestNewlineRecovery:
