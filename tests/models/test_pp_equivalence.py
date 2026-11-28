@@ -11,6 +11,9 @@ checkpoint is downloaded.
 
 CI sets `VLLM_TRITON_FORCE_FIRST_CONFIG=1`: Triton autotuning picks configs per
 process by timing, so two engines could otherwise run different kernels.
+Inductor does the same for the reductions of functions compiled with
+`torch.compile` (Cohere's norms), so this module puts Inductor in its
+deterministic mode, which picks one config without timing.
 """
 
 import contextlib
@@ -24,6 +27,7 @@ from functools import partial
 import numpy as np
 import pytest
 import torch
+import torch._inductor.config as inductor_config
 
 from vllm import ModelRegistry, SamplingParams
 from vllm.config.load import LoadConfig
@@ -102,6 +106,12 @@ SPARSE_MLA_ARCHS = (
 CUDA_SM90_ARCHS = {
     "InklingForCausalLM": "Inkling's FA4 attention (SM8x support: #55078)",
 }
+
+# `TORCHINDUCTOR_DETERMINISTIC=1` alone does not last: Dynamo resets the setting
+# after the first compiled frame (pytorch/pytorch#198563). A forced value
+# survives. The workers import this module (`LoaderInWorkers`), so it applies
+# to every process that runs the model.
+inductor_config._config["deterministic"].env_value_force = True
 
 ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
