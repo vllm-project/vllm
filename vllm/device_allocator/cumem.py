@@ -75,7 +75,7 @@ class CuMemAllocator:
     have empty memory (zeroed on ROCm).
 
     The `_create_and_map`, `_unmap_and_release`, `_create_cpu_backup`,
-    `_release_cpu_backup`, `_get_pluggable_allocator`, and
+    `_release_cpu_backup`, `_copy`, `_get_pluggable_allocator`, and
     `_use_memory_pool_with_allocator` methods are subclass hooks for
     out-of-tree device allocators. Their names and signatures form the
     subclassing contract; renaming them or changing their signatures is
@@ -155,6 +155,11 @@ class CuMemAllocator:
     def _release_cpu_backup(backup: torch.Tensor) -> None:
         if backup.is_pinned() and libcudart.cudaHostUnregister(backup.data_ptr()):
             libcudart.cudaGetLastError()
+
+    @staticmethod
+    def _copy(src_ptr: int, dst_ptr: int, nbytes: int) -> None:
+        """Copy `nbytes` bytes from `src_ptr` to `dst_ptr`."""
+        libcudart.cudaMemcpy(dst_ptr, src_ptr, nbytes)
 
     def _get_pluggable_allocator(self) -> torch.cuda.memory.CUDAPluggableAllocator:
         init_module(self.python_malloc_callback, self.python_free_callback)
@@ -322,7 +327,7 @@ class CuMemAllocator:
             if data.cpu_backup_tensor is None:
                 data.cpu_backup_tensor = self._create_cpu_backup(data.handle[1])
             cpu_ptr = data.cpu_backup_tensor.data_ptr()
-            libcudart.cudaMemcpy(cpu_ptr, ptr, data.handle[1])
+            self._copy(ptr, cpu_ptr, data.handle[1])
         elif data.cpu_backup_tensor is not None:
             self._release_cpu_backup(data.cpu_backup_tensor)
             data.cpu_backup_tensor = None
@@ -384,7 +389,7 @@ class CuMemAllocator:
                 data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_ptr = data.cpu_backup_tensor.data_ptr()
-                    libcudart.cudaMemcpy(ptr, cpu_ptr, handle[1])
+                    self._copy(cpu_ptr, ptr, handle[1])
                 elif current_platform.is_rocm():
                     # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
                     libcudart.cudaMemset(ptr, 0, handle[1])

@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import parallel_state
 from vllm.model_executor.models import utils as model_utils
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
@@ -104,7 +105,8 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
     model.layers = nn.ModuleList([layer])
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
-    model.shardq_sequence_parallel = False
+    model.use_residual_sequence_parallel = False
+    model.residual_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {"topk_indices": model.topk_indices_buffer}
     monkeypatch.setattr(

@@ -11,6 +11,7 @@ from vllm.multimodal.cache import (
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
@@ -67,7 +68,6 @@ class MultiModalBudget:
             self.cache = cache
             self.processor = processor
             mm_config = model_config.get_multimodal_config()
-            enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
             supported_mm_limits = processor.info.supported_mm_limits
             self.mm_limits = mm_limits = processor.info.allowed_mm_limits
@@ -82,7 +82,9 @@ class MultiModalBudget:
             embed_only_modalities = {
                 modality
                 for modality in supported_mm_limits
-                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
+                if mm_limits.get(modality, 0) == 0
+                and mm_config is not None
+                and mm_config.is_mm_embeds_enabled(modality)
             }
 
             active_modalities = tower_modalities | embed_only_modalities
@@ -203,10 +205,14 @@ class MultiModalBudget:
         if max_items_per_batch is None:
             max_items_per_batch = self.mm_max_items_per_batch[modality]
 
+        num_profile_items = max(self.mm_max_items_per_batch[modality], 1)
         # Don't use `max_items_per_batch` here to avoid redundant computation
         dummy_mm_inputs = self.processor.get_dummy_mm_inputs(
             mm_counts={modality: 1},
             cache=self.cache,
+            seq_len=self.processor.info.get_dummy_seq_len(
+                self.max_model_len, self.get_encoder_budget() // num_profile_items
+            ),
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
 
@@ -215,6 +221,63 @@ class MultiModalBudget:
         assert dummy_mm_item is not None, "Item should not already be cached"
 
         return [(modality, dummy_mm_item)] * max_items_per_batch
+
+    def get_dummy_encoder_profile_single_input(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+    ) -> list[tuple[str, MultiModalKwargsItem]]:
+        if not dummy_mm_inputs:
+            return []
+
+        modality, dummy_mm_item = dummy_mm_inputs[0]
+        num_profile_items = max(self.mm_max_items_per_batch[modality], 1)
+        encoder_budget = self.get_encoder_budget()
+        info = self.processor.info
+        seq_len = info.get_dummy_seq_len(self.max_model_len, encoder_budget)
+        if num_profile_items == 1 or seq_len == info.get_dummy_seq_len(
+            self.max_model_len, encoder_budget // num_profile_items
+        ):
+            return []
+
+        single_item = self.processor.get_dummy_mm_inputs(
+            mm_counts={modality: 1}, seq_len=seq_len
+        )["mm_kwargs"][modality][0]
+        assert single_item is not None
+        shapes = [
+            json_map_leaves(
+                lambda value: getattr(value, "shape", value), item.get_data()
+            )
+            for item in (dummy_mm_item, single_item)
+        ]
+        if shapes[0] == shapes[1]:
+            return []
+
+        return [(modality, single_item)]
+
+    def get_dummy_encoder_profile_modality_inputs(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+    ) -> list[list[tuple[str, MultiModalKwargsItem]]]:
+        if not dummy_mm_inputs:
+            return []
+
+        modalities = self.processor.info.get_extra_profiled_modalities(
+            tuple(self.mm_max_toks_per_item)
+        )
+        profiles = []
+        for modality in modalities:
+            if (
+                modality == dummy_mm_inputs[0][0]
+                or self.mm_max_items_per_batch.get(modality, 0) <= 0
+            ):
+                continue
+            split_inputs = self.get_dummy_encoder_profile_inputs(modality)
+            profiles.append(split_inputs)
+            if single_input := self.get_dummy_encoder_profile_single_input(
+                split_inputs
+            ):
+                profiles.append(single_input)
+        return profiles
 
     def reset_cache(self) -> None:
         if self.cache is not None:

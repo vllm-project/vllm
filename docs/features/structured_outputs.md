@@ -19,24 +19,13 @@ available to generate structured outputs.
 
 ## Migrating from LM Format Enforcer
 
-!!! warning
-    The `lm-format-enforcer` structured outputs backend is deprecated starting
-    in v0.33.0. It remains usable with a warning in v0.33.0, will require an
-    explicit opt-in in v0.34.0, and will be removed in v0.35.0.
-
-For online serving, replace
-`--structured-outputs-config.backend lm-format-enforcer` with
-`--structured-outputs-config.backend auto`, or remove the option to use the
-default. For offline inference, replace
-`structured_outputs_config={"backend": "lm-format-enforcer"}` with
-`structured_outputs_config={"backend": "auto"}` when constructing `LLM`.
-You can also explicitly select `xgrammar` or `guidance`.
-
-Validate your existing JSON schemas, regex patterns, and generated outputs with
-the replacement backend before migrating. Backend support and formatting can
-differ: in particular, LM Format Enforcer uses Python-style regex syntax, while
-XGrammar and Guidance use Rust-style regex syntax. Changing backends can change
-which tokens are allowed and therefore the generated output.
+The `lm-format-enforcer` structured outputs backend was removed in v0.35.0.
+Replace `--structured-outputs-config.backend lm-format-enforcer` (or
+`structured_outputs_config={"backend": "lm-format-enforcer"}`) with `auto`, or
+drop the option to use the default. You can also select `xgrammar` or
+`guidance` explicitly. These backends use Rust-style regex syntax rather than
+Python's `re`, so validate existing regex patterns and JSON schemas before
+migrating.
 
 ## Online Serving (OpenAI API)
 
@@ -82,7 +71,7 @@ Now let's see an example for each of the cases, starting with the `choice`, as i
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. All structured output backends (`xgrammar`, `guidance`, and `outlines`) use Rust-style regex syntax. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 
@@ -191,6 +180,12 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
 ## Reasoning Outputs
 
 You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
+
+When reasoning is outside the output grammar, the structured-output manager's
+fallback boundary detection activates constraints after the first reasoning-end
+prefix. A later speculative token that reopens thinking does not defer those
+constraints. This path does not support reopening an unconstrained thinking
+block after the boundary; subsequent tokens must satisfy the selected grammar.
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1

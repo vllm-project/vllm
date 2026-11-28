@@ -54,7 +54,8 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
-from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
+from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
+from .policy_process import EplbPolicyProcess
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     copy_rows,
@@ -71,33 +72,6 @@ def _compute_eplb_load_stats(
     avg_tokens = num_tokens_per_rank.mean(dim=1).sum()
     max_tokens = num_tokens_per_rank.max(dim=1).values.sum()
     return avg_tokens, max_tokens
-
-
-@dataclass(slots=True)
-class EplbStats:
-    """Model stats used in EPLB rebalancing algorithm."""
-
-    global_expert_load_window: torch.Tensor
-    """
-    Experts load window.
-    Shape: (window_size, num_moe_layers, num_physical_experts)
-    """
-    num_replicas: int
-    """
-    Number of physical experts.
-    """
-    num_groups: int
-    """
-    Number of expert groups.
-    """
-    num_nodes: int
-    """
-    Number of nodes.
-    """
-    num_gpus: int
-    """
-    Number of GPUs.
-    """
 
 
 @dataclass(slots=True)
@@ -243,18 +217,122 @@ class EplbModelState:
     indexes this list with `dbo_current_ubatch_id()`.
     """
 
+    def _commit_eplb_maps_for_layer(
+        self,
+        new_physical_to_logical_map: torch.Tensor,
+        layer: int,
+    ) -> None:
+        """Per-layer version of _commit_eplb_maps used by the sync portion of
+        async EPLB. Copies all of the new_* maps into this model state. After
+        this function completes, the new mappings will become the current
+        mappings and will be visible to the model.
+        """
+        # Commit physical_to_logical_map
+        src = new_physical_to_logical_map
+        dst = self.physical_to_logical_map[layer]
+        assert src.shape == dst.shape, (
+            "The number of physical experts must stay the same while running "
+            "Async EPLB. "
+            f"Current number of physical experts: {dst.shape[0]}. New number of "
+            "physical "
+            f"experts {src.shape[0]}."
+        )
+        if PIN_MEMORY and src.is_cpu:
+            src = src.new_empty(src.shape, pin_memory=True).copy_(src)
+        dst.copy_(src, non_blocking=True)
+
+        num_logical_experts = self.logical_to_physical_map.shape[1]
+        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+        # Commit logical_to_physical_map
+        _pad_out_tensor(src=new_logical, dst=self.logical_to_physical_map[layer])
+
+        # Commit logical_replica_count
+        src = new_replica_count
+        dst = self.logical_replica_count[layer]
+        assert src.shape == dst.shape
+        if PIN_MEMORY:
+            src = src.pin_memory()
+        dst.copy_(src, non_blocking=True)
+
+    def _commit_eplb_maps(
+        self,
+        new_physical_to_logical_map: torch.Tensor,
+    ) -> None:
+        """Copies all of the new_* maps into self. After this function completes,
+        the new mappings will become the current mappings and will be visible to the
+        model.
+        """
+        # Commit physical_to_logical_map
+        src = new_physical_to_logical_map
+        dst = self.physical_to_logical_map
+
+        if PIN_MEMORY and src.is_cpu:
+            src = src.new_empty(src.shape, pin_memory=True).copy_(src)
+        # When the number of physical experts changes, refresh the active map view to
+        # cover the new size before copying it.
+        if src.shape[1] != dst.shape[1]:
+            dst = self.physical_to_logical_map_buffer[:, : src.shape[1]]
+            assert dst.shape == src.shape
+            self.physical_to_logical_map = dst
+        dst.copy_(src, non_blocking=True)
+
+        num_logical_experts = self.logical_to_physical_map.shape[1]
+        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+        # Commit logical_to_physical_map
+        _pad_out_tensor(
+            src=new_logical,
+            dst=self.logical_to_physical_map,
+        )
+
+        # Commit logical_replica_count
+        src = new_replica_count
+        dst = self.logical_replica_count
+        if PIN_MEMORY:
+            src = src.pin_memory()
+        dst.copy_(src, non_blocking=True)
+
+    def _move_to_workspace(
+        self,
+        ep_rank: int,
+    ) -> None:
+        result = self.pending_result
+        assert result is not None
+        move_from_buffer(
+            expert_weights=self.model.expert_weights[result.layer_idx],
+            expert_weights_buffers=self.expert_buffer,
+            transfer_metadata=result.transfer_metadata,
+            new_indices=result.new_physical_to_logical_map.numpy(),
+            ep_rank=ep_rank,
+        )
+
+        self._commit_eplb_maps_for_layer(
+            result.new_physical_to_logical_map,
+            result.layer_idx,
+        )
+        self.num_committed_layers = result.layer_idx + 1
+
+        if result.layer_idx == self.model.num_moe_layers - 1:
+            self.rebalanced = False
+
+        # Reset pending_result before unblocking the async worker
+        self.pending_result = None
+        result.consumed_event.record()
+
 
 class EplbState:
     """EplbState of each expert parallel model. Key is the model config hash."""
+
+    model_state_cls: type[EplbModelState] = EplbModelState
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
+        self.policy: AbstractEplbPolicy = self.create_policy()
         """
-        Selected EPLB algorithm class
+        Selected EPLB algorithm
         """
+        self.policy_process: EplbPolicyProcess | None = None
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
@@ -315,6 +393,7 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_stop = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
@@ -323,7 +402,7 @@ class EplbState:
         """
         Device index for the async EPLB worker thread.
         """
-        if self.device.type in ("cuda", "xpu"):
+        if self.device.type in ("cuda", "xpu", "npu"):
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
@@ -347,6 +426,28 @@ class EplbState:
             i % num_routed_experts for i in range(num_redundant_experts)
         ]
         return global_physical_to_logical_map
+
+    def create_model_communicator(
+        self,
+        model: MixtureOfExperts,
+        expert_buffer: list[torch.Tensor] | None,
+        group_coordinator: GroupCoordinator,
+    ) -> EplbCommunicator:
+        """Create the communicator used by a model's EPLB transfers."""
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None
+        return create_eplb_communicator(
+            group_coordinator, backend, model.expert_weights, expert_buffer
+        )
+
+    def create_policy(self) -> AbstractEplbPolicy:
+        """Create the policy shared by every model in this EPLB state.
+
+        Async planning runs a serialized copy in a persistent CPU subprocess.
+        Synchronous planning and profiling use this instance on the main thread.
+        """
+        policy = self.parallel_config.eplb_config.policy
+        return EPLB_POLICIES["default" if policy is None else policy]()
 
     def add_model(
         self,
@@ -466,7 +567,6 @@ class EplbState:
         self.expert_rearrangement_step_interval = eplb_step_interval
 
         policy_type = self.parallel_config.eplb_config.policy
-        self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
 
         # num_ubatches is 0 when DBO is disabled.
@@ -492,10 +592,9 @@ class EplbState:
             if backend == "symm_mem"
             else [torch.empty_like(w) for w in model.expert_weights[0]]
         )
-        communicator = create_eplb_communicator(
+        communicator = self.create_model_communicator(
             group_coordinator=get_eplb_group(),
-            backend=backend,
-            expert_weights=model.expert_weights,
+            model=model,
             expert_buffer=expert_buffer,
         )
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
@@ -503,7 +602,7 @@ class EplbState:
         # Compile the copy-back kernels now rather than mid-serving (no-op copy).
         copy_rows(model.expert_weights[0], [0], model.expert_weights[0], [0])
 
-        model_state = EplbModelState(
+        model_state = self.model_state_cls(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_buffer=physical_to_logical_map_buffer,
             logical_to_physical_map=logical_to_physical_map,
@@ -687,10 +786,7 @@ class EplbState:
                 if eplb_model_state.rebalanced and self._all_ranks_result_ready(
                     eplb_model_state
                 ):
-                    _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
-                    )
+                    eplb_model_state._move_to_workspace(ep_rank=ep_group.rank())
                     if not self._async_rearrangement_in_progress():
                         # Start the next interval after the final commit, allowing
                         # the load window to fill under the new placement.
@@ -947,11 +1043,13 @@ class EplbState:
                         eplb_model_state.physical_to_logical_map.cpu()
                     )
                 new_physical_to_logical_map = self.policy.rebalance_experts(
-                    load_window_cpu,
-                    num_replicas,
-                    num_groups,
-                    num_nodes,
-                    num_gpus,
+                    EplbStats(
+                        global_expert_load_window=load_window_cpu,
+                        num_replicas=num_replicas,
+                        num_groups=num_groups,
+                        num_nodes=num_nodes,
+                        num_gpus=num_gpus,
+                    ),
                     old_physical_to_logical_map,
                 )
 
@@ -1023,8 +1121,7 @@ class EplbState:
                     )
 
                     if not is_profile:
-                        _commit_eplb_maps(
-                            eplb_model_state,
+                        eplb_model_state._commit_eplb_maps(
                             new_physical_to_logical_map=new_physical_to_logical_map,
                         )
 
@@ -1066,10 +1163,32 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_worker_stop.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
+
+    def stop_async_loop(self, timeout: float = 5) -> None:
+        """Cancel and stop the async worker before releasing model resources."""
+        worker = self.async_worker
+        self.async_worker_stop.set()
+        if self.policy_process is not None:
+            self.policy_process.close()
+        if worker is not None:
+            worker.join(timeout=timeout)
+            if worker.is_alive():
+                logger.warning(
+                    "Async EPLB worker did not stop within %s seconds; "
+                    "continuing shutdown while the worker is still running.",
+                    timeout,
+                )
+            else:
+                for ms in self.model_states.values():
+                    ms.rebalanced = False
+                    ms.pending_result = None
+            self.async_worker = None
+        self.policy_process = None
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.
@@ -1239,13 +1358,8 @@ class EplbState:
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
     ) -> EplbCommunicator:
         model_state = self.model_states[hash_config_cached(model_config)]
-        backend = self.parallel_config.eplb_config.communicator
-        assert backend is not None
-        return create_eplb_communicator(
-            group_coordinator,
-            backend,
-            model_state.model.expert_weights,
-            model_state.expert_buffer,
+        return self.create_model_communicator(
+            model_state.model, model_state.expert_buffer, group_coordinator
         )
 
     def update_communicator(
@@ -1410,106 +1524,3 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     padded = torch.full(dst.shape, -1, dtype=dst.dtype, pin_memory=PIN_MEMORY)
     padded[..., : src.shape[-1]] = src
     dst.copy_(padded, non_blocking=True)
-
-
-def _commit_eplb_maps_for_layer(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-    layer: int,
-) -> None:
-    """Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
-    when running async EPLB. Copies all of the new_* maps into model_state. After this
-    function completes, the new mappings will become the current mappings and will be
-    visible to the model.
-    """
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map[layer]
-    assert src.shape == dst.shape, (
-        "The number of physical experts must stay the same while running Async EPLB. "
-        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
-        f"experts {src.shape[0]}."
-    )
-    if PIN_MEMORY and src.is_cpu:
-        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count[layer]
-    assert src.shape == dst.shape
-    if PIN_MEMORY:
-        src = src.pin_memory()
-    dst.copy_(src, non_blocking=True)
-
-
-def _commit_eplb_maps(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-) -> None:
-    """Copies all of the new_* maps into model_state. After this function completes,
-    the new mappings will become the current mappings and will be visible to the
-    model.
-    """
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map
-
-    if PIN_MEMORY and src.is_cpu:
-        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    # When the number of physical experts changes, refresh the active map view to
-    # cover the new size before copying it.
-    if src.shape[1] != dst.shape[1]:
-        dst = model_state.physical_to_logical_map_buffer[:, : src.shape[1]]
-        assert dst.shape == src.shape
-        model_state.physical_to_logical_map = dst
-    dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map,
-    )
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count
-    if PIN_MEMORY:
-        src = src.pin_memory()
-    dst.copy_(src, non_blocking=True)
-
-
-def _move_to_workspace(
-    model_state: EplbModelState,
-    ep_rank: int,
-) -> None:
-    result = model_state.pending_result
-    assert result is not None
-    move_from_buffer(
-        expert_weights=model_state.model.expert_weights[result.layer_idx],
-        expert_weights_buffers=model_state.expert_buffer,
-        transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
-        ep_rank=ep_rank,
-    )
-
-    _commit_eplb_maps_for_layer(
-        model_state,
-        new_physical_to_logical_map=result.new_physical_to_logical_map,
-        layer=result.layer_idx,
-    )
-    model_state.num_committed_layers = result.layer_idx + 1
-
-    if result.layer_idx == model_state.model.num_moe_layers - 1:
-        model_state.rebalanced = False
-
-    # Reset pending_result before unblocking the async worker
-    model_state.pending_result = None
-    result.consumed_event.record()

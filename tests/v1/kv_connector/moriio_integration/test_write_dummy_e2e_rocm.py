@@ -58,7 +58,7 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -204,7 +204,7 @@ ARCHS: dict[str, ArchCase] = {
         overrides=_kimi_linear_overrides,
         corrupt_overrides={"rms_norm_eps": 1.0},
         env={"VLLM_ROCM_USE_AITER": "1"},
-        args=("--trust-remote-code", "--mamba-ssm-cache-dtype", "float32"),
+        args=("--mamba-ssm-cache-dtype", "float32"),
     ),
     "qwen3_5_moe": ArchCase(
         model="Qwen/Qwen3.5-35B-A3B",
@@ -220,6 +220,20 @@ ARCHS: dict[str, ArchCase] = {
         overrides=_qwen3_dense_overrides,
         corrupt_overrides={"rms_norm_eps": 1.0},
         env={"VLLM_ROCM_USE_AITER": "0"},
+        hybrid=False,
+    ),
+    "qwen3_dense_aiter": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "0"},
+        hybrid=False,
+    ),
+    "qwen3_dense_aiter_shuffled": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1"},
         hybrid=False,
     ),
     "deepseek_v3": ArchCase(
@@ -245,7 +259,7 @@ ARCHS: dict[str, ArchCase] = {
 def _arch_overrides(arch: ArchCase) -> dict[str, Any]:
     from vllm.transformers_utils.config import get_config
 
-    return arch.overrides(get_config(arch.model, trust_remote_code=True))
+    return arch.overrides(get_config(arch.model, trust_remote_code=False))
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -320,6 +334,22 @@ CASES = [
     # Attention-only: prefill transfers the whole prompt.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
     Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
+    # AITER FA exposes two 32-token kernel pages per 64-token manager block.
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+    ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        # AITER's shuffled BF16 decode kernel uses 16-token pages.
+        server_args=("--block-size", "16"),
+    ),
     # Without the hybrid KV cache manager: one cache group per model.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
@@ -353,6 +383,22 @@ HETEROGENEOUS_TP_CASES = [
 # READ mode, equal TP: one case per cache-group kind (KDA + MLA, Gated DeltaNet
 # + full attention, full attention, and single-group MLA and sliding window).
 READ_CASES = [
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+        read_mode=True,
+    ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "16"),
+        read_mode=True,
+    ),
     Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
@@ -961,12 +1007,10 @@ def test_corrupted_prefill_state_is_detected_read(arch_name: str):
 def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) -> None:
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
-    case = Case(
-        arch_name,
-        default.attention_backend,
-        _DEFAULT,
-        _DEFAULT,
-        default.hma_off,
+    case = replace(
+        default,
+        prefill_graph=_DEFAULT,
+        decode_graph=_DEFAULT,
         read_mode=read_mode,
     )
     overrides = _arch_overrides(arch)

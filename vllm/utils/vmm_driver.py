@@ -171,6 +171,17 @@ class VmmDriver:
         fns["unmap"].argtypes = [DevicePtr, ctypes.c_size_t]
         fns["release"].argtypes = [MemHandle]
         fns["address_free"].argtypes = [DevicePtr, ctypes.c_size_t]
+        fns["export"].argtypes = [
+            ctypes.c_void_p,
+            MemHandle,
+            ctypes.c_int,
+            ctypes.c_ulonglong,
+        ]
+        fns["import"].argtypes = [
+            pointer(MemHandle),
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
         for fn in fns.values():
             fn.restype = ctypes.c_int
 
@@ -203,8 +214,8 @@ class VmmDriver:
         )
         return prop
 
-    def granularity(self, device_index: int) -> int:
-        prop = self._make_alloc_prop(device_index)
+    def granularity(self, device_index: int, export_handle_types: int = 0) -> int:
+        prop = self._make_alloc_prop(device_index, export_handle_types)
         granularity = ctypes.c_size_t()
         self._check(
             self._fns["get_granularity"](
@@ -258,6 +269,33 @@ class VmmDriver:
     def release(self, handle: int) -> None:
         self._check(self._fns["release"](handle))
 
+    def export_fd(self, handle: int) -> int:
+        """Export an allocation as an owned, non-inheritable POSIX descriptor."""
+        fd = ctypes.c_int(-1)
+        self._check(
+            self._fns["export"](
+                ctypes.byref(fd), handle, MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0
+            )
+        )
+        try:
+            os.set_inheritable(fd.value, False)
+        except BaseException:
+            os.close(fd.value)
+            raise
+        return fd.value
+
+    def import_fd(self, fd: int) -> int:
+        """Import a POSIX descriptor; the caller still owns and must close it."""
+        handle = MemHandle()
+        self._check(
+            self._fns["import"](
+                ctypes.byref(handle),
+                ctypes.c_void_p(fd),
+                MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+            )
+        )
+        return handle.value
+
 
 class CudaVmmDriver(VmmDriver):
     dlpack_device_type = 2  # kDLCUDA
@@ -272,6 +310,8 @@ class CudaVmmDriver(VmmDriver):
         "unmap": "cuMemUnmap",
         "release": "cuMemRelease",
         "address_free": "cuMemAddressFree",
+        "export": "cuMemExportToShareableHandle",
+        "import": "cuMemImportFromShareableHandle",
     }
 
     def __init__(self) -> None:
@@ -311,6 +351,15 @@ class CudaVmmDriver(VmmDriver):
         )
         return result == _SUCCESS and bool(flag.value)
 
+    def supports_gpudirect_rdma_with_vmm(self, device_index: int) -> bool:
+        """Return whether the device supports GPUDirect RDMA on VMM allocations."""
+        if (capable := self._rdma_capable.get(device_index)) is None:
+            capable = self._device_attribute(
+                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
+            )
+            self._rdma_capable[device_index] = capable
+        return capable
+
     def _make_alloc_prop(
         self, device_index: int, export_handle_types: int = 0
     ) -> _MemAllocationProp:
@@ -318,12 +367,9 @@ class CudaVmmDriver(VmmDriver):
         # allocator does: without it, KV connectors cannot register the
         # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
         prop = super()._make_alloc_prop(device_index, export_handle_types)
-        if (capable := self._rdma_capable.get(device_index)) is None:
-            capable = self._device_attribute(
-                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
-            )
-            self._rdma_capable[device_index] = capable
-        prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        prop.allocFlags.gpuDirectRDMACapable = int(
+            self.supports_gpudirect_rdma_with_vmm(device_index)
+        )
         # UCX's cuda_ipc can only map driver-mapped memory through a FABRIC handle.
         if (fabric := self._fabric_capable.get(device_index)) is None:
             fabric = (
@@ -410,6 +456,8 @@ class HipVmmDriver(VmmDriver):
         "unmap": "hipMemUnmap",
         "release": "hipMemRelease",
         "address_free": "hipMemAddressFree",
+        "export": "hipMemExportToShareableHandle",
+        "import": "hipMemImportFromShareableHandle",
     }
 
     def __init__(self) -> None:

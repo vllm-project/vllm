@@ -123,6 +123,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 x.size(0), self.lora_config.specialize_active_lora
             ),
             scale,
+            split_k_reduction=self.lora_config.split_k_reduction,
         )
 
     def add_expand(
@@ -321,6 +322,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 x.size(0), self.lora_config.specialize_active_lora
             ),
             scale,
+            split_k_reduction=self.lora_config.split_k_reduction,
         )
 
         lora_expand(
@@ -355,6 +357,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 x.size(0), self.lora_config.specialize_active_lora
             ),
             1.0,
+            split_k_reduction=self.lora_config.split_k_reduction,
         )
         result = self._select_full_linear_output(
             y, adapter_y, bias_stacked, module_enabled

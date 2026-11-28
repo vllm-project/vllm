@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo"]
+__all__ = ["LayerTensors", "LayerReloadingInfo", "WeightReloadValidator"]
 
 # encodes both parameters and buffers separately
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+
+class WeightReloadValidator(ABC):
+    """Opt-in validation for modules with weight reload restrictions."""
+
+    @abstractmethod
+    def validate_weight_reload(self) -> None:
+        """Raise if reloading is unsupported, before any weights are written."""
 
 
 @dataclass(slots=True)
@@ -18,6 +27,10 @@ class LayerReloadingInfo:
 
     # device to materialize layers with, recorded by `record_metadata_for_reloading`
     restore_device: torch.device
+
+    # materialize on the CPU instead: online quantization of a layer that the
+    # UVA offloader targets stages its full-precision weights there
+    stage_on_cpu: bool = False
 
     # track how many elements are ready for loading, used by `online_process_loader`
     load_numel: int = 0
@@ -36,7 +49,9 @@ class LayerReloadingInfo:
 
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
+            stage_on_cpu=self.stage_on_cpu,
         )
 
     def can_load(self) -> bool:

@@ -10,10 +10,16 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import LinearBase, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    lm_head_padding_size,
+    lm_head_quant_method,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -31,7 +37,12 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
+from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
 from vllm.models.muse_spark.amd.ops import fused_markov
+from vllm.models.muse_spark.amd.ops.fused_markov_sampling import (
+    MuseSparkFusedMarkov,
+    use_fused_markov_sampling,
+)
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
@@ -79,6 +90,24 @@ class MuseSparkDSparkDecoderLayer(MuseSparkDecoderLayer):
         return stream, None
 
 
+def _weight_rows(linear: LinearBase, start: int, end: int) -> torch.Tensor:
+    """Output rows `[start, end)` of a linear's weight in its parameter dtype.
+
+    A quantized weight is dequantized by running the layer's own method on the
+    identity. This is exact for methods with dynamic activation scales (the
+    online methods), whatever the weight layout or scales; a static activation
+    scale would round the identity.
+    """
+    if linear.weight.dtype == linear.params_dtype:
+        return linear.weight[start:end]
+    eye = torch.eye(
+        linear.input_size_per_partition,
+        dtype=linear.params_dtype,
+        device=linear.weight.device,
+    )
+    return linear.quant_method.apply(linear, eye)[:, start:end].t()
+
+
 @support_torch_compile
 class MuseSparkDSparkModel(DFlashQwen3Model):
     """Muse draft backbone with independently cached context K/V."""
@@ -111,14 +140,15 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         draft_config.model_config = vllm_config.speculative_config.draft_model_config
         draft_config.quant_config = self.quant_config
 
-        if (
-            isinstance(vllm_config.additional_config, dict)
-            and vllm_config.additional_config.get("decode_backend")
-            == "latency_specialized"
+        extra = vllm_config.additional_config
+        if vllm_config.kernel_config.monokernel or (
+            isinstance(extra, dict)
+            and extra.get("decode_backend") == "latency_specialized"
         ):
             logger.warning_once(
-                "The Muse Spark specialized decode is not supported on ROCm; the "
-                "DSpark draft keeps its stock layers and Markov loop."
+                "The Muse Spark specialized decode (monokernel) is not supported "
+                "on ROCm for the DSpark draft; the draft keeps its stock layers "
+                "and Markov loop."
             )
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -161,12 +191,20 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             has_weight=config.norm_affine,
             zero_centered_gamma=config.norm_zero_centered_gamma,
         )
+        head_quantization = vllm_config.speculative_config.draft_lm_head_quantization
         self.markov_head = DSparkMarkovHead(
             config.vocab_size,
             config.draft_vocab_size,
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
             quant_config=self.quant_config,
+            # The Markov head is a second vocabulary head; quantize it like the
+            # lm_head.
+            quant_method=(
+                None
+                if head_quantization is None
+                else lm_head_quant_method(head_quantization)
+            ),
         )
         self.confidence_head: DSparkConfidenceHead | None = None
         if config.enable_confidence_head:
@@ -185,7 +223,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         attn0 = layers_attn[0]
         self._context_pre_norms = tuple(attn.pre_qkv_proj_norm for attn in layers_attn)
         kv = [
-            attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            _weight_rows(attn.qkv_proj, attn.q_size, attn.q_size + 2 * attn.kv_size)
             for attn in layers_attn
         ]
         refill_derived(self, "_stacked_kv_weight", torch.stack(kv, dim=0))
@@ -246,7 +284,10 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         )
         if self._rotary_emb is not None:
             positions = context_positions.repeat(num_layers)
-            all_k_flat, _ = self._rotary_emb(
+            # With the RoPE custom op disabled, calling the module dispatches to
+            # forward_native, which replaces the FP32 table (shared with draft
+            # layer 0) with a BF16 copy.
+            all_k_flat, _ = self._rotary_emb.forward_cuda(
                 positions,
                 all_k_flat,
                 # CUDA RoPE updates both operands in place. Aliasing the same
@@ -290,6 +331,8 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     """Muse DSpark head with the target's output-distribution transform."""
 
     has_own_lm_head = True
+    # Builds its lm_head with speculative_config.draft_lm_head_quantization.
+    quantizes_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -305,6 +348,9 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
+        self.vllm_config = vllm_config
+        # The draft-layer kernels under --monokernel (ROCm), set after loading.
+        self.mono = None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
@@ -313,10 +359,21 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
         )
+        lm_head_quantization = vllm_config.speculative_config.draft_lm_head_quantization
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            padding_size=(
+                DEFAULT_VOCAB_PADDING_SIZE
+                if lm_head_quantization is None
+                else lm_head_padding_size(get_tensor_model_parallel_world_size())
+            ),
             prefix=maybe_prefix(prefix, "lm_head"),
+            quant_method=(
+                None
+                if lm_head_quantization is None
+                else lm_head_quant_method(lm_head_quantization)
+            ),
         )
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size)
         self.target_vocab_size = vllm_config.model_config.get_vocab_size()
@@ -344,6 +401,22 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
         ):
             self.sample_sequential = fused_markov.sample_sequential  # type: ignore[assignment]
+        if use_fused_markov_sampling(vllm_config):
+            fused = MuseSparkFusedMarkov(self)
+            self.sample_sequential = fused.sample  # type: ignore[assignment]
+
+    def forward(  # type: ignore[override]
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Ahead of the draft model's compiled __call__: the kernels or stock.
+        if self.mono is not None:
+            out = self.mono.try_forward(self.model, input_ids, positions, inputs_embeds)
+            if out is not None:
+                return out
+        return super().forward(input_ids, positions, inputs_embeds)
 
     def apply_output_logit_transform(self, logits: torch.Tensor) -> torch.Tensor:
         logits = logits.float() * self.output_multiplier
@@ -356,13 +429,13 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Identical full-vocabulary heads may be shared with an FP32 target head.
         return self.logits_processor(
-            self.lm_head, hidden_states.to(self.lm_head.weight.dtype)
+            self.lm_head, hidden_states.to(self.lm_head.params_dtype)
         )
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Target residuals are FP32; the training collator casts features before FC.
         return super().combine_hidden_states(
-            hidden_states.to(self.model.fc.weight.dtype)
+            hidden_states.to(self.model.fc.params_dtype)
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -389,6 +462,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     def process_weights_after_loading(self) -> None:
         super().process_weights_after_loading()
         materialize_residual_path_constants(self.model)
+        maybe_attach_drafter(self)
         if hasattr(self, "sample_sequential"):
             # The fused rounds sample in draft ids, so they need d2t = 0.
             self.d2t_is_identity = not self.draft_id_to_target_id.any().item()

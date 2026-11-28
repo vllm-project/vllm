@@ -22,16 +22,15 @@ from __future__ import annotations
 import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
+    from vllm.device_allocator import MemAllocator
 
 logger = init_logger(__name__)
-
-SleepModeState = Literal["RUNNING", "SUSPENDED", "RESUMING"]
 
 
 class SleepModeBackend(ABC):
@@ -40,14 +39,7 @@ class SleepModeBackend(ABC):
     A backend owns the *mechanism* of suspend/resume. The dispatch path
     (`/sleep` endpoint -> engine -> executor -> worker) is shared across all
     backends and lives outside this class.
-
-    Capability flags are `@classmethod` so callers (executor, `/health`,
-    AUTO selection) can introspect a backend without instantiating it, matching
-    the capability-flag convention used by attention backends.
     """
-
-    def __init__(self) -> None:
-        self._state: SleepModeState = "RUNNING"
 
     @abstractmethod
     def suspend(self, discardable: Collection[int] = ()) -> None:
@@ -70,11 +62,6 @@ class SleepModeBackend(ABC):
         """
         raise NotImplementedError
 
-    def state(self) -> SleepModeState:
-        """Current lifecycle state. Lets `/health` distinguish a healthy-idle
-        (suspended) engine from a healthy-serving one (see RFC #34303)."""
-        return self._state
-
     def discard(self, tags: tuple[str, ...]) -> None:
         """Discard selected tagged allocations without preserving contents."""
         raise RuntimeError(
@@ -82,37 +69,10 @@ class SleepModeBackend(ABC):
             "selective discard."
         )
 
-    # -- Capability introspection (no instance required) --
-
     @classmethod
     def is_supported(cls) -> bool:
         """Whether this backend can run on the current platform/driver."""
         return True
-
-    @classmethod
-    def preserves_communicators(cls) -> bool:
-        """If False, collective communicators (e.g. NCCL) are destroyed by
-        `suspend` and the executor must re-initialize them on `resume`."""
-        return False
-
-    @classmethod
-    def preserves_compiled_artifacts(cls) -> bool:
-        """If True, torch.compile / JIT kernels survive suspend/resume and need
-        not be recompiled on resume."""
-        return False
-
-    @classmethod
-    def preserves_graphs_with_communicators(cls) -> bool:
-        """If True, CUDA graphs containing collective communicators (e.g. NCCL)
-        stay valid after resume. False when communicators are rebuilt (embedded
-        comm handles go stale)."""
-        return False
-
-    @classmethod
-    def supports_durable_storage(cls) -> bool:
-        """If True, suspended state can be persisted beyond the process
-        lifetime (disk or object storage) and restored in a new process."""
-        return False
 
 
 class CuMemBackend(SleepModeBackend):
@@ -123,33 +83,24 @@ class CuMemBackend(SleepModeBackend):
     host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 
-    def suspend(self, discardable: Collection[int] = ()) -> None:
+    def _get_allocator(self) -> MemAllocator:
+        """Return the platform allocator used by this backend.
+
+        Downstream subclasses may override this method to provide an allocator
+        that implements the `MemAllocator` protocol.
+        """
         from vllm.device_allocator import get_mem_allocator_instance
 
-        self._state = "SUSPENDED"
-        get_mem_allocator_instance().sleep(
-            ("weights", "runtime", "cudagraph"), discardable
-        )
+        return get_mem_allocator_instance()
+
+    def suspend(self, discardable: Collection[int] = ()) -> None:
+        self._get_allocator().sleep(("weights", "runtime", "cudagraph"), discardable)
 
     def resume(self, tags: list[str] | None = None) -> None:
-        from vllm.device_allocator import get_mem_allocator_instance
-
-        self._state = "RESUMING"
-        allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
-        self._state = "RUNNING"
+        self._get_allocator().wake_up(tags)
 
     def discard(self, tags: tuple[str, ...]) -> None:
-        from vllm.device_allocator import get_mem_allocator_instance
-
-        allocator = get_mem_allocator_instance()
-        allocator.discard(tags)
-        self._state = "SUSPENDED"
-
-    @classmethod
-    def preserves_communicators(cls) -> bool:
-        # Comm identity/topology survive memory suspension; no reinit needed.
-        return True
+        self._get_allocator().discard(tags)
 
 
 class SleepModeBackendFactory:

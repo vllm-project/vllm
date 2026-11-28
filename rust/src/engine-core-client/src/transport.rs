@@ -724,10 +724,11 @@ pub async fn run_output_loop(
     loop {
         let message = match output_socket.recv().await {
             Ok(message) => message,
+            Err(error @ (ZmqError::Codec(_) | ZmqError::Network(_))) => {
+                warn!(error = %error.as_report(), "output peer connection failed");
+                continue;
+            }
             Err(error) => {
-                // If we fail to receive a message from the engine, it's likely that the engine
-                // has crashed or become unreachable, so we should notify the
-                // client and shut down the output loop.
                 error!(error = %error.as_report(), "failed to receive output message");
                 let _ = tx.send(Err(Error::Transport(error))).await;
                 return;
@@ -817,11 +818,50 @@ pub async fn run_input_watch_loop(
 #[cfg(test)]
 mod tests {
     use std::os::fd::IntoRawFd;
+    use std::time::Duration;
 
-    use zeromq::RouterSocket;
-    use zeromq::prelude::Socket;
+    use futures::StreamExt as _;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+    use zeromq::prelude::{Socket, SocketSend};
+    use zeromq::{PushSocket, RouterSocket, SocketEvent, ZmqMessage};
 
-    use super::{adopt_listener, bind_local_sockets};
+    use super::{ENGINE_CORE_DEAD_SENTINEL, adopt_listener, bind_local_sockets, run_output_loop};
+    use crate::Error;
+    use crate::test_utils::{reset_zmtp_stream, zmtp_handshake};
+
+    async fn next_disconnection(events: &mut super::SocketEventReceiver) {
+        timeout(Duration::from_secs(5), async {
+            while !matches!(events.next().await, Some(SocketEvent::Disconnected(_))) {}
+        })
+        .await
+        .expect("peer disconnection event");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_loop_continues_after_peer_connection_error() {
+        let mut output = zeromq::PullSocket::new();
+        let mut events = output.monitor();
+        let address = output.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+        let mut engine = PushSocket::new();
+        engine.connect(&address).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let output_task = tokio::spawn(run_output_loop(output, tx));
+        let reset_peer = tokio::task::spawn_blocking(move || {
+            let mut stream =
+                std::net::TcpStream::connect(address.strip_prefix("tcp://").unwrap()).unwrap();
+            zmtp_handshake(&mut stream, b"PUSH");
+            reset_zmtp_stream(stream);
+        });
+        reset_peer.await.unwrap();
+        next_disconnection(&mut events).await;
+
+        engine.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec())).await.unwrap();
+        let error = timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap().unwrap_err();
+        assert!(matches!(error, Error::EngineCoreDead), "{error:?}");
+        output_task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {

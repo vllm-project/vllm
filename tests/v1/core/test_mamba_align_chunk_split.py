@@ -15,15 +15,10 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-from vllm.model_executor.layers.mamba.checkpoint import (
-    compute_mamba_prefill_checkpoints,
-)
-from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import get_group_id, init_none_hash
+from vllm.v1.core.kv_cache_utils import init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
@@ -32,11 +27,9 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     is_mamba_prefill_checkpoint_valid,
 )
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
-from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests, mamba_layer, new_kv_cache_group
+from .utils import create_requests, new_kv_cache_group
 
 pytestmark = pytest.mark.cpu_test
 
@@ -117,7 +110,7 @@ def _make_hybrid_kv_cache_manager(
                         shapes=((1, 1),),
                         dtypes=(torch.float32,),
                     ),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                     num_speculative_blocks=NUM_SPEC,
                     num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
                     prefill_checkpoint_alignment=(
@@ -133,8 +126,6 @@ def _make_hybrid_kv_cache_manager(
         scheduler_block_size=MAMBA_BLOCK_SIZE,
         hash_block_size=ATTN_BLOCK_SIZE,
         enable_caching=True,
-        use_eagle=not num_hash_lookahead_tokens,
-        num_prefill_lookahead=num_hash_lookahead_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
@@ -142,20 +133,15 @@ def _make_hybrid_kv_cache_manager(
 def _split(
     request: Request,
     num_new_tokens: int,
-    use_eagle: bool = True,
-    use_eagle_block_drop: bool | None = None,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
-    if use_eagle_block_drop is None:
-        use_eagle_block_drop = use_eagle
     stub = SimpleNamespace(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
-        use_eagle_block_drop=use_eagle_block_drop,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -172,25 +158,24 @@ def _split(
 
 
 @pytest.mark.parametrize(
-    ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
+    ("prompt_len", "num_new_tokens", "lookahead", "expected"),
     [
-        (2002, 2002, False, 2002),
-        (3602, 2000, False, MAMBA_BLOCK_SIZE),
-        (3602, 3602, True, 3602),
-        (2002, 2002, True, 2002),
-        (3602, 512, True, 0),
-        (3602, 1700, True, MAMBA_BLOCK_SIZE),
+        (2002, 2002, 0, 2002),
+        (3602, 2000, 0, MAMBA_BLOCK_SIZE),
+        (3602, 3602, 1, 3602),
+        (3602, 512, 1, 0),
+        (3602, 1700, 1, MAMBA_BLOCK_SIZE),
     ],
 )
 def test_internal_checkpoint_split(
-    prompt_len: int, num_new_tokens: int, use_eagle: bool, expected: int
+    prompt_len: int, num_new_tokens: int, lookahead: int, expected: int
 ) -> None:
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
     assert (
         _split(
             request,
             num_new_tokens,
-            use_eagle=use_eagle,
+            num_hash_lookahead_tokens=lookahead,
             num_prefill_checkpoint_blocks=1,
         )
         == expected
@@ -209,138 +194,30 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
         _split(
             request,
             prompt_len - resume_at,
-            use_eagle=False,
             partial_hit=True,
         )
         == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
     )
 
-    # A hash-aligned resume inside a physical Mamba block cannot use the fixed
-    # internal-checkpoint column: it aliases the initial-state column. Enabling
-    # checkpoints must therefore preserve the normal aligned split.
+    # With checkpoint export, the checkpoint goes in the resumed column, whose
+    # state is read before the forward, so the rest of the prompt runs at once.
     assert (
         _split(
             request,
             prompt_len - resume_at,
-            use_eagle=False,
             partial_hit=True,
             num_prefill_checkpoint_blocks=1,
         )
-        == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
+        == prompt_len - resume_at
     )
 
 
-@pytest.mark.parametrize("internal", [False, True])
-def test_partial_checkpoint_resume_preserves_cached_state(internal: bool) -> None:
-    """A resumed prefill must not publish its old state under a later hash."""
-    block_size, hash_size, num_blocks = 64, 16, 128
-    config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", max_model_len=1024),
-        cache_config=CacheConfig(
-            block_size=block_size,
-            enable_prefix_caching=True,
-            mamba_cache_mode="align",
-        ),
-        scheduler_config=SchedulerConfig(
-            is_encoder_decoder=False,
-            max_model_len=1024,
-            max_num_batched_tokens=256,
-            max_num_seqs=1,
-            async_scheduling=False,
-            watermark=0.0,
-        ),
-    )
-    config.cache_config.num_gpu_blocks = num_blocks
-    cache = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            new_kv_cache_group(
-                ["attention"],
-                AttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            new_kv_cache_group(
-                ["state"],
-                mamba_layer(
-                    MambaSpec(
-                        block_size=block_size,
-                        shapes=((1,),),
-                        dtypes=(torch.float32,),
-                    ),
-                    mamba_cache_mode="align",
-                    num_speculative_blocks=0,
-                    num_prefill_checkpoint_blocks=int(internal),
-                    prefill_checkpoint_alignment=16 if internal else None,
-                ),
-            ),
-        ],
-    )
-    init_none_hash(sha256)
-    scheduler = Scheduler(
-        config, cache, StructuredOutputManager(config), block_size, hash_size
-    )
-    manager = scheduler.kv_cache_manager
-    state_at = torch.full((num_blocks,), -1, dtype=torch.int64)
-    copies = 0
-    for name, length in [("producer", 337), ("consumer", 512)]:
-        request = make_request(
-            name,
-            list(range(length)),
-            hash_size,
-            sha256,
-            sampling_params=SamplingParams(max_tokens=1),
-        )
-        if name == "consumer":
-            assert manager.get_computed_blocks(request)[1] == 336
-        scheduler.add_request(request)
-        while not request.is_finished():
-            output = scheduler.schedule()
-            assert output.num_scheduled_tokens[request.request_id] > 0
-            for copy in output.kv_cache_block_copies or []:
-                state_at[copy.dst_block_id] = state_at[copy.src_block_id]
-                copies += 1
-            count = output.num_scheduled_tokens[request.request_id]
-            end = request.num_computed_tokens
-            start = end - count
-            ids = manager.get_block_ids(request.request_id)[MAMBA_GROUP_ID]
-            state_at[ids[cdiv(end, block_size) - 1]] = end
-            if internal:
-                offsets, columns = compute_mamba_prefill_checkpoints(
-                    [end], [count], hash_size, block_size, 16, False, hash_size
-                )
-                if offsets[0]:
-                    state_at[ids[columns[0]]] = start + offsets[0]
-            for block in manager.block_pool.blocks:
-                if (
-                    block.block_hash is not None
-                    and get_group_id(block.block_hash) == MAMBA_GROUP_ID
-                ):
-                    assert (
-                        state_at[block.block_id].item() == block.block_hash_num_tokens
-                    )
-            scheduler.update_from_output(
-                output,
-                ModelRunnerOutput(
-                    req_ids=[request.request_id],
-                    sampled_token_ids=[[0]] if end == length else [[]],
-                ),
-            )
-    assert copies > 0
-
-
-def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
+def test_lookahead_keeps_the_trailing_cache_boundary() -> None:
     (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
-
-    with_drop = _split(request, request.num_tokens, use_eagle_block_drop=True)
-    without_drop = _split(request, request.num_tokens, use_eagle_block_drop=False)
-
-    assert with_drop == MAMBA_BLOCK_SIZE
-    assert without_drop == 2 * MAMBA_BLOCK_SIZE
+    assert (
+        _split(request, request.num_tokens, num_hash_lookahead_tokens=1)
+        == 2 * MAMBA_BLOCK_SIZE
+    )
 
 
 def _run_chunked_prefill(
@@ -411,23 +288,10 @@ def _prefill(prompt_len: int, budgets: list[int]) -> int:
     return _count_cached_boundary_states(manager, request, state_at)
 
 
-def test_fragmented_first_chunk_does_not_poison_mamba_prefix_cache() -> None:
-    """EAGLE zeroes `last_cache_position` for prompts under two blocks.
-
-    Past that point any chunk end used to be accepted, so a short first chunk
-    (concurrent prefills sharing the budget) left slot 0 at state@364 while the
-    next chunk crossed 1600 and published slot 0 as state@1600.
-    """
-    _prefill(PROMPT_LEN, budgets=[364, PROMPT_LEN])
-
-
 def test_fragmented_tail_chunk_does_not_poison_mamba_prefix_cache() -> None:
-    """Same poisoning one block in, where a hit is still cacheable.
-
-    `last_cache_position` is 1600, so the chunk ending there is cached. The next
-    chunk used to be free to stop mid-block (slot 1 at state@2600) and the one
-    after it crossed 3200, publishing slot 1 as state@3200.
-    """
+    """A sub-block fragment after a cached block boundary must not leave a
+    mid-block state (slot 1 at state@2600) that a later chunk publishes as
+    state@3200."""
     assert _prefill(3602, budgets=[1600, 1000, 3602]) > 0
 
 
@@ -454,7 +318,6 @@ def test_lookahead_split_caches_partial_tail_boundary(lookahead: int) -> None:
         manager,
         producer,
         budgets=[],
-        use_eagle_block_drop=False,
         partial_hit=True,
         num_hash_lookahead_tokens=lookahead,
     )
@@ -499,14 +362,14 @@ def test_poisoning_is_block_size_independent(
 @pytest.mark.parametrize("partial_hit", [False, True])
 @pytest.mark.parametrize("resume_at", [331, 1599, 1601, 2531, 3011])
 @pytest.mark.parametrize(
-    ("num_prefill_checkpoint_blocks", "use_eagle"),
-    [(0, True), (1, False)],
+    ("num_prefill_checkpoint_blocks", "lookahead"),
+    [(0, 1), (1, 0)],
 )
 def test_unaligned_resume_never_runs_past_its_block(
     partial_hit: bool,
     resume_at: int,
     num_prefill_checkpoint_blocks: int,
-    use_eagle: bool,
+    lookahead: int,
 ) -> None:
     """A prefill resuming mid-block must re-align before crossing a boundary.
 
@@ -516,12 +379,8 @@ def test_unaligned_resume_never_runs_past_its_block(
     """
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
-    # Under eagle the partial-tail stop sits one hash unit below the prompt's
-    # last hash boundary: eagle matches a unit past its candidate and drops it,
-    # so nothing proves that last boundary.
+    # The trailing hash boundary has finalized lookahead in this prompt.
     tail_stop = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
-    if use_eagle:
-        tail_stop -= ATTN_BLOCK_SIZE
 
     pos, ends = resume_at, []
     while pos < prompt_len:
@@ -529,7 +388,7 @@ def test_unaligned_resume_never_runs_past_its_block(
         num_new = _split(
             request,
             prompt_len - pos,
-            use_eagle=use_eagle,
+            num_hash_lookahead_tokens=lookahead,
             partial_hit=partial_hit,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         )
@@ -550,3 +409,21 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
         )
+
+
+@pytest.mark.parametrize("resume_at", [400, 1200, 1216])
+def test_junction_stop_is_floored_to_the_block_grid(resume_at: int) -> None:
+    """A mid-block resume whose chunk an internal checkpoint lets cross the
+    boundary must still stop at the block holding the junction's state."""
+    prompt_len = 3602
+    junction = MAMBA_BLOCK_SIZE + 1200
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+    request.shared_prefix_boundary = junction
+    num_new = _split(
+        request,
+        prompt_len - resume_at,
+        num_hash_lookahead_tokens=1,
+        num_prefill_checkpoint_blocks=1,
+    )
+    assert resume_at + num_new == junction // MAMBA_BLOCK_SIZE * MAMBA_BLOCK_SIZE

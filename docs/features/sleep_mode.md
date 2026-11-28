@@ -167,6 +167,25 @@ llm.wake_up()
 
 Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
 
+#### Free a KV connector's host memory
+
+Resetting the connector's cache does not return its host memory. A connector
+that keeps a CPU pool inside the vLLM process, such as `MooncakeStoreConnector`
+in its default `embedded` mode, holds that pool for as long as the engine runs,
+also while it sleeps. When a colocated trainer needs that memory, run the pool
+in its own process with Mooncake's `standalone-store` mode, and stop that
+process while the engine sleeps:
+
+1. Put the engine to sleep.
+2. Stop `mooncake_client`. vLLM keeps running.
+3. Start `mooncake_client` again, at the same address, before serving resumes.
+
+The KV cache held in the pool is lost, so later lookups miss and the prefixes
+are computed again. Each vLLM rank still keeps its Mooncake `local_buffer_size`
+buffer. See
+[MooncakeStoreConnector](mooncake_store_connector_usage.md#disk-offloading)
+for the `standalone-store` setup.
+
 #### Offloading CUDA graph memory
 
 By default, CUDA graph memory stays on the GPU while asleep. With
@@ -271,6 +290,27 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
+
+## Custom model loaders
+
+A custom `BaseModelLoader` can react to sleep and wake-up by overriding three optional methods. All keep today's behavior by default, so existing loaders are unaffected. For example, a loader that serves weights to other processes over RDMA directly from GPU memory must stop serving before that memory is freed.
+
+| Method | Called | Default |
+| --- | --- | --- |
+| `on_sleep(level)` | Before `Worker.sleep(level)` frees GPU memory. Pause anything that reads that memory. | No-op |
+| `on_wake_up(tags)` | After `Worker.wake_up(tags)` returns. | No-op |
+| `reload_model(vllm_config, model_config, model, *, is_checkpoint_format)` | From `reload_weights()`, when no weights are passed. | `get_all_weights()` + `model.load_weights()` |
+
+What the weights contain when `on_wake_up` runs for a wake-up that includes them (`tags` is `None` or contains `"weights"`) depends on the sleep level:
+
+| Sleep level | Weights in `on_wake_up` | When to resume |
+| --- | --- | --- |
+| 1 | Restored and valid | In `on_wake_up` |
+| 2 | Discarded; memory is re-allocated but empty | After `reload_model` completes |
+
+The hooks go to the loader instance that loaded the model, which records itself in `BaseModelLoader.load_model()`. A loader that overrides `load_model()` must call `bind_model_loader(model, self)` to receive them. When a loader overrides `reload_model`, `reload_weights()` reuses that same instance, so state kept across `on_sleep` and `on_wake_up` sees the reload. Loaders that keep the default get a fresh instance, as before.
+
+See the docstrings on `BaseModelLoader` for the exact contract.
 
 ## Limitation
 

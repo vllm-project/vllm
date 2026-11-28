@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import threading
 from collections import defaultdict
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
+    moriio_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConnectorMetadata,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
@@ -262,6 +269,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._completed_notification_owners = {}
     worker._pending_unmapped_acks = []
 
     assert worker.get_finished() == (set(), set())
@@ -463,6 +471,8 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     worker._has_mamba = has_mamba
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
 
     worker._record_failed_recv("req")
 
@@ -501,12 +511,13 @@ def test_step_barrier_awaits_every_read_before_forward():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
     worker._reads_issued_this_step = [attn, indexer, mtp_attn]
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._await_reads_issued_this_step()
     worker._await_reads_issued_this_step()
 
-    assert worker.moriio_wrapper.awaited == [[attn, indexer, mtp_attn]]
+    assert wrapper.awaited == [[attn, indexer, mtp_attn]]
     assert worker._reads_issued_this_step == []
 
 
@@ -518,7 +529,8 @@ def test_wait_for_layer_load_is_noop():
     connector = MoRIIOConnector.__new__(MoRIIOConnector)
     connector.connector_worker = _Boom()
 
-    assert connector.wait_for_layer_load("layer") is None
+    wait_for_layer_load: Callable[[str], object] = connector.wait_for_layer_load
+    assert wait_for_layer_load("layer") is None
 
 
 def test_step_barrier_without_mamba_does_not_raise_on_failure():
@@ -605,12 +617,14 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
         "b": {"layer0": [pending_b]},
     }
     worker._recving_transfers_callback_addr = {
-        "a": ("127.0.0.1", "7000", "tx-a"),
-        "b": ("127.0.0.1", "7000", "tx-b"),
+        "a": ("127.0.0.1", ("7000",), "tx-a"),
+        "b": ("127.0.0.1", ("7000",), "tx-b"),
     }
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
     return worker
 
 
@@ -689,11 +703,12 @@ def test_step_barrier_noop_when_no_reads_posted():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
     worker._reads_issued_this_step = []
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._await_reads_issued_this_step()
 
-    assert worker.moriio_wrapper.called is False
+    assert wrapper.called is False
 
 
 def test_write_mode_read_blocks_posts_no_read():
@@ -710,10 +725,11 @@ def test_write_mode_read_blocks_posts_no_read():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.mode = MoRIIOMode.WRITE
     worker._reads_issued_this_step = []
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._read_blocks(
-        local_block_ids=[1, 2],
+        local_block_ids=[[1, 2]],
         remote_block_ids=[[10, 11], [90]],
         dst_engine_id="prefill",
         request_id="req-write",
@@ -724,10 +740,62 @@ def test_write_mode_read_blocks_posts_no_read():
     )
 
     assert worker._reads_issued_this_step == []
-    assert worker.moriio_wrapper.sent == []
+    assert wrapper.sent == []
 
 
-def test_producer_start_load_kv_posts_no_read():
+class _RecordingStream:
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    def synchronize(self):
+        self.events.append("sync")
+
+
+@pytest.fixture
+def stream_events(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: _RecordingStream(events))
+    return events
+
+
+def _read_step_metadata(
+    order_reads_after_compute_stream: bool, *req_ids: str
+) -> MoRIIOConnectorMetadata:
+    metadata = MoRIIOConnectorMetadata()
+    for req_id in req_ids:
+        metadata.add_new_req(
+            request_id=req_id,
+            local_block_ids=[[1, 2]],
+            kv_transfer_params={
+                "transfer_id": f"tx-{req_id}",
+                "remote_engine_id": "prefill",
+                "remote_block_ids": [[10, 11]],
+                "remote_host": "127.0.0.1",
+                "remote_handshake_port": 6000,
+                "remote_notify_port": 6001,
+            },
+        )
+    metadata.order_reads_after_compute_stream = order_reads_after_compute_stream
+    return metadata
+
+
+def _consumer_worker(events: list[str], mode: MoRIIOMode) -> MoRIIOConnectorWorker:
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = False
+    worker.mode = mode
+    worker.moriio_config = SimpleNamespace(transfer_timeout=30.0)
+    worker._eager_handshaked_engines = {"127.0.0.1:6000"}
+    worker._remote_agents = {}
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+    worker._reqs_to_send = {}
+    worker._eager_handshake_all_dp_ranks = lambda metadata: None  # type: ignore[method-assign]
+    worker._read_blocks_for_req = lambda req_id, meta: events.append(f"read:{req_id}")  # type: ignore[method-assign]
+    worker._await_reads_issued_this_step = lambda: None  # type: ignore[method-assign]
+    return worker
+
+
+def test_producer_start_load_kv_posts_no_read(stream_events):
     class RecordingWrapper:
         def __init__(self):
             self.waited = False
@@ -743,17 +811,90 @@ def test_producer_start_load_kv_posts_no_read():
             pass
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.mode = MoRIIOMode.READ
     worker.is_producer = True
     worker._reads_issued_this_step = []
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
-    worker.moriio_wrapper = RecordingWrapper()
+    worker._completed_notification_owners = {}
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
-    worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
+    worker.start_load_kv(
+        SimpleNamespace(
+            transfer_id_to_request_id={}, order_reads_after_compute_stream=True
+        )
+    )
 
     assert worker._reads_issued_this_step == []
-    assert worker.moriio_wrapper.async_waited is True
-    assert worker.moriio_wrapper.waited is False
+    assert wrapper.async_waited is True
+    assert wrapper.waited is False
+    assert stream_events == []
+
+
+def test_read_step_waits_for_compute_stream_before_first_read(stream_events):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+
+    worker.start_load_kv(_read_step_metadata(True, "a", "b"))
+
+    assert stream_events == ["sync", "read:a", "read:b"]
+
+
+def test_read_step_without_stream_work_does_not_wait_for_compute_stream(
+    stream_events,
+):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+
+    worker.start_load_kv(_read_step_metadata(False, "a"))
+
+    assert stream_events == ["read:a"]
+
+
+def test_write_consumer_start_load_kv_does_not_wait_for_compute_stream(
+    stream_events,
+):
+    worker = _consumer_worker(stream_events, MoRIIOMode.WRITE)
+
+    worker.start_load_kv(_read_step_metadata(True, "a"))
+
+    assert stream_events == []
+
+
+def _failed_read_worker_meta(stream_events, dst_block_ids, unzeroed_block_ids):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+    worker._has_mamba = False
+    worker._recving_local_blocks = {"a": dst_block_ids}
+    worker._invalid_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
+    metadata = _read_step_metadata(False, "a")
+    metadata.unzeroed_read_block_ids = unzeroed_block_ids
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.connector_worker = worker
+
+    worker.start_load_kv(metadata)
+    worker._record_failed_recv("a")
+    return connector.build_connector_worker_meta(), connector
+
+
+def test_failed_read_returns_its_unzeroed_destinations_once(stream_events):
+    worker_meta, connector = _failed_read_worker_meta(
+        stream_events, [1, 2, 3], {2, 3, 9}
+    )
+
+    assert worker_meta is not None
+    assert isinstance(worker_meta, moriio_common.MoRIIOConnectorWorkerMetadata)
+    assert worker_meta.blocks_to_zero == {2, 3}
+    assert connector.build_connector_worker_meta() is None
+
+
+def test_unzeroed_destinations_of_every_rank_are_merged(stream_events):
+    first, _ = _failed_read_worker_meta(stream_events, [1, 2], {1, 2, 3})
+    second, _ = _failed_read_worker_meta(stream_events, [2, 3], {1, 2, 3})
+
+    assert first is not None and second is not None
+    merged = first.aggregate(second)
+    assert isinstance(merged, moriio_common.MoRIIOConnectorWorkerMetadata)
+    assert merged.blocks_to_zero == {1, 2, 3}
 
 
 def test_requested_cudagraph_mode_is_never_overridden():

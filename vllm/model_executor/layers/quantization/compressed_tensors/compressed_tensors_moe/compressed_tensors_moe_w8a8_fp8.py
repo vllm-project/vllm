@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 
 import torch
 from compressed_tensors.quantization import (
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequantize_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape_moe,
@@ -98,6 +100,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             ),
         }
         weight_key = ct2vllm_weight[self.weight_quant.strategy]
+        self.weight_quant_key = weight_key
         if weight_key == kFp8Static128BlockSym:
             activation_key = kFp8Dynamic128Sym
         else:
@@ -254,6 +257,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            weight_key=self.weight_quant_key,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.weight_block_size,
+            static_input_scales=self.static_input_scales,
+            out_dtype=layer.orig_dtype,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
@@ -304,6 +324,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            experts_cls=self.experts_cls,
         )
 
         # Replace parameters with updated versions. Note that this helper
