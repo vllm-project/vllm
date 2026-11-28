@@ -553,6 +553,37 @@ def test_encoder_cache_size_rejects_non_positive_values():
         _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size=0)
 
 
+def test_multi_modal_budget_propagates_exception_when_sizing_requires_dummy_inputs():
+    """If dummy inputs are required for encoder sizing (no static token limits)
+    and get_dummy_mm_inputs raises, MultiModalBudget must propagate the exception
+    rather than silently falling back to a zero encoder budget."""
+    from unittest.mock import MagicMock
+
+    from vllm.config import VllmConfig
+    from vllm.multimodal.encoder_budget import MultiModalBudget
+
+    mock_vllm_config = MagicMock(spec=VllmConfig)
+    mock_vllm_config.model_config.max_model_len = 2048
+    mock_vllm_config.model_config.is_encoder_decoder = False
+    mock_vllm_config.model_config.get_multimodal_config.return_value = None
+    mock_vllm_config.scheduler_config.max_num_seqs = 16
+    mock_vllm_config.scheduler_config.disable_chunked_mm_input = False
+
+    mock_registry = MagicMock()
+    mock_processor = MagicMock()
+    mock_processor.info.supported_mm_limits = {"image": 1}
+    mock_processor.info.allowed_mm_limits = {"image": 1}
+    # No static token limits: dummy inputs are required for sizing
+    mock_processor.info.get_mm_max_tokens_per_item.return_value = None
+    mock_processor.get_dummy_mm_inputs.side_effect = RuntimeError(
+        "Dummy input generation failed for sizing"
+    )
+    mock_registry.create_processor.return_value = mock_processor
+
+    with pytest.raises(RuntimeError, match="Dummy input generation failed for sizing"):
+        MultiModalBudget(mock_vllm_config, mock_registry, enable_cache=False)
+
+
 def test_capacity_decides_whether_reuse_survives_another_request():
     """One item's encoder output is reusable by a later request only while it fits."""
     req_a = MockRequest("r1", ["imgA"], [4])

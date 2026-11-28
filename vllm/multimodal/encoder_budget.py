@@ -22,6 +22,7 @@ def get_mm_max_toks_per_item(
     processor: BaseMultiModalProcessor,
     mm_counts: Mapping[str, int],
     cache: BaseMultiModalProcessorCache | None,
+    dummy_mm_inputs: Mapping[str, object] | None = None,
 ) -> Mapping[str, int]:
     """Get the maximum number of tokens per data item from each modality based
     on underlying model configuration.
@@ -33,11 +34,12 @@ def get_mm_max_toks_per_item(
     if max_tokens_per_item is not None:
         return max_tokens_per_item
 
-    mm_inputs = processor.get_dummy_mm_inputs(mm_counts, cache=cache)
+    if dummy_mm_inputs is None:
+        dummy_mm_inputs = processor.get_dummy_mm_inputs(mm_counts, cache=cache)
 
     return {
         modality: sum(item.get_num_embeds() for item in placeholders)
-        for modality, placeholders in mm_inputs["mm_placeholders"].items()
+        for modality, placeholders in dummy_mm_inputs["mm_placeholders"].items()
     }
 
 
@@ -88,12 +90,37 @@ class MultiModalBudget:
             }
 
             active_modalities = tower_modalities | embed_only_modalities
+            mm_counts = dict.fromkeys(active_modalities, 1)
 
-            all_mm_max_toks_per_item = get_mm_max_toks_per_item(
-                processor,
-                cache=cache,
-                mm_counts=dict.fromkeys(active_modalities, 1),
+            # Check if model supplies token limits directly without dummy inputs.
+            max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
+                seq_len=processor.info.ctx.model_config.max_model_len,
+                mm_counts=mm_counts,
             )
+
+            dummy_mm_inputs = None
+            if max_tokens_per_item is None:
+                # Dummy inputs are required for encoder sizing.
+                # Must propagate any exception if generation fails so that startup
+                # fails fast rather than silently creating a zero encoder budget.
+                dummy_mm_inputs = processor.get_dummy_mm_inputs(mm_counts, cache=cache)
+                all_mm_max_toks_per_item = {
+                    modality: sum(item.get_num_embeds() for item in placeholders)
+                    for modality, placeholders in dummy_mm_inputs[
+                        "mm_placeholders"
+                    ].items()
+                }
+            else:
+                all_mm_max_toks_per_item = max_tokens_per_item
+
+            all_mm_max_placeholder_spans = None
+            if dummy_mm_inputs is not None and "mm_placeholders" in dummy_mm_inputs:
+                all_mm_max_placeholder_spans = {
+                    modality: sum(item.length for item in placeholders)
+                    for modality, placeholders in dummy_mm_inputs[
+                        "mm_placeholders"
+                    ].items()
+                }
 
         if embed_only_modalities:
             logger.info_once(
@@ -110,6 +137,16 @@ class MultiModalBudget:
             for modality in active_modalities
             if modality in all_mm_max_toks_per_item
         }
+        active_mm_max_placeholder_spans = (
+            {
+                modality: all_mm_max_placeholder_spans[modality]
+                for modality in active_modalities
+                if modality in all_mm_max_placeholder_spans
+            }
+            if all_mm_max_placeholder_spans is not None
+            else None
+        )
+        self.mm_max_placeholder_spans = active_mm_max_placeholder_spans
         tower_mm_max_toks_per_item = {
             modality: active_mm_max_toks_per_item[modality]
             for modality in tower_modalities

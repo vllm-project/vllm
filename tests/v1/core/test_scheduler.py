@@ -2090,6 +2090,258 @@ def test_no_mm_input_chunking_after_prefix_cache_hit_inside_item():
     assert step() == {"primer": 1, "text": 1, "hit": 78}
 
 
+def test_no_mm_input_chunking_placeholder_span_exceeds_budget():
+    """A request whose multimodal placeholder span exceeds max_num_batched_tokens
+    with disable_chunked_mm_input=True must be finished with an error rather
+    than hanging indefinitely in an infinite 0-token scheduling loop."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    mm_positions = [[PlaceholderRange(offset=0, length=1100)]]
+    requests = create_requests(
+        num_requests=1, num_tokens=1200, mm_positions=mm_positions
+    )
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+    assert output.scheduled_cached_reqs.num_reqs == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+    assert requests[0].request_id not in scheduler.waiting
+    assert requests[0].request_id not in scheduler.requests
+    err = engine_outputs[0].outputs[0].error
+    assert err is not None
+    assert err.code == "validation_error"
+    assert "exceeds max_num_batched_tokens" in err.message
+
+    output2 = scheduler.schedule()
+    assert requests[0].request_id in output2.finished_req_ids
+
+
+def test_no_mm_input_chunking_placeholder_span_exceeds_budget_with_text_prefix():
+    """A request with pre-prompt text followed by a multimodal item whose span
+    exceeds max_num_batched_tokens must also be rejected with error rather than
+    scheduling pre-prompt text and then deadlocking."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    mm_positions = [[PlaceholderRange(offset=200, length=1100)]]
+    requests = create_requests(
+        num_requests=1, num_tokens=1400, mm_positions=mm_positions
+    )
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+    assert requests[0].request_id not in scheduler.waiting
+    assert requests[0].request_id not in scheduler.requests
+    err = engine_outputs[0].outputs[0].error
+    assert err is not None
+    assert err.code == "validation_error"
+    assert "exceeds max_num_batched_tokens" in err.message
+
+    output2 = scheduler.schedule()
+    assert requests[0].request_id in output2.finished_req_ids
+
+
+def test_no_mm_input_chunking_rejection_in_try_schedule_encoder_inputs():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    mm_positions = [[PlaceholderRange(offset=0, length=1200)]]
+    request = create_requests(
+        num_requests=1, num_tokens=1300, mm_positions=mm_positions
+    )[0]
+    result = scheduler._try_schedule_encoder_inputs(
+        request,
+        num_computed_tokens=0,
+        num_new_tokens=1024,
+        encoder_compute_budget=100_000,
+    )
+    assert result[1] == 0
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id in scheduler.request_errors
+    assert scheduler.request_errors[request.request_id].code == "validation_error"
+
+
+def test_no_mm_input_chunking_placeholder_span_exceeds_max_num_scheduled_tokens():
+    """When max_num_scheduled_tokens is explicitly set lower than
+    max_num_batched_tokens, the error message should specifically report
+    max_num_scheduled_tokens."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    scheduler.scheduler_config.max_num_scheduled_tokens = 1024
+    scheduler.max_num_scheduled_tokens = 1024
+
+    mm_positions = [[PlaceholderRange(offset=0, length=1100)]]
+    requests = create_requests(
+        num_requests=1, num_tokens=1200, mm_positions=mm_positions
+    )
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+    err = engine_outputs[0].outputs[0].error
+    assert err is not None
+    assert err.code == "validation_error"
+    assert "exceeds max_num_scheduled_tokens (1024)" in err.message
+
+
+def test_no_mm_input_chunking_placeholder_span_exceeds_max_num_batched_tokens_binding():
+    """When max_num_batched_tokens is the binding ceiling (lower than
+    max_num_scheduled_tokens), an item larger than max_num_batched_tokens
+    must be rejected even though it fits within max_num_scheduled_tokens."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1000,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    scheduler.scheduler_config.max_num_scheduled_tokens = 2048
+    scheduler.max_num_scheduled_tokens = 2048
+
+    # Placeholder length 1100 < max_num_scheduled_tokens (2048),
+    # but > max_num_batched_tokens (1000).
+    mm_positions = [[PlaceholderRange(offset=0, length=1100)]]
+    requests = create_requests(
+        num_requests=1, num_tokens=1200, mm_positions=mm_positions
+    )
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+    err = engine_outputs[0].outputs[0].error
+    assert err is not None
+    assert err.code == "validation_error"
+    assert "exceeds max_num_batched_tokens (1000)" in err.message
+
+
+def test_no_mm_input_chunking_placeholder_span_exceeds_draft_slots_budget():
+    """When speculative decoding reserves draft slots, the effective per-request
+    batch budget is reduced by draft_slots and must reject spans exceeding it."""
+    from unittest.mock import MagicMock
+
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1100,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    scheduler.scheduler_config.max_num_scheduled_tokens = 2048
+    scheduler.max_num_scheduled_tokens = 2048
+
+    # Mock speculative config reserving 5 draft slots -> limit becomes 1095
+    mock_spec = MagicMock()
+    mock_spec.max_num_new_slots_for_drafting = 5
+    scheduler.vllm_config.speculative_config = mock_spec
+
+    mm_positions = [[PlaceholderRange(offset=0, length=1100)]]
+    requests = create_requests(
+        num_requests=1, num_tokens=1200, mm_positions=mm_positions
+    )
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+    err = engine_outputs[0].outputs[0].error
+    assert err is not None
+    assert err.code == "validation_error"
+    assert "exceeds max_num_batched_tokens minus draft slots (1095)" in err.message
+
+
+def test_scheduler_startup_warns_on_oversized_placeholder_spans(caplog):
+    """Scheduler startup logs a warning when profiled placeholder spans exceed
+    the maximum per-request token budget."""
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    base_scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    # LLaVA image placeholder span is 576 tokens. Configure
+    # max_num_scheduled_tokens = 500 so the span exceeds the per-request budget
+    # while batch tokens (1024) allows startup.
+    vllm_config = base_scheduler.vllm_config
+    vllm_config.scheduler_config.max_num_scheduled_tokens = 500
+
+    with caplog.at_level("WARNING"):
+        Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=base_scheduler.kv_cache_config,
+            structured_output_manager=base_scheduler.structured_output_manager,
+            block_size=base_scheduler.cache_config.block_size,
+        )
+
+    assert (
+        "maximum profiled placeholder span (576) exceeds max_num_scheduled_tokens (500)"
+        in caplog.text
+    )
+
+
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.
