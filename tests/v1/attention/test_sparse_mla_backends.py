@@ -4693,6 +4693,7 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
     not current_platform.is_device_capability_family(90),
     reason="FlashAttention MLA requires Hopper",
 )
+@pytest.mark.parametrize("packed_q", [False, True])
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("block_stride_rows", [64, 128])
 @pytest.mark.parametrize(
@@ -4715,6 +4716,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
     num_layers,
     block_stride_rows,
     use_cuda_graph,
+    packed_q,
 ):
     """Reuse must preserve attention outputs as requests and pages change."""
     device = torch.device(DEVICE_TYPE)
@@ -4739,6 +4741,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
     )
     q_nope = torch.randn(num_tokens, 8, 512, dtype=torch.bfloat16, device=device)
     q_rope = torch.randn(num_tokens, 8, 64, dtype=torch.bfloat16, device=device)
+    q = torch.cat((q_nope, q_rope), dim=-1) if packed_q else (q_nope, q_rope)
     caches = torch.randn(
         num_layers,
         2 * blocks_per_req,
@@ -4770,7 +4773,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
     def run():
         impls[0].record_logical_topk_ready()
         return [
-            impl.forward_mqa((q_nope, q_rope), cache, metadata, None)[0]
+            impl.forward_mqa(q, cache, metadata, None)[0]
             for impl, cache in zip(impls, caches)
         ]
 
