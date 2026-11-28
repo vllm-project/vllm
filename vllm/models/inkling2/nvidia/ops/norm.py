@@ -33,8 +33,13 @@ def _rms_norm_kernel(
     N: tl.constexpr,
     eps,
     BLOCK: tl.constexpr,
+    STREAM_WEIGHT_STRIDE: tl.constexpr = None,
 ):
     row = tl.program_id(0).to(tl.int64)
+    if STREAM_WEIGHT_STRIDE is not None:
+        stream = tl.program_id(1).to(tl.int64)
+        row += stream * tl.num_programs(0)
+        W += stream * STREAM_WEIGHT_STRIDE
     cols = tl.arange(0, BLOCK)
     mask = cols < N
     x = tl.load(X + row * stride_x + cols, mask, other=0).to(tl.float32)
@@ -50,14 +55,21 @@ def rms_norm(
     eps: float,
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """RMSNorm over the last dim of a row-major (possibly row-strided) tensor."""
+    """RMSNorm over the last dim, optionally with a weight per stream of a 3D input."""
     n = x.shape[-1]
     assert x.stride(-1) == 1
     x2d = x if x.dim() == 2 else x.reshape(-1, n)
     out = torch.empty(x.shape, dtype=out_dtype or x.dtype, device=x.device)
     if x2d.shape[0]:
         block = triton.next_power_of_2(n)
-        _rms_norm_kernel[(x2d.shape[0],)](
+        grid: tuple[int, ...] = (x2d.shape[0],)
+        stream_weight_stride = None
+        if weight.ndim == 2:
+            assert x.ndim == 3 and weight.shape == (x.shape[0], n)
+            assert weight.stride(1) == 1
+            grid = (x.shape[1], x.shape[0])
+            stream_weight_stride = weight.stride(0)
+        _rms_norm_kernel[grid](
             x2d,
             weight,
             out,
@@ -65,7 +77,9 @@ def rms_norm(
             n,
             eps,
             BLOCK=block,
+            STREAM_WEIGHT_STRIDE=stream_weight_stride,
             num_warps=min(max(block // 512, 1), 16),
+            enable_fp_fusion=stream_weight_stride is None,
         )
     return out
 

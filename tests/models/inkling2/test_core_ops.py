@@ -292,6 +292,37 @@ def test_loop_blend_matches_per_stream_controllers(tokens):
         torch.testing.assert_close(out[s].float(), ref.float(), atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(120), reason="SM120 prefill controller"
+)
+@pytest.mark.parametrize(
+    "tokens,streams,broadcast", [(769, 1, False), (1025, 3, True), (2051, 3, False)]
+)
+def test_prefill_controller_matches_bmm_and_blend(tokens, streams, broadcast):
+    from vllm.models.inkling2.nvidia.ops.loop import (
+        blend_rms_norm,
+        project_blend_rms_norm,
+    )
+
+    torch.manual_seed(0)
+    dim, rank = 2304, 64
+    source_streams = 1 if broadcast else streams
+    dest = torch.randn(source_streams, tokens, dim, device=DEVICE).expand(
+        streams, -1, -1
+    )
+    message = torch.randn(streams, tokens, dim, device=DEVICE)
+    norm = (
+        torch.randn(source_streams, dim, device=DEVICE).bfloat16().expand(streams, -1)
+    )
+    hidden = torch.randn(streams, tokens, rank, device=DEVICE).bfloat16()
+    up = (torch.randn(streams, 2 * dim, rank, device=DEVICE) * 0.08).bfloat16()
+
+    gates = torch.bmm(hidden, up.transpose(1, 2), out_dtype=torch.float32)
+    expected = blend_rms_norm(dest, message, gates, norm, 1e-6)
+    actual = project_blend_rms_norm(dest, message, hidden, up, norm, 1e-6)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _dense_conv(x, weight, dyn):
     """Torch reference over whole sequences; x: (L, C)."""
     width = weight.shape[0] if dyn is not None else weight.shape[1]
