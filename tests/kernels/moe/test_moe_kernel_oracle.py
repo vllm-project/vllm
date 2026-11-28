@@ -72,6 +72,8 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     Mxfp4MoEKernelOracle,
     make_mxfp4_moe_kernel,
+    map_mxfp4_backend,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     _BACKEND_NAME_MAP,
@@ -159,6 +161,12 @@ SELECT_CASES = {
         map_w4a8_int8_backend,
         "cpu",
         "W4A8 Int8",
+    ),
+    "mxfp4": (
+        lambda cfg: select_mxfp4_moe_backend(cfg, None),
+        lambda b: map_mxfp4_backend(b)[0],
+        "triton",
+        "MXFP4",
     ),
 }
 
@@ -830,6 +838,33 @@ def test_make_kernel_delegates() -> None:
         moe_config,
         UnquantizedMoeBackend.TRITON,
         TritonExperts,
+        None,  # routing_tables default
+    )
+    assert built_kernel is sentinel_kernel
+
+
+def test_mxfp4_make_kernel_delegates() -> None:
+    """`Mxfp4MoEKernelOracle.make_kernel` delegates to the module fn."""
+    quant_config = object()
+    moe_config = object()
+    sentinel_kernel = object()
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4."
+        "make_mxfp4_moe_kernel",
+        return_value=sentinel_kernel,
+    ) as mocked:
+        built_kernel = Mxfp4MoEKernelOracle(make_dummy_moe_config()).make_kernel(
+            quant_config,
+            moe_config,
+            Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+            TritonExperts,
+        )
+
+    mocked.assert_called_once_with(
+        quant_config,
+        moe_config,
+        TritonExperts,
+        Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
         None,  # routing_tables default
     )
     assert built_kernel is sentinel_kernel

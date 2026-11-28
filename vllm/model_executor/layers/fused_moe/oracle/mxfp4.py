@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 
@@ -598,15 +598,112 @@ def _warn_on_bf16_fallback(
 
 
 class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
-    """MXFP4 MoE backend selection for one deployment configuration."""
+    """Class-based view of the MXFP4 MoE kernel oracle.
+
+    Each method delegates to its module-level counterpart so that
+    instantiating and calling this class is bit-identical to calling
+    the standalone functions.
+    """
 
     name = "Mxfp4"
     placeholder_backend = Mxfp4MoeBackend.NONE
+
+    def backend_enum_cls(self) -> type[Mxfp4MoeBackend]:
+        return Mxfp4MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[Mxfp4MoeBackend]:
+        return _get_priority_backends_for_gpt_oss()
 
     def backend_to_kernel_cls(
         self, backend: Mxfp4MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> Mxfp4MoeBackend:
+        backends = map_mxfp4_backend(runner_backend)
+        return backends[0]
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_mxfp4_moe_backend(
+            moe_config, activation_key=activation_key
+        )
+
+    def select_deepseek_v4_backend(
+        self,
+        moe_config: FusedMoEConfig,
+    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_deepseek_v4_mxfp4_moe_backend(moe_config)
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: Mxfp4MoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_mxfp4_moe_kernel(
+            quant_config, moe_config, experts_cls, backend, routing_tables
+        )
+
+    def convert_to_kernel_format(
+        self,
+        backend: Mxfp4MoeBackend,
+        moe_config: FusedMoEConfig,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        layer: torch.nn.Module | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if layer is not None:
+            converted = convert_weight_to_mxfp4_moe_kernel_format(
+                backend,
+                layer,
+                w13_weight,
+                w2_weight,
+                getattr(layer, "w13_weight_scale", None),
+                getattr(layer, "w2_weight_scale", None),
+                getattr(layer, "w13_bias", None),
+                getattr(layer, "w2_bias", None),
+                **kwargs,
+            )
+            return converted[0], converted[1]
+        return w13_weight, w2_weight
+
+    def make_quant_config(
+        self,
+        backend: Mxfp4MoeBackend,
+        w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+        w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+        gemm1_alpha: float | None = None,
+        gemm1_beta: float | None = None,
+        swiglu_limit: float | None = None,
+        w1_bias: torch.Tensor | None = None,
+        w2_bias: torch.Tensor | None = None,
+        a1_scale: torch.Tensor | None = None,
+        a2_scale: torch.Tensor | None = None,
+        layer: "RoutedExperts | None" = None,
+    ) -> FusedMoEQuantConfig | None:
+        return make_mxfp4_moe_quant_config(
+            backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            swiglu_limit=swiglu_limit,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            layer=layer,
+        )
 
 
 def _requested_kernel_cls(
