@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
@@ -52,6 +54,27 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
     manager_config = layer_config.manager_config
     assert isinstance(manager_config.params, MambaManager.Params)
     assert manager_config.params.num_speculative_blocks == expected_blocks
+
+
+@pytest.mark.parametrize(
+    ("use_replayssm", "backend", "expected"),
+    [
+        (False, MambaBackendEnum.TRITON, True),
+        (True, MambaBackendEnum.TRITON, True),
+        (True, MambaBackendEnum.FLASHINFER, False),
+    ],
+)
+def test_mamba2_adaptive_verification_with_replayssm(use_replayssm, backend, expected):
+    """Triton ReplaySSM reads device query offsets, so adaptive verification can
+    trim its batches; FlashInfer ReplaySSM's uniform-batch view reads host counts."""
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(use_replayssm=use_replayssm),
+        mamba_config=MambaConfig(backend=backend),
+    )
+    with set_current_vllm_config(vllm_config):
+        assert (
+            Mamba2AttentionBackend.supports_device_cpu_query_lens_mismatch() is expected
+        )
 
 
 @pytest.mark.parametrize(

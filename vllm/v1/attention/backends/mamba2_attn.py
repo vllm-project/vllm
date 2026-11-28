@@ -107,11 +107,12 @@ class Mamba2AttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Decode kernels take device offsets; ReplaySSM plans off CPU counts.
+        # Decode kernels take device offsets. FlashInfer ReplaySSM still picks a
+        # uniform-batch view from host token counts.
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return True
-        return not vllm_config.cache_config.use_replayssm
+        return not vllm_config.use_flashinfer_replayssm
 
 
 @dataclass
