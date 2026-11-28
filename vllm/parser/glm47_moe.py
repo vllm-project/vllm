@@ -53,27 +53,30 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
-_VALUE_START_RE = re.compile(r"\s*" + re.escape(ARG_VALUE_START))
+_KEY_CLOSE_TAIL_RE = re.compile(r"\s*+(?:" + re.escape(ARG_KEY_END) + r"\s*+)*+")
 
 
 def _find_arg(text: str, pos: int) -> tuple[int, int, int] | None:
     """Locate the first argument whose key starts at or after `pos`.
 
-    Returns the start and end of the key and the start of the value. The key
-    runs to the first `</arg_key>` that is followed by `<arg_value>`. When
-    the first `<arg_key>` has no such end, no later one has either, so each
-    call scans the text once.
+    Returns `(key_start, key_end, value_start)`. The key cannot cross
+    `<arg_key>` or `</arg_key>`, and repeated `</arg_key>` tags (with
+    optional whitespace) before `<arg_value>` are skipped so stray tags
+    never leak into the key. Scans the text in linear time.
     """
-    start = text.find(ARG_KEY_START, pos)
-    if start < 0:
-        return None
-    key_start = start + len(ARG_KEY_START)
-    key_end = text.find(ARG_KEY_END, key_start)
-    while key_end >= 0:
-        value_start = _VALUE_START_RE.match(text, key_end + len(ARG_KEY_END))
-        if value_start is not None:
-            return key_start, key_end, value_start.end()
-        key_end = text.find(ARG_KEY_END, key_end + 1)
+    while (start := text.find(ARG_KEY_START, pos)) >= 0:
+        key_start = start + len(ARG_KEY_START)
+        key_end = text.find(ARG_KEY_END, key_start)
+        if key_end < 0:
+            return None
+        last_open = text.rfind(ARG_KEY_START, key_start, key_end)
+        if last_open >= 0:
+            key_start = last_open + len(ARG_KEY_START)
+        tail = _KEY_CLOSE_TAIL_RE.match(text, key_end + len(ARG_KEY_END))
+        after = tail.end() if tail is not None else key_end + len(ARG_KEY_END)
+        if text.startswith(ARG_VALUE_START, after):
+            return key_start, key_end, after + len(ARG_VALUE_START)
+        pos = after
     return None
 
 
