@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -23,6 +25,9 @@ from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.encoder_runner import EncoderRunner
 from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.model_states.default import DefaultModelState
+from vllm.v1.worker.cpu.model_states.encoder_decoder import (
+    EncoderDecoderModelState,
+)
 from vllm.v1.worker.cpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.cpu.states import CPURequestState
 
@@ -335,3 +340,37 @@ def test_encoder_timing_stats_registry() -> None:
     assert stats["req0"]["num_encoder_calls"] == 2
     assert stats["req0"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}
+
+
+def test_encoder_decoder_state_reuses_encoder_output_across_requests() -> None:
+    """A request whose audio is already encoded still gets that output on prefill."""
+    model = _EncoderModel()
+    cache = EncoderCache()
+    feature = _feature("audio", offset=0, length=1, modality="audio", data=_item(7))
+    cache.add_request("first", [feature])
+    cache.add_request("second", [feature])
+    state = EncoderDecoderModelState.__new__(EncoderDecoderModelState)
+    state.encoder_cache = cache
+    state.encoder_runner = EncoderRunner(
+        model=model,
+        max_num_tokens=64,
+        hidden_size=HIDDEN_SIZE,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    batch = SimpleNamespace(req_ids=["first"], num_computed_tokens_np=np.array([0]))
+    state.prepare_inputs_embeds({"first": [0]}, batch, None)
+    first_outputs = state.prepare_inputs(batch, None)["encoder_outputs"]
+
+    # On a cache hit the scheduler schedules no encoder input for the request.
+    batch = SimpleNamespace(
+        req_ids=["first", "second"], num_computed_tokens_np=np.array([4, 0])
+    )
+    state.prepare_inputs_embeds({}, batch, None)
+    second_outputs = state.prepare_inputs(batch, None)["encoder_outputs"]
+
+    assert model.batches == [[7]]
+    assert len(second_outputs) == 1
+    assert second_outputs[0] is first_outputs[0]

@@ -1130,9 +1130,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
-        skip_compiled = bool(
-            self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs
-        )
+        # Prefill writes cross-attention K/V from dynamic encoder outputs, also
+        # when those outputs come from the encoder cache.
+        skip_compiled = self.is_encoder_decoder and input_batch.has_prefill
         batch_descriptor = BatchDescriptor(
             num_tokens=input_batch.num_tokens_after_padding,
             num_active_loras=num_active_loras,
