@@ -15,6 +15,7 @@ const STEP5_CONFIG: QwenCoderConfig = QwenCoderConfig {
     next_tool_call_start: "<tool_call>",
     tool_call_end: "</tool_call>",
     trim_parameter_newlines: true,
+    allow_json_tool_body: false,
 };
 
 /// Step-5 uses Qwen Coder's inner XML grammar with bare tool-call boundaries.
@@ -53,7 +54,7 @@ mod tests {
 
     use super::*;
     use crate::tool::ToolParserTestExt as _;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
 
     #[test]
@@ -101,5 +102,18 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn step5_rejects_hermes_json_tool_body() {
+        let mut parser = Step5ToolParser::create(&test_tools(), test_tokenizer()).unwrap();
+
+        assert!(
+            parser
+                .parse_complete(
+                    "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+                )
+                .is_err()
+        );
     }
 }
