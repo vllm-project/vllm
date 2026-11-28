@@ -235,8 +235,10 @@ def init_attn_backend(
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
-        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
+        group_map: dict[
+            tuple[tuple[str, str], KVCacheSpec, int, bool], AttentionGroup
+        ] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec, int, bool]] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -257,12 +259,25 @@ def init_attn_backend(
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders.
+            # metadata builders, and on whether they take multimodal PrefixLM
+            # ranges, which are given per metadata.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
-            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
+            mm_prefix_ranges = getattr(
+                attn_layers[layer_name], "applies_mm_prefix_ranges", True
+            )
+            key = (
+                attn_backend.full_cls_name(),
+                layer_kv_cache_spec,
+                num_heads_q,
+                mm_prefix_ranges,
+            )
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
+                    attn_backend,
+                    [layer_name],
+                    layer_kv_cache_spec,
+                    kv_cache_group_id,
+                    applies_mm_prefix_ranges=mm_prefix_ranges,
                 )
                 group_order.append(key)
             else:

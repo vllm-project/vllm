@@ -281,6 +281,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         mm_prefix_clamp_sliding_window: bool = False,
+        mm_prefix_ranges: bool = True,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         query_pre_quantized: bool = False,
@@ -500,6 +501,9 @@ class Attention(nn.Module, AttentionLayerBase):
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
+        # Whether this layer applies the multimodal PrefixLM ranges of a
+        # PrefixLM model; its attention group's metadata omits them if not.
+        self.applies_mm_prefix_ranges = mm_prefix_ranges
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache

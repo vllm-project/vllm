@@ -1004,8 +1004,7 @@ class FlashInferMetadata:
     """
 
     # Per scheduled token, the [start, end] of its bidirectional range or
-    # (-1, -1); set only when the batch has ranges. Gemma4 clears it for its
-    # full-attention groups at forward time, so forward() reads it there.
+    # (-1, -1); set only when the group's metadata has ranges.
     mm_prefix_query_range_tensor: torch.Tensor | None = None
     # mm-prefix wrapper planned beside the causal prefill path.
     mm_wrapper: BatchPrefillWithCausalBidirectionalRangesWrapper | None = None
@@ -2720,8 +2719,7 @@ class FlashInferImpl(AttentionImpl):
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
 
-            # Chosen at forward time: Gemma4 clears the ranges for its
-            # full-attention groups after the metadata is built.
+            # The mm-prefix wrapper runs only when the metadata has ranges.
             mm_wrapper = (
                 attn_metadata.mm_wrapper
                 if attn_metadata.mm_prefix_query_range_tensor is not None

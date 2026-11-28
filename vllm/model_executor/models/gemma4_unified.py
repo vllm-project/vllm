@@ -11,8 +11,8 @@ multimodal embedder.
 
 This module subclasses Gemma4ForConditionalGeneration from gemma4_mm rather
 than reimplementing it from scratch.  Only the multimodal pipeline differs;
-the language model, MTP integration, bidirectional attention helpers,
-embedding/forward path, and LoRA support are all inherited unchanged.
+the language model, MTP integration, embedding/forward path, and LoRA
+support are all inherited unchanged.
 """
 
 import math
@@ -243,9 +243,9 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
 class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
     """Encoder-free Gemma4 (Unified) for conditional generation.
 
-    Inherits multimodal embedding routing, PLE handling, bidirectional
-    attention helpers, language-model forward, LoRA, and pipeline-parallel
-    support from `Gemma4ForConditionalGeneration`.  Overrides only:
+    Inherits multimodal embedding routing, PLE handling, language-model
+    forward, LoRA, and pipeline-parallel support from
+    `Gemma4ForConditionalGeneration`.  Overrides only:
 
       * `__init__` — builds the encoder-free vision embedder instead of
         SigLIP/audio towers (LightOnOCR-style: `nn.Module.__init__` +
@@ -341,16 +341,6 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        # --- Precompute full-attention layer indices for bidi clearing ---
-        self._full_attn_layer_idxs: frozenset[int] = frozenset()
-        text_config = config.text_config
-        if getattr(text_config, "use_bidirectional_attention", None) == "vision":
-            layer_types = getattr(text_config, "layer_types", None)
-            if layer_types:
-                self._full_attn_layer_idxs = frozenset(
-                    i for i, lt in enumerate(layer_types) if lt != "sliding_attention"
-                )
 
         # --- MixtureOfExperts delegation to language_model ---
         self.moe_layers = self.language_model.moe_layers
