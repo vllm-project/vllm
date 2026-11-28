@@ -8,7 +8,7 @@ import pytest
 
 from vllm import PoolingParams
 
-MODEL_NAME = "vllm-project/multilingual-e5-small"
+MODEL_NAME = "vllm/multilingual-e5-small"
 
 
 @pytest.fixture(scope="module")

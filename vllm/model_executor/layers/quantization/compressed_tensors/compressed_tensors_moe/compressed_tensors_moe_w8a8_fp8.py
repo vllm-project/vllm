@@ -324,6 +324,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            experts_cls=self.experts_cls,
         )
 
         # Replace parameters with updated versions. Note that this helper
