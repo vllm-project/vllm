@@ -471,3 +471,121 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     cgu._teardown_profiling_state(runner)
 
     assert runner.model_state._mamba_ctx is None
+
+
+def test_profile_cudagraph_memory_records_transient_capture_peak(monkeypatch):
+    """Capture-time transient allocations (e.g. speculator / sparse-indexer
+    warmup workspaces) must be recorded before teardown frees the profiled
+    graphs, and reset to 0 when profiling is skipped."""
+    _patch_module(monkeypatch)
+    gib = 1 << 30
+    runner = _make_profiling_runner(
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        num_full_descs=3,
+        captured_bytes=5 * gib,
+        mem_samples=[1 * gib, 1 * gib],
+    )
+    runner.device = torch.device("cpu")
+
+    def _reset_peak(device=None):
+        assert device == runner.device
+        runner.events.append("reset_peak")
+
+    def _sync():
+        runner.events.append("sync")
+
+    def _memory_stats(device=None):
+        assert device == runner.device
+        runner.events.append("memory_stats")
+        # 4 GiB transient workspace above steady-state allocated graphs.
+        return {
+            "allocated_bytes.all.peak": 14 * gib,
+            "allocated_bytes.all.current": 10 * gib,
+        }
+
+    monkeypatch.setattr(cgu.torch.accelerator, "reset_peak_memory_stats", _reset_peak)
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", _sync)
+    monkeypatch.setattr(cgu.torch.accelerator, "memory_stats", _memory_stats)
+
+    steady = cgu.profile_cudagraph_memory(runner)
+
+    # Steady-state estimate is unchanged: 5 - (1 + 1) + (1 + 2 * 1) = 6 GiB.
+    assert steady == 6 * gib
+    assert runner.cudagraph_capture_transient_peak_bytes == 4 * gib
+    # Peak stats must be reset before capture and sampled before teardown.
+    assert runner.events == [
+        "init",
+        "reset_peak",
+        "capture",
+        "sync",
+        "memory_stats",
+        "teardown",
+    ]
+
+    # Disabled profiling must clear any prior transient peak value.
+    runner.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    runner.cudagraph_manager = None
+    assert cgu.profile_cudagraph_memory(runner) == 0
+    assert runner.cudagraph_capture_transient_peak_bytes == 0
+
+
+def test_capture_model_flushes_cache_between_capture_stages(monkeypatch):
+    """capture_model() must flush dead capture-stream caches between encoder,
+    target decoder, and speculator capture so warmup activations on earlier
+    capture streams do not stay pinned during speculator capture."""
+    events: list[str] = []
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.lora_config = None
+    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    runner.pcp_manager = None
+    runner.input_buffers = object()
+    runner.model = object()
+    runner.intermediate_tensors = None
+    runner.block_tables = object()
+    runner.attn_groups = []
+    runner.kv_cache_config = object()
+    runner.use_aux_hidden_state_outputs = False
+    runner.adaptive_verification = None
+    runner.draft_context = contextlib.nullcontext
+    runner.kv_connector = SimpleNamespace(reset_capture_state=lambda: None)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=True,
+        encoder_runner=SimpleNamespace(
+            has_cudagraph=lambda: True,
+            capture=lambda: events.append("encoder_capture"),
+        ),
+        capture_inner_cudagraphs=lambda *args, **kwargs: events.append("inner_capture"),
+    )
+    runner.cudagraph_manager = SimpleNamespace(
+        needs_capture=lambda: True,
+        capture_stream=None,
+        capture=lambda *args, **kwargs: events.append("decoder_capture"),
+    )
+    runner.speculator = SimpleNamespace(
+        capture=lambda: events.append("speculator_capture")
+    )
+
+    monkeypatch.setattr(mrv2, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext)
+    monkeypatch.setattr(mrv2, "create_lora_capture_hook", lambda *args: None)
+    monkeypatch.setattr(mrv2, "lock_workspace", lambda: None)
+    monkeypatch.setattr(
+        mrv2.torch.accelerator,
+        "empty_cache",
+        lambda: events.append("empty_cache"),
+    )
+    monkeypatch.setattr(
+        mrv2.torch.accelerator, "get_memory_info", lambda: (10 << 30, 80 << 30)
+    )
+
+    runner.capture_model(profile_only=True)
+
+    assert events == [
+        "empty_cache",
+        "encoder_capture",
+        "empty_cache",
+        "decoder_capture",
+        "inner_capture",
+        "empty_cache",
+        "speculator_capture",
+        "empty_cache",
+    ]
