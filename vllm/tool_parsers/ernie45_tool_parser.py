@@ -160,10 +160,16 @@ class Ernie45ToolParser(ToolParser):
             ):
                 content = content.lstrip("\n")
 
-            return DeltaMessage(content=content if content else None)
+            return DeltaMessage(content=content) if content else None
         logger.debug("cur_text = %s", cur_text)
-        end_idx = cur_text.find(self.tool_call_end_token)
-        if end_idx != -1:
+        # a single delta may contain several complete tool calls (e.g. the
+        # whole message arrived in one delta with async scheduling or
+        # stream_interval > 1), so keep extracting until no complete tool
+        # call is left in the buffer
+        delta_content: str | None = None
+        delta_tool_calls: list[DeltaToolCall] = []
+        first_tool_call = self.current_tool_id == -1
+        while (end_idx := cur_text.find(self.tool_call_end_token)) != -1:
             if self.current_tool_id == -1:
                 self.current_tool_id = 0
                 self.prev_tool_call_arr = []
@@ -179,7 +185,9 @@ class Ernie45ToolParser(ToolParser):
 
             if len(extracted_tool_calls.tool_calls) == 0:
                 logger.warning("Failed to extract any tool calls.")
-                return None
+                if not delta_tool_calls:
+                    return None
+                break
             tool_call = extracted_tool_calls.tool_calls[0]
             self.prev_tool_call_arr[self.current_tool_id] = {
                 "name": tool_call.function.name,
@@ -188,24 +196,40 @@ class Ernie45ToolParser(ToolParser):
             self.streamed_args_for_tool[self.current_tool_id] = (
                 tool_call.function.arguments
             )
-            delta = DeltaMessage(
-                content=extracted_tool_calls.content,
-                tool_calls=[
-                    DeltaToolCall(
-                        index=self.current_tool_id,
-                        id=tool_call.id,
-                        type=tool_call.type,
-                        function=DeltaFunctionCall(
-                            name=tool_call.function.name,
-                            arguments=tool_call.function.arguments,
-                        ),
-                    )
-                ],
+            # only the text before the first tool call is content; text
+            # between tool calls is separator noise, matching the
+            # non-streaming path, so stop capturing once any call has
+            # been emitted
+            if (
+                first_tool_call
+                and not delta_tool_calls
+                and extracted_tool_calls.content
+            ):
+                delta_content = extracted_tool_calls.content
+            delta_tool_calls.append(
+                DeltaToolCall(
+                    index=self.current_tool_id,
+                    id=tool_call.id,
+                    type=tool_call.type,
+                    function=DeltaFunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
             )
             self.current_tool_id += 1
-            self._buffer = cur_text[end_idx + len(self.tool_call_end_token) :]
-            return delta
+            cur_text = cur_text[end_idx + len(self.tool_call_end_token) :]
+
+        if delta_tool_calls:
+            self._buffer = cur_text
+            return DeltaMessage(content=delta_content, tool_calls=delta_tool_calls)
 
         self._buffer = cur_text[start_idx:]
-        content = cur_text[:start_idx].rstrip("\n")
-        return DeltaMessage(content=content if content else None)
+        if self.current_tool_id == -1:
+            # no tool call has been emitted yet, so this is leading content
+            content = cur_text[:start_idx].rstrip("\n")
+            if content:
+                return DeltaMessage(content=content)
+        # text between or after tool calls is separator noise, matching
+        # the non-streaming path
+        return None

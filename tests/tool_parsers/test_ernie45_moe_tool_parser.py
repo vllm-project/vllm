@@ -7,6 +7,7 @@ from collections.abc import Generator
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -360,3 +361,223 @@ def test_extract_tool_calls_streaming_incremental(
     assert len(actual_tool_calls) > 0
     # check tool call format
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def test_extract_tool_calls_streaming_multiple_tools_single_delta(
+    ernie45_tool_parser,
+):
+    """Multiple complete tool calls in one delta must all be emitted.
+
+    This happens e.g. with async scheduling or stream_interval > 1, where a
+    single streamed delta can contain the entire tool call message.
+    Previously only the first tool call was emitted and the rest were left
+    stranded in the internal buffer.
+    """
+    model_output = (
+        "I will check the weather and the time.\n"
+        "<tool_call>\n"
+        '{"name": "get_current_temperature", "arguments": {"location": "Beijing"}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"timezone": "Asia/Shanghai"}}\n'
+        "</tool_call>\n"
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_temperature",
+        "get_current_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "Asia/Shanghai"
+    }
+    assert "I will check the weather and the time." in reconstructor.other_content
+
+
+def test_extract_tool_calls_streaming_three_tools_single_delta(ernie45_tool_parser):
+    """Three complete tool calls in one delta must all be emitted."""
+    model_output = (
+        "<tool_call>\n"
+        '{"name": "get_current_temperature", "arguments": {"location": "Beijing"}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_temperature_unit", "arguments": {"location": "Guangzhou", "unit": "c"}}\n'  # noqa: E501
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"timezone": "Asia/Shanghai"}}\n'
+        "</tool_call>\n"
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_temperature",
+        "get_temperature_unit",
+        "get_current_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "location": "Guangzhou",
+        "unit": "c",
+    }
+    assert json.loads(reconstructor.tool_calls[2].function.arguments) == {
+        "timezone": "Asia/Shanghai"
+    }
+
+
+def test_extract_tool_calls_streaming_multiple_tools_two_deltas(ernie45_tool_parser):
+    """A delta that completes several tool calls must emit them all.
+
+    With stream_interval > 1 or chunked prefill, one delta can complete the
+    tool call it was streaming plus one or more complete calls that follow.
+    Previously only the first completed call was emitted.
+    """
+    deltas = [
+        # leading content plus the start of the first tool call
+        "I will check the weather and the time.\n"
+        "<tool_call>\n"
+        '{"name": "get_current_temperature", "arg',
+        # completes the first tool call and carries the whole second one
+        'uments": {"location": "Beijing"}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"timezone": "Asia/Shanghai"}}\n'
+        "</tool_call>\n",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_temperature",
+        "get_current_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "Asia/Shanghai"
+    }
+    assert "I will check the weather and the time." in reconstructor.other_content
+
+
+def test_extract_tool_calls_streaming_single_delta_with_empty_tail(
+    ernie45_tool_parser,
+):
+    """A whole message followed by one empty delta must emit every tool.
+
+    The empty trailing delta itself must yield None, not an empty
+    DeltaMessage: the serving layer already decides whether a chunk is
+    still needed when the parser returns None.
+    """
+    model_output = (
+        "<tool_call>\n"
+        '{"name": "get_current_temperature", "arguments": {"location": "Beijing"}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"timezone": "Asia/Shanghai"}}\n'
+        "</tool_call>\n"
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, [model_output, ""], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_temperature",
+        "get_current_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "Asia/Shanghai"
+    }
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        # the whole message, separators included, in one delta
+        pytest.param(
+            [
+                "Let me check both cities.\n"
+                "<tool_call>\n"
+                '{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n'  # noqa: E501
+                "</tool_call>\n"
+                " some text in between "
+                "<tool_call>\n"
+                '{"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n'  # noqa: E501
+                "</tool_call>\n",
+            ],
+            id="single_delta",
+        ),
+        # the separator lands in the same delta as the second complete call
+        pytest.param(
+            [
+                "Let me check both cities.\n"
+                "<tool_call>\n"
+                '{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n'  # noqa: E501
+                "</tool_call>\n"
+                " some text",
+                " in between "
+                "<tool_call>\n"
+                '{"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n'  # noqa: E501
+                "</tool_call>\n",
+            ],
+            id="two_deltas",
+        ),
+        # the separator is held while the second call is still incomplete
+        pytest.param(
+            [
+                "Let me check both cities.\n"
+                "<tool_call>\n"
+                '{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n'  # noqa: E501
+                "</tool_call>\n"
+                " some text",
+                ' in between <tool_call>\n{"name": "get_current_weather", "arg',
+                'uments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n'
+                "</tool_call>\n",
+            ],
+            id="three_deltas",
+        ),
+    ],
+)
+def test_extract_tool_calls_streaming_text_between_calls(ernie45_tool_parser, deltas):
+    """Text between tool calls is separator noise, not content.
+
+    The non-streaming path only keeps the text before the first tool
+    call, so the streaming path must not leak the separator text into
+    content, whether it arrives in the same delta as a call or between
+    two deltas.
+    """
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert reconstructor.other_content == "Let me check both cities."
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
