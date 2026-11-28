@@ -147,6 +147,9 @@ Batch invariance has been tested and verified on the following models:
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
+!!! tip
+    For more end-to-end RL recipes with zero train-inference mismatch (models, hardware and parallel configurations beyond the list above), see [zero-mismatch-rl](https://github.com/Inferact/zero-mismatch-rl) first. The vLLM changes it relies on are being upstreamed to `main` gradually.
+
 ## Implementation Details
 
 When batch invariance is enabled, vLLM:
