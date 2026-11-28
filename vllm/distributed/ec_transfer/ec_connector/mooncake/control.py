@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from typing import Any
@@ -25,6 +25,8 @@ from vllm.utils.network_utils import make_zmq_path
 logger = init_logger(__name__)
 
 _MAX_PENDING_EVENTS = 4096
+_MAX_CONTROL_SOCKETS_PER_THREAD = 64
+_MAX_CACHED_TOPOLOGIES = 256
 _RESERVATION_REAP_INTERVAL_SECONDS = 1
 
 
@@ -33,21 +35,46 @@ ControlResponse = dict[str, Any]
 
 
 class ControlClient:
-    """Send control requests through reusable, thread-local REQ sockets."""
+    """Send requests through bounded, thread-local REQ socket caches."""
 
     def __init__(self, timeout_ms: int) -> None:
         self._context = zmq.Context()
         self._timeout_ms = timeout_ms
         self._local = threading.local()
-        self._topologies: dict[str, list[str]] = {}
+        self._topologies: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._topologies_lock = threading.Lock()
         self._closed = False
 
-    def _sockets(self) -> dict[str, zmq.Socket]:
+    def _sockets(self) -> OrderedDict[str, zmq.Socket]:
         sockets = getattr(self._local, "sockets", None)
         if sockets is None:
-            sockets = {}
+            sockets = OrderedDict()
             self._local.sockets = sockets
         return sockets
+
+    def _socket(self, addr: str) -> zmq.Socket:
+        sockets = self._sockets()
+        socket = sockets.get(addr)
+        if socket is not None:
+            sockets.move_to_end(addr)
+            return socket
+
+        while len(sockets) >= _MAX_CONTROL_SOCKETS_PER_THREAD:
+            _, stale_socket = sockets.popitem(last=False)
+            stale_socket.close(linger=0)
+
+        socket = self._context.socket(zmq.REQ)
+        try:
+            socket.setsockopt(zmq.IPV6, 1)
+            socket.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.connect(addr)
+        except Exception:
+            socket.close(linger=0)
+            raise
+        sockets[addr] = socket
+        return socket
 
     def _discard(self, addr: str) -> None:
         socket = self._sockets().pop(addr, None)
@@ -55,16 +82,7 @@ class ControlClient:
             socket.close(linger=0)
 
     def _exchange(self, addr: str, payload: ControlRequest) -> ControlResponse:
-        sockets = self._sockets()
-        socket = sockets.get(addr)
-        if socket is None:
-            socket = self._context.socket(zmq.REQ)
-            socket.setsockopt(zmq.IPV6, 1)
-            socket.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
-            socket.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
-            socket.setsockopt(zmq.LINGER, 0)
-            socket.connect(addr)
-            sockets[addr] = socket
+        socket = self._socket(addr)
         try:
             socket.send_json(payload)
             response = socket.recv_json()
@@ -81,8 +99,11 @@ class ControlClient:
         return response.get("result")
 
     def discover_shards(self, base_addr: str) -> list[str] | None:
-        if base_addr in self._topologies:
-            return self._topologies[base_addr]
+        with self._topologies_lock:
+            shards = self._topologies.get(base_addr)
+            if shards is not None:
+                self._topologies.move_to_end(base_addr)
+                return list(shards)
         try:
             reply = self.request(base_addr, {"op": "peers"})
             ports = reply.get("ports") if isinstance(reply, dict) else None
@@ -97,8 +118,15 @@ class ControlClient:
                 exc_info=True,
             )
             return None
-        self._topologies[base_addr] = shards
-        return shards
+        with self._topologies_lock:
+            cached_shards = self._topologies.get(base_addr)
+            if cached_shards is not None:
+                self._topologies.move_to_end(base_addr)
+                return list(cached_shards)
+            self._topologies[base_addr] = tuple(shards)
+            while len(self._topologies) > _MAX_CACHED_TOPOLOGIES:
+                self._topologies.popitem(last=False)
+            return shards
 
     def close(self) -> None:
         if self._closed:

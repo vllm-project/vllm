@@ -93,6 +93,7 @@ steps:
     # Mooncake comes from the CI image (requirements/test/kv_connectors_cuda.txt).
     - uv venv --system-site-packages --python python3 .venv
     - bash .buildkite/scripts/check-kv-connectors.sh
+    - .venv/bin/python -m pytest -q tests/v1/ec_connector/unit/test_mooncake_control.py
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:
