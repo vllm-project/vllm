@@ -313,9 +313,11 @@ class TestConvertUserMessage:
             ]
         )
         result = _convert(req)
-        assert result.messages[0]["content"][0]["image_url"] == {
-            "url": "https://x/i.png"
-        }
+        content = result.messages[0]["content"]
+        assert isinstance(content, list)
+        part = content[0]
+        assert not isinstance(part, str) and part["type"] == "image_url"
+        assert part["image_url"] == {"url": "https://x/i.png"}
 
     def test_text_plus_image_keeps_list(self):
         req = _make_request(
@@ -442,6 +444,7 @@ class TestConvertAssistantMessage:
         asst = result.messages[1]
         assert asst["content"] == "I'll call a tool."
         assert asst["reasoning"] == "plan: use calculator"
+        assert asst["tool_calls"] is not None
         assert asst["tool_calls"][0]["function"] == {
             "name": "calc",
             "arguments": "{}",
@@ -467,7 +470,9 @@ class TestConvertAssistantMessage:
             ]
         )
         result = _convert(req)
-        tc = result.messages[1]["tool_calls"][0]
+        tool_calls = result.messages[1]["tool_calls"]
+        assert tool_calls is not None
+        tc = tool_calls[0]
         assert tc["id"] == "c1"
         assert tc["type"] == "function"
         assert tc["function"] == {"name": "", "arguments": "{}"}
@@ -834,6 +839,7 @@ class TestApplyTools:
                 ],
             )
         )
+        assert result.tools is not None
         assert result.tools[0].function.strict is True
 
 
@@ -923,22 +929,26 @@ class TestApplyCohereTemplateKwargs:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         docs = result.chat_template_kwargs["documents"]
         assert docs[0] == {"id": "custom", "data": {"text": "t"}}
         assert docs[1]["id"] == "doc_1"
 
     def test_safety_mode_normalized_to_lowercase(self):
         result = _convert(_make_request(safety_mode="CONTEXTUAL"))
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["safety_mode"] == "contextual"
 
     def test_citation_options_forwarded_as_dict(self):
         result = _convert(_make_request(citation_options={"mode": "accurate"}))
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["citation_options"] == {"mode": "accurate"}
 
     def test_thinking_forwarded_as_dict(self):
         result = _convert(
             _make_request(thinking={"type": "enabled", "token_budget": 16})
         )
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["thinking"] == {
             "type": "enabled",
             "token_budget": 16,
@@ -956,6 +966,7 @@ class TestApplyCohereTemplateKwargs:
                 safety_mode="CONTEXTUAL",
             )
         )
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["safety_mode"] == "user-explicit"
         assert result.chat_template_kwargs["extra"] == "x"
 
@@ -997,6 +1008,7 @@ class TestEngineChatTemplateKwargs:
             citation_options={"mode": "accurate"},
         )
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         # Sanity: the key we expect to be dropped is actually present.
         assert POSITION_TO_SOURCE_KEY in full
 
@@ -1014,6 +1026,7 @@ class TestEngineChatTemplateKwargs:
         """
         request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         internal = {k for k in full if k.startswith("_")}
         # Sanity: this request really does populate all three.
         assert internal == {
@@ -1049,6 +1062,7 @@ class TestEngineChatTemplateKwargs:
         """
         request = _make_request(documents=[{"id": "d1", "data": {"text": "hi"}}])
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         before = set(full)
 
         self._engine_kwargs(request)
@@ -1294,6 +1308,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         citations_by_index = result.chat_template_kwargs["_messages_citations"]
         assert list(citations_by_index.keys()) == [1]
         cite = citations_by_index[1][0]
@@ -1371,6 +1386,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["sources"] == [{"tool_call_index": 0, "tool_result_indices": [1]}]
 
@@ -1450,6 +1466,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][5]
         assert cite["sources"] == [
             {"tool_call_index": 1, "tool_result_indices": [1]},
@@ -1504,6 +1521,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 1, "tool_result_indices": [0]},
@@ -1564,6 +1582,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 0, "tool_result_indices": [0, 1]},
@@ -1654,6 +1673,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["is_thinking"] is True
         # And the source resolved (sanity: is_thinking is meaningful
@@ -1684,6 +1704,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["is_thinking"] is True
 
@@ -1831,6 +1852,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 0, "tool_result_indices": [1, 3]},
@@ -1900,6 +1922,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][4]
         # ``d2`` is at position 0 within its own message's content,
         # but the previous tool message contributed 2 slots, so its
@@ -2049,6 +2072,8 @@ class TestBuildUsage:
         )
         usage = CohereServingChatV2._build_usage(resp)
         assert usage is not None
+        assert usage.billed_units is not None
+        assert usage.tokens is not None
         assert usage.billed_units.input_tokens == 10
         assert usage.billed_units.output_tokens == 5
         assert usage.tokens.input_tokens == 10
@@ -2061,6 +2086,7 @@ class TestBuildUsage:
             usage={"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
         )
         usage = CohereServingChatV2._build_usage(resp)
+        assert usage is not None and usage.billed_units is not None
         assert usage.billed_units.output_tokens == 0
 
     def test_cached_tokens_propagated(self):
@@ -2074,6 +2100,7 @@ class TestBuildUsage:
             },
         )
         usage = CohereServingChatV2._build_usage(resp)
+        assert usage is not None
         assert usage.cached_tokens == 3
 
 

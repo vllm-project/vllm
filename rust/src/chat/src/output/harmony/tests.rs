@@ -46,6 +46,7 @@ fn decoded_start() -> DecodedTextEvent {
     DecodedTextEvent::Start {
         prompt_token_ids: Arc::<[u32]>::from([]),
         prompt_logprobs: None,
+        prompt_token_id_logprobs: None,
     }
 }
 
@@ -59,7 +60,6 @@ fn finished() -> Finished {
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
         ec_transfer_params: None,
-        sampling_mask: None,
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
@@ -75,8 +75,10 @@ fn decoded_tokens(
     DecodedTextEvent::TextDelta {
         decoded: DecodedText::default(),
         sampled: SampledDelta {
+            timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
             token_ids,
             logprobs,
+            sampling_mask: None,
         },
         finished: finished.map(Box::new),
     }
@@ -115,12 +117,18 @@ fn request_with_tools() -> ChatRequest {
 
 #[test]
 fn interrupted_final_message_is_preserved() {
+    let mut terminal = finished();
+    terminal.timestamps.last_token_ts = 2.5;
     let tokens = completion_tokens(&[text_message("final", "hello")]);
     let events = block_on(collect_events(
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            decoded_tokens(tokens[..tokens.len() - 1].to_vec(), None, Some(finished())),
+            decoded_tokens(
+                tokens[..tokens.len() - 1].to_vec(),
+                None,
+                Some(terminal.clone()),
+            ),
         ],
     ));
 
@@ -137,7 +145,8 @@ fn interrupted_final_message_is_preserved() {
                 output_token_count: 0,
                 prompt_cache_usage: Default::default(),
             }),
-            timestamps: Default::default(),
+            timestamps: terminal.timestamps,
+            first_content_token_ts: Some(2.5),
             spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
@@ -196,6 +205,7 @@ fn interrupted_analysis_message_is_preserved() {
                 reasoning_tokens: 1,
             },
             timestamps: Default::default(),
+            first_content_token_ts: None,
             spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
@@ -321,6 +331,8 @@ fn reasoning_token_counts(events: &[ChatEvent]) -> (Vec<usize>, usize) {
 
 #[test]
 fn reasoning_tokens_count_analysis_and_tool_call_content() {
+    let mut terminal = finished();
+    terminal.timestamps.last_token_ts = 2.5;
     let analysis = "Let me check the weather.";
     let arguments = r#"{"city":"Paris"}"#;
     let tokens = completion_tokens(&[
@@ -331,7 +343,7 @@ fn reasoning_tokens_count_analysis_and_tool_call_content() {
         HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
         vec![
             decoded_start(),
-            decoded_tokens(tokens, None, Some(finished())),
+            decoded_tokens(tokens, None, Some(terminal)),
         ],
     ));
 
@@ -339,6 +351,13 @@ fn reasoning_tokens_count_analysis_and_tool_call_content() {
     // counts, Harmony control and header tokens do not. Tool-call tokens are
     // only in the final usage.
     let (deltas, total) = reasoning_token_counts(&events);
+    assert!(matches!(
+        events.last(),
+        Some(ChatEvent::Done {
+            first_content_token_ts: None,
+            ..
+        })
+    ));
     assert_eq!(deltas.iter().sum::<usize>(), content_token_count(analysis));
     assert_eq!(
         total,
@@ -444,12 +463,14 @@ fn semantic_events_precede_same_update_logprobs() {
 
 #[test]
 fn rejects_generic_parser_overrides() {
-    let reasoning_error =
-        validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::None)
-            .unwrap_err();
+    let reasoning_error = validate_harmony_parser_overrides(
+        &ParserSelection::Auto,
+        &ParserSelection::Explicit("qwen3".to_string()),
+    )
+    .unwrap_err();
     assert_eq!(
         reasoning_error.to_string(),
-        "gpt_oss uses native Harmony output parsing; generic reasoning parser override `none` is not supported"
+        "gpt_oss uses native Harmony output parsing; generic reasoning parser override `qwen3` is not supported"
     );
 
     let tool_error = validate_harmony_parser_overrides(
@@ -464,7 +485,14 @@ fn rejects_generic_parser_overrides() {
 }
 
 #[test]
-fn allows_auto_auto_only() {
-    validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::Auto).unwrap();
+fn allows_auto_and_omitted_selections() {
+    // `vllm serve` passes `none` for omitted parser flags.
+    for (tool, reasoning) in [
+        (ParserSelection::Auto, ParserSelection::Auto),
+        (ParserSelection::None, ParserSelection::None),
+        (ParserSelection::Auto, ParserSelection::None),
+    ] {
+        validate_harmony_parser_overrides(&tool, &reasoning).unwrap();
+    }
     let _ = HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap();
 }

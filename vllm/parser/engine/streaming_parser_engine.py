@@ -260,7 +260,7 @@ class StreamingParserEngine:
             item = scanner_items[0]
             lex_tokens = self._lexer.feed(item.text, item.token_texts, item.token_count)
             if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
-                events = self._emit_for_state(
+                events = self._on_content(
                     lex_tokens[0].value,
                     token_count=lex_tokens[0].token_count,
                 )
@@ -283,9 +283,12 @@ class StreamingParserEngine:
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
                 if not item.text and item.token_count:
-                    events.extend(
-                        self._emit_for_state("", token_count=item.token_count)
-                    )
+                    if self._pending_reasoning_tool_tokens is not None:
+                        events.extend(
+                            self._on_content("", token_count=item.token_count)
+                        )
+                    else:
+                        events.extend(self._emit_for_state("", item.token_count))
                 else:
                     events.extend(
                         self._process_lex_tokens(
@@ -299,23 +302,13 @@ class StreamingParserEngine:
     def finish(
         self, *, resolve_deferred_tool_start: bool = False
     ) -> list[SemanticEvent]:
-        """Finish the stream, optionally resolving an ambiguous tool opener.
-
-        ``resolve_deferred_tool_start`` is for the reasoning adapter, which
-        normally suppresses tool parsing but must route an unresolved Qwen3
-        implicit-end span through tool transitions at the stream boundary.
-        """
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
 
-        # If an explicit THINK_END never arrived, the tool opener retains its
-        # normal meaning as an implicit reasoning end. Replay the held tokens
-        # now that the stream boundary resolves the ambiguity.
         if self._pending_reasoning_tool_tokens is not None:
             pending = self._pending_reasoning_tool_tokens
             self._pending_reasoning_tool_tokens = None
-            # Resolve the withheld opener as the legacy implicit end.
             self.state = ParserState.CONTENT
             skip_tool_parsing = self.skip_tool_parsing
             if resolve_deferred_tool_start:
@@ -323,7 +316,7 @@ class StreamingParserEngine:
             try:
                 for terminal, value, token_count in pending:
                     if terminal == CONTENT_TERMINAL:
-                        events.extend(self._on_content(value, token_count))
+                        events.extend(self._emit_for_state(value, token_count))
                     else:
                         events.extend(self._on_terminal(terminal, value, token_count))
             finally:
@@ -447,8 +440,6 @@ class StreamingParserEngine:
         pending = self._pending_reasoning_tool_tokens
         if pending is not None:
             if terminal == "THINK_END":
-                # The tool-looking span was inside explicitly closed reasoning.
-                # Preserve its original text instead of executing it.
                 self._pending_reasoning_tool_tokens = None
                 events = [
                     SemanticEvent(

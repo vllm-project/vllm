@@ -69,6 +69,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -221,6 +222,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            tool_choice=request.tool_choice,
             model_config=self.model_config,
         )
 
@@ -256,6 +258,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 "chat_template_kwargs": self._engine_chat_template_kwargs(
                     chat_template_kwargs
                 ),
+                "tool_choice": "auto" if request.tool_choice == "auto" else None,
             }
         return {
             "reasoning_ended": request.resolve_reasoning_ended(
@@ -265,8 +268,7 @@ class OpenAIServingChat(GenerateBaseServing):
         }
 
     async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
+        self, request: ChatCompletionRequest, tok_params: TokenizeParams | None = None
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -285,7 +287,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(request, tok_params=tok_params)
 
     async def create_chat_completion(
         self,
@@ -405,6 +407,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     trace_headers=trace_headers,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -548,6 +551,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
 
         previous_texts = [""] * num_choices
+        first_content_token_ts: float | None = None
 
         try:
             if self.parser_cls is not None:
@@ -731,6 +735,17 @@ class OpenAIServingChat(GenerateBaseServing):
                         res.prompt_token_ids,
                     )
 
+                    if (
+                        self.enable_per_request_metrics
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and delta_message is not None
+                        and delta_message.content
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
+
                     previous_texts[i] += delta_text
 
                     if parser is not None and self._include_reasoning_tokens_details:
@@ -907,7 +922,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, completion_tokens
+                            last_metrics,
+                            completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:

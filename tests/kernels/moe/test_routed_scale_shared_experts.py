@@ -6,9 +6,10 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedScaleMode
 from vllm.utils.torch_utils import set_random_seed
 
 NUM_EXPERTS = 8
@@ -34,16 +35,19 @@ class SharedMLP(nn.Module):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("divide_shared_output_in_fp16", [False, True])
+@pytest.mark.parametrize(
+    "routed_scale_mode",
+    [RoutedScaleMode.OUTPUT, RoutedScaleMode.OUTPUT_FP16_GUARD],
+)
+@override_parallel_groups(SingleRankGroup())
 def test_routed_scale_applied_to_output_with_shared_experts(
     dtype: torch.dtype,
-    divide_shared_output_in_fp16: bool,
-    dist_init,
+    routed_scale_mode: RoutedScaleMode,
     workspace_init,
 ):
-    """Without the opt-in, the output is scale * routed + shared for every
-    dtype. With it, FP16 gives routed + shared / scale (the decoder layer is
-    expected to compensate)."""
+    """OUTPUT gives scale * routed + shared for every dtype. OUTPUT_FP16_GUARD
+    gives routed + shared / scale in FP16 (the decoder layer is expected to
+    compensate) and scale * routed + shared otherwise."""
     set_random_seed(0)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_default_device(device)
@@ -67,8 +71,7 @@ def test_routed_scale_applied_to_output_with_shared_experts(
         moe = FusedMoEFactory(
             shared_experts=shared_experts,
             routed_scaling_factor=ROUTED_SCALING_FACTOR,
-            apply_routed_scale_to_output=True,
-            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=routed_scale_mode,
             prefix="moe",
             **common,
         )
@@ -89,17 +92,26 @@ def test_routed_scale_applied_to_output_with_shared_experts(
             routed = routed_only(hidden_states, router_logits)
             shared = shared_experts(hidden_states)
 
-    if divide_shared_output_in_fp16 and dtype == torch.float16:
+    if (
+        routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
+        and dtype == torch.float16
+    ):
         expected = routed + shared / ROUTED_SCALING_FACTOR
     else:
         expected = routed * ROUTED_SCALING_FACTOR + shared
     torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)
 
 
-def _mha_moe_config(model: str):
-    from transformers import AXK1Config, DeepseekV2Config
+def test_routed_scale_mode_scales_output():
+    assert not RoutedScaleMode.ROUTER.scales_output
+    assert RoutedScaleMode.OUTPUT.scales_output
+    assert RoutedScaleMode.OUTPUT_FP16_GUARD.scales_output
 
-    common = dict(
+
+def _mha_moe_config():
+    from transformers import DeepseekV2Config
+
+    return DeepseekV2Config(
         hidden_size=HIDDEN_SIZE,
         intermediate_size=INTERMEDIATE_SIZE,
         moe_intermediate_size=INTERMEDIATE_SIZE,
@@ -117,22 +129,16 @@ def _mha_moe_config(model: str):
         first_k_dense_replace=0,
         torch_dtype=torch.float16,
     )
-    if model == "axk1":
-        return AXK1Config(mlp_layer_types=["sparse"], **common)
-    return DeepseekV2Config(**common)
 
 
-@pytest.mark.parametrize("model", ["deepseek_v2", "axk1"])
-def test_mha_decoder_layer_does_not_divide_shared_output(
-    model: str, tmp_path, dist_init, workspace_init
-):
-    """MHA DeepseekV2/AXK1 decoder layers skip the FP16 compensation, so their
+@override_parallel_groups(SingleRankGroup())
+def test_mha_decoder_layer_does_not_divide_shared_output(tmp_path, workspace_init):
+    """MHA DeepseekV2 decoder layers skip the FP16 compensation, so their
     MoE must scale the routed output instead of dividing the shared output."""
     from vllm.config import ModelConfig
-    from vllm.model_executor.models.AXK1 import AXK1DecoderLayer
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
 
-    config = _mha_moe_config(model)
+    config = _mha_moe_config()
     config.save_pretrained(tmp_path)
     model_config = ModelConfig(
         model=str(tmp_path),
@@ -141,10 +147,9 @@ def test_mha_decoder_layer_does_not_divide_shared_output(
         dtype="float16",
     )
     vllm_config = VllmConfig(model_config=model_config)
-    layer_cls = AXK1DecoderLayer if model == "axk1" else DeepseekV2DecoderLayer
     with set_current_vllm_config(vllm_config):
-        layer = layer_cls(
+        layer = DeepseekV2DecoderLayer(
             vllm_config=vllm_config, prefix="model.layers.0", config=config
         )
     assert layer.use_mha
-    assert layer.mlp.experts.divide_shared_output_in_fp16 is False
+    assert layer.mlp.experts.routed_scale_mode is RoutedScaleMode.OUTPUT

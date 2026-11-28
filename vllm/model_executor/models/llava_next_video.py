@@ -147,13 +147,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
         max_total_frames = self._get_max_video_frames(seq_len)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        return max(max_total_frames // max(num_videos, 1), 1)
 
 
 class LlavaNextVideoDummyInputsBuilder(
@@ -175,7 +173,7 @@ class LlavaNextVideoDummyInputsBuilder(
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {
@@ -217,11 +215,14 @@ class LlavaNextVideoMultiModalProcessor(
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 assert isinstance(videos, VideoProcessorItems)
-                image_size = videos.get_frame_size(item_idx)
+                pixel_values = out_mm_kwargs["video"][item_idx][
+                    "pixel_values_videos"
+                ].data
+                assert isinstance(pixel_values, torch.Tensor)
                 num_video_tokens = self.info.get_num_video_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    num_frames=videos.get_num_frames(item_idx),
+                    image_width=pixel_values.shape[-1],
+                    image_height=pixel_values.shape[-2],
+                    num_frames=pixel_values.shape[0],
                 )
 
             return [video_token_id] * num_video_tokens

@@ -12,16 +12,24 @@ request is released as many times as it waits for.
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import msgspec
 import pytest
 import torch
 
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
+    moriio_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
+    MoRIIOConfig,
     MoRIIOConnectorMetadata,
+    MoRIIOConstants,
     MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
@@ -110,10 +118,13 @@ def _metadata(rank: Rank) -> MoRIIOAgentMetadata:
 
 def _make_reader(
     consumer: Rank,
-    producers: list[Rank],
+    producers: list[Rank] | dict[int, list[Rank]],
     backend: str,
+    monkeypatch: pytest.MonkeyPatch,
     fail: bool = False,
     prewarmed: dict[str, int] | None = None,
+    dp_rank: int = 0,
+    session_keys: list[str] | None = None,
 ) -> list:
     """Route the decode rank's reads to the prefill ranks; return its releases.
 
@@ -123,16 +134,21 @@ def _make_reader(
     worker = consumer.worker
     released: list = []
     read_from: list[int] = []
+    producers_by_dp = {0: producers} if isinstance(producers, list) else producers
 
     def get_built_session(engine_id: str):
+        remote_dp_rank = int(engine_id.rsplit("_dp", 1)[1].split("_tp", 1)[0])
+        peers = producers_by_dp[remote_dp_rank]
+        if session_keys is not None:
+            session_keys.append(engine_id)
         if prewarmed is not None:
             assert engine_id in prewarmed, (engine_id, sorted(prewarmed))
             tp_rank = prewarmed[engine_id]
         elif "_tp" in engine_id:
             tp_rank = int(engine_id.rsplit("_tp", 1)[1])
         else:
-            tp_rank = worker._remote_tp_rank(len(producers))
-        remote = producers[tp_rank]
+            tp_rank = worker._remote_tp_rank(len(peers))
+        remote = peers[tp_rank]
         sessions = [
             _Session(local, remote_region, tp_rank)
             for local, remote_region in zip(
@@ -152,7 +168,7 @@ def _make_reader(
 
     worker.mode = MoRIIOMode.READ
     worker.is_producer = False
-    worker.dp_rank = 0
+    worker.dp_rank = dp_rank
     worker._num_mamba_transfer_groups = 1 if worker._has_mamba else 0
     worker._num_attn_transfer_groups = (
         len(set(worker.layer_to_group.values())) - worker._num_mamba_transfer_groups
@@ -162,7 +178,7 @@ def _make_reader(
     worker.moriio_config = SimpleNamespace(
         backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
     )
-    worker._get_built_session = get_built_session
+    monkeypatch.setattr(worker, "_get_built_session", get_built_session)
     worker.moriio_wrapper = SimpleNamespace(
         lock=threading.Lock(),
         read_remote_data=read_remote_data,
@@ -176,8 +192,9 @@ def _make_reader(
     worker._recving_transfers_callback_addr = {}
     worker._recving_local_blocks = {}
     worker._reads_issued_this_step = []
-    worker._mamba_reads_this_step = []
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
     consumer.sent = read_from
     return released
 
@@ -209,7 +226,7 @@ def _prewarm(consumer: Rank, meta: ReqMeta, monkeypatch) -> dict[str, int]:
         )
         return set()
 
-    worker._moriio_handshake = handshake
+    monkeypatch.setattr(worker, "_moriio_handshake", handshake)
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_lock = threading.Lock()
     worker._eager_handshaked_engines = set()
@@ -238,7 +255,14 @@ def _ranks(model, producer_tp, consumer_tp, hma, layouts, state):
 
 
 def _read_all(
-    model, producer_tp, consumer_tp, hma, layouts, backend="xgmi", advertised_tp=None
+    model,
+    producer_tp,
+    consumer_tp,
+    hma,
+    layouts,
+    monkeypatch,
+    backend="xgmi",
+    advertised_tp=None,
 ):
     """Run every decode rank's READ; return the releases per prefill rank.
 
@@ -253,7 +277,7 @@ def _read_all(
     producers, consumers = _ranks(model, producer_tp, consumer_tp, hma, layouts, state)
     releases: dict[int, list] = defaultdict(list)
     for consumer in consumers:
-        released = _make_reader(consumer, producers, backend)
+        released = _make_reader(consumer, producers, backend, monkeypatch)
         consumer.worker._read_blocks_for_req("req", _meta(groups, advertised_tp))
         assert consumer.worker._pop_done_transfers() == {"t"}
         for p, message_type, fields in released:
@@ -313,17 +337,143 @@ def _conv_dim_first(monkeypatch):
         if hma or "hybrid" not in model
     ],
 )
-def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts):
+def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts, monkeypatch):
     """Prefill and decode may lay heads and tokens out differently."""
-    _assert_released(_read_all(model, tp, tp, hma, layouts), tp)
+    _assert_released(_read_all(model, tp, tp, hma, layouts, monkeypatch), tp)
+
+
+@pytest.mark.parametrize("local_dp_rank", [0, 1])
+def test_dp2_tp2_read_uses_remote_dp1_and_releases_its_holders(
+    local_dp_rank, monkeypatch
+):
+    """READ must use the request's DP rank for both sessions and releases."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    other_state = {name: values.bitwise_xor(255) for name, values in state.items()}
+    producers, consumers = _ranks("gqa", 2, 2, True, LAYOUTS[0], state)
+    other_producers, _ = _ranks("gqa", 2, 2, True, LAYOUTS[0], other_state)
+    releases: dict[int, list] = defaultdict(list)
+    kv_config = KVTransferConfig(
+        kv_connector="MoRIIOConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "host_ip": "127.0.0.1",
+            "http_port": 8000,
+            "handshake_port": 29000,
+            "notify_port": NOTIFY_PORT,
+            "read_mode": True,
+            "backend": "xgmi",
+        },
+    )
+    monkeypatch.setattr(
+        moriio_common, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    dialed = []
+    peers = {
+        "tcp://prefill:29002": producers[0],
+        "tcp://prefill:29003": producers[1],
+    }
+
+    @contextmanager
+    def handshake_socket(socket_type, path):
+        dialed.append(path)
+        frames = iter(
+            [
+                (b"", msgspec.msgpack.encode(_metadata(peers[path]))),
+                (b"", msgspec.msgpack.encode({})),
+            ]
+        )
+
+        def send(message):
+            assert message == MoRIIOConstants.GET_META_MSG
+
+        yield SimpleNamespace(send=send, recv_multipart=lambda: next(frames))
+
+    monkeypatch.setattr(moriio_connector, "zmq_ctx", handshake_socket)
+
+    for consumer in consumers:
+        session_keys: list[str] = []
+        released = _make_reader(
+            consumer,
+            {0: other_producers, 1: producers},
+            "xgmi",
+            monkeypatch,
+            dp_rank=local_dp_rank,
+            session_keys=session_keys,
+        )
+        meta = _meta(["full"], 2)
+        meta.remote_dp_size = 2
+        meta.remote_dp_rank = 1
+        meta.remote_handshake_port = 29000
+        meta.remote_engine_id = "prefill:29000"
+        session_key = "prefill:29000_dp1"
+        worker = consumer.worker
+        worker.local_kv_cache_metadata = []
+        worker.remote_kv_cache_metadata = []
+        worker.remote_moriio_metadata = {}
+        worker.layer_name_to_remote_kv_cache_metadata = {}
+        agent_name = f"prefill-dp1-tp{consumer.tp_rank}"
+        worker.moriio_wrapper.register_remote_engine = lambda _, name=agent_name: name
+        dialed.clear()
+        assert worker._moriio_handshake(
+            meta.remote_host,
+            meta.remote_handshake_port,
+            meta.tp_size,
+            session_key,
+            meta.remote_dp_rank,
+        ) == {agent_name}
+        monkeypatch.setattr(
+            moriio_common,
+            "get_tensor_model_parallel_rank",
+            lambda rank=consumer.tp_rank: rank,
+        )
+        config = MoRIIOConfig.from_vllm_config(
+            VllmConfig(
+                kv_transfer_config=kv_config,
+                parallel_config=ParallelConfig(
+                    data_parallel_size=2,
+                    data_parallel_rank=1,
+                    data_parallel_size_local=2,
+                ),
+            )
+        )
+        expected_offset = (2, 3)[consumer.tp_rank]
+        assert config.handshake_port + config.port_offset == 29000 + expected_offset
+        assert dialed == [f"tcp://prefill:{config.handshake_port + config.port_offset}"]
+        assert config.notify_port == NOTIFY_PORT + expected_offset
+        consumer.worker._read_blocks_for_req("req", meta)
+
+        assert session_keys == [session_key]
+        assert set(consumer.sent) == {consumer.tp_rank}
+        assert released == []
+        for layer in layers:
+            received = consumer.caches[layer.name]
+            expected = _expected(
+                layer, "full", state, heads, consumer.tp_rank, 2, received
+            )
+            assert torch.equal(received, expected), (layer.name, consumer.tp_rank)
+
+        assert consumer.worker._pop_done_transfers() == {"t"}
+        # DP1's TP ranks are at offsets 2 and 3, independent of local DP.
+        assert released == [(expected_offset, "release", {"consumer_tp_size": 2})]
+        for _, message_type, fields in released:
+            releases[consumer.tp_rank].append((message_type, fields))
+        assert consumer.worker._pop_done_transfers() == set()
+        assert len(released) == 1
+
+    _assert_released(releases, 2)
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
 @pytest.mark.parametrize("tp", [1, 2])
 @pytest.mark.parametrize("model", list(MODELS))
-def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
+def test_read_without_advertised_prefill_tp_is_homogeneous(
+    model, tp, layouts, monkeypatch
+):
     """A request without the prefill TP size (0) reads as equal TP."""
-    _assert_released(_read_all(model, tp, tp, True, layouts, advertised_tp=0), tp)
+    _assert_released(
+        _read_all(model, tp, tp, True, layouts, monkeypatch, advertised_tp=0), tp
+    )
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
@@ -337,10 +487,10 @@ def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
     ],
 )
 def test_replicated_read_releases_every_holder(
-    model, producer_tp, consumer_tp, layouts
+    model, producer_tp, consumer_tp, layouts, monkeypatch
 ):
     """In fan-in each decode rank reads one copy and releases every holder."""
-    releases = _read_all(model, producer_tp, consumer_tp, True, layouts)
+    releases = _read_all(model, producer_tp, consumer_tp, True, layouts, monkeypatch)
     _assert_released(releases, producer_tp)
 
 
@@ -353,7 +503,9 @@ def test_flexible_mirror_spreads_reads_and_releases_every_holder(monkeypatch):
     consumer.worker.moriio_config = SimpleNamespace(backend="rdma")
     prewarmed = _prewarm(consumer, _meta(["full"], 4), monkeypatch)
     assert sorted(prewarmed.values()) == [0, 1, 2, 3]
-    released = _make_reader(consumer, producers, "rdma", prewarmed=prewarmed)
+    released = _make_reader(
+        consumer, producers, "rdma", monkeypatch, prewarmed=prewarmed
+    )
     picked = []
     for _ in range(4):
         consumer.sent.clear()
@@ -375,7 +527,9 @@ def test_xgmi_mirror_reads_the_fixed_source(monkeypatch):
     consumer.worker.moriio_config = SimpleNamespace(backend="xgmi")
     prewarmed = _prewarm(consumer, _meta(["full"], 4), monkeypatch)
     assert len(prewarmed) == 1
-    released = _make_reader(consumer, producers, "xgmi", prewarmed=prewarmed)
+    released = _make_reader(
+        consumer, producers, "xgmi", monkeypatch, prewarmed=prewarmed
+    )
     for _ in range(3):
         consumer.sent.clear()
         released.clear()
@@ -389,14 +543,16 @@ def test_xgmi_mirror_reads_the_fixed_source(monkeypatch):
     ("producer_tp", "consumer_tp", "advertised_tp"),
     [(4, 2, 4), (2, 4, 2), (2, 2, 0)],
 )
-def test_aborted_read_releases_every_holder(producer_tp, consumer_tp, advertised_tp):
+def test_aborted_read_releases_every_holder(
+    producer_tp, consumer_tp, advertised_tp, monkeypatch
+):
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, consumers = _ranks(
         "mla", producer_tp, consumer_tp, True, LAYOUTS[0], state
     )
     for consumer in consumers:
-        released = _make_reader(consumer, producers, "xgmi")
+        released = _make_reader(consumer, producers, "xgmi", monkeypatch)
         consumer.worker._read_blocks(
             local_block_ids=[],
             remote_block_ids=[PREFILL_BLOCKS["full"]],
@@ -414,11 +570,11 @@ def test_aborted_read_releases_every_holder(producer_tp, consumer_tp, advertised
         assert consumer.sent == []
 
 
-def test_failed_read_releases_every_holder():
+def test_failed_read_releases_every_holder(monkeypatch):
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
-    released = _make_reader(consumer, producers, "xgmi", fail=True)
+    released = _make_reader(consumer, producers, "xgmi", monkeypatch, fail=True)
     consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
     # A failed read is a load error, not a completion.
     assert consumer.worker._pop_done_transfers() == set()

@@ -32,6 +32,7 @@ per-token x 128-channel-group `ckv_scale_arr` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
+import functools
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -51,17 +52,20 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     FlashInferMLASparseMetadataBuilder,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -116,6 +120,7 @@ def _clamp_work_kv_end(
     seq_lens,
     query_start_loc,
     req_id_per_token,
+    row_ids,
     num_works_idx,
     q_indptr_off,
     kv_start_off,
@@ -129,6 +134,8 @@ def _clamp_work_kv_end(
     works = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = works < tl.load(int_ws + num_works_idx)
     row = tl.load(int_ws + q_indptr_off + works, mask=mask, other=0)
+    if row_ids is not None:
+        row = tl.load(row_ids + row, mask=mask, other=0)
     req = tl.load(req_id_per_token + row, mask=mask, other=0)
     seq_len = tl.load(seq_lens + req, mask=mask, other=0)
     query_end = tl.load(query_start_loc + req + 1, mask=mask, other=0)
@@ -151,6 +158,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
+
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -253,11 +264,18 @@ class _SM90State:
         sm_scale: float,
         index_topk: int,
         index_kpool: int,
+        workspace: torch.Tensor | None = None,
+        reset_kv_indices_on_plan: bool = False,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        self.workspace = (
+            torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+            if workspace is None
+            else workspace
+        )
         self.device = device
+        self.reset_kv_indices_on_plan = reset_kv_indices_on_plan
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
         self.max_tokens = max_tokens
@@ -306,6 +324,7 @@ class _SM90State:
         kv_lens: torch.Tensor,
         cam: CommonAttentionMetadata | None,
         req_id_per_token: torch.Tensor | None,
+        row_ids: torch.Tensor | None = None,
     ) -> None:
         """Plan per-row KV lengths (CPU int32, `[num_tokens]`).
 
@@ -338,7 +357,7 @@ class _SM90State:
                 num_tokens, torch.clamp(kv_lens + _PLAN_SLACK, max=self.max_valid)
             )
             self._planned_num_tokens = num_tokens
-        self._clamp_kv_end(cam, req_id_per_token)
+        self._clamp_kv_end(cam, req_id_per_token, row_ids)
 
     def _plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
         # CPU staging buffers are filled in place: plan() runs per step
@@ -357,13 +376,17 @@ class _SM90State:
         self._lens_cpu[:num_tokens] = kv_lens
         self._kv_cpu[0] = 0
         torch.cumsum(self._lens_cpu, dim=0, out=self._kv_cpu[1:])
-        # Only the live prefix of kv_indices: the wrapper snapshots and
-        # copies whatever is passed.
         num_indices = max(int(self._kv_cpu[-1]), 1)
+        kv_indices = self.kv_indices[:num_indices]
+        # The forward writes kv_indices after planning, but FlashInfer records
+        # the planned page range from them: with HiSparse, stale slots from a
+        # step over the hot cache would reject the smaller staging workspace.
+        if self.reset_kv_indices_on_plan:
+            kv_indices.zero_()
         self.wrapper.plan(
             self._qo_cpu,
             self._kv_cpu,
-            self.kv_indices[:num_indices],
+            kv_indices,
             self._lens_cpu,
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
@@ -395,7 +418,10 @@ class _SM90State:
         self._saved_kv_end.copy_(self._int_ws[kv_end_off : kv_end_off + max_works])
 
     def _clamp_kv_end(
-        self, cam: CommonAttentionMetadata, req_id_per_token: torch.Tensor
+        self,
+        cam: CommonAttentionMetadata,
+        req_id_per_token: torch.Tensor,
+        row_ids: torch.Tensor | None,
     ) -> None:
         assert self._int_ws is not None and self._plan_offsets is not None
         block = 1024
@@ -405,6 +431,7 @@ class _SM90State:
             cam.seq_lens,
             cam.query_start_loc,
             req_id_per_token,
+            row_ids,
             *self._plan_offsets,
             TOPK=self.index_topk,
             KPOOL=self.index_kpool,
@@ -421,12 +448,23 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    # HiSparse reads prefill rows from a different cache than decode rows
+    # when it stages them, so mixed batches plan them separately.
+    prefill_state: _SM90State | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
     """Reuse the common sparse metadata (req ids, topk buffer access)."""
 
     metadata_cls = FlashInferMLASparseSM90Metadata
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -439,7 +477,6 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        self._attention_layer = attention_layer
         impl = attention_layer.impl
         if not isinstance(impl, FlashInferMLASparseSM90Impl):
             raise TypeError(
@@ -456,7 +493,9 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             if kv_cache_spec.dtype == torch.uint8
             else kv_cache_spec.dtype
         )
-        self.state = _SM90State(
+        hisparse = vllm_config.attention_config.hisparse_config is not None
+        make_state = functools.partial(
+            _SM90State,
             device,
             impl.num_heads,
             kv_plan_dtype,
@@ -467,7 +506,44 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             sm_scale=impl.scale,
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
+            reset_kv_indices_on_plan=hisparse,
         )
+        self.state = make_state()
+        self.prefill_state = (
+            make_state(workspace=self.state.workspace) if hisparse else None
+        )
+        self._batch_rows = (
+            torch.arange(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=torch.int32,
+                device=device,
+            )
+            if hisparse
+            else None
+        )
+        self.shardq_state: _SM90State | None = None
+        if impl.use_shardq:
+            world = vllm_config.parallel_config.tensor_parallel_size
+            scheduler = vllm_config.scheduler_config
+            # Each rank owns at most two rounded chunks per request.
+            rank_rows = min(
+                scheduler.max_num_batched_tokens,
+                -(-scheduler.max_num_batched_tokens // world)
+                + 2 * scheduler.max_num_seqs,
+            )
+            self.shardq_state = _SM90State(
+                device,
+                impl.num_heads * world,
+                kv_plan_dtype,
+                rank_rows,
+                topk_indices_buffer.shape[1],
+                impl.kv_lora_rank,
+                impl.qk_rope_head_dim,
+                impl.scale,
+                self.state.index_topk,
+                self.state.index_kpool,
+                workspace=self.state.workspace,
+            )
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
             spec_config is not None and spec_config.enable_adaptive_verification
@@ -533,23 +609,81 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # refreshed buffers.
         num_rows, kv_lens, exact = self._kv_lens_host(common_attn_metadata)
         # MHA prefills are removed from q before forward_mqa. Plan only the
-        # decode prefix in that case, using the same routing decision as MLA.
-        if metadata.num_prefills > 0 and self._attention_layer._use_sparse_mha(
-            metadata
+        # decode prefix in that case.
+        if (
+            metadata.prefill is not None
+            and metadata.prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        if exact:
-            self.state.plan(num_rows, kv_lens, None, None)
-        else:
-            self.state.plan(
-                num_rows, kv_lens, common_attn_metadata, metadata.req_id_per_token
+        if (split := metadata.shardq) is not None:
+            assert (
+                self.shardq_state is not None and split.local_token_ids_cpu is not None
             )
-        metadata.state = self.state
+            decode_rows = split.num_decode_tokens
+            local = split.attn_metadata
+            assert isinstance(local, FlashInferMLASparseSM90Metadata)
+            local.state = self.shardq_state
+            cpu_rows = torch.from_numpy(split.local_token_ids_cpu)
+            local_lens = kv_lens[decode_rows:][cpu_rows]
+            self.shardq_state.plan(
+                len(cpu_rows),
+                local_lens,
+                None if exact else common_attn_metadata,
+                None if exact else metadata.req_id_per_token,
+                None if exact else split.local_token_ids + decode_rows,
+            )
+            num_rows = decode_rows
+            kv_lens = kv_lens[:num_rows]
+            if num_rows == 0:
+                return metadata
+        num_decode_rows = metadata.num_decode_tokens
+        plan_prefill_separately = (
+            self.prefill_state is not None and 0 < num_decode_rows < num_rows
+        )
+        num_first_rows = num_decode_rows if plan_prefill_separately else num_rows
+        self._plan(
+            self.state,
+            kv_lens[:num_first_rows],
+            None,
+            exact,
+            common_attn_metadata,
+            metadata,
+        )
+        metadata.state = metadata.prefill_state = self.state
+        if plan_prefill_separately:
+            assert self.prefill_state is not None and self._batch_rows is not None
+            self._plan(
+                self.prefill_state,
+                kv_lens[num_decode_rows:],
+                self._batch_rows[num_decode_rows:],
+                exact,
+                common_attn_metadata,
+                metadata,
+            )
+            metadata.prefill_state = self.prefill_state
         return metadata
+
+    @staticmethod
+    def _plan(
+        state: _SM90State,
+        kv_lens: torch.Tensor,
+        row_ids: torch.Tensor | None,
+        exact: bool,
+        cam: CommonAttentionMetadata,
+        metadata: FlashInferMLASparseSM90Metadata,
+    ) -> None:
+        if exact:
+            state.plan(kv_lens.shape[0], kv_lens, None, None)
+        else:
+            state.plan(
+                kv_lens.shape[0], kv_lens, cam, metadata.req_id_per_token, row_ids
+            )
 
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
+    supports_shardq: ClassVar[bool] = True
+
     def __init__(
         self,
         num_heads: int,
@@ -589,6 +723,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         assert self.topk_indices_buffer is not None
         self.supports_quant_query_input = False
         self.use_fp8_kv_cache = self.kv_cache_dtype in _FP8_KV_DTYPES
+        self.use_shardq &= self.qk_rope_head_dim == 0
 
     def forward_mqa(
         self,
@@ -597,19 +732,84 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         attn_metadata: FlashInferMLASparseSM90Metadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if not isinstance(q, tuple):
-            raise NotImplementedError(
-                "FlashInferMLASparseSM90Impl expects split (q_nope, q_rope)."
-            )
-        q_nope, q_rope = q
+        if isinstance(q, tuple):
+            q_nope, q_rope = q
+        else:
+            q_nope, q_rope = q.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
         num_tokens = q_rope.shape[0]
         # NoPE models hand a zero-width rope tensor through; rope MLA hands
         # the real 64-dim part. The kernel takes both as-is.
-        q_pe = q_rope.reshape(num_tokens, self.num_heads, self.qk_rope_head_dim)
+        q_pe = q_rope.reshape(num_tokens, q_nope.shape[1], self.qk_rope_head_dim)
 
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_tokens]
-        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+        start = attn_metadata.topk_start
+        topk_indices = self.topk_indices_buffer[start : start + num_tokens]
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            hot_cache = index_group.physical_kv_cache(self.index_group_index)
+            prefill_cache = hot_cache
+            if (
+                num_decode_tokens == num_tokens
+                or index_group.cache(self.index_group_index).all_context_pages_resident
+            ):
+                topk_slots, _ = index_group.convert_logical_to_physical_topk(
+                    self.index_group_index,
+                    topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=True,
+                )
+                decode_slots = topk_slots[:num_decode_tokens]
+                prefill_slots = topk_slots[num_decode_tokens:]
+            else:
+                if num_decode_tokens:
+                    decode_slots, _ = index_group.convert_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        block_stride_rows=None,
+                        return_valid_counts=True,
+                    )
+                prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+                )
+                prefill_slots, _ = triton_convert_req_index_to_global_index(
+                    req_ids,
+                    block_table,
+                    topk_indices[num_decode_tokens:],
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                    return_valid_counts=True,
+                )
+            outputs = []
+            if num_decode_tokens:
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[:num_decode_tokens],
+                        q_pe[:num_decode_tokens],
+                        hot_cache,
+                        decode_slots,
+                        attn_metadata.state,
+                        attn_metadata.block_size,
+                        layer,
+                    )
+                )
+            if num_decode_tokens < num_tokens:
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[num_decode_tokens:],
+                        q_pe[num_decode_tokens:],
+                        prefill_cache,
+                        prefill_slots,
+                        attn_metadata.prefill_state,
+                        attn_metadata.block_size,
+                        layer,
+                    )
+                )
+            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+
+        _, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
         # return_valid_counts=True keeps the compacted-prefix layout: valid
@@ -624,15 +824,34 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        state = attn_metadata.state
+        out = self._run_mqa_kernel(
+            q_nope,
+            q_pe,
+            kv_c_and_k_pe_cache,
+            topk_slots,
+            attn_metadata.state,
+            attn_metadata.block_size,
+            layer,
+        )
+        return out, None
+
+    def _run_mqa_kernel(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_slots: torch.Tensor,
+        state: _SM90State | None,
+        block_size: int,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
         assert state is not None
         # Pack valid prefixes at the offsets refreshed by plan() before replay.
         state.pack_indices(topk_slots)
 
+        kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
         flat = (
-            kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
-            if self.use_fp8_kv_cache
-            else kv_c_and_k_pe_cache
+            kv_rows.view(torch.float8_e4m3fn) if self.use_fp8_kv_cache else kv_rows
         ).reshape(-1, 1, self.head_size)
         ckv = flat[..., : self.kv_lora_rank]
         kpe = flat[..., self.kv_lora_rank :]
@@ -642,5 +861,4 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
-        return out, None
+        return state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)

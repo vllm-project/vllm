@@ -615,7 +615,7 @@ class TestPostToolContentDeferral:
         assert deferred.content == "\nHere is the result"
         assert not deferred.tool_calls
 
-    def test_text_after_tool_deferred_even_when_finished(self):
+    def test_text_after_tool_flushes_when_finished(self):
         engine = _make_engine()
         events = [
             SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
@@ -627,7 +627,8 @@ class TestPostToolContentDeferral:
         delta = engine._events_to_delta(events, finished=True)
         assert delta is not None
         assert delta.tool_calls
-        assert delta.content is None
+        assert delta.content == "done"
+        assert engine._deferred_content == ""
 
     def test_text_before_tool_not_deferred(self):
         engine = _make_engine()

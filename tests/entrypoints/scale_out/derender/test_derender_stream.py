@@ -71,7 +71,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.utils import random_uuid
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 def _merge_fake_deltas(
@@ -143,7 +143,7 @@ class _FakeParser(Parser):
     - Anything else emits nothing.
     """
 
-    tool_parser_cls = _FakeToolParser  # type: ignore[assignment]
+    tool_parser_cls = _FakeToolParser
 
     TOOL_START = 9
     TOOL_ARG = 10
@@ -423,7 +423,9 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
             response = GenerateTokensResponse(
                 request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
-            return derenderer._derender_chat(response, request)[0][0].message.content
+            content = derenderer._derender_chat(response, request)[0][0].message.content
+            assert content is not None
+            return content
 
         # Same decode window and seeding; "length" never drops a token.
         expected = batch_content(
@@ -481,7 +483,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 3, [11]
     )
 
@@ -513,7 +515,7 @@ def test_derender_text_choices_drops_tool_calls_without_tool_choice(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 0, None
     )
 
@@ -1330,6 +1332,7 @@ class TestDerenderChatStream:
                 num_accepted_draft_tokens=1,
                 num_draft_tokens=2,
                 num_spec_tokens=1,
+                num_verified_draft_tokens=2,
             )
         )
         chunk, _ = await derenderer.derender_chat_stream(
@@ -1876,7 +1879,7 @@ def harmony_encode():
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
     pytest.importorskip("openai_harmony")
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 @pytest.fixture(scope="module")
@@ -3070,3 +3073,98 @@ async def test_streaming_derender_logprob_override(
     else:
         assert choice["logprobs"]["tokens"] == [expected]
         assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]
+
+
+_QWEN_DEFERRAL_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen_deferral_server():
+    with RemoteLaunchRenderServer(
+        _QWEN_DEFERRAL_MODEL,
+        [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "qwen3_xml",
+            "--reasoning-parser",
+            "qwen3",
+            "--max-model-len",
+            "2048",
+        ],
+    ) as server:
+        yield server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_end", [False, True])
+async def test_qwen3_quoted_tool_derender_http(qwen_deferral_server, explicit_end):
+    """The real HTTP derender entrypoint agrees across batch and token deltas."""
+    tokenizer = get_tokenizer(_QWEN_DEFERRAL_MODEL)
+    chat_request = {
+        "model": _QWEN_DEFERRAL_MODEL,
+        "messages": [{"role": "user", "content": "Weather?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+    }
+    call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
+    )
+    prefix = "Example: "
+    text = prefix + call + (" done</think>Answer." if explicit_end else "")
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    prompt_ids = tokenizer.encode(
+        "<|im_start|>assistant\n<think>\n", add_special_tokens=False
+    )
+    async with httpx.AsyncClient(
+        base_url=qwen_deferral_server.url_for(""), timeout=60.0
+    ) as client:
+        streamed = await stream_chat_derender(
+            client, ids, [1] * len(ids), chat_request, len(prompt_ids), prompt_ids
+        )
+        response = await client.post(
+            "/v1/chat/completions/derender",
+            json={
+                "model": _QWEN_DEFERRAL_MODEL,
+                "generate_response": {
+                    "request_id": "qwen-deferral",
+                    "choices": [
+                        {"index": 0, "token_ids": ids, "finish_reason": "stop"}
+                    ],
+                },
+                "prompt_token_ids": prompt_ids,
+                "chat_request": chat_request,
+            },
+        )
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    message = choice["message"]
+    if explicit_end:
+        assert streamed["reasoning"] == message["reasoning"] == prefix + call + " done"
+        assert streamed["content"] == message["content"] == "Answer."
+        assert not streamed["tool_calls"]
+        assert not message.get("tool_calls")
+        assert streamed["finish_reason"] == choice["finish_reason"] == "stop"
+    else:
+        assert streamed["reasoning"] == prefix
+        assert message["reasoning"] == prefix
+        assert [call["name"] for call in streamed["tool_calls"]] == ["get_weather"]
+        assert json.loads(streamed["tool_calls"][0]["arguments"]) == {"city": "Paris"}
+        assert [call["function"]["name"] for call in message["tool_calls"]] == [
+            "get_weather"
+        ]
+        assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {
+            "city": "Paris"
+        }
+        assert streamed["finish_reason"] == choice["finish_reason"] == "tool_calls"

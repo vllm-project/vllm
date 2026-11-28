@@ -28,6 +28,19 @@ class _CrashOnTeardown:
 _keep = _CrashOnTeardown()
 """
 
+FAULT_SIGNALS = (signal.SIGSEGV, signal.SIGBUS, signal.SIGABRT)
+# How py-spy reports that it may not trace a process (no ptrace permission).
+NO_PTRACE = ("Permission denied", "Operation not permitted")
+
+
+def _default_fault_signals():
+    """Give the child default fault signals. An ignored or blocked SIGSEGV
+    survives exec; inherited on some CI pods, it turned the expected crashes into
+    exit 0."""
+    for sig in FAULT_SIGNALS:
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, FAULT_SIGNALS)
+
 
 def _run(tmp_path, body, *, plugin=True, env=None, args=()):
     (tmp_path / "test_case.py").write_text(CRASH_AT_TEARDOWN + body)
@@ -50,6 +63,7 @@ def _run(tmp_path, body, *, plugin=True, env=None, args=()):
         env=run_env,
         capture_output=True,
         text=True,
+        preexec_fn=_default_fault_signals,
     )
 
 
@@ -145,3 +159,79 @@ def test_without_the_library_the_tests_run_as_before(tmp_path):
     result = _run(tmp_path, PASSING, env={"VLLM_CI_FAULT_TRAP_LIB": "/nonexistent.so"})
     assert result.returncode == 0, result.stderr
     assert "no native fault reporter" in result.stderr
+
+
+# A test that hangs on a child engine which hangs on its own child, as an
+# EngineCore under `vllm serve` does; it outlives faulthandler_timeout, then waits
+# for the plugin's dump before killing them. The children run from files: the dump
+# also prints each command line, which must not carry the function names.
+HANGING_CHILDREN = """
+import os, signal, subprocess, sys, threading, time
+from pathlib import Path
+
+Path("grandchild.py").write_text(
+    "import time\\n"
+    "def hang_in_grandchild():\\n    time.sleep(60)\\n"
+    "hang_in_grandchild()\\n"
+)
+Path("child.py").write_text(
+    "import subprocess, sys, time\\n"
+    "def hang_in_child():\\n"
+    "    subprocess.Popen([sys.executable, 'grandchild.py'])\\n"
+    "    time.sleep(60)\\n"
+    "hang_in_child()\\n"
+)
+
+def test_hangs_on_a_child():
+    child = subprocess.Popen([sys.executable, "child.py"], start_new_session=True)
+    try:
+        time.sleep(3)
+        for t in threading.enumerate():
+            if isinstance(t, threading.Timer):
+                t.join(120)
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+"""
+
+
+def test_a_timed_out_test_dumps_the_stacks_of_its_child_processes(tmp_path):
+    result = _run(tmp_path, HANGING_CHILDREN, args=("-o", "faulthandler_timeout=1"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    err = result.stderr
+    assert "Timeout (0:00:01)!" in err
+    assert "stacks of 2 child processes" in err
+    assert err.count("[amd-ci] ---- pid") == 2
+    assert err.count("[amd-ci] kernel wait channels: ") == 2
+    assert "end of child process stacks" in err
+    # Only the AMD CI image pins a py-spy for its interpreter. py-spy also needs
+    # ptrace permission for these processes; some CI pods lack it.
+    may_trace = not any(reason in err for reason in NO_PTRACE)
+    if IMAGE_LIB.exists() and shutil.which("py-spy") and may_trace:
+        assert "hang_in_child" in err and "hang_in_grandchild" in err, err
+
+
+@pytest.mark.skipif(
+    not IMAGE_LIB.exists() or shutil.which("py-spy") is None,
+    reason="needs the AMD CI image, which pins py-spy",
+)
+def test_py_spy_reads_this_interpreter(tmp_path):
+    """The child stack dump needs a py-spy that knows this Python: an older one
+    fails with "Failed to find python version" and the dump has no stacks.
+    Recording a process py-spy starts itself needs no ptrace permission."""
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import time\ndef hang_in_child():\n    time.sleep(3)\nhang_in_child()\n"
+    )
+    samples = tmp_path / "samples.txt"
+    result = subprocess.run(
+        ["py-spy", "record", "--idle", "-d", "1", "-f", "raw", "-o", str(samples)]
+        + ["--", sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if any(reason in result.stderr for reason in NO_PTRACE):
+        pytest.skip("py-spy may not trace processes here")
+    assert result.returncode == 0, result.stderr
+    assert "hang_in_child" in samples.read_text()

@@ -5,12 +5,12 @@
 
 from abc import ABC
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, get_args
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import InTreeMoEBackend, MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -34,6 +35,14 @@ BackendT = TypeVar("BackendT", bound=Enum)
 Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 
 
+class RequantizationSourceExperts(mk.FusedMoEExperts):
+    """Experts class selected for online requantization sources.
+
+    Such a source only dequantizes its weights, so no kernel is ever built from
+    it: it is returned as a class and never instantiated.
+    """
+
+
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
@@ -44,6 +53,16 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
+
+    # Backend returned (with `RequantizationSourceExperts`) when selection is
+    # skipped for an online requantization source, which only dequantizes weights.
+    # Oracles supporting requantization sources set it to their enum's `NONE`.
+    # NB: `NONE` may carry other meanings in some enums (e.g. no backend on an
+    # out-of-tree platform for fp8, kernel-less online mxfp4): see each enum.
+    placeholder_backend: BackendT
+
+    # Oracles opt in to platform-registered experts with their own enum member.
+    oot_backend: BackendT | None = None
 
     def __init__(
         self,
@@ -61,6 +80,19 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
         raise NotImplementedError
 
+    @classmethod
+    def maybe_skip_for_requantization_source(
+        cls,
+    ) -> tuple[BackendT, type[mk.FusedMoEExperts]] | None:
+        """Skip backend selection for online requantization sources."""
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        if not is_requantization_source():
+            return None
+        return cls.placeholder_backend, RequantizationSourceExperts
+
     def get_priority_backends(self, moe_config: FusedMoEConfig) -> list[BackendT]:
         """Return platform-appropriate backends in priority order for
         this `moe_config`."""
@@ -76,6 +108,59 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         not alias it with `= staticmethod(fn)`, which snapshots it at import.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_oot_backends(cls) -> dict[str, type[mk.FusedMoEExperts]]:
+        """Return platform registrations for an oracle that supports them."""
+        if cls.oot_backend is None:
+            return {}
+        backends = current_platform.get_moe_backends()
+        if collisions := backends.keys() & get_args(InTreeMoEBackend):
+            raise ValueError(
+                f"Platform MoE backends use reserved names: {sorted(collisions)}"
+            )
+        return backends
+
+    def select_oot_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts]] | None:
+        """Select a registered backend, or let the caller try in-tree selection.
+
+        A named registration is required to support the configuration. With
+        `auto`, try registrations in order and warn if all are rejected.
+        """
+        backend = self.oot_backend
+        if backend is None:
+            return None
+        requested = self.moe_config.moe_backend
+        if requested != "auto" and requested in get_args(InTreeMoEBackend):
+            return None
+
+        backends = self.get_oot_backends()
+        if requested != "auto":
+            experts_cls = backends.get(requested)
+            if experts_cls is None:
+                return None
+            return self.return_or_raise(
+                backend, kernel_classes=[experts_cls], backend_name=requested
+            )
+
+        rejections = []
+        for name, experts_cls in backends.items():
+            kernel_cls, rejected = self.try_backend(
+                backend, [experts_cls], backend_name=name
+            )
+            if kernel_cls is not None:
+                logger.debug_once(self.make_log_backend(backend, backend_name=name))
+                return backend, kernel_cls
+            reason = rejected[-1][1] if rejected else None
+            rejections.append(f"{name}: {reason or 'unsupported configuration'}")
+        if rejections:
+            logger.warning_once(
+                "None of the platform's MoE backends support this %s MoE "
+                "configuration: %s.",
+                self.name,
+                "; ".join(rejections),
+            )
+        return None
 
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
@@ -155,6 +240,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         available_backends: list[BackendT] | None = None,
         is_lora: bool = False,
+        *,
+        backend_name: str | None = None,
     ) -> str:
         """Message for the backend a select loop settled on."""
         available = (
@@ -163,16 +250,23 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             else ""
         )
         lora = "LoRA " if is_lora else ""
-        return f"Using {backend.value} {self.name} MoE {lora}backend{available}."
+        name = backend.value if backend_name is None else backend_name
+        return f"Using {name} {self.name} MoE {lora}backend{available}."
 
     def make_log_unsupported(
-        self, backend: BackendT, reason: str | None, is_lora: bool = False
+        self,
+        backend: BackendT,
+        reason: str | None,
+        is_lora: bool = False,
+        *,
+        backend_name: str | None = None,
     ) -> str:
         """Message for a backend that does not support the configuration."""
         since = f" since {reason}" if reason else ""
         lora = "LoRA " if is_lora else ""
+        name = backend.value if backend_name is None else backend_name
         return (
-            f"{self.name} MoE {lora}backend '{backend.value}' does not support the "
+            f"{self.name} MoE {lora}backend '{name}' does not support the "
             f"deployment configuration{since}."
         )
 
@@ -181,6 +275,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
+        *,
+        backend_name: str | None = None,
     ) -> tuple[type[mk.FusedMoEExperts] | None, list[Rejection]]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
@@ -211,7 +307,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             )
             if supported:
                 return kernel_cls, rejected
-            logger.debug_once(self.make_log_unsupported(backend, reason))
+            logger.debug_once(
+                self.make_log_unsupported(backend, reason, backend_name=backend_name)
+            )
             rejected.append((kernel_cls, reason))
         return None, rejected
 
@@ -222,6 +320,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
         is_lora: bool = False,
+        *,
+        backend_name: str | None = None,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts]]:
         """Return `backend` with its first supported kernel class, or raise.
 
@@ -230,11 +330,21 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 configuration; the message carries the last rejection reason.
 
         """
-        kernel_cls, rejected = self.try_backend(backend, kernel_classes, activation_key)
+        kernel_cls, rejected = self.try_backend(
+            backend, kernel_classes, activation_key, backend_name=backend_name
+        )
         if kernel_cls is None:
             reason = rejected[-1][1] if rejected else None
-            raise ValueError(self.make_log_unsupported(backend, reason, is_lora))
-        logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
+            raise ValueError(
+                self.make_log_unsupported(
+                    backend, reason, is_lora, backend_name=backend_name
+                )
+            )
+        logger.debug_once(
+            self.make_log_backend(
+                backend, available_backends, is_lora, backend_name=backend_name
+            )
+        )
         return backend, kernel_cls
 
 
@@ -285,7 +395,7 @@ def make_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     if experts_log is not None:
-        logger.info_once(experts_log, experts_cls.__name__)
+        logger.debug_once(experts_log, experts_cls.__name__)
 
     extra_kwargs = dict(experts_kwargs or {})
     if prepare_finalize.activation_format.is_batched:

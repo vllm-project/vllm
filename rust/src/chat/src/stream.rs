@@ -131,6 +131,7 @@ impl ChatEventStream {
                     message: done,
                     usage,
                     timestamps,
+                    first_content_token_ts: _,
                     spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
@@ -149,7 +150,7 @@ impl ChatEventStream {
                         token_ids,
                         usage,
                         timestamps,
-                        spec_decode_metrics,
+                        spec_decode_metrics: spec_decode_metrics.map(|value| *value),
                         finish_reason,
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
@@ -272,12 +273,13 @@ mod tests {
                         prompt_cache_usage: Default::default(),
                     }),
                     timestamps: Default::default(),
-                    spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                    first_content_token_ts: None,
+                    spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                         num_spec_tokens: 2,
                         histogram: vec![0, 1, 0],
                         num_draft_tokens: 2,
                         ..Default::default()
-                    }),
+                    })),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,

@@ -25,7 +25,9 @@ use crate::error::Error;
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextDecodeOptions {
-    pub skip_special_tokens: bool,
+    /// `None` takes the model's generation-config default when the request is
+    /// lowered, and `true` without one.
+    pub skip_special_tokens: Option<bool>,
     pub include_stop_str_in_output: bool,
     pub stop_strings: Option<Vec<String>>,
     /// Minimum number of tokens to generate before stop-string checking kicks
@@ -34,14 +36,14 @@ pub struct TextDecodeOptions {
     pub min_tokens: u32,
     /// Whether to detokenize the output. When false, the output is never
     /// decoded: text and logprob token strings stay empty.
-    /// `TextRequest::validate` rejects stop strings in that case.
+    /// [`TextDecodeOptions::validate`] rejects stop strings in that case.
     pub detokenize: bool,
 }
 
 impl Default for TextDecodeOptions {
     fn default() -> Self {
         Self {
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
@@ -50,7 +52,41 @@ impl Default for TextDecodeOptions {
     }
 }
 
+const MAX_STOP_STRINGS_ENV: &str = "VLLM_MAX_STOP_STRINGS";
+const DEFAULT_MAX_STOP_STRINGS: usize = 4;
+
+fn max_stop_strings() -> usize {
+    std::env::var(MAX_STOP_STRINGS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MAX_STOP_STRINGS)
+}
+
 impl TextDecodeOptions {
+    /// Validate stop-string and detokenize invariants.
+    pub fn validate(&self, request_id: &str) -> crate::Result<()> {
+        if let Some(stops) = self.stop_strings.as_ref() {
+            if stops.iter().any(String::is_empty) {
+                return Err(Error::EmptyStopString {
+                    request_id: request_id.to_owned(),
+                });
+            }
+            let max = max_stop_strings();
+            if stops.len() > max {
+                return Err(Error::TooManyStopStrings {
+                    count: stops.len(),
+                    max,
+                });
+            }
+            if !self.detokenize && !stops.is_empty() {
+                return Err(Error::StopStringsRequireDetokenize {
+                    request_id: request_id.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// If we are excluding stop strings from output, we need to buffer
     /// the output so that we don't return the beginning of a stop string
     /// when streaming the outputs.
@@ -79,8 +115,6 @@ pub struct Finished {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<Box<serde_json::Value>>,
-    /// Sampling support sets aligned with all generated token positions.
-    pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding statistics emitted by the engine.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     /// Weight-version spans over all generated token positions.
@@ -93,15 +127,20 @@ pub struct Finished {
 
 /// Sample metadata emitted by one engine output update.
 ///
-/// Token IDs and logprobs share the engine-update clock and align by generated
-/// token position. They may arrive before the corresponding decoded text is
-/// visible or alongside decoded text attributed to earlier updates.
+/// Token IDs, logprobs and sampling-mask rows share the engine-update clock and
+/// align by generated token position. They may arrive before the corresponding
+/// decoded text is visible or alongside decoded text attributed to earlier
+/// updates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SampledDelta {
+    /// Engine output-batch timestamp, on the same clock as `RequestTimestamps`.
+    pub timestamp: f64,
     /// Token IDs produced by this engine update, after stop-string truncation.
     pub token_ids: Vec<u32>,
     /// Per-position logprobs aligned with `token_ids`, when requested.
     pub logprobs: Option<DecodedLogprobs>,
+    /// Sampling support sets aligned with `token_ids`, when requested.
+    pub sampling_mask: Option<SamplingMask>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant
@@ -119,6 +158,9 @@ pub enum DecodedTextEvent {
         /// context to score against; `scored_positions` covers the
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
+        /// Log probabilities of the request's `prompt_logprob_token_ids`, when
+        /// requested.
+        prompt_token_id_logprobs: Option<WireNdArray>,
     },
     /// Decoded text and sampled metadata observed during one output update.
     ///
@@ -184,17 +226,23 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
-    let mut sampling_mask: Option<SamplingMask> = None;
     let mut weight_versions = WeightVersions::default();
+    let mut sampled_sampling_mask: Option<SamplingMask> = None;
+    // Rows received so far, checked against the token count at the end.
+    let mut sampling_mask_row_count: Option<usize> = None;
     let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
-        let output = next?;
+        let mut output = next?;
         prompt_cache_usage.merge(output.prompt_cache_usage);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
+            let prompt_token_id_logprobs = output
+                .prompt_info
+                .as_mut()
+                .and_then(|info| info.prompt_token_id_logprobs.take());
             let prompt_token_ids =
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
@@ -202,7 +250,7 @@ pub async fn decoded_text_event_stream(
             let dec = match text_tokenizer {
                 Some(tokenizer) => tokenizer.create_decode_stream(
                     prompt_token_ids,
-                    decode_options.skip_special_tokens,
+                    decode_options.skip_special_tokens.unwrap_or(true),
                     decode_options.min_bytes_to_buffer(),
                 ),
                 None => Box::new(TokenOnlyDecoder),
@@ -217,6 +265,7 @@ pub async fn decoded_text_event_stream(
                         decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
                     })
                     .transpose()?,
+                prompt_token_id_logprobs,
             })
             .await;
         };
@@ -291,8 +340,8 @@ pub async fn decoded_text_event_stream(
         output_token_count += new_token_ids.len();
         weight_versions.append(new_weight_versions);
         routed_experts.append(new_routed_experts);
-        if let Some(mut mask) = new_sampling_mask {
-            sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+        if let Some(mask) = &new_sampling_mask {
+            *sampling_mask_row_count.get_or_insert_default() += mask.rows.len();
         }
 
         let mut decoded_logprobs = new_logprobs
@@ -308,16 +357,19 @@ pub async fn decoded_text_event_stream(
                     .positions
                     .extend(dlp.positions);
             }
+            if let Some(mut mask) = new_sampling_mask.take() {
+                sampled_sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+            }
         }
 
         if let Some(reason) = finish_reason {
-            if let Some(mask) = sampling_mask.as_ref()
-                && mask.rows.len() != output_token_count
+            if let Some(row_count) = sampling_mask_row_count
+                && row_count != output_token_count
             {
                 return Err(vllm_llm::Error::SamplingMaskTokenCountMismatch {
                     request_id,
                     token_count: output_token_count,
-                    row_count: mask.rows.len(),
+                    row_count,
                 }
                 .into());
             }
@@ -333,6 +385,7 @@ pub async fn decoded_text_event_stream(
                 }
                 sampled_token_ids = new_token_ids;
                 sampled_logprobs = decoded_logprobs;
+                sampled_sampling_mask = new_sampling_mask;
                 decoded
             } else {
                 full_decoded
@@ -358,8 +411,10 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: sampled_token_ids,
                     logprobs: sampled_logprobs,
+                    sampling_mask: sampled_sampling_mask,
                 },
                 finished: Some(Box::new(Finished {
                     usage: TokenUsage {
@@ -370,7 +425,6 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
-                    sampling_mask,
                     spec_decode_metrics,
                     weight_versions,
                     routed_experts: routed_experts.map(Box::new),
@@ -385,8 +439,10 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: new_token_ids,
                     logprobs: decoded_logprobs,
+                    sampling_mask: new_sampling_mask,
                 },
                 finished: None,
             })
@@ -562,8 +618,10 @@ mod tests {
                 attributions: attributions.into_iter().collect(),
             },
             sampled: SampledDelta {
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids: sampled_token_ids,
                 logprobs: None,
+                sampling_mask: None,
             },
             finished: finished.map(Box::new),
         }
@@ -626,6 +684,7 @@ mod tests {
                     DecodedTextEvent::Start {
                         prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
+                        prompt_token_id_logprobs: None,
                     },
                     text_delta("", [], vec![0xe4], None),
                     text_delta(
@@ -641,7 +700,6 @@ mod tests {
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
                             ec_transfer_params: None,
-                            sampling_mask: None,
                             spec_decode_metrics: Some(RequestSpecDecodeMetrics {
                                 num_spec_tokens: 2,
                                 histogram: vec![0, 1, 0],
@@ -671,6 +729,7 @@ mod tests {
                     DecodedTextEvent::Start {
                         prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
+                        prompt_token_id_logprobs: None,
                     },
                     text_delta(
                         "a",
@@ -687,7 +746,6 @@ mod tests {
                             ))),
                             kv_transfer_params: None,
                             ec_transfer_params: None,
-                            sampling_mask: None,
                             spec_decode_metrics: None,
                             weight_versions: None,
                             routed_experts: None,
@@ -838,7 +896,7 @@ mod tests {
                 tokenizer,
                 stream::iter([Ok(output)]),
                 TextDecodeOptions {
-                    skip_special_tokens,
+                    skip_special_tokens: Some(skip_special_tokens),
                     ..Default::default()
                 },
                 false,

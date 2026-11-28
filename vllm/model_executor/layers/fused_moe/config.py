@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Union
 
 import torch
@@ -106,6 +106,26 @@ def _quant_flags_to_group_shape(
             w_shape = GroupShape.PER_TOKEN
 
     return a_shape, w_shape
+
+
+class RoutedScaleMode(Enum):
+    """Where routed_scaling_factor is applied in a MoE layer."""
+
+    # The scale is passed to the router and the experts kernel instead of the
+    # runner: grouped top-k folds it into the top-k weights, and some kernels
+    # (e.g. ROCm AITER) apply it themselves.
+    ROUTER = "router"
+    # The runner multiplies the routed expert output by the scale.
+    OUTPUT = "output"
+    # Like OUTPUT, except that in FP16 with shared experts the runner divides
+    # the shared expert output by the scale instead, to avoid overflow. The
+    # model's decoder layer must compensate with matching divisions (see
+    # DeepseekV2DecoderLayer).
+    OUTPUT_FP16_GUARD = "output_fp16_guard"
+
+    @property
+    def scales_output(self) -> bool:
+        return self is not RoutedScaleMode.ROUTER
 
 
 # The type of method in top-K routing
@@ -1043,7 +1063,7 @@ def biased_moe_quant_config(
 FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 
 
-@dataclass
+@dataclass(slots=True)
 class FusedMoEParallelConfig:
     tp_size: int
     pcp_size: int
@@ -1097,7 +1117,11 @@ class FusedMoEParallelConfig:
 
     @property
     def needs_round_robin_routing_tables(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_mooncake_ep_kernels
+        )
 
     @property
     def use_ag_rs_all2all_kernels(self):
@@ -1132,6 +1156,10 @@ class FusedMoEParallelConfig:
             and self.all2all_backend == "mori"
             and self.mori_ep_v2
         )
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mooncake_ep"
 
     @property
     def use_nixl_ep_kernels(self):
@@ -1481,6 +1509,7 @@ class FusedMoEConfig:
         if (
             conf.use_deepep_ll_kernels
             or conf.use_nixl_ep_kernels
+            or conf.use_mooncake_ep_kernels
             or conf.use_alltoall_batched_kernels
             or self.moe_backend == "batched_triton"
         ):
@@ -1651,6 +1680,10 @@ class FusedMoEConfig:
     @property
     def use_alltoall_batched_kernels(self):
         return self.moe_parallel_config.use_alltoall_batched_kernels
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.moe_parallel_config.use_mooncake_ep_kernels
 
     @property
     def use_nixl_ep_kernels(self):

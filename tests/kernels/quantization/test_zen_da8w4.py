@@ -691,6 +691,10 @@ def test_zen_experts_score_every_routing_method_they_accept():
         "sigmoid",
         True,
     )
+    assert zentorch_moe._ROUTING_SCORING[RoutingMethodType.DeepSeekV3] == (
+        "sigmoid",
+        True,
+    )
 
 
 def test_zen_experts_take_routing_config_off_the_layer():

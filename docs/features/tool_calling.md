@@ -96,6 +96,8 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
 
+The Responses API also accepts tools declared in the `input` list through `additional_tools` items (`{"type": "additional_tools", "role": "developer", "tools": [...]}`), as sent by clients such as Codex. vLLM appends their tools to the request's `tools` in input order, so they are offered to the model exactly like top-level tools.
+
 ## Required Function Calling
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Like named function calling, it uses structured outputs and needs a tool parser, with the same server flags and the same exceptions. Without a loaded parser, a request with `tool_choice='required'` returns HTTP 400.
@@ -192,8 +194,9 @@ vllm serve <model> \
     --reasoning-parser hf
 ```
 
-Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
-field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
+Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the field the selected parser
+needs: `reasoning_content` (or its legacy alias `thinking`) for reasoning, `tool_calls` for tool calls. The `hf` parser cannot be combined with
+other reasoning or tool call parsers.
 
 When streaming, each tool call is emitted whole once its region parses. A call cut off before its closer, for example by a closer that is also a
 stop token, is parsed from the text generated so far; a call that does not parse is dropped.
@@ -261,7 +264,7 @@ Known issues:
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-3. With the official Mistral format (`--tokenizer_mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
+3. With the official Mistral format (`--tokenizer-mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
    Chat Completions tool calls are constrained by [mistral-common](https://github.com/mistralai/mistral-common)'s grammar.
    For `tool_choice="required"` and named tool choice, this grammar allows content, including reasoning, before the tool calls, and the model is not told that a call is required.
    A call is therefore not guaranteed: the model can keep answering in text until `max_tokens` (`finish_reason="length"`).
@@ -275,19 +278,19 @@ Recommended flags:
 
 2. To use the Transformers format when available:
 
-    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+    `--tokenizer-mode hf --config-format hf --load-format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 !!! note
     Models officially released by Mistral AI have two possible formats:
 
     1. The official format that is used by default with `auto` or `mistral` arguments:
 
-        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        `--tokenizer-mode mistral --config-format mistral --load-format mistral`
         This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
 
     2. The Transformers format, when available, that is used with `hf` arguments:
 
-        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+        `--tokenizer-mode hf --config-format hf --load-format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -368,15 +371,6 @@ Known issues:
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
-
-### Jamba Models (`jamba`)
-
-AI21's Jamba-1.5 models are supported.
-
-* `ai21labs/AI21-Jamba-1.5-Mini`
-* `ai21labs/AI21-Jamba-1.5-Large`
-
-Flags: `--tool-call-parser jamba`
 
 ### xLAM Models (`xlam`)
 
@@ -528,6 +522,35 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
     The base model provides general function calling capabilities, but best results
     are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
+### Qwen3 Thinking and Tool Calls
+
+With the Qwen3 reasoning parser and `tool_choice="auto"`, a prompt ending
+in an open `<think>` block keeps tool-looking text in reasoning until an
+explicit `</think>` arrives. A quoted `<tool_call>` example before that closer
+is not an executable call. If the response ends without `</think>`, the first
+tool opener instead acts as the implicit reasoning end and the held span is
+parsed as a tool call. Text after that call is retained.
+
+Streaming delays the ambiguous span until the closer or the end of the
+response. The buffer grows with that span; there is no separate parser-side
+size limit beyond the response length limit. This applies only to Qwen3
+thinking mode with automatic tool choice. Required and named tool choice keep
+the existing implicit-end behavior so their argument grammar starts at the
+tool opener. Quoted tool markup inside reasoning is therefore still not fixed
+for required and named tool choice. Parsers that reuse Qwen3's tool format and
+prompts with thinking already closed are unchanged.
+
+Serving must supply prompt token IDs to identify an open reasoning block.
+The derender streaming API rejects parser-configured requests without them.
+Standalone prompt-less streaming keeps the legacy implicit-end behavior;
+standalone batch extraction can use full-output lookahead instead. These
+prompt-less modes do not have matching quoted-markup behavior.
+
+Prompt-embedding inputs without real prompt token IDs are also outside this
+fix. Their synthetic placeholder IDs cannot identify an open `<think>` block,
+so they keep the legacy implicit-end behavior, including the quoted-markup
+limitation.
+
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
@@ -600,8 +623,8 @@ Flags: `--tool-call-parser apertus`
 The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
 Enable tool calling with `--enable-auto-tool-choice`,
 `--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark` is an
-alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
-their original channel semantics, including recipient-less tool-parser content.
+alias for both parsers. The `muse_glimmer` entry points keep their original channel semantics, including
+recipient-less tool-parser content.
 
 The parsers route `to=self` and recipient-less messages to reasoning,
 `to=user` and `to=commentary` messages to content, and tool recipients to

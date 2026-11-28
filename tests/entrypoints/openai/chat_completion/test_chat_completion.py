@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -299,11 +300,16 @@ async def test_per_request_metrics_non_streaming(client: openai.AsyncOpenAI):
         extra_body={"min_tokens": 4},
     )
 
-    _assert_complete_timing_metrics(response.model_extra.get("metrics"))
+    metrics = response.model_extra.get("metrics")
+    _assert_complete_timing_metrics(metrics)
+    assert metrics["time_to_first_content_token_ms"] is None
 
 
 @pytest.mark.asyncio
-async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("empty_content", [False, True])
+async def test_per_request_metrics_on_final_usage_chunk(
+    client: openai.AsyncOpenAI, empty_content: bool
+):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "Say hello."}],
@@ -311,7 +317,11 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
         temperature=0,
         stream=True,
         stream_options={"include_usage": True},
-        extra_body={"min_tokens": 1},
+        extra_body=(
+            {"allowed_token_ids": [get_tokenizer(MODEL_NAME).eos_token_id]}
+            if empty_content
+            else {"min_tokens": 1}
+        ),
     )
 
     chunks = [chunk async for chunk in stream]
@@ -326,6 +336,16 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
     metrics = (usage_chunk.model_extra or {}).get("metrics")
     assert isinstance(metrics, dict)
     assert metrics["time_to_first_token_ms"] >= 0
+    if empty_content:
+        assert not any(
+            chunk.choices and chunk.choices[0].delta.content for chunk in chunks
+        )
+        assert metrics.get("time_to_first_content_token_ms") is None
+    else:
+        assert (
+            metrics["time_to_first_content_token_ms"]
+            == metrics["time_to_first_token_ms"]
+        )
     assert metrics["generation_time_ms"] >= 0
     assert metrics["queue_time_ms"] >= 0
     assert metrics["tokens_per_second"] >= 0

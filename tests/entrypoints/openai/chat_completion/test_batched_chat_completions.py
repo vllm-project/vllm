@@ -39,6 +39,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MAX_BATCH_CONVERSATIONS = 2
 
 
 @pytest.fixture(scope="module")
@@ -54,13 +55,60 @@ def default_server_args():
         "--block-size",
         "16",
         "--enforce-eager",
+        "--enable-scale-out",
     ]
 
 
 @pytest.fixture(scope="module")
 def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    env = {"VLLM_MAX_COMPLETION_PROMPTS": str(MAX_BATCH_CONVERSATIONS)}
+    with RemoteOpenAIServer(
+        MODEL_NAME, default_server_args, env_dict=env
+    ) as remote_server:
         yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        pytest.param(
+            "v1/chat/completions",
+            {"messages": [{"role": "user", "content": "Hello"}]},
+            id="chat",
+        ),
+        pytest.param(
+            "v1/chat/completions/batch",
+            {"messages": [[{"role": "user", "content": "Hello"}]]},
+            id="batch-chat",
+        ),
+        pytest.param("v1/responses", {"input": "Hello"}, id="responses"),
+        pytest.param(
+            "inference/v1/generate",
+            {"token_ids": [1], "sampling_params": {"max_tokens": 1}},
+            id="tokens",
+        ),
+    ],
+)
+async def test_inference_invalid_model_error_is_bounded(
+    server: RemoteOpenAIServer, endpoint: str, payload: dict
+) -> None:
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for(endpoint),
+            json={"model": "x" * 16384, **payload},
+            timeout=60,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == {
+        "message": (
+            f"The model `{'x' * 256}...` does not exist. Valid aliases: {MODEL_NAME}."
+        ),
+        "type": "NotFoundError",
+        "param": "model",
+        "code": 404,
+    }
 
 
 @pytest.mark.asyncio
@@ -98,6 +146,29 @@ async def test_batched_chat_completions(
     # Each conversation should produce a non-empty text response.
     for choice in choices:
         assert choice["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_batched_chat_completions_rejects_too_many_conversations(
+    server: RemoteOpenAIServer,
+) -> None:
+    conversation = [{"role": "user", "content": "Hello"}]
+
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for("v1/chat/completions/batch"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [conversation] * (MAX_BATCH_CONVERSATIONS + 1),
+                "max_tokens": 1,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["param"] == "body.messages"
+    assert f"at most {MAX_BATCH_CONVERSATIONS} items" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -580,7 +651,8 @@ REASONING_PARSER = "kimi_k3"
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_batched_reasoning_wiring_matches_single_chat() -> None:
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "none"])
+async def test_batched_reasoning_wiring_matches_single_chat(tool_choice) -> None:
     """`/v1/chat/completions/batch` must hand the engine the same reasoning
     wiring as `/v1/chat/completions`.
 
@@ -616,6 +688,8 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             chat_template=CHAT_TEMPLATE,
             chat_template_content_format="auto",
             reasoning_parser=REASONING_PARSER,
+            enable_auto_tools=True,
+            tool_parser="qwen3_xml",
         )
         return mock_engine, cls(
             mock_engine,
@@ -626,6 +700,8 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             chat_template_content_format="auto",
             request_logger=None,
             reasoning_parser=REASONING_PARSER,
+            enable_auto_tools=True,
+            tool_parser="qwen3_xml",
         )
 
     conversation = [{"role": "user", "content": "What is the capital of France?"}]
@@ -637,9 +713,17 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=conversation,
             chat_template_kwargs=chat_template_kwargs,
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice=tool_choice,
         )
     )
     single_call = single_engine.generate.call_args_list[-1]
+    assert single_call.kwargs["reasoning_parser_kwargs"]["tool_choice"] == (
+        "auto" if tool_choice == "auto" else None
+    )
+    # The batch API itself only supports tool_choice="none".
+    if tool_choice != "none":
+        return
 
     batch_engine, batch_serving = _build_serving(OpenAIServingChatBatch)
     await batch_serving.create_batch_chat_completion(
@@ -647,9 +731,15 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=[conversation],
             chat_template_kwargs=chat_template_kwargs,
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice=tool_choice,
         )
     )
     batch_call = batch_engine.generate.call_args_list[-1]
+
+    assert single_call.kwargs["reasoning_parser_kwargs"]["tool_choice"] == (
+        "auto" if tool_choice == "auto" else None
+    )
 
     # Guard against a vacuous comparison: the reference path must be wired up.
     assert single_call.kwargs["reasoning_ended"] is not None

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
+import regex as re
 import torch
 import transformers
 import transformers.configuration_utils as hf_configuration_utils
@@ -54,6 +54,64 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+
+class InvalidSentenceTransformersModulePath(ValueError):
+    pass
+
+
+def get_sentence_transformers_module_file(
+    model: str | Path, folder: str, filename: str
+) -> str:
+    if not isinstance(folder, str):
+        raise InvalidSentenceTransformersModulePath("Invalid module path")
+
+    relative_path = Path(folder) / filename
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise InvalidSentenceTransformersModulePath(
+            "Module path leaves model directory"
+        )
+
+    model_path = Path(model)
+    if model_path.is_dir():
+        model_path = model_path.resolve()
+        module_file = model_path / relative_path
+        resolved_file = module_file.resolve()
+        if not resolved_file.is_relative_to(model_path) and not _is_hub_cache_blob(
+            model_path, module_file, resolved_file
+        ):
+            raise InvalidSentenceTransformersModulePath(
+                "Module path leaves model directory"
+            )
+
+    return relative_path.as_posix()
+
+
+def _is_hub_cache_blob(snapshot: Path, module_file: Path, resolved_file: Path) -> bool:
+    cache_root = Path(constants.HF_HUB_CACHE).resolve()
+    repo = snapshot.parent.parent
+    if not (
+        repo.parent == cache_root
+        and repo.name.startswith("models--")
+        and snapshot.parent.name == "snapshots"
+        and re.fullmatch(r"[0-9a-f]{40}", snapshot.name)
+        and module_file.is_symlink()
+    ):
+        return False
+
+    # Hub snapshots link individual files through their repository's blob directory.
+    parent = module_file.parent.resolve()
+    repo_blobs = repo / "blobs"
+    link_target = Path(os.path.abspath(parent / module_file.readlink()))
+    return (
+        parent.is_relative_to(snapshot)
+        and link_target.parent == repo_blobs
+        and (
+            resolved_file.parent == repo_blobs
+            or resolved_file.parent.parent == cache_root / "blobs"
+        )
+    )
+
+
 CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "total_num_kv_heads": (
         "n_head_kv",  # Falcon
@@ -63,8 +121,8 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "num_attention_groups",  # Step3p5
     ),
     "num_experts": (
-        "num_experts",  # Jamba
-        "moe_num_experts",  # Dbrx
+        "num_experts",  # Qwen3-MoE
+        "moe_num_experts",  # ERNIE-4.5
         "n_routed_experts",  # DeepSeek
         "num_local_experts",  # Mixtral
     ),
@@ -131,12 +189,14 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32="DeepseekV3Config",
     dory="DoryConfig",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     hy_v4="HYV4Config",
+    hy_v4_vl="HYV4VLConfig",
+    hy_v4_flash="HYV4FlashConfig",
+    hy_v4_flash_vl="HYV4FlashVLConfig",
     hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
@@ -152,9 +212,9 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_k31="KimiK3Config",
     lfm3="Lfm3Config",
     lfm3_audio="Lfm3AudioConfig",
+    lfm3_omni="Lfm3OmniConfig",
     lfm3_vl="Lfm3VlConfig",
-    RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
-    RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    nemotron_labs_diffusion="NemotronLabsDiffusionConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -176,8 +236,9 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
-    inkling_mm_model="InklingMMConfig",
-    inkling_model="InklingModelConfig",
+    inkling2="Inkling2MMConfig",
+    inkling2_loop="Inkling2LoopMMConfig",
+    inkling2_model="Inkling2ModelConfig",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
@@ -188,7 +249,8 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashNgramForCausalLM": "longcat_flash",
 }
 
-_PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
+# Checkpoints whose served model is nested in `thinker_config`
+_THINKER_MODEL_TYPES: set[str] = {"qwen3_asr", "qwen2_5_omni", "qwen3_omni_moe"}
 
 # Model types whose checkpoints carry shared RoPE parameters alongside the
 # per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
@@ -236,7 +298,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
 
 
 @contextmanager
-def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+def _mistral_patch_hf_hub_constants() -> Generator[None]:
     hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
     hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
     constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
@@ -275,37 +337,6 @@ def _install_hf_config_validator(
                 validator if v is supersedes else v for v in validators
             ]
         stack.extend(cls.__subclasses__())
-
-
-def _patch_hf_transformers_validate_rope():
-    """Transformers v5 moved the ignore_keys option from the method signature of
-    validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
-    in the PreTrainedConfig class. This is a patch to make older versions of
-    validate_rope() with the ignore_keys parameter work with newer versions of
-    hf transformers (from v5 onwards)
-    """
-    if hasattr(PreTrainedConfig.validate_rope, "__vllm_patched__"):
-        return
-
-    _original_validate_rope = PreTrainedConfig.validate_rope
-
-    @wraps(_original_validate_rope)
-    def patched_validate_rope(self, *args, **kwargs):
-        ignore_keys_param = kwargs.pop("ignore_keys", None)
-        original_ignore_keys = self.ignore_keys_at_rope_validation
-        if ignore_keys_param is not None:
-            logger.warning(
-                "validate_rope() was called with the legacy 'ignore_keys' "
-                "argument; use 'ignore_keys_at_rope_validation' instead"
-            )
-        self.ignore_keys_at_rope_validation = original_ignore_keys or ignore_keys_param
-        result = _original_validate_rope(self, *args, **kwargs)
-        return result
-
-    patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    _install_hf_config_validator(
-        "validate_rope", patched_validate_rope, _original_validate_rope
-    )
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
@@ -385,9 +416,6 @@ class HFConfigParser(ConfigParserBase):
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
-        if model_type in _PATCH_HF_VALIDATE_ROPE:
-            _patch_hf_transformers_validate_rope()
-
         if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
             _patch_hf_transformers_nested_rope_validation()
 
@@ -413,21 +441,48 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
-        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
-            from transformers import Qwen3ASRConfig
-
-            # Original checkpoints nest their fields in `thinker_config`
+        elif model_type in _THINKER_MODEL_TYPES and "thinker_config" in config_dict:
             thinker_config = config_dict.pop("thinker_config")
-            audio_config = thinker_config["audio_config"]
-            audio_config["model_type"] = "qwen3_asr_encoder"
-            config_dict = {**thinker_config, **config_dict}
-            if thinker_config["model_type"] == "qwen3_forced_aligner":
-                config_dict["architectures"] = [
-                    "Qwen3ASRForcedAlignerForTokenClassification"
-                ]
-                config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
-            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+            if model_type == "qwen3_asr":
+                from transformers import Qwen3ASRConfig
+
+                # Original checkpoints nest their fields in `thinker_config`
+                thinker_config["audio_config"]["model_type"] = "qwen3_asr_encoder"
+                thinker_config["text_config"]["model_type"] = "qwen3"
+                config_dict = {**thinker_config, **config_dict}
+                if thinker_config["model_type"] == "qwen3_forced_aligner":
+                    config_dict["architectures"] = [
+                        "Qwen3ASRForcedAlignerForTokenClassification"
+                    ]
+                    config_dict["num_labels"] = config_dict.pop("classify_num")
+                config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+            else:
+                from transformers import CONFIG_MAPPING
+
+                # Only the thinker of an omni model runs a forward pass
+                top_level = ("quantization_config", "torch_dtype", "dtype")
+                thinker_config |= {
+                    k: v for k in top_level if (v := config_dict.get(k)) is not None
+                }
+                thinker_cls = CONFIG_MAPPING[thinker_config["model_type"]]
+                name = thinker_cls.__name__.removesuffix("Config")
+                thinker_config["architectures"] = [f"{name}ForConditionalGeneration"]
+                config = thinker_cls.from_dict(thinker_config, **kwargs)
+        elif model_type == "inkling_mm_model" and (
+            "dense_intermediate_size"
+            in (text_config := config_dict.get("text_config", {}))
+        ):
+            from transformers import InklingConfig
+
+            # Transformers < 5.20: original checkpoints lose their MoE width
+            # (huggingface/transformers#49416)
+            # TODO: Delete once Transformers 5.20.0 is the minimum supported version
+            dense_width = text_config.pop("dense_intermediate_size")
+            text_config["moe_intermediate_size"] = text_config["intermediate_size"]
+            text_config["intermediate_size"] = dense_width
+            kwargs.setdefault("name_or_path", str(model))
+            config = InklingConfig.from_dict(config_dict, **kwargs)
         elif (
             model_type == "moss_transcribe_diarize"
             and config_dict["audio_config"]["model_type"] == "whisper"
@@ -680,14 +735,6 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
                 )
             rope_parameters["rope_type"] = "default"
             logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
-        elif rope_parameters["rope_type"] == "telechat3-yarn":
-            # TeleChat3 is YaRN with 0.07 in place of YaRN's 0.1 attention
-            # scaling coefficient. Precompute it so the config is plain YaRN.
-            factor = rope_parameters["factor"]
-            rope_parameters["rope_type"] = "yarn"
-            rope_parameters["attention_factor"] = 0.07 * math.log(factor) + 1.0
-            rope_parameters.pop("type", None)
-            logger.warning("Replacing rope_type 'telechat3-yarn' with 'yarn'")
 
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):
@@ -1031,6 +1078,13 @@ def get_config(
                     scale_fmt,
                 )
 
+    # Sentence Transformers v6 prefers the CrossEncoder activation it saves outside
+    # config.json. Set it under the legacy key so that hf_overrides of either key win.
+    if act_fn := get_sentence_transformers_activation_fn(model, revision):
+        sentence_transformers = getattr(config, "sentence_transformers", None) or {}
+        sentence_transformers.pop("activation_fn", None)
+        config.sbert_ce_default_activation_function = act_fn
+
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
         config.update(hf_overrides_kw)
@@ -1103,7 +1157,9 @@ def get_pooling_config(
     if pooling:
         from vllm.config.pooler import SEQ_POOLING_TYPES, TOK_POOLING_TYPES
 
-        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_file_name = get_sentence_transformers_module_file(
+            model, pooling["path"], "config.json"
+        )
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
 
         logger.info("Found pooling configuration.")
@@ -1404,13 +1460,17 @@ def try_get_dense_modules(
         for module in dense_modules:
             folder = module.get("path", "")
 
-            config_path = f"{folder}/config.json" if folder else "config.json"
+            config_path = get_sentence_transformers_module_file(
+                model, folder, "config.json"
+            )
             layer_config = get_hf_file_to_dict(config_path, model, revision)
             if not layer_config:
                 continue
             layer_config["folder"] = folder
             layer_configs.append(layer_config)
         return layer_configs
+    except InvalidSentenceTransformersModulePath:
+        raise
     except Exception:
         return None
 
@@ -1495,6 +1555,36 @@ def get_sentence_transformers_chat_template_kwargs(
             f"Unsupported Sentence Transformers chat template settings: {reserved}"
         )
     return chat_template_kwargs
+
+
+@cache
+def get_sentence_transformers_activation_fn(
+    model: str | Path,
+    revision: str | None = None,
+) -> str | None:
+    try:
+        if not file_or_path_exists(
+            model, "config_sentence_transformers.json", revision
+        ):
+            return None
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if modules is not None:
+        types = [m.get("type") if isinstance(m, dict) else None for m in modules]
+        if not (len(types) == 1 and types[0] in _ST_TRANSFORMER_MODULE_TYPES):
+            return None
+    activation_fn = st_config.get("activation_fn")
+    return activation_fn if isinstance(activation_fn, str) else None
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:

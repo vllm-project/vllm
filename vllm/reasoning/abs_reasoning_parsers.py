@@ -31,6 +31,8 @@ class ReasoningParser:
     """
 
     engine_based_streaming: bool = False
+    # Opt in when engine-side boundary detection needs the rendered prompt.
+    requires_prompt_token_ids: bool = False
 
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer

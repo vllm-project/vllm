@@ -53,6 +53,8 @@ from vllm.tool_parsers.structural_tag_registry import (
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
 
+    from vllm.logprobs import LogprobsOnePosition
+
 
 logger = init_logger(__name__)
 
@@ -81,9 +83,22 @@ class Segment(NamedTuple):
     recipient: str | None
     delta: str
     completed_message: Message | None = None
+    # Index into the token_ids passed to process_chunk of the token that
+    # produced this segment. None for segments created by flush().
+    token_index: int | None = None
+    # (token_id, logprobs) of an output text token. Set by HarmonyContext
+    # only when logprobs are requested.
+    token_logprobs: tuple[int, LogprobsOnePosition] | None = None
+
+    @property
+    def is_content(self) -> bool:
+        return (
+            _SegmentType.from_channel_and_recipient(self.channel, self.recipient)
+            == _SegmentType.CONTENT
+        )
 
 
-@dataclass
+@dataclass(slots=True)
 class ChunkResult:
     segments: list[Segment]
     reasoning_token_count: int
@@ -334,7 +349,7 @@ class HarmonyParser(DelegatingParser):
 
         segments: list[Segment] = []
         reasoning_token_count = 0
-        for token_id in token_ids:
+        for token_index, token_id in enumerate(token_ids):
             try:
                 self._harmony_parser.process(token_id)
             except HarmonyError:
@@ -360,6 +375,7 @@ class HarmonyParser(DelegatingParser):
                     recipient=recipient,
                     delta=delta,
                     completed_message=completed_message,
+                    token_index=token_index,
                 )
             )
 

@@ -713,8 +713,9 @@ def test_mla_backend_selection(
 @pytest.mark.parametrize(
     "selected_backend", [None, AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
 )
-def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
-    """Sparse MLA remains selectable without DCP and fails early with DCP."""
+def test_sparse_mla_backend_supports_dcp(selected_backend, use_dcp):
+    """Sparse MLA is selectable with and without DCP; the impl enforces the
+    fp8_ds_mla, no-sink requirement of its DCP path."""
     from vllm.platforms.rocm import RocmPlatform
 
     selector_config = AttentionSelectorConfig(
@@ -726,13 +727,9 @@ def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
         use_sparse=True,
         use_dcp=use_dcp,
     )
-    if use_dcp:
-        with pytest.raises(ValueError, match="DCP not supported"):
-            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
-    else:
-        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
-            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
-        )
+    assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+        AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+    )
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
@@ -847,6 +844,44 @@ def test_turboquant_boundary_selection_is_not_cached_from_ordinary_run(
     assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend]) == [
         KVCacheLayout.LBNHC
     ]
+
+
+def test_ultraquant_boundary_selection_shares_a_layout(
+    cleared_attention_selector_cache,
+    monkeypatch,
+):
+    """Automatic selection for an ultraquant_4bit run must give the native-dtype
+    boundary layers a backend whose KV layout ULTRAQUANT can share; otherwise
+    get_supported_kv_cache_layouts() fails at engine startup."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx1201", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx1100", lambda: False)
+    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+    from vllm.v1.attention.selector import get_attn_backend
+
+    ultraquant_config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype="ultraquant_4bit")
+    )
+    backend_priorities = [
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ULTRAQUANT,
+    ]
+    with (
+        patch(
+            "vllm.platforms.rocm._get_backend_priorities",
+            return_value=backend_priorities,
+        ),
+        set_current_vllm_config(ultraquant_config),
+    ):
+        boundary_backend = get_attn_backend(128, torch.bfloat16, "auto")
+        quantized_backend = get_attn_backend(128, torch.bfloat16, "ultraquant_4bit")
+
+    assert quantized_backend is AttentionBackendEnum.ULTRAQUANT.get_class()
+    assert boundary_backend is not AttentionBackendEnum.ROCM_ATTN.get_class()
+    assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend])
 
 
 def test_turboquant_run_does_not_mask_unsupported_selected_backend(
@@ -1066,3 +1101,18 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+def test_ultraquant_starts_with_automatic_backend_selection(vllm_runner):
+    """ultraquant_4bit without --attention-backend: the boundary layers must get a
+    backend whose KV layout UltraQuant can share, so the engine starts and answers.
+    Before the fix startup failed with "No KV cache layout satisfies every
+    supported set"."""
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        kv_cache_dtype="ultraquant_4bit",
+        max_model_len=1024,
+        enforce_eager=True,
+    ) as llm:
+        outputs = llm.generate_greedy(["The capital of France is"], max_tokens=8)
+    assert "Paris" in outputs[0][1]

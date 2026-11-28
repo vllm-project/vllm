@@ -1,0 +1,173 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Inkling 2 Mini"
+  slug: "inkling-2-mini"
+  provider: "Thinking Machines Lab"
+  description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
+  date_added: 2026-11-20
+  date_updated: 2026-11-27
+  difficulty: intermediate
+  tasks:
+    - multimodal
+  performance_headline: "~4,400 output tok/s/GPU at 100 tok/s/user (32K-context agentic sessions) with DSpark on 1 GB200 (TP1)"
+  related_recipes:
+    - thinkingmachines/Inkling-2-Small
+  default_hardware: gb200
+  hardware:
+    gb200: verified
+    b300: verified
+    gb300: verified
+    h100: verified
+    h200: verified
+    dgx_spark_gb10: verified
+
+model:
+  model_id: "thinkingmachines/Inkling-2-Mini"
+  # Inkling2LoopForConditionalGeneration is not in v0.34.0; the next release at the earliest.
+  min_vllm_version: "0.35.0"
+  nightly_required: true
+  docker_image: "vllm/vllm-openai:nightly"
+  architecture: moe
+  parameter_count: "26B"
+  active_parameters: "3.5B"
+  context_length: 1048576
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Parse reasoning output with the Inkling reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "inkling"
+  tool_calling:
+    description: "Enable auto tool choice with the Inkling tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "inkling"
+  spec_decoding:
+    description: "DSpark speculative decoding with the draft bundled in the checkpoint: a 3-layer parallel block drafter plus a recurrent head, 7 draft tokens per step, reading the target's hidden states at four layer visits (two inside the loop). Drafts are sampled from the draft distribution, as in the reference."
+    args:
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+opt_in_features:
+  - tool_calling
+
+variants:
+  default:
+    precision: nvfp4
+    vram_minimum_gb: 24
+    description: "Routed experts in NVFP4 (layers 0-19) and MXFP8 (layers 20-23) with activations quantized to the same format; attention, routers, attention-residual queries, loop controllers and the LM head in BF16/FP32. ~20 GB on disk including the 0.6 GB DSpark draft."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  # One GPU serves the model's full 1M context (a GB200 holds ~1.8 concurrent
+  # 1M-token requests; ~69 KB of cache per token). H100 (80 GB) and DGX Spark
+  # (128 GB shared with the host) keep a 262,144-token cap.
+  single_node_tp:
+    tp: 1
+    hardware_overrides:
+      h100:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+      dgx_spark_gb10:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+
+guide: |
+  ## Overview
+
+  Inkling 2 Mini is a looped Mixture-of-Experts model from Thinking Machines (text and image in,
+  text out) with 26B total and 3.5B active parameters and up to 1M tokens of context. It ships
+  with a DSpark speculator in the same checkpoint.
+
+  Its 24 layers split into a prelude (layers 0-5), a loop core (layers 6-17) and a coda
+  (layers 18-23). The core runs three passes with shared weights, so every token makes 48
+  layer visits:
+
+  - **Every pass starts from the prelude's output.** From the second pass on, each core
+    sublayer input (attention query, key and value inputs, and the MLP input) reads a message
+    from the previous pass's two attention-residual blocks and merges it through a gated
+    rank-64 controller.
+  - **Each pass keeps its own memory:** every core layer has a KV cache and a conv-state cache
+    per pass (48 of each in total). vLLM manages them like any other cache layers, so prefix
+    caching and CUDA graphs work as usual.
+
+  Each layer uses Inkling 2 Small's components at hidden size 2,304: block attention residuals,
+  relative-bias attention with a gate and sink (20 sliding-window and 4 full-attention layers,
+  24 query and 8 KV heads), four short convolutions, and 128 routed experts (top-8). The image
+  encoder is a 23-layer ViT.
+
+  ## Runtime
+
+  Inkling 2 Mini is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
+
+  ## Configurations
+
+  Inkling 2 Mini runs on NVIDIA Blackwell (B200, GB200, B300, GB300), Hopper (H100, H200) and
+  DGX Spark, and is verified on GB200, B300, GB300, H100, H200 and DGX Spark. The configurations
+  below were verified on GB200 with DSpark and the reasoning parser enabled:
+
+  - **One GPU, TP1:** the full 1,048,576-token context (a GB200 holds about 1.8 concurrent
+    1M-token requests). This is the most efficient way to serve the model; TP4 gives lower
+    output throughput per GPU. On H100 and DGX Spark, the recipe caps the context at 262,144
+    tokens to fit in memory.
+
+  On one GPU, the KV cache bounds the number of concurrent long sessions: with 32K, 64K and
+  128K-token sessions, about 45, 32 and 20 sessions run at 100 tokens/s per user.
+
+  Ampere and Ada GPUs (SM80, SM86, SM89) are supported, with a BF16 KV cache and BF16 expert
+  activations.
+
+  Tool calling uses the `inkling` tool-call parser (opt-in above).
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  response = client.chat.completions.create(
+      model="thinkingmachines/Inkling-2-Mini",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe this image."},
+              {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+          ],
+      }],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Benchmarking
+
+  Benchmark through the chat endpoint so the server applies the chat template and the
+  reasoning parser. DSpark acceptance depends on the prompts and the sampling temperature:
+  random-token prompts accept almost nothing, so benchmark on realistic text such as SPEED-Bench.
+
+  ```bash
+  vllm bench serve \
+    --backend openai-chat --endpoint /v1/chat/completions \
+    --model thinkingmachines/Inkling-2-Mini \
+    --dataset-name speed_bench --speed-bench-dataset-subset throughput_1k \
+    --speed-bench-output-len 1024 --max-concurrency 16 --num-prompts 64
+  ```
+
+  ## References
+
+  - [Inkling 2 Mini announcement](https://thinkingmachines.ai/news/inkling-2-mini/)
+  - [Inkling 2 Mini on Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+  - [vLLM blog: Inkling 2 Mini on vLLM](https://vllm.ai/blog/2026-11-20-inkling2-mini)
+  - [Inkling 2 Small recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small)
+  - [DeepSeek DSpark (DeepSpec)](https://github.com/deepseek-ai/DeepSpec)

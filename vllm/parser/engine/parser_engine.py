@@ -69,6 +69,9 @@ class ToolCallSlot:
         "_streamed_joined",
         "extend_open_value",
         "open_value_streams",
+        "_name_window",
+        "_name_parts_seen",
+        "_json_name",
     )
 
     def __init__(self) -> None:
@@ -82,6 +85,9 @@ class ToolCallSlot:
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
         self.open_value_streams: bool = False
+        self._name_window = ""
+        self._name_parts_seen = 0
+        self._json_name: str | None = None
 
     @property
     def args(self) -> str:
@@ -92,6 +98,27 @@ class ToolCallSlot:
     def append_args(self, value: str) -> None:
         self._args_parts.append(value)
         self._args_joined = None
+
+    def search_name(self, pattern: re.Pattern[str]) -> str | None:
+        """Group 1 of the leftmost `pattern` match in the args, or `None`.
+
+        Each call scans only the args appended since the last call, plus the
+        tail where a partial match may still complete. The first match is
+        kept as the slot's name for its lifetime, so every call must pass the
+        same name pattern.
+        """
+        if self._json_name is None:
+            text = self._name_window + "".join(
+                self._args_parts[self._name_parts_seen :]
+            )
+            self._name_parts_seen = len(self._args_parts)
+            m = pattern.search(text)
+            if m is None:
+                partial = pattern.search(text, partial=True)
+                self._name_window = text[partial.start() :] if partial else ""
+                return None
+            self._json_name = m.group(1)
+        return self._json_name
 
     @property
     def streamed_json(self) -> str:
@@ -116,6 +143,8 @@ class ParserEngine(Parser):
     complete output format for a model (reasoning + tool calls).
     """
 
+    _streaming_engine_cls: type[StreamingParserEngine] = StreamingParserEngine
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -137,7 +166,7 @@ class ParserEngine(Parser):
         self._reasoning_parser = None
         self._tool_parser = None
         self.parser_engine_config = parser_engine_config
-        self._engine = StreamingParserEngine(
+        self._engine = self._streaming_engine_cls(
             parser_engine_config, tokenizer, vocab=self.vocab
         )
 
@@ -157,6 +186,9 @@ class ParserEngine(Parser):
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
         self._suppress_tool_calls: bool = False
+        # Off during a single-pass parse: `_build_extracted_result` converts
+        # each call's raw arguments once, so argument deltas would go unused.
+        self._emit_arg_deltas: bool = True
 
         self._arg_converter = parser_engine_config.arg_converter
         self._complete_tool_call_validator = (
@@ -263,9 +295,10 @@ class ParserEngine(Parser):
     def finish_streaming(
         self, *, resolve_deferred_tool_start: bool = False
     ) -> DeltaMessage | None:
-        events = self._engine.finish(
-            resolve_deferred_tool_start=resolve_deferred_tool_start
-        )
+        if resolve_deferred_tool_start:
+            events = self._engine.finish(resolve_deferred_tool_start=True)
+        else:
+            events = self._engine.finish()
         if events or self._deferred_content:
             return self._events_to_delta(events, finished=True)
         return None
@@ -532,8 +565,6 @@ class ParserEngine(Parser):
             if prompt_token_ids is not None:
                 self.adjust_initial_state_from_prompt(prompt_token_ids)
             elif self.parser_engine_config.defer_reasoning_tool_start:
-                # Prompt-sensitive parsers need a definite negative signal
-                # when this call path has no prompt tokens to inspect.
                 self.adjust_initial_state_from_prompt(())
             self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
@@ -728,8 +759,6 @@ class ParserEngine(Parser):
     def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
         """Reasoning-end tokens that are also content, e.g. a tool-call start."""
         if self._engine.defer_reasoning_tool_start:
-            # While a tool start is deferred inside open reasoning, no
-            # reasoning-end token doubles as content.
             return frozenset()
         return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
@@ -737,10 +766,6 @@ class ParserEngine(Parser):
         """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
         if self._engine.defer_reasoning_tool_start:
-            # While deferral is active, only the explicit reasoning end
-            # (e.g. </think>) closes reasoning; an implicit end such as a
-            # quoted <tool_call> must not. Without an explicit end token the
-            # effective set is empty and no reasoning end is reported.
             end_ids = (
                 frozenset({self._reasoning_end_token_id})
                 if self._reasoning_end_token_id is not None
@@ -842,7 +867,11 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events, finished=True)
+        self._emit_arg_deltas = False
+        try:
+            delta = self._events_to_delta(events, finished=True)
+        finally:
+            self._emit_arg_deltas = True
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
@@ -936,7 +965,9 @@ class ParserEngine(Parser):
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
-        if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
+        if self._deferred_content and (
+            finished or not seen_tool_event or not tool_call_deltas
+        ):
             # Deferred content carried in from a previous delta precedes this
             # delta's content; content deferred during this call (text after
             # an unpromoted tool event) follows it.
@@ -1035,7 +1066,7 @@ class ParserEngine(Parser):
                 # Name not yet known — try to extract from accumulated args
                 name = self._try_extract_name(idx)
                 self._emit_name_delta(idx, deltas, name)
-        elif event.value:
+        elif event.value and self._emit_arg_deltas:
             # Name already sent — emit arg delta
             arg_delta = self._compute_arg_delta(idx, event.value)
             if arg_delta:
@@ -1055,7 +1086,7 @@ class ParserEngine(Parser):
         if idx >= len(self._tool_slots):
             return
 
-        remaining = self._flush_arg_converter(idx)
+        remaining = self._flush_arg_converter(idx) if self._emit_arg_deltas else None
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
@@ -1122,6 +1153,13 @@ class ParserEngine(Parser):
 
     # ── Arg conversion helpers ─────────────────────────────────────────
 
+    def _hold_open_value(self, slot) -> None:
+        # Nothing has streamed yet, so the open value is the first one.
+        # Hold it with the extender until its tag closes.
+        if self._arg_value_extender is not None and not slot.streamed_json:
+            slot.extend_open_value = self._arg_value_extender(slot.args)
+            slot.open_value_streams = False
+
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         converter = self._arg_converter
         if converter is None:
@@ -1150,6 +1188,7 @@ class ParserEngine(Parser):
             return None
 
         if not current_json:
+            self._hold_open_value(slot)
             return None
 
         if slot.name:
@@ -1159,6 +1198,7 @@ class ParserEngine(Parser):
         safe_json, value_streams = self._safe_arg_prefix(current_json, slot.string_keys)
 
         if not safe_json:
+            self._hold_open_value(slot)
             return None
         if prev and not safe_json.startswith(prev):
             if self._arg_value_extender is not None:
@@ -1202,12 +1242,7 @@ class ParserEngine(Parser):
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 
     def _try_extract_name(self, idx: int) -> str | None:
-        m = self._NAME_RE.search(self._tool_slots[idx].args)
-        if m:
-            name = m.group(1)
-            if name:
-                return name
-        return None
+        return self._tool_slots[idx].search_name(self._NAME_RE) or None
 
     # ── Build ExtractedToolCallInformation ─────────────────────────────
 
