@@ -286,6 +286,12 @@ class NCCLWeightTransferEngine(
         # allocated outside torch (NCCL, other processes on the GPU) can use it.
         torch.accelerator.empty_cache()
 
+    def abort_weight_update(self) -> None:
+        """Abort the reload of the current target after a failed update."""
+        from vllm.model_executor.model_loader.reload import abort_reload
+
+        abort_reload(self.model)
+
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """Receive weights from trainer via NCCL broadcast.
 

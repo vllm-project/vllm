@@ -171,6 +171,14 @@ class IPCWeightTransferEngine(
             consumer.close()  # raises if the transfer was cut short
         finish_reload(self.model, self.model_config, self.device)
 
+    def abort_weight_update(self) -> None:
+        """Abort the reload of the current target after a failed update."""
+        from vllm.model_executor.model_loader.reload import abort_reload
+
+        # A partial transfer is expected on abort. close() checks completeness.
+        self._packed_consumer = None
+        abort_reload(self.model)
+
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via CUDA IPC handles and load them.
 

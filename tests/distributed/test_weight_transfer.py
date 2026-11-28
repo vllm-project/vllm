@@ -15,6 +15,7 @@ import pickle
 import runpy
 import threading
 import time
+import weakref
 from contextlib import ExitStack, nullcontext
 from functools import cached_property
 from types import SimpleNamespace
@@ -85,6 +86,8 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferUpdateInfo,
     SparseWeightPatch,
 )
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.utils.nccl import _nccl_has_no_cache
 from vllm.utils.network_utils import get_open_port, get_open_ports_list
@@ -2185,6 +2188,35 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
+def test_ipc_abort_weight_update_restores_model():
+    """An aborted update leaves the model with the weights it started from."""
+    layer = torch.nn.Linear(2, 2, bias=False)
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+    original = layer.weight.detach().clone()
+    record_metadata_for_reloading(model)
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+
+    engine.start_weight_update()
+    assert layer.weight.is_meta
+
+    engine.abort_weight_update()
+
+    assert not layer.weight.is_meta
+    assert torch.equal(layer.weight, original)
+
+    # A new session starts cleanly from the restored weights.
+    engine.start_weight_update()
+    assert layer.weight.is_meta
+    engine.abort_weight_update()
+    assert torch.equal(layer.weight, original)
+
+
 def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
     """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
     `bufs[i]`."""
@@ -2242,6 +2274,28 @@ def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
     engine.receive_weights(starts[0])
     with pytest.raises(RuntimeError, match="before its last chunk"):
         engine.finish_weight_update()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_abort_releases_incomplete_transfer(monkeypatch):
+    bufs = [torch.arange(4, dtype=torch.float32, device="cuda:0").view(torch.uint8)]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    handle = {uuid: (0, *range(7))}
+
+    engine.start_weight_update()
+    engine.receive_weights(_packed_ipc_chunk(handle, ["w"], 8))
+    imported = weakref.ref(bufs.pop())
+    engine.abort_weight_update()
+    assert imported() is None
+
+    bufs.append(torch.ones(4, dtype=torch.float32, device="cuda:0").view(torch.uint8))
+    engine.start_weight_update()
+    engine.receive_weights(_packed_ipc_chunk(handle, ["w"], 4, last=True))
+    engine.finish_weight_update()
+    [(name, weight)] = model.load_weights.call_args.args[0]
+    assert name == "w"
+    assert weight.tolist() == [1.0] * 4
 
 
 class RecordingClient:
@@ -3533,6 +3587,7 @@ def _make_modelexpress_engine():
         SimpleNamespace(
             parallel_config=SimpleNamespace(),
             model_config=SimpleNamespace(model="test/model"),
+            speculative_config=None,
         ),
         torch.device("cpu"),
         torch.nn.Linear(2, 2),
@@ -3552,6 +3607,7 @@ def mx_worker(mx_client, monkeypatch):
     worker._weight_update_is_draft = False
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
+    worker._asleep_tags = set()
     worker.model_runner = MagicMock(extensible_kv_cache=None)
     return worker
 
@@ -3609,22 +3665,31 @@ def test_modelexpress_worker_recovers_after_rejected_update(
     staged_b.release.assert_called_once_with()
 
 
-def test_modelexpress_worker_can_retry_failed_finish(mx_worker, mx_client):
+def test_modelexpress_worker_starts_new_session_after_failed_finish(
+    mx_worker, mx_client
+):
     mx_worker.weight_transfer_engine.init_transfer_engine(
         mx_worker.weight_transfer_engine.parse_init_info({})
     )
-    staged = mx_client.stage_weight.return_value
-    staged.release.side_effect = [RuntimeError("release failed"), None]
+    staged_a = SimpleNamespace(version_id="version-a", metrics={}, release=MagicMock())
+    staged_b = SimpleNamespace(version_id="version-b", metrics={}, release=MagicMock())
+    mx_client.stage_weight.side_effect = [staged_a, staged_b]
+    staged_a.release.side_effect = [RuntimeError("release failed"), None]
     mx_worker.start_weight_update()
     mx_worker.update_weights({"version_id": "version-a"})
 
     with pytest.raises(RuntimeError, match="release failed"):
         mx_worker.finish_weight_update()
-    mx_worker.finish_weight_update()
+    # Reset retries the release and drops the failed session.
+    assert staged_a.release.call_count == 2
+    with pytest.raises(RuntimeError, match="without a matching"):
+        mx_worker.finish_weight_update()
 
-    assert staged.release.call_count == 2
-    assert not mx_worker._weight_update_active
     mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-b"})
+    mx_worker.finish_weight_update()
+    mx_client.apply_weight.assert_called_with(staged_b)
+    staged_b.release.assert_called_once_with()
 
 
 def test_native_engine_applies_and_releases_exact_versions(mx_client):
