@@ -1878,9 +1878,24 @@ class RowParallelLinear(LinearBase):
             input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
+        # Add the bias after the all-reduce when reducing across ranks, so
+        # every rank executes the same operations. Backends that compile one
+        # graph per rank otherwise get different graphs across ranks, which
+        # breaks the all-reduce. Otherwise keep fusing the bias into the
+        # GEMM on rank 0.
+        defer_bias = (
+            self.reduce_results
+            and self.tp_size > 1
+            and not self.skip_bias_add
+            and self.bias is not None
+        )
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        bias_ = (
+            None
+            if (defer_bias or self.tp_rank > 0 or self.skip_bias_add)
+            else self.bias
+        )
         apply = partial(self.quant_method.apply, self, bias=bias_)
         output_parallel = apply_flattened(apply, input_parallel)
 
@@ -1888,6 +1903,9 @@ class RowParallelLinear(LinearBase):
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
+
+        if defer_bias:
+            output = output + self.bias
 
         if not self.return_bias:
             return output
