@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from vllm.config import MultiModalConfig
+from vllm import envs
+from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
 )
@@ -31,7 +32,10 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    is_fa_version_supported,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_aiter_fp8_attn_wrapper,
@@ -361,6 +365,8 @@ class MMEncoderAttention(CustomOp):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
+        *,
+        supports_fixed_fa4_config: bool = False,
     ) -> None:
         """Args:
         num_heads: number of attention heads per partition.
@@ -400,11 +406,27 @@ class MMEncoderAttention(CustomOp):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self._fa_version = (
-            get_flash_attn_version(head_size=head_size)
-            if self.is_flash_attn_backend
-            else None
+        vllm_config = get_current_vllm_config_or_none()
+        self._use_fixed_fa4_config = (
+            supports_fixed_fa4_config
+            and envs.VLLM_BATCH_INVARIANT
+            and vllm_config is not None
+            and vllm_config.attention_config.flash_attn_version == 4
+            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability((10, 0))
+            and dtype == torch.bfloat16
+            and head_size == 64
+            and num_heads == self.num_kv_heads == 16
+            and is_fa_version_supported(4)
         )
+        self._fa_version = None
+        if self.is_flash_attn_backend:
+            self._fa_version = (
+                4
+                if self._use_fixed_fa4_config
+                else get_flash_attn_version(head_size=head_size)
+            )
 
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             _get_flashinfer_workspace_buffer()
@@ -622,6 +644,7 @@ class MMEncoderAttention(CustomOp):
             scale=self.scale,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            use_fixed_fa4_config=self._use_fixed_fa4_config,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
