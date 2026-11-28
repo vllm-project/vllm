@@ -32,6 +32,8 @@ from vllm.parser.engine.parser_engine_config import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
@@ -43,7 +45,8 @@ THINK_START = "<think>"
 THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
-CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
+CHATML_IM_START = "<|im_start|>"
+CHATML_TURN_BOUNDARIES = frozenset((CHATML_IM_START, "<|im_end|>"))
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
@@ -374,6 +377,14 @@ class Qwen3Parser(ParserEngine):
             tools,
             **kwargs,
         )
+        # Some Qwen3.x quantizations emit <|im_start|> in place of the "<" of
+        # "<function=" (vllm#69190); see _preprocess_feed.
+        self._stray_func_prefix_re = re.compile(
+            rf"((?:{re.escape(self.TOOL_START)}|{re.escape(FUNC_END)})\s*)"
+            rf"{re.escape(CHATML_IM_START)}(?=function=)"
+        )
+        self._im_start_token_id = self.vocab.get(CHATML_IM_START)
+        self._lt_token_id = self.vocab.get("<")
         # Each streaming conversion resumes after the last closed parameter.
         if self._arg_converter is _qwen3_arg_converter:
             closed = _ClosedParams()
@@ -381,6 +392,40 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+
+    def _preprocess_feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> tuple[str, Sequence[int]]:
+        # The engine drops special tokens it has no terminal for, so a stray
+        # <|im_start|> before "function=" would lose the whole call. Inside
+        # an open tool call it can only be a misgenerated "<"; restore it.
+        if CHATML_IM_START not in delta_text or (
+            CHATML_IM_START not in self.TURN_BOUNDARIES
+        ):
+            return delta_text, delta_token_ids
+        delta_text, repaired = self._stray_func_prefix_re.subn(r"\1<", delta_text)
+        if not repaired and self._engine.state in (
+            ParserState.TOOL_PREAMBLE,
+            ParserState.TOOL_BETWEEN,
+        ):
+            stripped = delta_text.lstrip()
+            if stripped.startswith(CHATML_IM_START):
+                lead = delta_text[: len(delta_text) - len(stripped)]
+                delta_text = lead + "<" + stripped[len(CHATML_IM_START) :]
+                repaired = 1
+        if repaired and delta_token_ids and self._im_start_token_id is not None:
+            ids: list[int] = []
+            for tid in delta_token_ids:
+                if repaired and tid == self._im_start_token_id:
+                    repaired -= 1
+                    if self._lt_token_id is not None:
+                        ids.append(self._lt_token_id)
+                    continue
+                ids.append(tid)
+            delta_token_ids = ids
+        return delta_text, delta_token_ids
 
     def extract_reasoning(
         self,

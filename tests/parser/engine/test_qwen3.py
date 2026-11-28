@@ -23,6 +23,7 @@ from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -1534,3 +1535,116 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+class TestStrayImStartInToolCall:
+    """Some Qwen3.x quantizations emit <|im_start|> in place of the "<" of
+    "<function=" (vllm#69190); the call must still be parsed."""
+
+    VOCAB = {
+        "<think>": 200,
+        "</think>": 201,
+        TOOL_CALL_START: 100,
+        TOOL_CALL_END: 101,
+        "<|im_start|>": 151644,
+        "<|im_end|>": 151645,
+        "<": 27,
+    }
+    STRAY_CALL = (
+        "<tool_call>\n"
+        "<|im_start|>function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    def _parser(self, thinking: bool) -> Qwen3Parser:
+        tokenizer = make_mock_tokenizer(
+            self.VOCAB,
+            special_tokens=[t for t in self.VOCAB if t != "<"],
+        )
+        return Qwen3Parser(
+            tokenizer,
+            chat_template_kwargs={"enable_thinking": thinking},
+        )
+
+    def test_non_streaming(self, mock_request):
+        result = self._parser(thinking=False).extract_tool_calls(
+            self.STRAY_CALL, mock_request
+        )
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
+
+    def test_non_streaming_after_reasoning(self, mock_request):
+        text = "I should call get_weather.\n</think>\n\n" + self.STRAY_CALL
+        result = self._parser(thinking=True).extract_tool_calls(text, mock_request)
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+
+    def test_parallel_second_call(self, mock_request):
+        text = (
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter=city>\nTokyo\n</parameter>\n</function>\n"
+            "<|im_start|>function=get_weather>\n"
+            "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+        )
+        result = self._parser(thinking=False).extract_tool_calls(text, mock_request)
+        cities = [json.loads(tc.function.arguments)["city"] for tc in result.tool_calls]
+        assert cities == ["Tokyo", "Paris"]
+
+    @pytest.mark.parametrize("thinking", [False, True])
+    def test_streaming_with_token_ids(self, mock_request, thinking):
+        parser = self._parser(thinking=thinking)
+        chunks = [
+            *(
+                [("I should call get_weather.\n", [7]), ("</think>", [201])]
+                if thinking
+                else []
+            ),
+            ("<tool_call>", [100]),
+            ("\n", [198]),
+            ("<|im_start|>", [151644]),
+            ("function=get_weather", [1, 2]),
+            (">\n<parameter=city>\nParis\n</parameter>\n", [3, 4]),
+            ("</function>\n", [5]),
+            ("</tool_call>", [101]),
+        ]
+        previous_text, previous_ids = "", []
+        name, args = "", ""
+        for text, ids in chunks:
+            current_text = previous_text + text
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=text,
+                previous_token_ids=tuple(previous_ids),
+                current_token_ids=tuple(previous_ids + ids),
+                delta_token_ids=tuple(ids),
+                request=mock_request,
+            )
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function:
+                        name += tc.function.name or ""
+                        args += tc.function.arguments or ""
+            previous_text, previous_ids = current_text, previous_ids + ids
+        assert name == "get_weather"
+        assert json.loads(args) == {"city": "Paris"}
+
+    def test_function_eq_inside_argument_is_kept(self, mock_request):
+        text = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=content>\nresult = df.apply(function=np.sum)\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        result = self._parser(thinking=False).extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == ["write_file"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "result = df.apply(function=np.sum)"
+        }
+
+    def test_outside_tool_call_is_not_a_call(self, mock_request):
+        text = "Write <|im_start|>function=get_weather> to call it."
+        result = self._parser(thinking=False).extract_tool_calls(text, mock_request)
+        assert result.tools_called is False
