@@ -355,6 +355,14 @@ def context_attention_fwd(
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
+    # At the 16-row floor, 4 warps need less shared memory than 8.
+    if (
+        current_platform.is_cuda()
+        and BLOCK == 16
+        and q.element_size() * BLOCK * (2 * triton.next_power_of_2(Lk) + BLOCK)
+        > get_max_shared_memory_bytes()
+    ):
+        num_warps = 4
 
     # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
     # leaves dtypes whose default tile is already 32, such as float32, alone.
