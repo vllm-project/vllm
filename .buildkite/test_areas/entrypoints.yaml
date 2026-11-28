@@ -153,9 +153,11 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
+  - tests/v1/kv_connector/mooncake_integration/test_pre_admission_cleanup.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
+  - pytest -v -s v1/kv_connector/mooncake_integration/test_pre_admission_cleanup.py
   mirror:
     amd:
       automatic_shard: true
@@ -165,6 +167,9 @@ steps:
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s entrypoints/openai/chat_completion
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
