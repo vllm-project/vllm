@@ -642,6 +642,23 @@ class TestClientFlows:
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=True)]
 
+    def test_pd_requests_keep_round_zero(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        for job_id in range(3):
+            req_id = f"pd-{job_id}"
+            session.request_blocks(job_id, req_id, [OffloadKey(b"k")], [job_id])
+            assert conn._sent[-1][FetchMsg.ROUND_SEQ] == 0
+            conn.enqueue(
+                {
+                    TYPE_KEY: TransferDoneMsg.TYPE,
+                    TransferDoneMsg.ROUND_SEQ: 0,
+                    TransferDoneMsg.KV_REQUEST_ID: req_id,
+                    TransferDoneMsg.SUCCESS: True,
+                }
+            )
+            assert session.poll().loads == [LoadResult(job_id, req_id, True)]
+
     def test_transfer_done_failure(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -715,6 +732,48 @@ class TestClientFlows:
         assert _released(failure)
         assert session._client.has_active_loads is False
         assert "req-1" not in session._client._requests
+
+    @pytest.mark.parametrize("acknowledged", [True, False], ids=["ack", "deadline"])
+    def test_completed_abort_tracks_ack_to_original_deadline(
+        self, lookup_clock, acknowledged
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(8, "req-1", [OffloadKey(b"k")], [0])
+        session.finish_request("req-1")
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (8, False)
+        assert not _released(failure)
+
+        lookup_clock.now += 1
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert _released(failure)
+        assert session.has_pending_work
+
+        if acknowledged:
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.ROUND_SEQ: 0,
+                    AbortAckMsg.KV_REQUEST_ID: "req-1",
+                }
+            )
+            assert session.poll().loads == []
+            assert not session.has_pending_work
+
+        lookup_clock.now = _ABORT_ACK_TIMEOUT_S
+        assert session.poll().loads == []
+        assert session.alive is acknowledged
+        assert session.close().failed_jobs == []
+        assert not session.has_pending_work
 
     def test_finish_abort_timeout_emits_one_failure(self):
         """A missed AbortAck after finish() emits no second result: it ends
