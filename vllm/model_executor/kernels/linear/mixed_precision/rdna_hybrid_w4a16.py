@@ -19,6 +19,7 @@ transposes tiles in-register). No dual weight storage unless
 from contextlib import AbstractContextManager, nullcontext
 
 import torch
+from packaging.version import Version
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -131,6 +132,28 @@ def _int4_pair_to_fp16x2(x):
     )
 
 
+_TRITON_GE_3_9 = Version(triton.__version__).release[:2] >= (3, 9)
+
+
+@triton.jit
+def _layout_barrier(x):
+    """Return `x` unchanged through an opaque, non-pure op.
+
+    Emits no instructions (empty asm, output tied to input), but Triton does not
+    rematerialize the op (triton-lang/triton#11001), so layout conversions are
+    not hoisted across it.
+    """
+    tl.static_assert(x.dtype.primitive_bitwidth == 16)
+    return tl.inline_asm_elementwise(
+        asm="",
+        constraints="=v,0",
+        args=[x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=2,
+    )
+
+
 @triton.jit
 def _triton_w4a16_skinny_fmt_kernel(
     # Pointers
@@ -159,6 +182,8 @@ def _triton_w4a16_skinny_fmt_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    LAYOUT_BARRIER: tl.constexpr,
+    NO_NAN_BF16_SCALING: tl.constexpr,
 ):
     """Fused W4A16 GEMM reading weights from skinny format [N, K//8].
 
@@ -282,10 +307,25 @@ def _triton_w4a16_skinny_fmt_kernel(
                 # Same with the constant ZP_BIAS in place of the zero point.
                 b_fp = (b_raw - (c1024 + ZP_BIAS)) * scales[:, None]
         else:
-            if HAS_ZP:
-                b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
+            w_int = b - zp_raw[:, None] if HAS_ZP else b - ZP_BIAS
+            if NO_NAN_BF16_SCALING:
+                tl.static_assert(scales.dtype == tl.bfloat16)
+                # Triton 3.9 lowers a bf16 multiply to an fp32 multiply and a
+                # rounding sequence that handles NaN. Round to nearest even
+                # without that, assuming the scales are not NaN.
+                b_fp32 = w_int.to(tl.float32) * scales[:, None].to(tl.float32)
+                b_u32 = b_fp32.to(tl.uint32, bitcast=True)
+                b_u32 = b_u32 + 0x7FFF + ((b_u32 >> 16) & 1)
+                b_fp = (b_u32 >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
             else:
-                b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
+                b_fp = w_int.to(scales.dtype) * scales[:, None]
+
+        if LAYOUT_BARRIER:
+            # Triton 3.9's RemoveLayoutConversions would otherwise hoist the
+            # dot-operand conversion above the unpack and dequant, so they run
+            # in the WMMA operand layout, where each warp dequantizes the whole
+            # B tile, several times over.
+            b_fp = _layout_barrier(b_fp)
 
         b_fp_t = tl.trans(b_fp)
         accumulator += tl.dot(a, b_fp_t, out_dtype=tl.float32)
@@ -569,6 +609,20 @@ def triton_w4a16_skinny_fmt_gemm(
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
     extra_kwargs = {} if num_stages is None else {"num_stages": num_stages}
+    # Triton 3.9 hoists the conversion that the barrier blocks only with one
+    # stage (with more, B reaches the dot through shared memory) and, as
+    # observed, only without zero points. Elsewhere the barrier only perturbs
+    # scheduling, often for the worse. Triton < 3.9 does not hoist it.
+    layout_barrier = (
+        _TRITON_GE_3_9
+        and a.dtype == torch.bfloat16
+        and num_stages == 1
+        and not has_zp
+        and _on_gfx1151()
+    )
+    # Measured only on gfx1151; with Triton < 3.9 it was much slower on some
+    # shapes.
+    no_nan_bf16_scaling = _TRITON_GE_3_9 and a.dtype == torch.bfloat16 and _on_gfx1151()
     _triton_w4a16_skinny_fmt_kernel[grid](
         a,
         b_q,
@@ -594,6 +648,8 @@ def triton_w4a16_skinny_fmt_gemm(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        LAYOUT_BARRIER=layout_barrier,
+        NO_NAN_BF16_SCALING=no_nan_bf16_scaling,
         num_warps=num_warps,
         **extra_kwargs,
     )
