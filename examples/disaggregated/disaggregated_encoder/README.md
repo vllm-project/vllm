@@ -12,6 +12,107 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 - `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
+- `size_epd.py` - Recommends a split from engine measurements or a calibrated workload model.
+
+- `epd_capacity/measure.py` - Measures an E or PD worker's saturation rate with a representative replay.
+
+## Size an E+PD deployment
+
+The sizing example assumes one GPU per worker, a fixed serving configuration,
+and replicas with comparable service rates. For each split it estimates
+saturation capacity as the smaller of the two pools' aggregate rates.
+
+### Measure rates from vLLM workers
+
+Run two benchmark passes through the E+PD proxy on an isolated deployment.
+For the E pass, use one encoder and enough PD workers to keep up. For the PD
+pass, use one PD worker and enough encoders to keep it supplied. Pass all worker
+metrics URLs for the active topology. Use the same model, workload distribution,
+batching, connector, and cache policy in both passes. For a cold-cache replay,
+disable prefix caching and use fresh image inputs and encoder caches.
+
+Start the proxy with `--decode-retries 0` for both passes. The measurement tool
+uses one image per user request. The default `random-mm` replay supports mixed
+image sizes through `--random-mm-bucket-config`. To replay real requests, pass
+`--dataset-name custom_image --dataset-path workload.jsonl` after `--`. The
+tool checks each JSONL record for exactly one image before sending requests.
+Before accepting a probe, it also checks that the completion count from each
+pool equals the benchmark's completed user requests. Run any warmup separately
+before measuring.
+
+From `examples/disaggregated/disaggregated_encoder/`, run the E pass. Adjust
+the port numbers to match your deployment and pass representative work to
+`vllm bench serve` after `--`. This example uses synthetic images.
+
+```bash
+python -m epd_capacity.measure --stage encoder --output encoder-rates.json \
+    --target-metrics http://localhost:8101/metrics \
+    --peer-metrics http://localhost:8102/metrics \
+    --peer-metrics http://localhost:8103/metrics -- \
+    --model Qwen/Qwen2.5-VL-3B-Instruct --port 8000 --num-prompts 1000
+```
+
+Run the PD pass with `--stage pd`, its single PD worker as `--target-metrics`,
+the encoder endpoints as `--peer-metrics`, and `--output pd-rates.json`.
+The tool controls offered traffic by increasing concurrent requests. It infers
+the plateau from successful completion deltas across two consecutive levels
+where the target is backlogged and peer queues stay short. It reports an error
+if the request count produces too short a sampling window or the tested topology
+does not expose an isolated plateau. Use a larger representative replay or add
+peer headroom as appropriate.
+
+```bash
+python size_epd.py --num-gpus 4 --measured-rates encoder-rates.json pd-rates.json
+```
+
+### Predict rates for a new request distribution
+
+Provide a frozen calibration for the target deployment and a representative
+sample of completed requests with one image each. The workload JSON contains
+an `encoder` list of objects with `visual_tokens` and a `pd` object with
+`input_lens`, `output_lens`, and `failed`. Keep PD input/output lengths paired
+per request. For a replay using one fixed image shape, pass the detailed
+`vllm bench serve` result with
+`--benchmark-result PATH MERGED_TOKENS` in place of `--workload`.
+
+```bash
+python size_epd.py --num-gpus 4 --frozen-model frozen.json --workload workload.json
+```
+
+The predictor evaluates each encoder resource curve at the sampled merged-token
+counts and uses the largest mean normalized occupancy to estimate the encoder
+rate upper bound. The PD model uses paired lengths, the KV capacity, prefill chunk
+size, and a calibrated step time. It caps the KV estimates by the scheduler rate
+for an uncached prompt and ordinary decoding. The scheduled token demand is the
+prompt length plus the output length minus one, since prefill produces the first
+output token. The lower capped estimate drives the sizing calculation.
+
+Set `pd.max_num_scheduled_tokens` to the deployment's effective token budget per
+step. When this field is absent, the predictor uses `pd.chunk_tokens` as the
+budget, as in the archived calibration. The encoder fit and PD parameters are
+reused across request mixes within the calibrated encoder range on the same
+deployment. The estimates refer to saturation and depend on replica balance and
+shared resource contention.
+
+To fit the encoder from collected timing summaries, run
+`python -m epd_capacity.model --profiles profiles.json --output frozen.json`.
+The input includes `measurements` with per-component serial and saturated timing
+anchors and their effective parallelism, as well as calibrated `pd` settings.
+Use at least three distinct token-count anchors. With exactly three, the tool
+warns that leave-one-anchor-out validation of the quadratic components is
+unavailable.
+Before writing the model, the command checks that each fitted duration is finite
+and nonnegative throughout the calibrated visual-token range.
+For a worked model and held-out workload, use `frozen_predictor/frozen.json`
+from the [reproducer archive][epd-reproducer] and
+`results-783695/shift-workload.json` from the [results archive][epd-results].
+
+You can also supply `--encoder-rps` and `--pd-rps` from an external estimator.
+For equal predicted capacities, the example favors fewer encoder workers.
+
+[epd-reproducer]: https://raw.githubusercontent.com/Kelvin-Al/vllm/271a17af0967c5bd5270a6fb5e893675b74478d4/epd-sizing-67204-reproducer.tar.gz
+[epd-results]: https://raw.githubusercontent.com/Kelvin-Al/vllm/271a17af0967c5bd5270a6fb5e893675b74478d4/epd-sizing-783695-results.tar.gz
+
 ### Custom Configuration
 
 ```bash
