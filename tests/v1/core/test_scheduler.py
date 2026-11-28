@@ -8729,6 +8729,48 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.request_id not in req_to_blocks
 
 
+def test_async_load_reservation_prevents_wedge_in_hybrid_model():
+    """The wedge above with a sliding-window group beside full attention.
+
+    Each of three async KV loads holds 4 blocks once loaded and needs 2 more to
+    finish. 13 usable blocks fit two of them: admitting the third would leave
+    1 free block, and no load could run after its recv finishes.
+    """
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        num_blocks=14,
+        max_num_batched_tokens=BLOCK_SIZE,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 3, is_async=True),
+        # The second KV cache group; the first is full attention.
+        mamba_layer_config=new_sliding_window_layer(
+            sliding_window=BLOCK_SIZE, block_size=BLOCK_SIZE
+        ),
+    )
+    requests = create_requests(
+        num_requests=3, num_tokens=BLOCK_SIZE * 4, block_size=BLOCK_SIZE
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    loading = {
+        request.request_id
+        for request in requests
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    }
+    assert loading
+    recv_finished = dataclasses.replace(
+        EMPTY_MODEL_RUNNER_OUTPUT,
+        kv_connector_output=KVConnectorOutput(finished_recving=loading),
+    )
+    scheduler.update_from_output(output, recv_finished)
+
+    resumed = scheduler.schedule()
+    assert resumed.total_num_scheduled_tokens > 0
+    assert not resumed.preempted_req_ids
+
+
 def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     """Admitting an async KV load computes only its own reservation, not that of
     every load already parked, which made admissions quadratic in a burst."""
