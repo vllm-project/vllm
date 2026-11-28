@@ -76,6 +76,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.aux_objects = None
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -101,6 +102,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
     state.routed_experts_chunks = []
+    state.aux_objects = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1975,6 +1977,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.aux_objects = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -2158,3 +2161,43 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     assert final is not None and final.finished
     assert isinstance(final.outputs, list)
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_aux_objects_reach_the_final_output(output_kind: RequestOutputKind):
+    # Unread outputs merge in the collector; the listing of the final
+    # engine output survives the merge.
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
+    queue = RequestOutputCollector(output_kind, request_id="request-0-int")
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, output_kind=output_kind),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+    listing = [("p/g/ab", 0, 3), ("p/g/tail-cd", 3, 4)]
+    output_processor.process_outputs(
+        [EngineCoreOutput(request_id="request-0-int", new_token_ids=[10])]
+    )
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[11],
+                finish_reason=FinishReason.STOP,
+                aux_objects=listing,
+            )
+        ]
+    )
+    final = queue.get_nowait()
+    assert final is not None and final.finished
+    assert isinstance(final.outputs, list)
+    assert final.outputs[0].token_ids == [10, 11]
+    assert final.outputs[0].aux_objects == listing

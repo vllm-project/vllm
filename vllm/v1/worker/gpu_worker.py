@@ -295,6 +295,13 @@ class Worker(WorkerBase):
         self._pp_transport: PPTransport | None = None
         # What a non-first PP rank receives into; checked on the NCCL path.
         self._pp_recv_specs: dict[str, RowSpec] = {}
+        self._pp_all_gather_tensors: dict[str, bool] | None = None
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            from vllm.distributed.aux_output_connector.worker import (
+                PP_ROUTED_EXPERTS_KEY,
+            )
+
+            self._pp_all_gather_tensors = {PP_ROUTED_EXPERTS_KEY: False}
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1532,6 +1539,7 @@ class Worker(WorkerBase):
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
+                    all_gather_tensors=self._pp_all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1572,6 +1580,7 @@ class Worker(WorkerBase):
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
+                all_gather_tensors=self._pp_all_gather_tensors,
             )
             self._pp_send_work = handles[1:]
 

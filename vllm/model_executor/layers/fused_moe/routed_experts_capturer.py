@@ -218,8 +218,11 @@ class RoutedExpertsSink:
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
-) -> None:
-    """Attach capture callbacks to the target model's MoE routers."""
+    *,
+    allow_no_router: bool = False,
+) -> int:
+    """Attach capture callbacks to the model's MoE routers; return how many.
+    `allow_no_router` accepts a part without MoE layers, such as a dense PP stage."""
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEExpertsMonolithic,
@@ -265,5 +268,6 @@ def bind_routed_experts_capturer(
                 f"{type(module.router).__name__}."
             )
 
-    if num_bound == 0:
+    if num_bound == 0 and not allow_no_router:
         raise ValueError("No supported MoE router found for routed-experts capture.")
+    return num_bound

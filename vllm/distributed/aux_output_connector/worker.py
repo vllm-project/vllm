@@ -14,9 +14,16 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
+    AuxObject,
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
+    object_put_timeout_s,
     retained_objects,
+)
+from vllm.distributed.aux_output_connector.object_store import (
+    AuxObjects,
+    AuxObjectWriter,
+    create_aux_object_store,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -28,16 +35,107 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    _get_routed_experts_shape,
     bind_routed_experts_capturer,
 )
-from vllm.utils.math_utils import round_up
+from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv, round_up
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass(slots=True)
+class _ObjectRun:
+    """Rows a namespace request computed since it was last scheduled, by KV
+    block, and the objects still to write from them. A block a step computes
+    whole is a view of that step's rows; a block computed over several steps
+    is filled in place in its own buffer. Positions computed again, after a
+    failed KV load, go to copies of their blocks: the writer may still read
+    objects taken from them. Runs start on a block boundary and every object
+    starts at one; a tail object may span blocks."""
+
+    block_size: int
+    end: int = -1
+    blocks: dict[int, np.ndarray] = field(default_factory=dict)
+    writes: list[AuxObject] = field(default_factory=list)
+
+    def add(self, token_start: int, rows: np.ndarray) -> None:
+        if 0 <= self.end < token_start:
+            # A step scheduled while drafts were in flight starts after the
+            # ones rejected: its rows follow those kept.
+            token_start = self.end
+        size = self.block_size
+        if token_start < self.end:
+            for block in range(token_start // size, cdiv(self.end, size)):
+                if (buffer := self.blocks.get(block)) is not None:
+                    self.blocks[block] = buffer.copy()
+        position = token_start
+        self.end = end = token_start + len(rows)
+        while position < end:
+            block, offset = divmod(position, size)
+            stop = min(end, position - offset + size)
+            part = rows[position - token_start : stop - token_start]
+            position = stop
+            if len(part) == size:
+                self.blocks[block] = part
+                continue
+            if (buffer := self.blocks.get(block)) is None:
+                buffer = self.blocks[block] = np.empty(
+                    (size, *part.shape[1:]), part.dtype
+                )
+            buffer[offset : offset + len(part)] = part
+
+    def take_ready(self) -> AuxObjects:
+        """Objects whose rows are all here. Later writes start at or after
+        the start of the last one, so earlier blocks are dropped."""
+        if not self.writes:
+            return []
+        ready = [write for write in self.writes if write[2] <= self.end]
+        if not ready:
+            return []
+        self.writes = [write for write in self.writes if write[2] > self.end]
+        size = self.block_size
+        objects = [
+            (key, {"routed_experts": self._rows(start, end)})
+            for key, start, end in ready
+        ]
+        keep = min(
+            (start for _, start, _ in self.writes),
+            default=max(start for _, start, _ in ready),
+        )
+        for block in [block for block in self.blocks if block < keep // size]:
+            del self.blocks[block]
+        return objects
+
+    def _rows(self, start: int, end: int) -> np.ndarray:
+        size = self.block_size
+        first = start // size
+        if end - start <= size:
+            return self.blocks[first][: end - start]
+        blocks = [self.blocks[block] for block in range(first, cdiv(end, size))]
+        return np.concatenate(blocks)[: end - start]
+
+
+PP_ROUTED_EXPERTS_KEY = "routed_experts"
+
+
+def add_pp_routes_buffer(
+    intermediate_tensors: IntermediateTensors,
+    vllm_config: VllmConfig,
+    max_num_tokens: int,
+    device: torch.device,
+) -> None:
+    num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
+    intermediate_tensors[PP_ROUTED_EXPERTS_KEY] = torch.zeros(
+        (max_num_tokens, num_layers, num_experts_per_tok),
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 @dataclass(slots=True)
@@ -51,6 +149,7 @@ class _WorkerRequestState:
     pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
+    run: _ObjectRun | None = None
 
 
 @dataclass(slots=True)
@@ -67,6 +166,7 @@ class PendingAuxOutput:
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
+    runs: dict[str, _ObjectRun] = field(default_factory=dict)
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -95,11 +195,34 @@ class AuxOutputWorkerConnector:
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
         )
-        bind_routed_experts_capturer(model, capturer)
+        pp_group = get_pp_group()
+        if pp_group.world_size == 1:
+            bind_routed_experts_capturer(model, capturer)
+        else:
+            error: ValueError | None = None
+            try:
+                num_bound = bind_routed_experts_capturer(
+                    model, capturer, allow_no_router=True
+                )
+            except ValueError as e:
+                error, num_bound = e, 0
+            totals = torch.tensor([num_bound, error is not None])
+            torch.distributed.all_reduce(totals, group=pp_group.cpu_group)
+            if error is not None:
+                raise error
+            if totals[1]:
+                raise ValueError(
+                    "Routed-experts capture failed on another pipeline stage."
+                )
+            if not totals[0]:
+                raise ValueError(
+                    "No supported MoE router found for routed-experts capture."
+                )
         self._capturer = capturer
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
+        self._writer: AuxObjectWriter | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -114,7 +237,7 @@ class AuxOutputWorkerConnector:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if not get_tp_group().is_first_rank or not get_pp_group().is_last_rank:
             return
 
         vllm_config = self._vllm_config
@@ -134,6 +257,29 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_seqs,
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
+        )
+        config = vllm_config.aux_output_config
+        if config.object_key_prefix is not None:
+            self._writer = AuxObjectWriter(
+                create_aux_object_store(
+                    config.object_store, config.object_store_extra_config
+                ),
+                timeout_s=object_put_timeout_s(),
+            )
+
+    def receive_pp_routes(
+        self, intermediate_tensors: IntermediateTensors, num_tokens: int
+    ) -> None:
+        """Take the earlier stages' rows; this stage's forward writes its own."""
+        received = intermediate_tensors[PP_ROUTED_EXPERTS_KEY]
+        self._capturer.device_buffer[:num_tokens] = received[:num_tokens]
+
+    def send_pp_routes(
+        self, output_intermediate_tensors: IntermediateTensors
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            output_intermediate_tensors.tensors
+            | {PP_ROUTED_EXPERTS_KEY: self._capturer.device_buffer}
         )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
@@ -157,7 +303,10 @@ class AuxOutputWorkerConnector:
             )
             self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                self._requests[request_id].pending_outputs += 1
+                state = self._requests[request_id]
+                state.pending_outputs += 1
+                if state.run is not None:
+                    pending_output.runs[request_id] = state.run
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -203,15 +352,17 @@ class AuxOutputWorkerConnector:
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
         outputs: dict[str, AuxRequestOutput] = {}
+        objects: AuxObjects = []
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
+        query_start_loc = pending.query_start_loc.tolist()
         for request_id, token_start, start, end, sampled, rejected in zip(
             pending.request_ids,
-            pending.token_starts,
-            pending.query_start_loc[:-1],
-            pending.query_start_loc[1:],
-            num_sampled,
-            num_rejected,
+            pending.token_starts.tolist(),
+            query_start_loc[:-1],
+            query_start_loc[1:],
+            num_sampled.tolist(),
+            num_rejected.tolist(),
             strict=True,
         ):
             request_num_tokens = end - start
@@ -222,11 +373,14 @@ class AuxOutputWorkerConnector:
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.
-            rejected = int(rejected)
             assert 0 <= rejected <= request_num_tokens, (
                 "auxiliary output rejected-token count is invalid"
             )
             rows = routed_experts[start : end - rejected]
+            if (run := pending.runs.get(request_id)) is not None:
+                run.add(token_start, rows)
+                objects.extend(run.take_ready())
+                continue
 
             capture_start = token_start
             capture_cursor = state.capture_cursor
@@ -264,6 +418,7 @@ class AuxOutputWorkerConnector:
                 else:
                     materialize_outputs.append((request_id, emit_start, token_end))
 
+        self._put_objects(objects)
         # A consumer may reuse a block produced earlier in the same batch.
         self._publish_blocks(block_batches)
 
@@ -328,6 +483,12 @@ class AuxOutputWorkerConnector:
             for _, rows in blocks:
                 buffer.release_block(rows)
 
+    def _put_objects(self, objects: AuxObjects) -> None:
+        """One put per step, so a step waits for the writer at most once."""
+        if objects:
+            assert self._writer is not None
+            self._writer.put(objects)
+
     def _teardown(self, request_ids: Iterable[str]) -> None:
         """Drop finished requests' temporary state after publishing key releases."""
         buffer = self._buffer
@@ -354,6 +515,13 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
+            objects: AuxObjects = []
+            for request_id, writes in (metadata.object_writes or {}).items():
+                run = self._requests[request_id].run
+                assert run is not None
+                run.writes.extend(writes)
+                objects.extend(run.take_ready())
+            self._put_objects(objects)
             namespace = str(self._generation)
             hashes = metadata.retained_block_hashes or ()
             retained_keys = routed_experts_keys(hashes, namespace)
@@ -383,6 +551,9 @@ class AuxOutputWorkerConnector:
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
+            for request_id in metadata.namespace_runs or ():
+                state = self._requests.setdefault(request_id, _WorkerRequestState())
+                state.run = _ObjectRun(metadata.object_block_size)
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
@@ -406,11 +577,16 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
-            if self._store is not None:
-                try:
-                    self._store.close()
-                finally:
-                    self._store = None
+            writer, self._writer = self._writer, None
+            try:
+                if writer is not None:
+                    writer.close()
+            finally:
+                if self._store is not None:
+                    try:
+                        self._store.close()
+                    finally:
+                        self._store = None
 
 
 def get_aux_output_connector(

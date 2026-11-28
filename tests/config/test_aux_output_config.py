@@ -8,6 +8,7 @@ import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.config.utils import hash_config
+from vllm.distributed.aux_output_connector.connector import object_put_timeout_s
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -71,6 +72,26 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
     assert args.aux_output_config.enable_return_routed_experts
 
 
+@pytest.mark.parametrize("as_config", [False, True], ids=["dict", "config"])
+def test_legacy_routed_experts_flag_enables_an_object_key_prefix(as_config):
+    aux_output_config = {"object_key_prefix": "run-1"}
+    args = EngineArgs(
+        enable_return_routed_experts=True,
+        aux_output_config=(
+            AuxOutputConfig(**aux_output_config) if as_config else aux_output_config
+        ),
+    )
+
+    assert args.aux_output_config.object_key_prefix == "run-1"
+    assert args.aux_output_config.enable_return_routed_experts
+
+
+def test_object_put_timeout_follows_execute_model_timeout(monkeypatch):
+    # Not the default execute-model timeout: the derived default follows it.
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "500")
+    assert object_put_timeout_s() == 400.0
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
@@ -81,7 +102,6 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
             {"adaptive_verification": True},
             "adaptive speculative verification",
         ),
-        ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
     ],
@@ -93,9 +113,10 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}],
+    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}, {"pp": 2}],
+    ids=["sliding-window", "chunked-attention", "pipeline-parallel"],
 )
-def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
+def test_aux_output_config_accepts(kwargs):
     VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 
@@ -105,3 +126,16 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"object_key_prefix": ""}, "non-empty"),
+        ({"object_key_prefix": "runs/1"}, "without '/'"),
+    ],
+    ids=["empty-prefix", "slash"],
+)
+def test_object_key_prefix_config_is_validated(kwargs, error):
+    with pytest.raises(ValueError, match=error):
+        AuxOutputConfig(**{"enable_return_routed_experts": True, **kwargs})

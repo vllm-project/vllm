@@ -851,6 +851,7 @@ def _pausable_engine_core_proc() -> tuple[EngineCoreProc, MagicMock]:
     scheduler = MagicMock()
     core.scheduler = scheduler
     scheduler.has_requests.return_value = False
+    scheduler.aux_output_connector = None
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
