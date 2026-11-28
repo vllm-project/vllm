@@ -155,7 +155,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
-    let (llm, engine_core) = match llm {
+    let (llm, engine_core): (Box<dyn Llm>, _) = match llm {
         LlmSource::EngineCore(engine_core) => {
             let (llm, server_info) = connect_engine_core(
                 config,
@@ -164,10 +164,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
                 metrics_model_name.clone(),
             )
             .await?;
-            (
-                Box::new(llm) as Box<dyn Llm>,
-                Some((engine_core, server_info)),
-            )
+            (Box::new(llm), Some((engine_core, server_info)))
         }
         LlmSource::Provided(llm) => (llm, None),
     };

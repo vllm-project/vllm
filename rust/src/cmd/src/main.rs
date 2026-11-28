@@ -13,6 +13,7 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_remote_llm::GrpcLlm;
 use vllm_server::{LlmSource, Server};
 use vllm_tracing::LogLevel;
 
@@ -167,6 +168,17 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Serve(args) => {
             let server_config = args.to_server_config();
+            if let Some(url) = &args.remote_generation_url {
+                let shutdown = shutdown_signal();
+                let limit = tokio::select! {
+                    result = args.remote_max_model_len() => result?,
+                    _ = shutdown.cancelled() => return Ok(()),
+                };
+                let llm = GrpcLlm::from_url(url.clone(), limit)?;
+                return Server::new(server_config, LlmSource::Provided(Box::new(llm)))
+                    .serve(shutdown)
+                    .await;
+            }
 
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;

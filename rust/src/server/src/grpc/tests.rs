@@ -47,6 +47,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -55,7 +56,9 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::EngineCoreLlm;
+use vllm_llm::{FinishReason, GenerateRequest, Llm as _};
 use vllm_metrics::METRICS;
+use vllm_remote_llm::GrpcLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -855,6 +858,96 @@ async fn unary_generate_with_token_ids_prompt() {
         3
     );
 
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+fn grpc_llm_request() -> GenerateRequest {
+    GenerateRequest {
+        request_id: "proof".into(),
+        prompt_token_ids: vec![21, 43],
+        sampling_params: EngineCoreSamplingParams {
+            max_tokens: 8,
+            seed: Some(9_007_199_254_740_993),
+            ..Default::default()
+        },
+        mm_features: None,
+        arrival_time: None,
+        cache_salt: None,
+        trace_headers: None,
+        priority: 0,
+        data_parallel_rank: None,
+        session_id: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: None,
+        reasoning_ended: None,
+        lora_request: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_round_trips_through_inference_to_engine_core() {
+    let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
+        b"engine-grpc-llm-round-trip",
+        vec![
+            (vec![17], None),
+            (vec![31, 42], Some(EngineCoreFinishReason::Length)),
+        ],
+        Arc::new(FakeTextBackend {
+            tokenizer: Arc::new(PanickingTokenizer),
+            ..Default::default()
+        }),
+        |request| {
+            let sampling = request.sampling_params.as_ref().unwrap();
+            assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
+            assert_eq!(sampling.max_tokens, 8);
+        },
+    )
+    .await;
+    let (channel, server_task) =
+        start_grpc_test_server(inference, control, health, Default::default()).await;
+    let llm = GrpcLlm::new(channel, 512);
+    let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.prompt_info.unwrap().prompt_token_ids.as_ref(),
+        &[21, 43]
+    );
+    assert_eq!(first.token_ids, [17]);
+    assert_eq!(first.finish_reason, None);
+    let last = stream.next().await.unwrap().unwrap();
+    assert_eq!(last.request_id, "proof");
+    assert_eq!(last.token_ids, [31, 42]);
+    assert_eq!(last.finish_reason, Some(FinishReason::Length));
+    assert!(stream.next().await.is_none());
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_uses_worker_default_with_frontend_aliases() {
+    let (addr, server_task, engine_task) =
+        grpc_server_with_keepalive(b"engine-grpc-frontend-aliases", None).await;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"qwen3","vocab_size":128,"max_position_embeddings":512}"#,
+    )
+    .unwrap();
+    let mut frontend =
+        crate::serve_tests::server_config(dir.path(), &dir.path().join("frontend.sock"));
+    frontend.served_model_name = vec!["chat".into(), "test-model".into()];
+    let llm = GrpcLlm::from_url(format!("http://{addr}"), 512.try_into().unwrap()).unwrap();
+    let state = crate::build_state(&frontend, crate::LlmSource::Provided(Box::new(llm)))
+        .await
+        .unwrap();
+    let mut stream = state.llm().generate(grpc_llm_request()).await.unwrap();
+    assert_eq!(
+        stream.next().await.unwrap().unwrap().token_ids,
+        [u32::from(b'h')]
+    );
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }
@@ -2219,6 +2312,50 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
     server_task.abort();
     result
         .expect("disconnect must abort without waiting for engine output")
+        .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_cancels_unpolled_stream_on_drop() {
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-llm-cancel-pending-output".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        move |dealer, _push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request = decode_add_request(&add);
+                submitted_tx.send(()).expect("signal submitted request");
+
+                // A queued request produces no output before cancellation.
+                let abort = recv_engine_message(dealer).await;
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let request_ids: Vec<String> =
+                    rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                assert_eq!(request_ids, [request.request_id]);
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) =
+        start_grpc_test_server(inference, control, health, Default::default()).await;
+    let llm = GrpcLlm::new(channel, 512);
+    let stream = llm.generate(grpc_llm_request()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+
+    drop(stream);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
+    server_task.abort();
+    result
+        .expect("dropping the stream must cancel the request")
         .expect("mock engine task");
 }
 

@@ -277,7 +277,7 @@ impl ModelConfig {
 
     /// Return the checkpoint's declared context length. Prefer `model_max_length`
     /// over `max_position_embeddings` when both are present, as for Command R.
-    pub(super) fn max_model_len(&self) -> Result<Option<u32>> {
+    pub fn max_model_len(&self) -> Result<Option<u32>> {
         let text = self.effective_text_config();
         text.model_max_length
             .as_ref()

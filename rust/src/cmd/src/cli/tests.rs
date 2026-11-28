@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use thiserror_ext::AsReport as _;
 use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -47,6 +48,40 @@ impl FrontendConfig {
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &ServeArgs) -> DataParallelTopology {
     args.data_parallel_lb.resolve(&args.managed_engine, args.headless).unwrap()
+}
+
+#[tokio::test]
+async fn remote_context_limit_uses_config_source_and_honors_cli_override() {
+    let config = tempfile::tempdir().unwrap();
+    let path = config.path().join("config.json");
+    std::fs::write(&path, r#"{"text_config":{"max_position_embeddings":4096}}"#).unwrap();
+    let args = [
+        "vllm-rs",
+        "serve",
+        "org/model",
+        "--remote-generation-url",
+        "http://worker:50051",
+        "--hf-config-path",
+        config.path().to_str().unwrap(),
+        "--hf-overrides",
+        r#"{"text_config":{"model_max_length":2048}}"#,
+    ];
+    let Command::Serve(serve) = Cli::try_parse_from(args).unwrap().command else {
+        panic!("expected serve");
+    };
+    assert_eq!(serve.remote_max_model_len().await.unwrap().get(), 2048);
+
+    std::fs::remove_file(path).unwrap();
+    let error = serve.remote_max_model_len().await.unwrap_err();
+    assert!(error.as_report().to_string().contains("does not contain config.json"));
+    let Command::Serve(serve) =
+        Cli::try_parse_from(args.into_iter().chain(["--max-model-len", "512"]))
+            .unwrap()
+            .command
+    else {
+        panic!("expected serve");
+    };
+    assert_eq!(serve.remote_max_model_len().await.unwrap().get(), 512);
 }
 
 #[test]
@@ -279,6 +314,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    remote_generation_url: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
@@ -3641,6 +3677,7 @@ fn serve_args_accept_handshake_aliases() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    remote_generation_url: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",

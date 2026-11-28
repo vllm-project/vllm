@@ -97,7 +97,7 @@ impl Llm for TestLlm {
 /// A config that serves the model in `model_dir`, which only needs a
 /// `config.json` since no tokenizer is loaded, on the Unix socket `socket`,
 /// with dev mode on.
-fn server_config(model_dir: &Path, socket: &Path) -> ServerConfig {
+pub(super) fn server_config(model_dir: &Path, socket: &Path) -> ServerConfig {
     ServerConfig {
         model: model_dir.to_str().expect("utf-8 path").to_string(),
         revision: None,
