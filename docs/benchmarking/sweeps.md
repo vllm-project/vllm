@@ -215,6 +215,8 @@ vllm bench sweep startup \
 
 Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
+For a string-valued column, `--filter-by 'label==001'` selects the label `"001"`. Use `'label!=001'` to exclude that label and keep `"1"`.
+
 Example commands for visualizing [Workload Explorer](#workload-explorer) results:
 
 ```bash
