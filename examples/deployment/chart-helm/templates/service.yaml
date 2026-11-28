@@ -3,6 +3,10 @@ kind: Service
 metadata:
   name: {{ include "chart.service-name" . | quote }}
   namespace: {{ .Release.Namespace }}
+  {{- if .Values.serviceMonitor.enabled }}
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  {{- end }}
 spec:
   type: ClusterIP
   ports:
