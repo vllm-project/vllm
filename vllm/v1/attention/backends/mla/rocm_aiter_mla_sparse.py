@@ -1139,6 +1139,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
             if reason is None:
                 self.use_aiter_sparse_mla = True
+                # The Triton kernel reads an e4m3 query with layer._q_scale, so
+                # the layer may hand it the query already quantized.
+                self.supports_quant_query_input = self.kv_cache_dtype.startswith("fp8")
             else:
                 logger.warning_once(
                     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; "
@@ -1164,6 +1167,20 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     def _attn_sink(self, q: torch.Tensor) -> torch.Tensor | None:
         """Returns the sinks for the heads of `q`."""
         return self.sinks
+
+    def decode_query_padded_num_heads(
+        self, attn_metadata: ROCMAiterMLASparseMetadata
+    ) -> int | None:
+        # The Triton kernel takes the unpadded query, so a decode-only step can
+        # use the fused W_UK bmm + concat + FP8 quant query at the layer's own
+        # head count. Prefill chunks keep the bmm path.
+        if (
+            self.use_aiter_sparse_mla
+            and self.supports_quant_query_input
+            and attn_metadata.num_prefills == 0
+        ):
+            return self.num_heads
+        return None
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig

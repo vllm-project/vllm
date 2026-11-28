@@ -418,7 +418,7 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
     )
 
 
-def _build_impl(indexer, topk_indices_buffer):
+def _build_impl(indexer, topk_indices_buffer, kv_cache_dtype="auto"):
     return sparse_mod.ROCMAiterMLASparseImpl(
         num_heads=NUM_HEADS,
         head_size=HEAD_SIZE,
@@ -426,7 +426,7 @@ def _build_impl(indexer, topk_indices_buffer):
         num_kv_heads=1,
         alibi_slopes=None,
         sliding_window=None,
-        kv_cache_dtype="auto",
+        kv_cache_dtype=kv_cache_dtype,
         logits_soft_cap=None,
         attn_type="decoder",
         kv_sharing_target_layer_name=None,
@@ -486,6 +486,27 @@ def test_owns_indexer_is_structural(monkeypatch, has_indexer):
 
     assert impl.owns_indexer is has_indexer
     assert impl.topk_indices_buffer is buffer
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_triton_sparse_mla_takes_fused_decode_query(monkeypatch, kv_cache_dtype):
+    """The Triton kernel reads the unpadded e4m3 query with the layer's q_scale,
+    so with an fp8 cache a decode-only step takes MLAAttention's fused W_UK bmm
+    + concat + quant query at the layer's own head count; prefill keeps the bmm."""
+    _patch_init_deps(monkeypatch)
+    monkeypatch.setattr(
+        sparse_mod.rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True
+    )
+    impl = _build_impl(None, _new_buffer(), kv_cache_dtype)
+    fp8 = kv_cache_dtype == "fp8"
+
+    assert impl.use_aiter_sparse_mla
+    assert impl.supports_quant_query_input is fp8
+    decode_only = SimpleNamespace(num_prefills=0)
+    assert impl.decode_query_padded_num_heads(decode_only) == (
+        NUM_HEADS if fp8 else None
+    )
+    assert impl.decode_query_padded_num_heads(SimpleNamespace(num_prefills=1)) is None
 
 
 def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
