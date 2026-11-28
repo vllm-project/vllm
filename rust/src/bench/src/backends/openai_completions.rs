@@ -8,8 +8,8 @@ use futures::StreamExt;
 
 use super::streaming::StreamedResponseHandler;
 use super::{
-    CompletionChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
-    update_server_metrics,
+    CompletionChunk, RequestFuncInput, RequestFuncOutput, build_headers, finish_stream,
+    stream_error, update_server_metrics,
 };
 use crate::error::Result;
 
@@ -77,6 +77,8 @@ impl OpenAICompletionsBackend {
         let mut most_recent_timestamp = st;
         let mut generated_text = String::new();
         let mut first_chunk_received = false;
+        let mut saw_done = false;
+        let mut error = None;
 
         let mut request = client.post(&input.api_url).json(&payload);
         for (k, v) in &headers_map {
@@ -111,6 +113,7 @@ impl OpenAICompletionsBackend {
                             };
 
                             if chunk == "[DONE]" {
+                                saw_done = true;
                                 continue;
                             }
 
@@ -120,6 +123,13 @@ impl OpenAICompletionsBackend {
                                 Ok(d) => d,
                                 Err(_) => continue,
                             };
+
+                            if let Some(e) =
+                                stream_error(data.error.as_ref(), data.object.as_deref(), chunk)
+                            {
+                                error = Some(e);
+                                continue;
+                            }
 
                             update_server_metrics(&mut output, data.metrics.as_ref());
 
@@ -150,12 +160,7 @@ impl OpenAICompletionsBackend {
                         }
                     }
 
-                    if first_chunk_received {
-                        output.success = true;
-                    } else {
-                        output.success = false;
-                        output.error = NO_VALID_CHUNK_ERROR.to_string();
-                    }
+                    finish_stream(&mut output, error, first_chunk_received, saw_done);
                     output.generated_text = generated_text;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
                 } else {

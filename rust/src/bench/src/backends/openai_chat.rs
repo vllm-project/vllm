@@ -7,7 +7,7 @@ use futures::StreamExt;
 
 use super::streaming::StreamedResponseHandler;
 use super::{
-    ChatChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
+    ChatChunk, RequestFuncInput, RequestFuncOutput, build_headers, finish_stream, stream_error,
     update_server_metrics,
 };
 use crate::error::Result;
@@ -37,6 +37,8 @@ impl OpenAIChatBackend {
         let mut most_recent_timestamp = st;
         let mut generated_text = String::new();
         let mut first_token_received = false;
+        let mut saw_done = false;
+        let mut error = None;
 
         // Build request: use zero-copy raw JSON for multimodal, serde_json for text-only
         let mut request =
@@ -82,6 +84,7 @@ impl OpenAIChatBackend {
                             };
 
                             if chunk == "[DONE]" {
+                                saw_done = true;
                                 continue;
                             }
 
@@ -91,6 +94,13 @@ impl OpenAIChatBackend {
                                 Ok(d) => d,
                                 Err(_) => continue,
                             };
+
+                            if let Some(e) =
+                                stream_error(data.error.as_ref(), data.object.as_deref(), chunk)
+                            {
+                                error = Some(e);
+                                continue;
+                            }
 
                             update_server_metrics(&mut output, data.metrics.as_ref());
 
@@ -128,13 +138,8 @@ impl OpenAIChatBackend {
                         }
                     }
 
-                    if first_token_received {
-                        output.success = true;
-                    } else {
-                        output.success = false;
-                        output.error = NO_VALID_CHUNK_ERROR.to_string();
-                    }
                     output.generated_text = generated_text;
+                    finish_stream(&mut output, error, first_token_received, saw_done);
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
                 } else {
                     let status = response.status();
@@ -305,6 +310,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::backends::NO_VALID_CHUNK_ERROR;
 
     fn mm_input() -> RequestFuncInput {
         let frag: Arc<str> =
