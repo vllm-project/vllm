@@ -631,11 +631,20 @@ def kernel_unified_attention(
                 other=0.0,
             )
             # V : (TILE_SIZE, HEAD_SIZE)
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
+            v_mask = dim_mask[None, :] & tile_mask[:, None]
+            if (
+                SLIDING_WINDOW
+                and USE_CAUSAL
+                and not USE_PER_SEQ_CAUSAL
+                and HEAD_SIZE_PADDED >= 256
+            ):
+                # Zero V outside the window in the load: P is 0 there, but
+                # stale blocks may hold inf/NaN. At head size 256, masking the
+                # loaded tile with tl.where keeps a second V tile in shared
+                # memory and lowers occupancy.
+                v_dist = context_len + q_block_local_idx * BLOCK_Q - seq_offset
+                v_mask = v_mask & (v_dist < SLIDING_WINDOW)[:, None]
+            V_load = tl.load(value_cache_ptr + v_offset, mask=v_mask, other=0.0)
         K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
@@ -708,7 +717,10 @@ def kernel_unified_attention(
         M, L, P, alpha = softmax_step(S, M, L)
         acc = acc * alpha[:, None]
 
-        if SLIDING_WINDOW:
+        # Otherwise the window was applied in the V load above.
+        if SLIDING_WINDOW and (
+            USE_TD or USE_PER_SEQ_CAUSAL or not USE_CAUSAL or HEAD_SIZE_PADDED < 256
+        ):
             qpos_lo = q_block_local_idx * BLOCK_Q
             dist = context_len + qpos_lo - seq_offset[:, None]
             if USE_PER_SEQ_CAUSAL:
@@ -1465,6 +1477,24 @@ def unified_attention(
         tile_size = TILE_SIZE_DECODE
 
     launch_kwargs: dict[str, int] = {}
+    # SM90 and SM100 with the window in the V load (head size 256): the kernel
+    # takes up to 196 registers per thread, two CTAs per SM. Two stages and a
+    # 168-register cap keep three. SM100's tuned large-head launch is kept.
+    if (
+        sliding_window_val > 0
+        and use_causal
+        and not use_per_seq_causal
+        and head_size_padded >= 256
+        and not use_td
+        and not tuned_large_head
+        and current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    ):
+        launch_num_stages = 2
+        launch_kwargs["maxnreg"] = 168
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
     if launch_num_stages is not None:
