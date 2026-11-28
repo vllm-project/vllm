@@ -227,6 +227,7 @@ class EngineCoreSentinel:
         engine.batch_queue.clear()
         # Its sampling is never requested, and while set no step is scheduled.
         engine.deferred_step = None
+        scheduler._idle_step = None
 
     def _clear_contaminated_blocks(self) -> None:
         """Evict KV blocks possibly contaminated by the failed step."""

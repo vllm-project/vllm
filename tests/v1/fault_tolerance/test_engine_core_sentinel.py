@@ -2,14 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EngineCoreSentinel fault handling."""
 
+import queue
 from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVConnectorOutput
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.fault_tolerance.engine_core_sentinel import EngineCoreSentinel
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.outputs import ModelRunnerOutput
 
 
@@ -78,3 +82,34 @@ def test_drain_batch_queue_clears_deferred_step():
     sentinel._drain_batch_queue()
 
     assert sentinel.engine.deferred_step is None
+
+
+def test_recompute_retry_reschedules_requests_behind_idle_step():
+    """With PP and DP=1, an idle step in flight at fault time must not keep
+    retry from scheduling the requests that recompute kept."""
+    scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)
+    parallel_config = scheduler.vllm_config.parallel_config
+    parallel_config.fault_tolerance_config = FaultToleranceConfig(
+        request_failure_policy="recompute"
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=1)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    idle_step = scheduler.schedule()
+    assert not scheduler.should_schedule()
+
+    failed = _done_future(exception=RuntimeError("worker failed"))
+    engine = SimpleNamespace(
+        engine_index=0,
+        scheduler=scheduler,
+        batch_queue=deque([(failed, idle_step, None)]),
+        deferred_step=None,
+        model_executor=SimpleNamespace(collective_rpc=lambda *_, **__: [{"mask": [0]}]),
+        output_queue=queue.Queue(),
+    )
+    sentinel = EngineCoreSentinel(engine, parallel_config)
+    sentinel.on_fault(RuntimeError("worker failed"))
+    sentinel.retry(FaultToleranceRequest(instruction="retry", params={}))
+
+    assert scheduler.should_schedule()
+    assert scheduler.schedule().num_scheduled_tokens == {request.request_id: 8}
