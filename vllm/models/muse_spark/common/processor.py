@@ -440,9 +440,22 @@ def _preprocess_single_video(
     return video_tensor, _video_patch_count(video_tensor, config), factored_ts
 
 
-# Checkpoints ship no HF preprocessor config, so the connector cannot resolve
-# this video backend from model_type without this registration.
-VIDEO_PROCESSOR_MAPPING_NAMES.setdefault("muse_spark", "MuseSparkVideoProcessor")
+# The connector's video-processor resolver reads video_preprocessor_config.json
+# or preprocessor_config.json, neither of which the checkpoints ship (their
+# processor_config.json carries video_processor *settings*, no class name), so
+# this backend must be resolvable from model_type. The key must be assigned,
+# not setdefault-ed: transformers maps "muse_spark" to the borrowed
+# MuseGlimmerVideoProcessor entry, so the key already exists and a setdefault
+# is a silent no-op (every video then falls back to the generic opencv loader
+# with num_frames=32). The entry's existing value type is preserved (a
+# {"torchvision": name} dict on transformers >= 5.19) so transformers' own
+# iteration over this mapping is unaffected.
+_current = VIDEO_PROCESSOR_MAPPING_NAMES.get("muse_spark")
+VIDEO_PROCESSOR_MAPPING_NAMES["muse_spark"] = (
+    {**_current, "torchvision": "MuseSparkVideoProcessor"}
+    if isinstance(_current, dict)
+    else "MuseSparkVideoProcessor"
+)
 
 
 @VIDEO_LOADER_REGISTRY.register(
