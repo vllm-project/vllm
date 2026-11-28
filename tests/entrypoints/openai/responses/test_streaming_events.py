@@ -10,6 +10,7 @@ from openai.types.responses import (
     ResponseCustomToolCall,
     ResponseFunctionWebSearch,
     ResponseStreamEvent,
+    response_output_text,
 )
 from openai_harmony import Message, Role
 from pydantic import TypeAdapter
@@ -33,6 +34,7 @@ from vllm.entrypoints.openai.responses.utils import (
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
 )
+from vllm.outputs import CompletionOutput
 
 
 def test_browser_find_uses_responses_action_type():
@@ -89,6 +91,56 @@ def test_reasoning_content_parts_use_sdk_events(harmony):
     validator = TypeAdapter(ResponseStreamEvent)
     for event in events:
         assert event.output_index == added.output_index
+        validator.validate_python(event.model_dump())
+
+
+def test_simple_content_done_populates_logprobs():
+    processor = SimpleStreamingEventProcessor()
+    sample_logprobs = [
+        response_output_text.Logprob(
+            token="Hello",
+            bytes=list(b"Hello"),
+            logprob=-0.12,
+            top_logprobs=[
+                response_output_text.LogprobTopLogprob(
+                    token="Hello", bytes=list(b"Hello"), logprob=-0.12
+                )
+            ],
+        )
+    ]
+    dummy_output = CompletionOutput(
+        index=0,
+        text="Hello",
+        token_ids=[1],
+        cumulative_logprob=-0.12,
+        logprobs=None,
+    )
+
+    events = processor.open(_StateType.CONTENT)
+    events.extend(
+        processor.emit_delta(
+            DeltaMessage(content="Hello"),
+            dummy_output,
+            get_logprobs=lambda _: sample_logprobs,
+        )
+    )
+    events.extend(processor.close_current())
+
+    delta_ev = next(e for e in events if e.type == "response.output_text.delta")
+    done_ev = next(e for e in events if e.type == "response.output_text.done")
+    part_done_ev = next(e for e in events if e.type == "response.content_part.done")
+
+    assert len(delta_ev.logprobs) == 1
+    assert len(done_ev.logprobs) == 1
+    assert done_ev.logprobs[0].token == "Hello"
+    assert done_ev.logprobs[0].logprob == -0.12
+    assert done_ev.logprobs[0].top_logprobs is not None
+    assert done_ev.logprobs[0].top_logprobs[0].token == "Hello"
+    assert done_ev.logprobs[0].top_logprobs[0].logprob == -0.12
+    assert part_done_ev.part.logprobs == sample_logprobs
+
+    validator = TypeAdapter(ResponseStreamEvent)
+    for event in events:
         validator.validate_python(event.model_dump())
 
 
