@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import os
 import socket
 import time
+import weakref
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -99,6 +101,124 @@ class InputStreamError(Exception):
     def __init__(self, cause: Exception):
         self.cause = cause
         super().__init__(str(cause))
+
+
+# Keeps finalizer-spawned abort tasks alive until they complete.
+_UNCONSUMED_ABORT_TASKS: set[asyncio.Task] = set()
+
+
+def _abort_unconsumed_request(
+    engine_ref: "weakref.ReferenceType[AsyncLLM]",
+    request_id: str,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Abort an admitted request whose output stream was dropped unread."""
+    engine = engine_ref()
+    if engine is None or loop.is_closed():
+        return
+
+    def _spawn() -> None:
+        task = loop.create_task(engine.abort(request_id, internal=True))
+        _UNCONSUMED_ABORT_TASKS.add(task)
+        task.add_done_callback(_UNCONSUMED_ABORT_TASKS.discard)
+
+    with contextlib.suppress(RuntimeError):
+        loop.call_soon_threadsafe(_spawn)
+
+
+class _AdmittedRequestStream:
+    """Output stream for a request that has already passed admission.
+
+    Mirrors the drain loop and error handling of `AsyncLLM.generate()`.
+    Because admission happened before the stream is iterated, the request is
+    aborted if the stream is closed or garbage collected before it finishes,
+    including when it is never iterated at all (e.g. the client disconnects
+    before a streaming HTTP response starts).
+    """
+
+    def __init__(
+        self, engine: "AsyncLLM", queue: RequestOutputCollector, request_id: str
+    ) -> None:
+        self._engine = engine
+        self._queue = queue
+        self._request_id = request_id
+        self._finished = False
+        self._abort_task: asyncio.Task[None] | None = None
+        self._finalizer = weakref.finalize(
+            self,
+            _abort_unconsumed_request,
+            weakref.ref(engine),
+            queue.request_id,
+            asyncio.get_running_loop(),
+        )
+
+    def __aiter__(self) -> "_AdmittedRequestStream":
+        return self
+
+    async def __anext__(self) -> RequestOutput:
+        if self._finished or self._abort_task is not None:
+            raise StopAsyncIteration
+        q = self._queue
+        try:
+            while True:
+                # Drain without await if possible (see AsyncLLM.generate()).
+                out = q.get_nowait() or await q.get()
+                assert isinstance(out, RequestOutput)
+                if out.finished:
+                    self._mark_done()
+                if out is not STREAM_FINISHED:
+                    return out
+                if self._finished:
+                    raise StopAsyncIteration
+        except StopAsyncIteration:
+            raise
+        except asyncio.CancelledError:
+            await self._abort()
+            raise
+        except EngineDeadError:
+            self._mark_done()
+            raise
+        except (VLLMClientError, GracefulHTTPError, GenerationError) as e:
+            # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
+            await self._abort()
+            if self._engine.log_requests:
+                logger.info("Request %s failed (bad request): %s.", self._request_id, e)
+            raise
+        except InputStreamError as e:
+            await self._abort()
+            if self._engine.log_requests:
+                logger.info("Request %s failed (input error): %s.", self._request_id, e)
+            raise e.cause from e
+        except Exception as e:
+            await self._abort()
+            if self._engine.log_requests:
+                logger.info("Request %s failed due to %r.", self._request_id, e)
+            raise EngineGenerateError() from e
+
+    async def aclose(self) -> None:
+        await self._abort()
+
+    async def _abort(self) -> None:
+        if self._finished:
+            return
+        if self._abort_task is None:
+            self._abort_task = asyncio.create_task(
+                self._engine.abort(self._queue.request_id, internal=True)
+            )
+            _UNCONSUMED_ABORT_TASKS.add(self._abort_task)
+            self._abort_task.add_done_callback(_UNCONSUMED_ABORT_TASKS.discard)
+            self._abort_task.add_done_callback(self._abort_done)
+        await asyncio.shield(self._abort_task)
+
+    def _abort_done(self, _task: asyncio.Task[None]) -> None:
+        self._mark_done()
+        if self._engine.log_requests:
+            logger.info("Request %s aborted.", self._request_id)
+
+    def _mark_done(self) -> None:
+        self._finished = True
+        self._finalizer.detach()
+        self._queue.close()
 
 
 class AsyncLLM(EngineClient):
@@ -587,7 +707,12 @@ class AsyncLLM(EngineClient):
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
         except BaseException:
-            await self.abort(parent_request.request_id, internal=True)
+            try:
+                await self.abort(parent_request.request_id, internal=True)
+            except BaseException:
+                logger.exception(
+                    "Failed to roll back request %s.", parent_request.request_id
+                )
             raise
         return queue
 
@@ -608,7 +733,14 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            try:
+                await self.abort(request.request_id, internal=True)
+            except BaseException:
+                logger.exception("Failed to roll back request %s.", request.request_id)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -750,6 +882,74 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
+    async def generate_admitted(
+        self,
+        prompt: EngineCoreRequest | PromptType | EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        *,
+        prompt_text: str | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+        session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
+        reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
+    ) -> "_AdmittedRequestStream":
+        """Admit a request eagerly, then return its output stream.
+
+        `generate()` performs admission lazily on its first iteration, which
+        for streaming HTTP responses happens after the response status has
+        already been sent, so a late overload rejection (e.g. the queue filled
+        up while the prompt was being rendered) can only be reported in-band.
+        This method awaits `add_request()` first, so `GracefulHTTPError`
+        and validation errors are raised before any response is started.
+        """
+        try:
+            q = await self.add_request(
+                request_id,
+                prompt,
+                sampling_params,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                session_id=session_id,
+                kv_hints=kv_hints,
+                prompt_text=prompt_text,
+                reasoning_ended=reasoning_ended,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
+            )
+        except EngineDeadError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine dead).", request_id)
+            raise
+        except (VLLMClientError, GracefulHTTPError, GenerationError) as e:
+            if self.log_requests:
+                logger.info("Request %s failed (bad request): %s.", request_id, e)
+            raise
+        except InputStreamError as e:
+            if self.log_requests:
+                logger.info("Request %s failed (input error): %s.", request_id, e)
+            raise e.cause from e
+        except Exception as e:
+            if self.log_requests:
+                try:
+                    s = f"{e.__class__.__name__}: {e}"
+                except Exception as e2:
+                    s = (
+                        f"{e.__class__.__name__}: "
+                        "error during printing an exception of class"
+                        + e2.__class__.__name__
+                    )
+                logger.info("Request %s failed due to %s.", request_id, s)
+            raise EngineGenerateError() from e
+        return _AdmittedRequestStream(self, q, request_id)
+
     async def generate(
         self,
         prompt: EngineCoreRequest

@@ -2,14 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from argparse import Namespace
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.openai.chat_completion.api_router import attach_router
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -19,7 +23,8 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.exceptions import GenerationError, QueueOverflowError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -323,6 +328,8 @@ async def test_chat_error_stream(include_usage: bool, monkeypatch: pytest.Monkey
         yield request_output_2
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
+    # Streaming requests are admitted eagerly via generate_admitted().
+    mock_engine.generate_admitted = AsyncMock(side_effect=mock_engine.generate)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -386,6 +393,8 @@ async def test_chat_error_stream_first_chunk(
         yield request_output
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
+    # Streaming requests are admitted eagerly via generate_admitted().
+    mock_engine.generate_admitted = AsyncMock(side_effect=mock_engine.generate)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -712,3 +721,44 @@ def test_non_numeric_logprobs_rejected(field_name):
             messages=[{"role": "user", "content": "hello"}],
             **{field_name: "2"},
         )
+
+
+def test_chat_streaming_admission_rejection_is_http_503(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    engine.generate_admitted = AsyncMock(side_effect=QueueOverflowError())
+
+    async def reject_lazily(*args, **kwargs):
+        raise QueueOverflowError()
+        yield
+
+    engine.generate = reject_lazily
+    serving = _build_serving_chat(engine, monkeypatch)
+
+    app = FastAPI()
+    app.state.args = Namespace(log_error_stack=False, sse_keep_alive_interval=0)
+    app.state.openai_serving_chat = serving
+    attach_router(app)
+    init_exception_handler(app)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": "Test"}],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        )
+
+    assert response.status_code == 503, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()["error"]
+    assert error["code"] == 503
+    assert "engine is currently busy" in error["message"]
