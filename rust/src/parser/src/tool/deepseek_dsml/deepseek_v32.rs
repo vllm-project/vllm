@@ -84,7 +84,7 @@ mod tests {
     use super::DeepSeekV32ToolParser;
     use crate::tool::test_utils::{split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace_with;
-    use crate::tool::{ToolParser, ToolParserOutput};
+    use crate::tool::{ToolParser, ToolParserError, ToolParserOutput};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -453,6 +453,18 @@ mod tests {
         let error = parser.finish().unwrap_err();
         assert!(error.to_report_string().contains("incomplete DeepSeek DSML tool call"));
     }
+    #[test]
+    fn deepseek_v32_reports_half_written_opener_at_finish() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
+        let output = parser.parse_chunk("Checking.\n\n<｜DSML｜function_c").unwrap();
+
+        assert_eq!(output.normal_text(), "Checking.");
+        assert!(matches!(
+            parser.finish(),
+            Err(ToolParserError::IncompleteToolCall { .. })
+        ));
+    }
+
     #[test]
     fn deepseek_v32_streaming_drops_eos_after_complete_tool_calls() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
