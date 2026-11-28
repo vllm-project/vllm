@@ -48,12 +48,15 @@ def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata
 
 
 def _make_runner(
-    req_states: dict[str, tuple[int, int]], decode_query_len: int = 8
+    req_states: dict[str, tuple[int, int]],
+    decode_query_len: int = 8,
+    use_gdp_replayssm: bool = False,
 ) -> Any:
     """Build a runner stub from {req_id: (num_computed_tokens, prefill_len)}."""
     prefill_lens = np.array([s[1] for s in req_states.values()], dtype=np.int32)
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(use_gdp_replayssm=use_gdp_replayssm)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
     runner.pcp_manager = None
@@ -154,6 +157,23 @@ def test_one_new_prompt_token_over_context_runs_as_decode():
     }
 
 
+def test_gdp_replay_runs_only_the_prompt_tail_as_decode():
+    # A GDP replay row that decoded cannot go back to the prefill path, so a
+    # one-token mid-prompt chunk stays a prefill. The prompt's last token still
+    # runs as a decode: no prompt chunk follows it.
+    batch = {"tail": (128, 129), "mid": (64, 129)}
+    runner = _make_runner(batch, decode_query_len=4, use_gdp_replayssm=True)
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"tail": 4, "mid": 1},
+        total_num_scheduled_tokens=5,
+        scheduled_spec_decode_tokens={"tail": [-1] * 3},
+    )
+    state, _ = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    runs_as_decode = dict(zip(state.req_ids, state.prefill_runs_as_decode_np))
+    assert runs_as_decode == {"tail": True, "mid": False}
+
+
 def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
     # Replaying the last prompt token over existing context (full prefix-cache
     # hit or P/D KV import) computes exactly like a decode.
@@ -244,6 +264,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     position would read its row and wrongly reject the two decodes.
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(use_gdp_replayssm=False)
     runner.decode_query_len = 8
     runner.adaptive_verification = None
     runner.pcp_manager = None

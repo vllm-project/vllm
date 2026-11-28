@@ -6,8 +6,11 @@ GDP is a gated delta rule that takes `gdp_num_householder` delta steps per
 token. It reuses the GDN attention backend for its metadata and FlashInfer's
 GDP kernels: `gdp_prefill.chunk_gated_delta_product` for prefill and
 `cake_gdp.cake_gated_delta_product_mtp` for decode and speculative verify.
+With `--use-replayssm`, decode and speculative verify run on
+`gdp_conv_replay_decode.gdp_conv_replay` instead (see `gdp_replay.py`).
 """
 
+import bisect
 import functools
 import importlib
 
@@ -36,10 +39,21 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    direct_register_custom_op,
+    get_kv_cache_torch_dtype,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+from .gdp_replay import (
+    FLUSH_MIN,
+    GdpReplayStep,
+    GdpReplayTrackers,
+    is_prefix_view,
+)
 
 
 def gdp_state_dtype(
@@ -90,6 +104,104 @@ def gdp_state_shape(
     return conv_state_shape, temporal_state_shape
 
 
+# Conv rows FlashInfer's gdp_conv_replay was tuned with, per tokens per step T.
+_GDP_REPLAY_CONV_ROWS = {1: 4, 2: 4, 3: 8, 4: 8, 5: 8, 6: 8, 7: 12, 8: 12}
+
+
+def gdp_replay_conv_rows(tokens: int) -> int:
+    """Conv ring rows for steps of up to `tokens` tokens (FlashInfer's
+    `gdp_conv_replay_decode.conv_state_rows`)."""
+    if tokens not in _GDP_REPLAY_CONV_ROWS:
+        raise ValueError(f"GDP replay runs 1..8 tokens per step; got {tokens}")
+    return _GDP_REPLAY_CONV_ROWS[tokens]
+
+
+def gdp_replay_ring_slots(tokens: int) -> int:
+    """K / U / g ring slots for steps of up to `tokens` tokens in the banked
+    layout: two banks of 8 + T (FlashInfer's `gdp_conv_replay_decode.ring_slots`)."""
+    if tokens not in _GDP_REPLAY_CONV_ROWS:
+        raise ValueError(f"GDP replay runs 1..8 tokens per step; got {tokens}")
+    return 2 * (8 + tokens)
+
+
+def gdp_replay_state_dtype(
+    model_dtype: ModelDType | torch.dtype,
+    mamba_cache_dtype: MambaDType,
+    mamba_ssm_cache_dtype: MambaDType = "auto",
+) -> tuple[torch.dtype, ...]:
+    """Dtypes of the replay page, in `gdp_replay_state_shape` order: conv ring,
+    checkpoint, K ring, U ring, g ring. The op is fastest with an FP16
+    checkpoint, so "auto" means FP16."""
+    conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+    if mamba_ssm_cache_dtype == "auto":
+        checkpoint_dtype = torch.float16
+    elif mamba_ssm_cache_dtype in ("float16", "bfloat16", "float32"):
+        checkpoint_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
+    else:
+        raise ValueError(
+            "GDP replay checkpoint supports only auto, float16, bfloat16 and "
+            f"float32; got {mamba_ssm_cache_dtype}"
+        )
+    return (
+        conv_state_dtype,
+        checkpoint_dtype,
+        torch.float16,
+        torch.float16,
+        torch.float32,
+    )
+
+
+def gdp_replay_state_shape(
+    tp_world_size: int,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+    num_householder: int,
+    num_spec: int = 0,
+) -> tuple[
+    tuple[int, int],
+    tuple[int, int, int],
+    tuple[int, int, int, int],
+    tuple[int, int, int, int],
+    tuple[int, int],
+]:
+    """The page of FlashInfer's `gdp_conv_replay`, one block per request:
+
+    0. conv ring `(R_c, conv_dim)`, token-major; the op indexes it itself.
+    1. checkpoint `(heads, head_v_dim, head_k_dim)`: the state at the last
+       flush, not the current state.
+    2. K ring `(heads, R, num_householder, head_k_dim)`.
+    3. U ring `(heads, R, num_householder, head_v_dim)`.
+    4. g ring `(heads, R)`.
+    """
+    if is_conv_state_dim_first():
+        raise ValueError(
+            "GDP replay needs the token-major (SD) conv state; unset "
+            "VLLM_SSM_CONV_STATE_LAYOUT=DS"
+        )
+    conv_shape, temporal_shape = gdp_state_shape(
+        tp_world_size,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_kernel_size,
+        num_householder,
+    )
+    tokens = 1 + num_spec
+    ring = gdp_replay_ring_slots(tokens)
+    heads = temporal_shape[0]
+    return (
+        (gdp_replay_conv_rows(tokens), conv_shape[1]),
+        temporal_shape,
+        (heads, ring, num_householder, head_k_dim),
+        (heads, ring, num_householder, head_v_dim),
+        (heads, ring),
+    )
+
+
 # FlashInfer's GDP kernels: the module and the function the mixer calls.
 _GDP_KERNELS = (
     ("flashinfer.gdp_prefill", "chunk_gated_delta_product"),
@@ -109,6 +221,16 @@ def missing_gdp_kernels() -> tuple[str, ...]:
             pass
         missing.append(f"{module_name}.{name}")
     return tuple(missing)
+
+
+@functools.cache
+def gdp_replay_kernel_missing() -> bool:
+    """Whether FlashInfer's `gdp_conv_replay` cannot be imported."""
+    try:
+        module = importlib.import_module("flashinfer.gdp_conv_replay_decode")
+        return not hasattr(module, "gdp_conv_replay")
+    except Exception:  # ImportError, or a module failing to load
+        return True
 
 
 def gdp_prefill(
@@ -147,6 +269,21 @@ def gdp_prefill(
 def _pad_spec_window(t: torch.Tensor, dst: torch.Tensor, size: int) -> torch.Tensor:
     """Scatter ragged spec-decode tokens into a rectangular per-request block."""
     return t.new_zeros((size, *t.shape[1:])).index_copy_(0, dst, t)
+
+
+_SPEC_ROWS_LEAD = "_gdp_spec_rows_lead"
+
+
+def _spec_rows_lead(metadata: GDNAttentionMetadata) -> bool:
+    """Whether a mixed step's spec requests are its leading requests, so that
+    their tokens are the step's first `num_spec_decode_tokens` rows and the
+    other requests' tokens follow. Read from the host masks once per step."""
+    lead = getattr(metadata, _SPEC_ROWS_LEAD, None)
+    if lead is None:
+        masks = metadata.spec_sequence_masks_cpu
+        lead = masks is not None and bool(masks[: metadata.num_spec_decodes].all())
+        setattr(metadata, _SPEC_ROWS_LEAD, lead)
+    return lead
 
 
 def _make_gdp_sharded_weight_loader(
@@ -221,6 +358,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        gdp_replay_trackers: GdpReplayTrackers | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -298,12 +436,33 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         # parameter would cost two cast kernels per layer on every decode step.
         # requires_grad=False: `.float()` now returns the parameter itself, and the
         # CuTe-DSL decode kernel cannot DLPack-export a tensor that requires grad.
-        self.dt_bias = nn.Parameter(
-            torch.empty(self.num_heads, dtype=torch.float32), requires_grad=False
-        )
-        self.A_log = nn.Parameter(
-            torch.empty(self.num_heads, dtype=torch.float32), requires_grad=False
-        )
+        # The replay op reads them as one [A_log; dt_bias] tensor, so under replay
+        # both are views of it and loading them fills it in place.
+        # On GDP layers, --use-replayssm selects FlashInfer's GDP replay. The flag
+        # has its own name: MambaBase.use_replayssm selects the shared ReplaySSM
+        # trackers (Mamba-2, Gated DeltaNet), which GDP replay does not use.
+        self.use_gdp_replayssm = cache_config is not None and cache_config.use_replayssm
+        if self.use_gdp_replayssm and gdp_replay_kernel_missing():
+            raise RuntimeError(
+                "--use-replayssm on GDP layers needs FlashInfer's "
+                "gdp_conv_replay_decode.gdp_conv_replay"
+            )
+        self.gate_params: torch.Tensor | None = None
+        if self.use_gdp_replayssm:
+            self.gate_params = torch.empty(2, self.num_heads, dtype=torch.float32)
+            a_log, dt_bias = self.gate_params[0], self.gate_params[1]
+        else:
+            a_log = torch.empty(self.num_heads, dtype=torch.float32)
+            dt_bias = torch.empty(self.num_heads, dtype=torch.float32)
+        self.A_log = nn.Parameter(a_log, requires_grad=False)
+        self.dt_bias = nn.Parameter(dt_bias, requires_grad=False)
+        # The model shares one tracker set across its GDP layers; a standalone
+        # layer keeps its own.
+        self.gdp_replay_trackers: GdpReplayTrackers | None = None
+        if self.use_gdp_replayssm:
+            self.gdp_replay_trackers = gdp_replay_trackers or GdpReplayTrackers()
+        # The state views from the first bind, at the KV cache's full capacity.
+        self.gdp_replay_capacity_views: tuple[torch.Tensor, ...] | None = None
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
         self.g_clamp_value = getattr(config, "gdp_g_clamp_value", None)
@@ -330,14 +489,43 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
         self.num_spec = vllm_config.num_speculative_tokens
+        # The replay op compiles once per batch size, in warmup's FULL decode
+        # graphs; eager steps pad up to one of those (`_replay_batches`).
+        self.replay_capture_sizes = sorted(
+            compilation_config.cudagraph_capture_sizes or []
+        )
+        self.replay_decode_requests = (
+            compilation_config.decode_cudagraph_capture_request_sizes
+        )
+        self._replay_batch_cache: dict[int, list[int]] = {}
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.GDN_ATTN
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        if self.gdp_replay_trackers is None:
+            return
+        self.gdp_replay_trackers.bind(self.kv_cache[0])
+        # The replay op compiles per pool shape, block count included. An
+        # extensible KV cache binds the pools at capacity for CUDA graph
+        # capture, then rebinds the committed prefix. Keeping the capacity
+        # views lets calls outside a captured graph reuse the kernels compiled
+        # at warmup instead of compiling again mid-serving. Only committed
+        # blocks are ever indexed, and the uncommitted tail keeps its reserved
+        # addresses.
+        if self.gdp_replay_capacity_views is None:
+            self.gdp_replay_capacity_views = self.kv_cache
+        elif is_prefix_view(self.gdp_replay_capacity_views, self.kv_cache):
+            self.kv_cache = self.gdp_replay_capacity_views
+
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None and self.cache_config is not None
-        return gdp_state_dtype(
+        calculator = (
+            gdp_replay_state_dtype if self.use_gdp_replayssm else gdp_state_dtype
+        )
+        return calculator(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
@@ -345,7 +533,10 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         # The helper shards internally, so feed it the unsharded counts.
-        return gdp_state_shape(
+        calculator = (
+            gdp_replay_state_shape if self.use_gdp_replayssm else gdp_state_shape
+        )
+        return calculator(
             get_tensor_model_parallel_world_size(),
             self.config.gdp_num_groups,
             self.config.gdp_num_heads,
@@ -377,24 +568,35 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             ],
             dim=-1,
         )
-        if self.g_clamp_value is not None:
-            a = self.clamp_decay_input(a)
         # Zeros: the op leaves padded rows, and all rows of profile runs, unwritten.
-        core_out = torch.zeros(
+        # The replay path zeroes the rows it leaves unwritten itself, which in a
+        # captured decode step is none.
+        core_out = (torch.empty if self.use_gdp_replayssm else torch.zeros)(
             (num_tokens, self.num_heads, self.head_dim),
             dtype=projected.dtype,
             device=projected.device,
         )
-        # `clone`, not `contiguous`: a single token leaves b/a as one-row views into
-        # the projection, which `contiguous` keeps as-is, and the GDP kernels need
-        # them 16-byte aligned. Copying here lets inductor fuse the copies.
         # The GDP op splits the graph and `gate` crosses it into the next piece; a
         # copy gives it the stride that piece was compiled for, since inductor may
         # pad the projection's rows when their width is not a multiple of 8.
         gate = gate.clone()
-        torch.ops.vllm.nemotron_shortcut_gdp(
-            mixed_vkq, b.clone(), a.clone(), core_out, self.prefix
-        )
+        if self.use_gdp_replayssm:
+            # The replay op reads the decay logits from the projection itself.
+            if self.g_clamp_value is not None:
+                a.copy_(self.clamp_decay_input(a))
+            torch.ops.vllm.nemotron_shortcut_gdp(
+                projected, None, None, core_out, self.prefix
+            )
+        else:
+            if self.g_clamp_value is not None:
+                a = self.clamp_decay_input(a)
+            # `clone`, not `contiguous`: a single token leaves b/a as one-row views
+            # into the projection, which `contiguous` keeps as-is, and the GDP
+            # kernels need them 16-byte aligned. Copying here lets inductor fuse
+            # the copies.
+            torch.ops.vllm.nemotron_shortcut_gdp(
+                mixed_vkq, b.clone(), a.clone(), core_out, self.prefix
+            )
         core_out = self.norm(core_out.reshape(num_tokens, self.value_dim), gate)
         output, _ = self.out_proj(core_out)
         return output
@@ -417,6 +619,387 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         upper = torch.log(softplus_bound.clamp_min(torch.finfo(torch.float32).tiny))
         return torch.minimum(a.float(), upper - self.dt_bias).to(a.dtype)
 
+    def _gdn_metadata(self) -> GDNAttentionMetadata | None:
+        """This layer's metadata; None in profile and warmup runs, which carry
+        no mamba metadata."""
+        context_metadata = get_forward_context().attn_metadata
+        metadata = (
+            context_metadata.get(self.prefix)
+            if isinstance(context_metadata, dict)
+            else context_metadata
+        )
+        return metadata if isinstance(metadata, GDNAttentionMetadata) else None
+
+    def _forward_replay(self, projected: torch.Tensor, core_out: torch.Tensor) -> None:
+        """GDP with FlashInfer's `gdp_conv_replay` for decode and spec-verify rows.
+
+        Decode rows take the op on whole in_proj rows (it slices the conv
+        channels and gate logits itself); prefill rows take the regular prefill
+        and reset their trackers. A row with replay history never reaches the
+        prefill path: GDP replay requires spec decode, so every decoding row is
+        a spec row, and the metadata builder sends every prefilling row to
+        prefill. Plain decode rows appear only in warmup batches.
+        """
+        md = self._gdn_metadata()
+        if md is None:
+            core_out.zero_()
+            return
+        assert self.gate_params is not None and self.gdp_replay_trackers is not None
+        commits = self.gdp_replay_trackers.claim(md)
+        if (
+            self.A_log.data_ptr() != self.gate_params[0].data_ptr()
+            or self.dt_bias.data_ptr() != self.gate_params[1].data_ptr()
+        ):
+            raise RuntimeError(
+                f"{self.prefix}: A_log / dt_bias no longer alias the replay gate params"
+            )
+        # Rows past the step's tokens pad a captured graph; nothing below writes
+        # them.
+        core_out[md.num_actual_tokens :].zero_()
+        if md.spec_sequence_masks is not None:
+            self._forward_replay_spec(md, projected, core_out, commits)
+            return
+        projected = projected[: md.num_actual_tokens]
+        core_out = core_out[: md.num_actual_tokens]
+
+        num_decode_tokens = md.num_decode_tokens
+        if md.num_decodes > 0:
+            # One token per row. With spec decode on, decoding rows are spec
+            # rows, so only warmup batches get here; still commit what each
+            # row's previous step accepted, not an assumed single token.
+            assert md.non_spec_state_indices_tensor is not None
+            batch = md.num_decodes
+            device = projected.device
+            num_accepted = (
+                md.num_accepted_tokens[:batch]
+                if md.num_accepted_tokens is not None
+                else torch.ones(batch, dtype=torch.int32, device=device)
+            )
+            step = self._replay_step(
+                md,
+                commits,
+                md.non_spec_state_indices_tensor[:batch],
+                torch.arange(batch + 1, dtype=torch.int32, device=device),
+                num_accepted,
+                tokens=1,
+                num_rows=num_decode_tokens,
+            )
+            self._replay(
+                projected[:num_decode_tokens], step, core_out[:num_decode_tokens]
+            )
+        if md.num_prefills > 0:
+            if md.num_decodes > 0:
+                # The conv's launch metadata covers the decode rows too, so let
+                # it derive its own from the prefill rows.
+                assert md.prefill_query_start_loc is not None
+                assert md.prefill_state_indices is not None
+                loc = md.prefill_query_start_loc
+                state_indices = md.prefill_state_indices
+                has_initial_state = md.prefill_has_initial_state
+                conv_metadata = None
+            else:
+                assert md.non_spec_query_start_loc is not None
+                assert md.non_spec_state_indices_tensor is not None
+                loc = md.non_spec_query_start_loc
+                state_indices = md.non_spec_state_indices_tensor
+                has_initial_state = md.has_initial_state
+                conv_metadata = md
+            self._replay_prefill(
+                projected[num_decode_tokens:],
+                loc,
+                state_indices,
+                has_initial_state,
+                conv_metadata,
+                commits,
+                out=core_out[num_decode_tokens:],
+            )
+
+    def _forward_replay_spec(
+        self,
+        md: GDNAttentionMetadata,
+        projected: torch.Tensor,
+        core_out: torch.Tensor,
+        commits: bool,
+    ) -> None:
+        """A spec-decode step: the replay op on the spec rows, the regular
+        prefill on the others (with spec decode on, every non-spec row is a
+        prefill).
+
+        The batch reorder puts decoding requests first, so the spec rows are
+        usually the step's leading tokens and the prefill tokens follow. Both
+        parts then read their rows and write their outputs in place. A short
+        prefill chunk can sort among the decodes; such a step gathers and
+        scatters its rows."""
+        num_spec_tokens = md.num_spec_decode_tokens
+        only_spec = md.num_prefills == 0 and md.num_decodes == 0
+        if only_spec or _spec_rows_lead(md):
+            # The prefill runs after the replay, so it overwrites the +0 the op
+            # stores for padding requests on rows that are the prefill's.
+            self._replay_spec(md, projected, num_spec_tokens, core_out, commits)
+            if not only_spec:
+                rows = slice(num_spec_tokens, md.num_actual_tokens)
+                self._spec_step_prefill(md, projected[rows], commits, core_out[rows])
+            return
+        spec_idx, prefill_idx = md.spec_token_indx, md.non_spec_token_indx
+        assert spec_idx is not None and prefill_idx is not None
+        spec_rows = projected.index_select(0, spec_idx)
+        spec_out = self._replay_spec(md, spec_rows, num_spec_tokens, None, commits)
+        core_out.index_copy_(0, spec_idx, spec_out)
+        prefill_rows = projected.index_select(0, prefill_idx)
+        prefill_out = self._spec_step_prefill(md, prefill_rows, commits)
+        core_out.index_copy_(0, prefill_idx, prefill_out)
+
+    def _spec_step_prefill(
+        self,
+        md: GDNAttentionMetadata,
+        rows: torch.Tensor,
+        commits: bool,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """The prefill rows of a spec-decode step."""
+        assert md.non_spec_query_start_loc is not None
+        assert md.non_spec_state_indices_tensor is not None
+        return self._replay_prefill(
+            rows,
+            md.non_spec_query_start_loc,
+            md.non_spec_state_indices_tensor,
+            md.has_initial_state,
+            conv_metadata=md,
+            commits=commits,
+            out=out,
+        )
+
+    def _replay_spec(
+        self,
+        md: GDNAttentionMetadata,
+        rows: torch.Tensor,
+        num_rows: int,
+        out: torch.Tensor | None,
+        commits: bool,
+    ) -> torch.Tensor:
+        """Verify windows of up to 1 + num_spec tokens per request: the first
+        `num_rows` of `rows`. The op wants them rectangular, so ragged windows
+        are padded and the padding is dropped from the output. With `out`, full
+        windows write their output there (rows of padding requests get +0);
+        `rows` and `out` past `num_rows` may serve as the padding requests'
+        rows, which the op does not read."""
+        assert md.spec_state_indices_tensor is not None
+        assert md.spec_query_start_loc is not None
+        assert md.num_accepted_tokens is not None
+        batch = md.num_spec_decodes
+        step = self._replay_step(
+            md,
+            commits,
+            md.spec_state_indices_tensor[:batch, 0],
+            md.spec_query_start_loc,
+            md.num_accepted_tokens[:batch],
+            tokens=self.num_spec + 1,
+            num_rows=num_rows,
+        )
+        if step.dst is None:
+            return self._replay(rows, step, out)
+        rows = _pad_spec_window(rows[:num_rows], step.dst, batch * step.tokens)
+        result = self._replay(rows, step).index_select(0, step.dst)
+        if out is not None:
+            out[:num_rows].copy_(result)
+        return result
+
+    def _replay_step(
+        self,
+        md: GDNAttentionMetadata,
+        commits: bool,
+        slots: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_accepted: torch.Tensor,
+        tokens: int,
+        num_rows: int,
+    ) -> GdpReplayStep:
+        """This step's op inputs: the group's first GDP layer commits the
+        previous step and plans them; the other layers reuse the plan."""
+        trackers = self.gdp_replay_trackers
+        assert trackers is not None
+        if not commits:
+            return trackers.step_of(md)
+        batch = slots.size(0)
+        batches = self._replay_batches(tokens)
+        i = bisect.bisect_left(batches, batch)
+        padded = batches[i] if i < len(batches) else batch
+        return trackers.commit_step(
+            md, slots, query_start_loc, num_accepted, tokens, padded, num_rows
+        )
+
+    def _replay_batches(self, tokens: int) -> list[int]:
+        """The batch sizes warmup compiled the op for at `tokens` tokens per
+        request, ascending: the request counts of the FULL decode graphs. An
+        eager step pads up to one, so the op never compiles mid-serving."""
+        batches = self._replay_batch_cache.get(tokens)
+        if batches is None:
+            sizes = set(self.replay_capture_sizes)
+            if self.replay_decode_requests:
+                # Each decode graph runs n requests as n * tokens tokens; the
+                # other captured token counts are prefill graphs, which run the
+                # op outside the graph.
+                found = {n for n in self.replay_decode_requests if n * tokens in sizes}
+            else:
+                found = {size // tokens for size in sizes if size % tokens == 0}
+            batches = self._replay_batch_cache[tokens] = sorted(found)
+        return batches
+
+    def _replay(
+        self,
+        rows: torch.Tensor,
+        step: GdpReplayStep,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run `gdp_conv_replay` on whole in_proj rows, `step.tokens` per
+        request, with the step's planned inputs; returns the live requests'
+        output rows.
+
+        The padding requests take the rows of `rows` past the live ones, which
+        the op does not read, or zero rows if `rows` ends first. When `out` has
+        room for every request's rows, the op writes there (+0 on padding
+        requests); otherwise the live rows are copied into it."""
+        from flashinfer.gdp_conv_replay_decode import gdp_conv_replay
+
+        trackers = self.gdp_replay_trackers
+        assert trackers is not None and self.gate_params is not None
+        live = step.batch * step.tokens
+        size = step.padded * step.tokens
+        if rows.size(0) < size:
+            rows = torch.cat([rows[:live], rows.new_zeros(size - live, rows.size(1))])
+        rows = rows[:size]
+        op_out = None
+        if out is not None and out.size(0) >= size:
+            op_out = out[:size].view(
+                step.padded, step.tokens, self.num_heads, self.head_dim
+            )
+        conv_start = self.value_dim
+        gates_start = conv_start + self.conv_dim
+        conv_state, state, k_ring, u_ring, g_ring = self.kv_cache
+        result = gdp_conv_replay(
+            rows[:, conv_start:gates_start],
+            rows[:, gates_start:],
+            self.conv1d.weight.view(self.conv_dim, self.conv_kernel_size),
+            conv_state,
+            step.slots,
+            self.gate_params,
+            state,
+            k_ring,
+            u_ring,
+            g_ring,
+            step.slots,
+            step.base,
+            step.hist_len,
+            step.valid_len,
+            trackers.seed,
+            scale=self.key_head_dim**-0.5,
+            # The commit rule in GdpReplayTrackers assumes this threshold.
+            flush_min=FLUSH_MIN,
+            # The op's tuned default, within about 1 FP16 ulp of exact SiLU.
+            silu="tanh",
+            ring_bank=step.ring_bank,
+            null_block_id=NULL_BLOCK_ID,
+            # The norm and out_proj read every row, padding included.
+            zero_inactive_out=True,
+            out=op_out,
+        )
+        result = result.view(-1, self.num_heads, self.head_dim)[:live]
+        if out is not None and op_out is None:
+            out[:live].copy_(result)
+        return result
+
+    def _replay_prefill(
+        self,
+        rows: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor | None,
+        conv_metadata: GDNAttentionMetadata | None,
+        commits: bool,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """The regular prefill on whole in_proj rows, into `out` if given;
+        then, with `commits`, zero the trackers of the prefilled blocks, whose
+        checkpoint is now the post-prompt state and whose conv rows 0..2 hold
+        the last three prompt inputs."""
+        _, mixed_vkq, b, a = rows.split(
+            [
+                self.value_dim,
+                self.conv_dim,
+                self.num_householder * self.num_heads,
+                self.num_heads,
+            ],
+            dim=-1,
+        )
+        assert has_initial_state is not None
+        out = self._prefill(
+            mixed_vkq,
+            b,
+            a,
+            self.conv1d.weight.view(self.conv_dim, self.conv_kernel_size),
+            # The conv kernel takes (dim, rows) views; replay keeps rows first.
+            self.kv_cache[0].transpose(-1, -2),
+            self.kv_cache[1],
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            conv_metadata,
+            out,
+        )
+        if commits:
+            assert self.gdp_replay_trackers is not None
+            self.gdp_replay_trackers.reset(state_indices)
+        return out
+
+    def _prefill(
+        self,
+        mixed_vkq: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        conv_weights: torch.Tensor,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        conv_metadata: GDNAttentionMetadata | None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Conv and chunked GDP over prefill rows; writes each request's last
+        three conv inputs and its post-prompt state."""
+        mixed_vkq = causal_conv1d_fn(
+            mixed_vkq.transpose(0, 1),
+            conv_weights,
+            None,
+            activation=self.activation,
+            conv_states=conv_state,
+            has_initial_state=has_initial_state,
+            cache_indices=state_indices,
+            query_start_loc=query_start_loc,
+            metadata=conv_metadata,
+        ).transpose(0, 1)
+        value, key, query = self._split_heads(mixed_vkq)
+        num_tokens = query.size(0)
+        decay = -self.A_log.float().exp() * nn.functional.softplus(
+            a.float() + self.dt_bias.float()
+        )
+        beta = b.reshape(num_tokens, self.num_householder, self.num_heads).sigmoid()
+        # The kernel accumulates in fp32; a replay checkpoint is stored narrower.
+        initial_state = ssm_state[state_indices].float()
+        initial_state[~has_initial_state] = 0
+        core_out, last_state = gdp_prefill(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            initial_state,
+            query_start_loc,
+            out,
+        )
+        ssm_state[state_indices] = last_state.to(ssm_state.dtype)
+        return core_out
+
     def _forward(
         self,
         mixed_vkq: torch.Tensor,
@@ -424,16 +1007,9 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         a: torch.Tensor,
         core_out: torch.Tensor,
     ) -> None:
-        context_metadata = get_forward_context().attn_metadata
-        metadata = (
-            context_metadata.get(self.prefix)
-            if isinstance(context_metadata, dict)
-            else context_metadata
-        )
-        if not isinstance(metadata, GDNAttentionMetadata):
-            # Profile and warmup runs carry no mamba metadata.
+        attn_metadata = self._gdn_metadata()
+        if attn_metadata is None:
             return
-        attn_metadata = metadata
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         spec_masks = attn_metadata.spec_sequence_masks
@@ -456,6 +1032,9 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes == 0
         )
+        parts: list[
+            tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]
+        ]
         if spec_masks is None:
             parts = [(None, mixed_vkq, b, a)]
         elif only_spec:
@@ -464,9 +1043,15 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             spec_idx = attn_metadata.spec_token_indx
             non_idx = attn_metadata.non_spec_token_indx
             assert spec_idx is not None and non_idx is not None
+            spec_vkq, spec_b, spec_a = (
+                t.index_select(0, spec_idx) for t in (mixed_vkq, b, a)
+            )
+            non_vkq, non_b, non_a = (
+                t.index_select(0, non_idx) for t in (mixed_vkq, b, a)
+            )
             parts = [
-                (spec_idx, *(t.index_select(0, spec_idx) for t in (mixed_vkq, b, a))),
-                (None, *(t.index_select(0, non_idx) for t in (mixed_vkq, b, a))),
+                (spec_idx, spec_vkq, spec_b, spec_a),
+                (None, non_vkq, non_b, non_a),
             ]
 
         conv_weights = self.conv1d.weight.view(
@@ -509,6 +1094,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             return
         spec_idx = attn_metadata.spec_token_indx
         non_idx = attn_metadata.non_spec_token_indx
+        assert spec_idx is not None and non_idx is not None
         for idx, part in zip((spec_idx, non_idx), (r[1] for r in results)):
             core_out.index_copy_(0, idx, part)
 
@@ -670,55 +1256,34 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         assert state_indices is not None and query_start_loc is not None
 
         if attn_metadata.num_prefills > 0:
-            mixed_vkq = causal_conv1d_fn(
-                mixed_vkq.transpose(0, 1),
-                conv_weights,
-                None,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=attn_metadata.has_initial_state,
-                cache_indices=state_indices,
-                query_start_loc=query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
-        else:
-            mixed_vkq = causal_conv1d_update(
+            assert attn_metadata.has_initial_state is not None
+            return self._prefill(
                 mixed_vkq,
-                conv_state,
+                b,
+                a,
                 conv_weights,
-                None,
-                self.activation,
-                conv_state_indices=state_indices[: attn_metadata.num_decodes],
-                validate_data=True,
-            )
-        # The decode kernel L2-normalizes q/k itself (same rsqrt(sum + 1e-6) as
-        # l2norm_fwd, in fp32), saving two kernels per layer and step.
-        value, key, query = self._split_heads(
-            mixed_vkq, l2norm_qk=attn_metadata.num_prefills > 0
-        )
-        num_tokens = query.size(0)
-
-        if attn_metadata.num_prefills > 0:
-            decay = -self.A_log.float().exp() * nn.functional.softplus(
-                a.float() + self.dt_bias.float()
-            )
-            beta = b.reshape(num_tokens, self.num_householder, self.num_heads).sigmoid()
-            has_initial_state = attn_metadata.has_initial_state
-            assert has_initial_state is not None
-            initial_state = ssm_state[state_indices].contiguous()
-            initial_state[~has_initial_state] = 0
-            core_out, last_state = gdp_prefill(
-                query,
-                key,
-                value,
-                decay,
-                beta,
-                initial_state,
+                conv_state,
+                ssm_state,
                 query_start_loc,
+                state_indices,
+                attn_metadata.has_initial_state,
+                attn_metadata,
                 out,
             )
-            ssm_state[state_indices] = last_state.to(ssm_state.dtype)
-            return core_out
+
+        mixed_vkq = causal_conv1d_update(
+            mixed_vkq,
+            conv_state,
+            conv_weights,
+            None,
+            self.activation,
+            conv_state_indices=state_indices[: attn_metadata.num_decodes],
+            validate_data=True,
+        )
+        # The decode kernel L2-normalizes q/k itself (same rsqrt(sum + 1e-6) as
+        # l2norm_fwd, in fp32), saving two kernels per layer and step.
+        value, key, query = self._split_heads(mixed_vkq, l2norm_qk=False)
+        num_tokens = query.size(0)
 
         # Decode applies the gating itself, so it takes the raw logits in the
         # model dtype -- unlike prefill, which consumes fp32 gates directly.
@@ -749,14 +1314,20 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
 
 def nemotron_shortcut_gdp(
-    mixed_vkq: torch.Tensor,
-    b: torch.Tensor,
-    a: torch.Tensor,
+    x: torch.Tensor,
+    b: torch.Tensor | None,
+    a: torch.Tensor | None,
     core_out: torch.Tensor,
     layer_name: str,
 ) -> None:
+    """The GDP conv and recurrence. `x` is the conv input (`mixed_vkq`) with
+    its `b` and `a`, or, under `--use-replayssm`, the whole in_proj output
+    with no `b` and `a`: the replay op slices them itself."""
     self = get_forward_context().no_compile_layers[layer_name]
-    self._forward(mixed_vkq, b, a, core_out)
+    if b is None or a is None:
+        self._forward_replay(x, core_out)
+    else:
+        self._forward(x, b, a, core_out)
 
 
 direct_register_custom_op(

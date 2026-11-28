@@ -17,6 +17,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import cast
 
 import torch
 from torch import nn
@@ -45,7 +46,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import IsHybrid, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    IsHybrid,
+    MambaStateShapes,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -56,7 +61,14 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .gdp import NemotronShortcutGDPMixer, gdp_state_dtype, gdp_state_shape
+from .gdp import (
+    NemotronShortcutGDPMixer,
+    gdp_replay_state_dtype,
+    gdp_replay_state_shape,
+    gdp_state_dtype,
+    gdp_state_shape,
+)
+from .gdp_replay import GdpReplayTrackers, validate_gdp_replay
 from .mlp import NemotronShortcutMLP
 from .moe import NemotronShortcutMoE
 from .sdsa import (
@@ -299,6 +311,7 @@ class NemotronShortcutGDPLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        gdp_replay_trackers: GdpReplayTrackers | None = None,
     ) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -308,6 +321,7 @@ class NemotronShortcutGDPLayer(nn.Module):
             cache_config,
             quant_config,
             prefix=f"{prefix}.mixer",
+            gdp_replay_trackers=gdp_replay_trackers,
         )
         self.residual_connection = NemotronShortcutWideResidualConnection(config)
 
@@ -551,6 +565,7 @@ class ShortcutMoEGDPLayer(ShortcutMoELayer):
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        gdp_replay_trackers: GdpReplayTrackers | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -562,7 +577,12 @@ class ShortcutMoEGDPLayer(ShortcutMoELayer):
             prefix=prefix,
         )
         self.mixer = NemotronShortcutGDPMixer(
-            config, model_config, cache_config, quant_config, prefix=f"{prefix}.mixer"
+            config,
+            model_config,
+            cache_config,
+            quant_config,
+            prefix=f"{prefix}.mixer",
+            gdp_replay_trackers=gdp_replay_trackers,
         )
 
     def mixer_projections(
@@ -630,17 +650,9 @@ def load_nemotron_shortcut_weights(
 
 
 def check_supported(vllm_config: VllmConfig) -> None:
-    """Refuse deployments the GDP mixers cannot serve, with every reason."""
-    reasons = []
+    """Refuse deployments the GDP mixers cannot serve."""
     if vllm_config.cache_config.use_replayssm:
-        reasons.append(
-            "ReplaySSM is not supported: the GDP verify kernel writes one state "
-            "slot per draft token"
-        )
-    if reasons:
-        raise ValueError(
-            "Nemotron Shortcut cannot run this configuration: " + "; ".join(reasons)
-        )
+        validate_gdp_replay(vllm_config)
 
 
 ALL_LAYER_TYPES = {
@@ -671,6 +683,11 @@ class NemotronShortcutTextModel(nn.Module):
         if config.index_topk is not None:
             self.sdsa_buffers = allocate_sdsa_buffers(vllm_config, config.index_topk)
 
+        # The replay cursors that every GDP layer shares under --use-replayssm.
+        self.gdp_replay_trackers = (
+            GdpReplayTrackers() if vllm_config.cache_config.use_replayssm else None
+        )
+
         def get_layer(prefix: str):
             layer_idx = extract_layer_index(prefix)
             layer_type = config.layer_types[layer_idx]
@@ -685,6 +702,10 @@ class NemotronShortcutTextModel(nn.Module):
             if layer_type in ("full_attention", "shortcut_moe_attn"):
                 return ALL_LAYER_TYPES[layer_type](
                     *args, prefix=prefix, sdsa_buffers=self.sdsa_buffers
+                )
+            if layer_type in ("linear_attention", "shortcut_moe_gdp"):
+                return ALL_LAYER_TYPES[layer_type](
+                    *args, prefix=prefix, gdp_replay_trackers=self.gdp_replay_trackers
                 )
             return ALL_LAYER_TYPES[layer_type](*args, prefix=prefix)
 
@@ -803,7 +824,12 @@ class NemotronShortcutForCausalLM(nn.Module, SupportsPP, IsHybrid, SdsaKVCacheGr
     def get_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, ...]:
-        return gdp_state_dtype(
+        calculator = (
+            gdp_replay_state_dtype
+            if vllm_config.cache_config.use_replayssm
+            else gdp_state_dtype
+        )
+        return calculator(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
@@ -812,9 +838,14 @@ class NemotronShortcutForCausalLM(nn.Module, SupportsPP, IsHybrid, SdsaKVCacheGr
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         config = vllm_config.model_config.hf_text_config
-        return gdp_state_shape(
+        calculator = (
+            gdp_replay_state_shape
+            if vllm_config.cache_config.use_replayssm
+            else gdp_state_shape
+        )
+        shapes = calculator(
             vllm_config.parallel_config.tensor_parallel_size,
             config.gdp_num_groups,
             config.gdp_num_heads,
@@ -824,6 +855,8 @@ class NemotronShortcutForCausalLM(nn.Module, SupportsPP, IsHybrid, SdsaKVCacheGr
             config.gdp_num_householder,
             vllm_config.num_speculative_tokens,
         )
+        # The replay page has five states, more than the shared alias lists.
+        return cast(MambaStateShapes, shapes)
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:

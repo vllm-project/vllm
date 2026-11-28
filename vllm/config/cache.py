@@ -334,7 +334,9 @@ class CacheConfig:
     backends; Gated DeltaNet supports Triton standard decode only. Pipeline
     parallelism is not supported. Flushes are most efficient when
     mamba_block_size is a multiple of replayssm_buffer_len, but this is not
-    required."""
+    required. On a Gated DeltaProduct model it selects FlashInfer's GDP replay
+    decode instead (`VllmConfig.use_gdp_replayssm`), which sizes its rings from
+    the draft count and ignores replayssm_buffer_len."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 

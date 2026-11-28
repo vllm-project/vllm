@@ -1468,6 +1468,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_draft_tokens_np is not None:
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            if self.vllm_config.use_gdp_replayssm:
+                # A GDP replay block's checkpoint lags its history, so only the
+                # prompt's last token may run as a decode: a row that decoded
+                # must not return to the prefill path.
+                one_token_ext &= num_computed_prefill_tokens_np + 1 == prefill_len_np
             prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
             decode_graph_eligible = bool(
                 (prefill_runs_as_decode_np | ~is_prefilling_np).all()

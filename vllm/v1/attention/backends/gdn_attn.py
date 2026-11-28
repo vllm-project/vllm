@@ -194,6 +194,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.speculative_config
             and self.speculative_config.enable_adaptive_verification
         )
+        self.use_gdp_replayssm = vllm_config.use_gdp_replayssm
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec, self.checkpoint_alignment
         )
@@ -290,6 +291,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_replayssm: bool = (
             vllm_config.cache_config.use_replayssm
             and not vllm_config.cache_config.use_kda_recoverssm
+            # GDP replay keeps its own cursors and plans its own steps.
+            and not self.use_gdp_replayssm
         )
         self.replayssm_buffer_len: int | None = (
             vllm_config.cache_config.replayssm_buffer_len
@@ -434,7 +437,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             # Capture batches also have seq_len == query_len, but are not
             # prefills.
-            if m.is_prefilling is not None:
+            if m.is_prefilling is not None and self.use_gdp_replayssm:
+                # A GDP replay block's checkpoint lags its history, so a row
+                # that left the prefill path must not come back to it: every
+                # prefilling row is a prefill, resumed one-token chunks too.
+                # Spec decode lands here when no row in the batch decodes.
+                no_prior_state = (query_lens_cpu > 0) & m.is_prefilling
+            elif m.is_prefilling is not None:
                 no_prior_state &= m.is_prefilling
             else:
                 no_prior_state = torch.zeros_like(no_prior_state)
