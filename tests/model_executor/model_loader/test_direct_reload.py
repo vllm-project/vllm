@@ -25,6 +25,10 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers import linear as linear_module
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -595,6 +599,57 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     ckpt = model.proj.weight._ckpt
     replace_parameter(model.proj, "weight", model.mimo.weight)
     assert model.proj.weight._ckpt == ckpt
+
+
+def _cutlass_fp8_pwal(layer):
+    """Fp8LinearMethod's post-load processing on the CUTLASS kernel, which pads
+    the output dim to a multiple of 16."""
+    kernel = object.__new__(CutlassFP8ScaledMMLinearKernel)  # __init__ needs CUDA
+    kernel.layer_param_names = ("weight", "weight_scale", None, None)
+    replace_parameter(layer, "weight", layer.weight.t())
+    kernel.process_weights_after_loading(layer)
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_reload_cutlass_fp8_padded_merged_layer(dist_init, monkeypatch, tp_rank):
+    # Qwen3.5 GDN in_proj_ba: 24 output rows per rank (TP2 here, TP4 there)
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    gen = torch.Generator().manual_seed(0)
+    checkpoints = [
+        [torch.rand(24, 32, generator=gen).to(torch.bfloat16) for _ in range(2)]
+        for _ in range(2)
+    ]
+
+    def load(model, checkpoint):
+        param = model["ba"].weight
+        for shard_id, weight in enumerate(checkpoint):
+            param.weight_loader(param, weight, shard_id)
+
+    def cold_start(checkpoint):
+        layer = MergedColumnParallelLinear(
+            32, [24, 24], bias=False, params_dtype=torch.bfloat16
+        )
+        layer.quant_method = _Method(_cutlass_fp8_pwal)
+        model = torch.nn.ModuleDict({"ba": layer})
+        record_checkpoint_layout(model)
+        load(model, checkpoint)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        return model
+
+    model = cold_start(checkpoints[0])
+    assert model["ba"].weight.shape == (32, 32)
+    address = model["ba"].weight.data_ptr()
+    begin_direct_reload(model)
+    load(model, checkpoints[1])
+    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+    expected = cold_start(checkpoints[1])["ba"].weight
+    torch.testing.assert_close(model["ba"].weight, expected, rtol=0, atol=0)
+    assert model["ba"].weight.data_ptr() == address
 
 
 def test_replace_parameter_keeps_only_the_target_reload_fill_flag():
