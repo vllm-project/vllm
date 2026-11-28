@@ -59,7 +59,7 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
 
     from vllm.parser.gemma4 import _parse_gemma4_args
 
-    parsed = _parse_gemma4_args(args_str)
+    parsed = _parse_gemma4_args(args_str, decode_bare=str)
     return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
 
 

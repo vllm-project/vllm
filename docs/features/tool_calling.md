@@ -522,6 +522,13 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
     The base model provides general function calling capabilities, but best results
     are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
+### Gemma 4 Models (`gemma4`)
+
+Use `--enable-auto-tool-choice --tool-call-parser gemma4` to parse native Gemma 4 tool calls.
+The parser reads bare JSON numbers, booleans, and `null` as their corresponding types.
+Gemma-delimited values represent strings. Type correction for declared tool parameters
+still applies.
+
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
