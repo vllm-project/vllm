@@ -5,11 +5,13 @@ import ast
 import json
 
 import pytest
+from openai.types.responses import CustomTool
 
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     coerce_to_schema_type,
     contains_broken_string_literal,
+    custom_tool_as_function_dict,
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
@@ -20,6 +22,22 @@ from vllm.tool_parsers.utils import (
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
 )
+
+
+def test_custom_tool_grammar_is_included_in_the_function_shim() -> None:
+    grammar = 'start: "apply_patch"'
+    tool = CustomTool(
+        type="custom",
+        name="apply_patch",
+        description="Edit files.",
+        format={"type": "grammar", "syntax": "lark", "definition": grammar},
+    )
+
+    function = custom_tool_as_function_dict(tool)
+
+    assert function["strict"] is True
+    assert function["description"].startswith("Edit files.")
+    assert grammar in function["description"]
 
 
 class TestCoerceToSchemaType:

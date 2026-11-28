@@ -8,6 +8,7 @@ import math
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
@@ -57,13 +58,65 @@ def custom_tool_parameters() -> dict[str, Any]:
     }
 
 
-def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
+def custom_tools_with_grammar(tools: Sequence[Tool] | None) -> dict[str, CustomTool]:
+    """Return custom tools whose input uses a declared grammar."""
     return {
+        tool.name: tool
+        for tool in tools or ()
+        if isinstance(tool, CustomTool)
+        and tool.format is not None
+        and tool.format.type == "grammar"
+    }
+
+
+@lru_cache(maxsize=128)
+def compile_custom_tool_grammar(syntax: str, definition: str) -> Any:
+    """Compile a custom-tool grammar once and surface invalid syntax as 4xx."""
+    import xgrammar as xgr
+
+    try:
+        grammar = (
+            xgr.Grammar.from_lark(definition)
+            if syntax == "lark"
+            else xgr.Grammar.from_regex(definition)
+        )
+        # This compiler validates text; generation later uses the model vocabulary.
+        return xgr.GrammarCompiler(xgr.TokenizerInfo([])).compile_grammar(grammar)
+    except (ValueError, RuntimeError) as error:
+        raise VLLMValidationError(
+            "Invalid custom tool grammar specification.", parameter="tools"
+        ) from error
+
+
+def warn_custom_tool_grammar_fallback(tools: Sequence[Tool] | None) -> None:
+    """Warn when a grammar is only guidance rather than a sampling constraint."""
+    if not custom_tools_with_grammar(tools):
+        return
+    logger.warning_once(
+        "Custom tool grammar constraints are unavailable for the selected tool "
+        "parser. Falling back to best-effort free-form input: the grammar is "
+        "included in the tool description but it is not enforced by the sampler.",
+        scope="local",
+    )
+
+
+def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
+    function: dict[str, Any] = {
         "type": "function",
         "name": tool.name,
         "description": tool.description,
         "parameters": custom_tool_parameters(),
     }
+    if tool.format is not None and tool.format.type == "grammar":
+        function["strict"] = True
+        guidance = (
+            f"The input must follow this {tool.format.syntax} grammar:\n"
+            f"{tool.format.definition}"
+        )
+        function["description"] = (
+            f"{tool.description}\n\n{guidance}" if tool.description else guidance
+        )
+    return function
 
 
 def safe_literal_eval(text: str):

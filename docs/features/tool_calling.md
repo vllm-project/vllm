@@ -126,6 +126,12 @@ When a structural tag applies, each tool's declared parameter schema is enforced
 
 For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
+### Custom Tool Input Grammars
+
+Responses API custom tools may declare a `format` with `type: "grammar"` and either Lark or regex syntax. vLLM validates the definition and rejects malformed grammars with HTTP 400. A valid grammar is included in the function shim description, and the tool is marked strict so the call envelope is constrained when structural tags are available.
+
+In this change the grammar is not enforced during sampling: vLLM uses best-effort free-form generation and logs a warning; the grammar is guidance only. Native grammar enforcement can be added by parsers that support it.
+
 ### Strict Mode
 
 Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
