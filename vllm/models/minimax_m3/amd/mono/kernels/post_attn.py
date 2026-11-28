@@ -16,7 +16,8 @@ S = 1..MAX_TOKENS tokens (each token's stage tasks side by side); for one token:
             best TOPK_BLOCKS are ranked, gathered from the peers under CP)
     split : one 256-key context partition x 16 heads per task (the gluon decode's
             partitioning) over that page-16 table, FP8 QK / PV with its scale
-            placement
+            placement (NVFP4 K/V pages: f16 QK / PV over the exact dequantized
+            products, `nvfp4.split_task`)
     o     : combine the partitions (the gluon reduce), per-token FP8 (standalone
             quant formula) -> o_proj GEMV
             -> push bf16 partial rows to every peer -> rank-ordered sum
@@ -105,6 +106,7 @@ from vllm.models.minimax_m3.amd.mono.kernels.index_score import (
     index_scale_log2e,
     step_rows,
 )
+from vllm.models.minimax_m3.amd.mono.kernels.nvfp4 import split_task as nvfp4_split
 from vllm.models.minimax_m3.amd.mono.kernels.pre_attn import (
     K1_ARGS,
     emit_k1,
@@ -286,6 +288,9 @@ def build_post_attn_kernel(
         kps=mono_config.KV_PAGE_STRIDE,
         sks=mono_config.STATIC_KV_SCALE,
         sf8=shared_fp8,
+        nv=mono_config.NVFP4,
+        nvk=mono_config.NVFP4_KV_BLOCK_BYTES,
+        nvi=mono_config.NVFP4_INDEX_BLOCK_BYTES,
     )
 
     # the JIT cache key holds the kernel's scalar closure values, not objects: the
@@ -889,6 +894,61 @@ def build_post_attn_kernel(
         # Each stage is its own function: flydsl carries a local reassigned inside a
         # dynamic if / for as region state, so names must not be shared across stages.
         # ============================================================ 1. split
+        def wait_new_kv(tok):
+            """Token tok's q heads and every token's new K / V (K1's head tasks):
+            a request's tokens of one step (speculative decode) attend to each
+            other's."""
+            if wave == 0:
+                kv = lane - H
+                k1_poll(
+                    [
+                        (
+                            hdone_mb,
+                            (lane < H).select(
+                                tok * K1_HEAD_TASKS + lane,
+                                fx.min(kv // 2, tokens - 1) * K1_HEAD_TASKS
+                                + H
+                                + kv % 2,
+                            ),
+                            1,
+                        )
+                    ]
+                )
+            gpu.barrier()
+            acquire()
+
+        def stage_split_nvfp4():
+            """`stage_split` over NVFP4 K/V pages (`k_cache` the pool, `k_scale` /
+            `v_scale` the layer's global scales): the same page lists, waits and
+            hand-offs, the task of `nvfp4.split_task`."""
+            kg = fx.Float32(bo.buffer_load(rsrc(k_scale), 0, vec_width=1, dtype=T.f32))
+            vg = fx.Float32(bo.buffer_load(rsrc(v_scale), 0, vec_width=1, dtype=T.f32))
+            for ts in range(start("split"), N_SPLIT * tokens, G):
+                ts = fx.Int32(ts)
+                tok = ts // N_SPLIT
+                t = ts % N_SPLIT
+                select_blocks(tok, t)
+                stamp(17)
+                if const_expr(fuse_k1):
+                    wait_new_kv(tok)
+                n_ctx = uniform(fx.ptr_load(blk + 16))
+
+                # called inside the task, while `ts` is this iteration's
+                def put_o(e0, ov):
+                    mb_put_bf(mb("sp_o"), ts * O_K + e0, ov)  # noqa: B023
+
+                def put_m(head, m):
+                    mb_put(mb("sp_m"), ts * H + head, m)  # noqa: B023
+
+                def put_l(head, lt):
+                    mb_put(mb("sp_l"), ts * H + head, lt)  # noqa: B023
+
+                nvfp4_split(
+                    tid, lane, wave, tok, t, blk, q, k_cache, kg, vg, sm_scale, hst,
+                    opart, n_ctx, put_o, put_m, put_l, H, O_K, SPLIT_KEYS, WAVES,
+                    CM_K1,
+                )  # fmt: skip
+
         def stage_split():
             r_k, r_v = rsrc(k_cache), rsrc(v_cache)
             r_ks, r_vs = rsrc(k_scale), rsrc(v_scale)
@@ -900,26 +960,7 @@ def build_post_attn_kernel(
                 select_blocks(tok, t)
                 stamp(17)
                 if const_expr(fuse_k1):
-                    # this token's q heads and every token's new K / V: a request's
-                    # tokens of one step (speculative decode) attend to each other's
-                    if wave == 0:
-                        kv = lane - H
-                        k1_poll(
-                            [
-                                (
-                                    hdone_mb,
-                                    (lane < H).select(
-                                        tok * K1_HEAD_TASKS + lane,
-                                        fx.min(kv // 2, tokens - 1) * K1_HEAD_TASKS
-                                        + H
-                                        + kv % 2,
-                                    ),
-                                    1,
-                                )
-                            ]
-                        )
-                    gpu.barrier()
-                    acquire()
+                    wait_new_kv(tok)
                 # Every independent load goes out first: this wave's pages and q.
                 # Pages past the context read junk masked below.
                 n_ctx = uniform(fx.ptr_load(blk + 16))
@@ -1125,7 +1166,10 @@ def build_post_attn_kernel(
                 gpu.barrier()
 
         stage_select_long()
-        stage_split()
+        if const_expr(mono_config.NVFP4):
+            stage_split_nvfp4()
+        else:
+            stage_split()
         stamp(1)
 
         def merge_token(k):

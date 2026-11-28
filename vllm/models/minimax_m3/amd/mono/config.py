@@ -95,13 +95,31 @@ LAYER_SLOTS = 128  # mailbox epochs: step * LAYER_SLOTS + layer + 1
 # whether fp8 K/V carry the host's fixed unit scale instead of per-token scales
 KV_PAGE_STRIDE = SPARSE_BLOCK // PAGE16
 STATIC_KV_SCALE = False
+# NVFP4 pages (`--kv-cache-dtype nvfp4`, `indexer_kv_dtype: nvfp4`): one page per
+# block, K/V `[K data | K scales | V data | V scales]` and index-K `[data | scales]`
+# (`ops/norm_rope_nvfp4_insert`), addressed by their caches' block strides in bytes
+NVFP4 = False
+NVFP4_KV_BLOCK_BYTES = 0
+NVFP4_INDEX_BLOCK_BYTES = 0
 
 
-def configure(*, kv_page_stride: int, static_kv_scale: bool) -> None:
+def configure(
+    *,
+    kv_page_stride: int,
+    static_kv_scale: bool,
+    nvfp4: bool = False,
+    nvfp4_kv_block_bytes: int = 0,
+    nvfp4_index_block_bytes: int = 0,
+) -> None:
     global KV_PAGE_STRIDE, STATIC_KV_SCALE
+    global NVFP4, NVFP4_KV_BLOCK_BYTES, NVFP4_INDEX_BLOCK_BYTES
     assert kv_page_stride in (SPARSE_BLOCK // PAGE16, 2 * SPARSE_BLOCK // PAGE16)
+    assert not nvfp4 or kv_page_stride == SPARSE_BLOCK // PAGE16
     KV_PAGE_STRIDE = kv_page_stride
     STATIC_KV_SCALE = static_kv_scale
+    NVFP4 = nvfp4
+    NVFP4_KV_BLOCK_BYTES = nvfp4_kv_block_bytes
+    NVFP4_INDEX_BLOCK_BYTES = nvfp4_index_block_bytes
 
 
 class MonoUnsupported(Exception):

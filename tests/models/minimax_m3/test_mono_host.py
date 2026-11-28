@@ -122,6 +122,26 @@ def test_configure_accepts_only_the_two_kv_page_strides():
         mono_config.configure(kv_page_stride=saved[0], static_kv_scale=saved[1])
 
 
+def test_configure_nvfp4_takes_one_page_id_per_eighth_block():
+    saved = (mono_config.KV_PAGE_STRIDE, mono_config.STATIC_KV_SCALE)
+    try:
+        mono_config.configure(
+            kv_page_stride=8,
+            static_kv_scale=True,
+            nvfp4=True,
+            nvfp4_kv_block_bytes=18432,
+            nvfp4_index_block_bytes=9216,
+        )
+        assert mono_config.NVFP4
+        assert mono_config.NVFP4_KV_BLOCK_BYTES == 18432
+        assert mono_config.NVFP4_INDEX_BLOCK_BYTES == 9216
+        with pytest.raises(AssertionError):
+            mono_config.configure(kv_page_stride=16, static_kv_scale=True, nvfp4=True)
+    finally:
+        mono_config.configure(kv_page_stride=saved[0], static_kv_scale=saved[1])
+    assert not mono_config.NVFP4
+
+
 def _vllm_config(**overrides):
     cg = SimpleNamespace(requires_piecewise_compilation=lambda: False)
     cfg = SimpleNamespace(
@@ -169,6 +189,32 @@ def _mi355x(monkeypatch):
 @pytest.mark.parametrize("aux", [(), (2, 30, 57)])
 def test_config_refusal_accepts_the_supported_deployment(fse, aux):
     assert config_refusal(_vllm_config(), _model(fse=fse, aux=aux)) is None
+
+
+def _nvfp4_config(index_dtype="nvfp4"):
+    return _vllm_config(
+        **{
+            "cache_config.cache_dtype": "nvfp4",
+            "attention_config.resolve_indexer_kv_dtype": lambda default: index_dtype,
+        }
+    )
+
+
+def test_config_refusal_accepts_nvfp4_caches():
+    # the NVFP4 pages are read by the kernels themselves, not the AITER sparse PA
+    assert config_refusal(_nvfp4_config(), _model(sparse_pa=False)) is None
+
+
+def test_config_refusal_refuses_mixed_cache_dtypes():
+    nvfp4_index = _vllm_config(
+        **{"attention_config.resolve_indexer_kv_dtype": lambda default: "nvfp4"}
+    )
+    for cfg, why in (
+        (_nvfp4_config("fp8"), "index cache fp8"),
+        (nvfp4_index, "index cache nvfp4"),
+    ):
+        reason = config_refusal(cfg, _model())
+        assert reason is not None and why in reason
 
 
 @pytest.mark.parametrize(
