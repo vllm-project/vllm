@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader import get_model_loader, register_model_lo
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.utils import set_weight_attrs
 
 
 @register_model_loader("custom_load_format")
@@ -136,6 +137,15 @@ def test_weights_track_reports_missing_quantized_weights():
     error = _track(model, loaded, quantized=True)
     assert "proj.weight_scale_inv" in error and "unquantized.bias" in error
     assert not any(n in error for n in ("gptq", "fbgemm", "attn", "online"))
+
+
+def test_weights_track_skips_params_optional_in_checkpoint():
+    # Weight-only NVFP4 layers keep input scales that their exports do not write.
+    model = nn.Module()
+    model.proj = _layer(_QuantMethod(), weight=(4, 4), scale=(1,), input_scale=(1,))
+    set_weight_attrs(model.proj.input_scale, {"optional_in_checkpoint": True})
+    error = _track(model, {"proj.weight"}, quantized=True)
+    assert "proj.scale" in error and "proj.input_scale" not in error
 
 
 def test_weights_track_keeps_unquantized_models_unchanged():
