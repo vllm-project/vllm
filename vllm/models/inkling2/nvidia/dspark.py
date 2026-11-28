@@ -28,6 +28,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -46,6 +47,7 @@ from .ops.dspark import (
     qk_norm_rope_,
     rope_,
     silu_and_mul,
+    write_kv_paged,
 )
 from .ops.linear import linear
 
@@ -189,7 +191,16 @@ class Inkling2DraftSelfAttention(nn.Module):
         self, k: torch.Tensor, v: torch.Tensor, slot_mapping: torch.Tensor
     ) -> None:
         impl = cast(FlashAttentionImpl, self.attn.impl)
-        impl.do_kv_cache_update(self.attn, k, v, self.attn.kv_cache, slot_mapping)
+        cache = self.attn.kv_cache
+        if (
+            current_platform.is_device_capability_family(120)
+            and impl.kv_cache_dtype == "auto"
+            and cache.dtype == k.dtype == v.dtype
+        ):
+            key_cache, value_cache = cache.transpose(1, 2).split(self.head_dim, dim=-1)
+            write_kv_paged(k, v, key_cache, value_cache, slot_mapping)
+            return
+        impl.do_kv_cache_update(self.attn, k, v, cache, slot_mapping)
 
     def forward(
         self, positions: torch.Tensor, x: torch.Tensor, cos_sin_cache: torch.Tensor
