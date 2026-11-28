@@ -30,9 +30,7 @@ from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    check_compressed_kernel_split,
     get_current_attn_backends,
-    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -46,6 +44,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats,
     PromMetric,
     PromMetricT,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.block_size_utils import (
+    check_compressed_kernel_split_per_group,
+    get_transfer_group_kernel_block_sizes,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
@@ -100,7 +102,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
 
@@ -1560,7 +1561,7 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
-        self._physical_blocks_per_logical_kv_block = 1
+        self._physical_blocks_per_logical_kv_block: list[int] = []
         self._sync_block_size_with_kernel()
 
         self.attn_backends = get_current_attn_backends(vllm_config)
@@ -1593,32 +1594,38 @@ class MooncakeConnectorWorker:
         self._heartbeat_decoder = msgspec.msgpack.Decoder(MooncakeLeaseHeartbeat)
 
     def _sync_block_size_with_kernel(self) -> None:
-        # When speculative decoding (e.g. Eagle) is enabled, the main model
-        # and draft model may use different attention backends with different
-        # physical block sizes. Pick the common (smallest) block size so that
-        # KV-cache registration and transfer work correctly for both models.
-        backends = get_current_attn_backends(self.vllm_config)
-        backends, specs, layer_names = get_current_attn_backends_and_specs(
-            self.vllm_config, self.kv_cache_config, backends
+        # Attention backends may serve one logical block from several physical
+        # kernel blocks. The ratio is per KV cache group: each group indexes its
+        # own block table in its own block size, so a single ratio can only be
+        # correct when all groups resolve to the same split count.
+        kernel_block_sizes = get_transfer_group_kernel_block_sizes(
+            self.vllm_config, self.kv_cache_config
         )
-        kernel_block_size = select_common_block_size(
-            self.block_size, backends, specs, layer_names
+        check_compressed_kernel_split_per_group(
+            self.vllm_config, self.kv_cache_config, kernel_block_sizes
         )
-        check_compressed_kernel_split(
-            self.vllm_config, self.kv_cache_config, kernel_block_size
-        )
-        if self.block_size != kernel_block_size:
+        logical_block_sizes = [
+            group.block_size for group in self.kv_cache_config.transfer_groups
+        ]
+        ratios: list[int] = []
+        for logical, kernel in zip(
+            logical_block_sizes, kernel_block_sizes, strict=True
+        ):
+            # The selected kernel size always divides the logical block size;
+            # a mismatch would silently turn the ratio into zero.
+            assert logical % kernel == 0, (
+                f"Kernel block size {kernel} does not divide logical block "
+                f"size {logical}."
+            )
+            ratios.append(logical // kernel)
+        self._physical_blocks_per_logical_kv_block = ratios
+        if any(size != 1 for size in ratios):
             logger.info_once(
-                "User-specified logical block size (%s) does not match"
-                " physical kernel block size (%s). Using the latter.",
-                self.block_size,
-                kernel_block_size,
+                "Splitting logical blocks into physical kernel blocks: "
+                "logical block sizes %s, physical kernel block sizes %s.",
+                logical_block_sizes,
+                kernel_block_sizes,
             )
-            assert self.block_size > kernel_block_size
-            self._physical_blocks_per_logical_kv_block = (
-                self.block_size // kernel_block_size
-            )
-            self.block_size = kernel_block_size
 
     def __del__(self):
         # A constructor that raised before the ZeroMQ context existed still
@@ -2050,24 +2057,21 @@ class MooncakeConnectorWorker:
         # while the matching Mamba/GDN state block remains k. Only attention
         # groups need logical block ids expanded to kernel block ids; Mamba/GDN
         # state block ids stay in the logical/page-id space.
-        if self._physical_blocks_per_logical_kv_block == 1:
+        if all(scale == 1 for scale in self._physical_blocks_per_logical_kv_block):
             return block_ids
 
-        block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
-            1, -1
-        )
         group_specs = self.kv_cache_config.transfer_groups
-        return [
-            (
-                np.array(group)[:, None] * self._physical_blocks_per_logical_kv_block
-                + block_arange
+        expanded: list[list[int]] = []
+        for i, group in enumerate(block_ids):
+            scale = self._physical_blocks_per_logical_kv_block[i]
+            if scale == 1 or issubclass(group_specs[i].manager_cls, MambaManager):
+                expanded.append(group)
+                continue
+            block_arange = np.arange(scale).reshape(1, -1)
+            expanded.append(
+                (np.array(group)[:, None] * scale + block_arange).reshape(-1).tolist()
             )
-            .reshape(-1)
-            .tolist()
-            if not issubclass(group_specs[i].manager_cls, MambaManager)
-            else group
-            for i, group in enumerate(block_ids)
-        ]
+        return expanded
 
     async def _build_transfer_params(
         self,
@@ -2349,7 +2353,7 @@ class MooncakeConnectorWorker:
         if (
             self.pp_size != 1
             or meta.remote_pp_size != 1
-            or self._physical_blocks_per_logical_kv_block != 1
+            or any(scale != 1 for scale in self._physical_blocks_per_logical_kv_block)
             or not self.use_mla
         ):
             return "Region-mapped imports require PP1 and unsplit MLA pages"
@@ -2459,8 +2463,8 @@ class MooncakeConnectorWorker:
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
         collapsed_views = 0
-        num_blocks = (
-            self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
+        num_blocks = self.kv_cache_config.num_blocks * max(
+            self._physical_blocks_per_logical_kv_block, default=1
         )
         skip_host = self.kv_cache_config.hisparse_shared_host_pool and (
             self.tp_rank != get_hisparse_host_leader_rank(self.vllm_config)
@@ -2596,15 +2600,11 @@ class MooncakeConnectorWorker:
                 region_base_addresses.append(base_addr)
 
                 if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
-                    assert (
-                        layer_spec.page_size_bytes
-                        % self._physical_blocks_per_logical_kv_block
-                        == 0
-                    )
-                    kv_block_len = (
-                        layer_spec.page_size_bytes
-                        // self._physical_blocks_per_logical_kv_block
-                    )
+                    blocks_per_logical = self._physical_blocks_per_logical_kv_block[
+                        group_index
+                    ]
+                    assert layer_spec.page_size_bytes % blocks_per_logical == 0
+                    kv_block_len = layer_spec.page_size_bytes // blocks_per_logical
                 elif isinstance(layer_spec, MambaSpec) and block_is_contiguous:
                     kv_block_len = layer_spec.page_size_bytes
                 else:
