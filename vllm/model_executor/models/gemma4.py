@@ -93,7 +93,9 @@ def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
 
     gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
     into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
-    is loaded into both the K and V shards and no v_proj is expected. KV-shared
+    is loaded into both the K and V shards and no v_proj is expected (their
+    V shard is zero-width, so this only fills the per-shard quantization
+    scales that fused-scale reductions read). KV-shared
     layers only have q_proj; the K/V tensors original checkpoints still ship
     for them are dropped.
     """
@@ -477,9 +479,12 @@ class Gemma4Attention(nn.Module):
                 prefix=f"{prefix}.q_proj",
             )
         else:
-            # QKVParallelLinear handles GQA correctly for all layer types.
-            # k_eq_v layers load K weights into both K and V slots via
-            # hf_to_vllm_mapper — no structural difference needed.
+            # k_eq_v full-attention layers have no v_proj in the checkpoint
+            # (V == K before normalization). v_head_size=0 makes the V shard of
+            # qkv_proj zero-width, saving its weights and GEMM columns;
+            # forward() derives V from the K projection output instead, so a
+            # k_proj LoRA reaches V the same way it does in transformers.
+            self.use_k_eq_v = attention_k_eq_v and not self.is_sliding
             self.qkv_proj = QKVParallelLinear(
                 hidden_size,
                 self.head_dim,
@@ -488,10 +493,8 @@ class Gemma4Attention(nn.Module):
                 bias=config.attention_bias,
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
+                v_head_size=0 if self.use_k_eq_v else None,
             )
-            if attention_k_eq_v and not self.is_sliding:
-                # k_proj LoRA must be applied to the V slice
-                self.qkv_proj.lora_packed_modules = ["q_proj", "k_proj", "k_proj"]
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             # V norm: no learnable scale (pure normalization only)
             self.v_norm = RMSNorm(
@@ -593,10 +596,13 @@ class Gemma4Attention(nn.Module):
             q, _ = self.rotary_emb(positions, q, None)
             attn_output = self.attn(q, None, None)
         else:
-            # For k_eq_v, K weights are loaded into both K and V slots of
-            # qkv_proj, so V == K automatically.
             qkv, _ = self.qkv_proj(hidden_states)
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            if self.use_k_eq_v:
+                # qkv_proj has no V slot: V is the pre-norm K projection.
+                q, k = qkv.split([self.q_size, self.kv_size], dim=-1)
+                v = k
+            else:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             q = q.unflatten(-1, (self.num_heads, self.head_dim))
             q = self.q_norm(q)
