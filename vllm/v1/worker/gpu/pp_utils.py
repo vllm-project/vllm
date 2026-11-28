@@ -69,6 +69,12 @@ class PPHandler:
     ):
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
+        # Under uniform PP every last-stage rank is `last_rank` of its own PP
+        # chain. Under heterogeneous PP only the last stage's TP rank 0 sends
+        # the sampled-token broadcast to all non-last ranks.
+        self.is_broadcast_sender = (
+            self.is_last_rank and get_pp_group().rank == self.last_rank
+        )
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
         self.device = device
@@ -93,7 +99,7 @@ class PPHandler:
         self.req_idx_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Dedicated subgroup for the sampled-token broadcast.
-        self.broadcast_group = get_pp_group().make_sibling_device_group(
+        self.broadcast_group = get_pp_group().make_broadcast_device_group(
             group_desc="pp_broadcast"
         )
         # Whether sampled tokens were broadcast this step.
@@ -248,6 +254,8 @@ class PPHandler:
     def broadcast_drafts(self, draft_tokens: torch.Tensor) -> None:
         """Broadcast draft proposals so non-last ranks can embed real token ids."""
         assert self.is_last_rank
+        if not self.is_broadcast_sender:
+            return
         if self.sampled_tokens_broadcast:
             with torch.cuda.stream(self.broadcast_stream):
                 self.broadcast_stream.wait_stream(self.main_stream)
@@ -321,6 +329,9 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
+        if not self.is_broadcast_sender:
+            self.sampled_tokens_broadcast = False
+            return
         if compute_need_sampled_mask(input_batch) is None:
             # No request needs sampled outputs for a subsequent decode step.
             self.sampled_tokens_broadcast = False

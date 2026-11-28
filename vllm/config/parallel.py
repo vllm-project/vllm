@@ -251,6 +251,12 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = Field(default=1, ge=1)
     """Number of pipeline parallel groups."""
+    pipeline_parallel_tp_sizes: list[int] | None = None
+    """Per-stage tensor parallel sizes for heterogeneous pipeline parallelism
+    (e.g., [1, 2, 1] or [2, 4, 2]). When set, stage `i` uses TP size
+    `pipeline_parallel_tp_sizes[i]` (and EP size `pipeline_parallel_tp_sizes[i]`
+    when expert parallelism is enabled), and total `world_size` is the sum of
+    per-stage TP sizes."""
     tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
     prefill_context_parallel_size: int = Field(default=1, ge=1)
@@ -642,6 +648,22 @@ class ParallelConfig:
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
+
+    @field_validator("pipeline_parallel_tp_sizes")
+    @classmethod
+    def _validate_pipeline_parallel_tp_sizes(
+        cls, value: list[int] | None
+    ) -> list[int] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("pipeline_parallel_tp_sizes must not be empty.")
+        if any(tp < 1 for tp in value):
+            raise ValueError(
+                "pipeline_parallel_tp_sizes must contain positive integers, "
+                f"got {value}."
+            )
+        return value
 
     @field_validator("numa_bind_nodes")
     @classmethod
@@ -1183,12 +1205,137 @@ class ParallelConfig:
 
         return get_compile_factors(self, ignored_factors)
 
+    @property
+    def pp_stage_tp_sizes(self) -> tuple[int, ...]:
+        """Tensor parallel size for each pipeline parallel stage."""
+        if self.pipeline_parallel_tp_sizes is not None:
+            return tuple(self.pipeline_parallel_tp_sizes)
+        return (self.tensor_parallel_size,) * self.pipeline_parallel_size
+
+    @property
+    def is_heterogeneous_pp(self) -> bool:
+        """Whether pipeline stages use different tensor parallel sizes."""
+        return (
+            self.pipeline_parallel_tp_sizes is not None
+            and len(set(self.pipeline_parallel_tp_sizes)) > 1
+        )
+
+    @property
+    def pp_stage_offsets(self) -> tuple[int, ...]:
+        """Starting rank offset of each pipeline stage within a DP replica."""
+        offsets: list[int] = []
+        offset = 0
+        for tp in self.pp_stage_tp_sizes:
+            offsets.append(offset)
+            offset += tp
+        return tuple(offsets)
+
+    def get_pp_stage_and_tp_rank(self, rank: int) -> tuple[int, int]:
+        """Map a rank within a DP replica to `(pp_stage, tp_rank)`."""
+        if rank < 0 or rank >= sum(self.pp_stage_tp_sizes):
+            raise ValueError(
+                f"Rank {rank} out of bounds for pp_stage_tp_sizes="
+                f"{self.pp_stage_tp_sizes}."
+            )
+        offset = 0
+        for pp_stage, tp_size in enumerate(self.pp_stage_tp_sizes):
+            if rank < offset + tp_size:
+                return pp_stage, rank - offset
+            offset += tp_size
+        raise AssertionError("Unreachable")
+
+    def get_pp_stage_tp_size(self, pp_stage: int) -> int:
+        """Return the tensor parallel size of `pp_stage`."""
+        return self.pp_stage_tp_sizes[pp_stage]
+
+    def get_pp_stage_tp_size_for_rank(self, rank: int) -> int:
+        """Return the tensor parallel size of the stage owning `rank`."""
+        pp_stage, _ = self.get_pp_stage_and_tp_rank(rank)
+        return self.pp_stage_tp_sizes[pp_stage]
+
+    def get_pp_stage_ranks(self, pp_stage: int) -> list[int]:
+        """Return the global ranks belonging to `pp_stage`."""
+        offset = self.pp_stage_offsets[pp_stage]
+        return list(range(offset, offset + self.pp_stage_tp_sizes[pp_stage]))
+
+    def _validate_and_normalize_pp_tp_sizes(self) -> None:
+        """Validate and normalize `pipeline_parallel_tp_sizes`."""
+        if self.pipeline_parallel_tp_sizes is None:
+            return
+        stage_tps = self.pipeline_parallel_tp_sizes
+        if self.pipeline_parallel_size == 1 and len(stage_tps) > 1:
+            self.pipeline_parallel_size = len(stage_tps)
+        elif len(stage_tps) != self.pipeline_parallel_size:
+            raise ValueError(
+                f"Length of pipeline_parallel_tp_sizes ({len(stage_tps)}) "
+                "must match pipeline_parallel_size "
+                f"({self.pipeline_parallel_size})."
+            )
+
+        if len(set(stage_tps)) == 1:
+            # Uniform per-stage TP list: normalize onto standard uniform PP.
+            uniform_tp = stage_tps[0]
+            if self.tensor_parallel_size == 1:
+                self.tensor_parallel_size = uniform_tp
+            elif self.tensor_parallel_size != uniform_tp:
+                raise ValueError(
+                    f"tensor_parallel_size ({self.tensor_parallel_size}) "
+                    "conflicts with uniform pipeline_parallel_tp_sizes "
+                    f"({stage_tps})."
+                )
+            return
+
+        # Heterogeneous TP across PP stages.
+        if self.tensor_parallel_size > 1:
+            raise ValueError(
+                "Cannot set tensor_parallel_size > 1 together with "
+                f"heterogeneous pipeline_parallel_tp_sizes={stage_tps}. "
+                "Leave tensor_parallel_size unset (1) when specifying "
+                "per-stage TP sizes."
+            )
+        if self.data_parallel_size > 1:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes currently requires "
+                f"data_parallel_size=1, got {self.data_parallel_size}."
+            )
+        if self.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes currently requires "
+                "prefill_context_parallel_size=1, got "
+                f"{self.prefill_context_parallel_size}."
+            )
+        if self.decode_context_parallel_size > 1:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes currently requires "
+                "decode_context_parallel_size=1, got "
+                f"{self.decode_context_parallel_size}."
+            )
+        if self.enable_eplb:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes is not supported with EPLB."
+            )
+        if self.use_ubatching:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes is not supported "
+                "with DBO/ubatching."
+            )
+        if self.enable_batch_sharded_sampling:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes is not supported "
+                "with enable_batch_sharded_sampling."
+            )
+        if self.enable_hc_sp:
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes is not supported "
+                "with enable_hc_sp."
+            )
+
     def __post_init__(self) -> None:
+        self._validate_and_normalize_pp_tp_sizes()
+
         # Continue with the rest of the initialization
         self.world_size = (
-            self.pipeline_parallel_size
-            * self.tensor_parallel_size
-            * self.prefill_context_parallel_size
+            sum(self.pp_stage_tp_sizes) * self.prefill_context_parallel_size
         )
 
         if self.distributed_executor_backend == "external_launcher":
@@ -1370,6 +1517,13 @@ class ParallelConfig:
             from vllm.v1.executor import ray_utils
 
             ray_utils.assert_ray_available()
+
+        if self.is_heterogeneous_pp and self.distributed_executor_backend != "mp":
+            raise ValueError(
+                "Heterogeneous pipeline_parallel_tp_sizes currently requires "
+                "distributed_executor_backend='mp', got "
+                f"{self.distributed_executor_backend!r}."
+            )
 
         if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True

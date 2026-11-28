@@ -509,6 +509,9 @@ class EngineArgs:
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    pipeline_parallel_tp_sizes: list[int] | None = (
+        ParallelConfig.pipeline_parallel_tp_sizes
+    )
     master_addr: str = ParallelConfig.master_addr
     master_port: int = ParallelConfig.master_port
     nnodes: int = ParallelConfig.nnodes
@@ -1175,6 +1178,10 @@ class EngineArgs:
             "--pipeline-parallel-size",
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--pipeline-parallel-tp-sizes",
+            **parallel_kwargs["pipeline_parallel_tp_sizes"],
         )
         parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
@@ -2423,11 +2430,12 @@ class EngineArgs:
             )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
-            world_size_within_dp = (
-                self.pipeline_parallel_size
-                * self.tensor_parallel_size
-                * self.prefill_context_parallel_size
+            pp_tp_world = (
+                sum(self.pipeline_parallel_tp_sizes)
+                if self.pipeline_parallel_tp_sizes is not None
+                else self.pipeline_parallel_size * self.tensor_parallel_size
             )
+            world_size_within_dp = pp_tp_world * self.prefill_context_parallel_size
             world_size = self.data_parallel_size * world_size_within_dp
             if world_size % self.nnodes != 0:
                 raise ValueError(
@@ -2594,6 +2602,7 @@ class EngineArgs:
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
+            pipeline_parallel_tp_sizes=self.pipeline_parallel_tp_sizes,
             tensor_parallel_size=self.tensor_parallel_size,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
@@ -2970,7 +2979,11 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        if self.pipeline_parallel_size > 1:
+        has_pp = self.pipeline_parallel_size > 1 or (
+            self.pipeline_parallel_tp_sizes is not None
+            and len(self.pipeline_parallel_tp_sizes) > 1
+        )
+        if has_pp:
             supports_pp = getattr(
                 self.distributed_executor_backend, "supports_pp", False
             )
@@ -3205,7 +3218,7 @@ class EngineArgs:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ):
-        world_size = self.pipeline_parallel_size * self.tensor_parallel_size
+        world_size = parallel_config.world_size
         (
             default_max_num_batched_tokens,
             default_max_num_seqs,
