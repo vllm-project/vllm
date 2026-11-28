@@ -388,6 +388,7 @@ def test_connector_reports_configured_cache_source(
     }
     if backend == "disk":
         extra_config.update(
+            cpu_hot_cache=0,
             disk_path=str(tmp_path / "kv-offload.bin"),
             disk_capacity_bytes=_BYTES_PER_BLOCK * 4,
         )
@@ -402,6 +403,8 @@ def test_connector_reports_configured_cache_source(
 
     assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}  # type: ignore[arg-type]
     assert connector.get_external_cache_hit_sources(None, 0) == {}  # type: ignore[arg-type]
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager.hot_cache_tokens_per_request == 0
 
 
 @pytest.mark.parametrize("num_layers", [1, 2])
@@ -424,6 +427,7 @@ def test_connector_explicit_cpu_blocks_align_uneven_stages(
     }
     if backend == "disk":
         extra.update(
+            cpu_hot_cache=0,
             disk_path=str(tmp_path / "offload.bin"),
             disk_capacity_bytes=_BYTES_PER_BLOCK * 8,
         )

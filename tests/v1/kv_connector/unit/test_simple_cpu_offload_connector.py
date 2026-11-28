@@ -145,6 +145,40 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
         )
 
 
+@pytest.mark.parametrize("option", ["lazy_offload", "use_page_cache"])
+def test_disk_hot_cache_restrictions_are_opt_in(option):
+    extra = {
+        "kv_offload_backend": "disk",
+        "disk_path": "/tmp/kv",
+        "disk_capacity_bytes": _BYTES_PER_BLOCK * 8,
+        option: True,
+    }
+    connector = _make_connector(extra_config=extra)
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager.hot_cache_tokens_per_request == 0
+    with pytest.raises(ValueError, match="hot cache requires"):
+        _make_connector(extra_config={**extra, "cpu_hot_cache": 1 << 20})
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"cpu_hot_cache": -1},
+        {"cpu_hot_cache": 1 << 20, "hot_cache_tokens_per_request": -1},
+        {"disk_buffer_slots": 4, "max_load_slots": 2},
+    ],
+)
+def test_disk_rejects_invalid_hot_cache_or_staging_limits(limits):
+    with pytest.raises(ValueError, match="hot-cache or load-slot limit"):
+        _make_connector(
+            extra_config={
+                "kv_offload_backend": "disk",
+                "disk_path": "/tmp/kv",
+                **limits,
+            }
+        )
+
+
 def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     """A paged full-attention group beside a per-request ring group."""
     full = AttentionSpec(

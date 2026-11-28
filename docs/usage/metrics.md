@@ -65,6 +65,8 @@ is configured (e.g. `--kv-transfer-config='{"kv_connector":
 {"kv_offload_backend": "disk", "disk_path": "/mnt/nvme/kv"}}'`). They are
 updated once per engine step.
 
+For configuration and defaults, see the [Disk Backend guide](../features/kv_offloading_usage.md#disk-backend).
+
 Caveats to keep in mind when interpreting them:
 
 - A "completed" store means the write syscalls returned; it is **not**

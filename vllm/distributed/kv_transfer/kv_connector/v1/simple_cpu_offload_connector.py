@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SimpleCPUOffloadConnector: minimal CPU KV cache offloading."""
 
+import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -57,11 +59,81 @@ DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
 # Keys that only apply to the disk backend, warned about under "cpu".
 _DISK_ONLY_KEYS = (
+    "cpu_hot_cache",
     "disk_path",
     "disk_capacity_bytes",
     "disk_buffer_slots",
     "use_page_cache",
+    "hot_cache_tokens_per_request",
+    "max_load_slots",
 )
+
+
+@dataclass
+class _DiskConfig:
+    path: str | None = None
+    capacity_bytes: int = 0
+    buffer_slots: int = 2
+    max_load_slots: int = 2
+    use_page_cache: bool = False
+    hot_cache_bytes: int = 0
+    hot_cache_tokens: int = 0
+
+
+def _parse_disk_config(
+    extra: dict[str, Any],
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig",
+) -> _DiskConfig:
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+    buffer_slots = max(1, int(extra.get("disk_buffer_slots", 2)))
+    disk = _DiskConfig(
+        path=extra.get("disk_path") or None,
+        capacity_bytes=int(extra.get("disk_capacity_bytes", 100 * (1024**3))),
+        buffer_slots=buffer_slots,
+        max_load_slots=int(extra.get("max_load_slots", buffer_slots)),
+        use_page_cache=bool(extra.get("use_page_cache", False)),
+        hot_cache_bytes=int(extra.get("cpu_hot_cache", 0)),
+        hot_cache_tokens=int(extra.get("hot_cache_tokens_per_request", 2048)),
+    )
+    if disk.path is None:
+        raise ValueError('kv_offload_backend="disk" requires disk_path to be set.')
+    if disk.capacity_bytes <= 0:
+        raise ValueError('kv_offload_backend="disk" requires disk_capacity_bytes > 0.')
+    if parse_hugepage_size(extra.get("cpu_hugepage_block_size")) is not None:
+        raise ValueError(
+            'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
+        )
+    if "cpu_bytes_to_use" in extra or "cpu_bytes_to_use_per_rank" in extra:
+        logger.warning(
+            "Disk ignores cpu_bytes_to_use and cpu_bytes_to_use_per_rank; "
+            "use cpu_hot_cache to size the hot cache."
+        )
+    if disk.hot_cache_bytes == 0:
+        disk.hot_cache_tokens = 0
+    if (
+        disk.hot_cache_bytes < 0
+        or disk.hot_cache_tokens < 0
+        or disk.max_load_slots < disk.buffer_slots
+    ):
+        raise ValueError("Invalid disk hot-cache or load-slot limit")
+    if disk.hot_cache_bytes > 0 and (
+        bool(extra.get("lazy_offload", False))
+        or disk.use_page_cache
+        or not getattr(os, "O_DIRECT", 0)
+        or vllm_config.parallel_config.world_size != 1
+        or vllm_config.parallel_config.data_parallel_size != 1
+        or len(kv_cache_config.kv_cache_groups) != 1
+        or not issubclass(
+            kv_cache_config.kv_cache_groups[0].manager_cls, FullAttentionManager
+        )
+    ):
+        raise ValueError(
+            "The disk hot cache requires eager offload, O_DIRECT, one GPU and "
+            "one full-attention group"
+        )
+    return disk
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -84,14 +156,27 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
         extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
 
-        cpu_capacity_bytes = int(
-            extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
+        kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
+        if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
+            raise ValueError(
+                f"Unknown kv_offload_backend {kv_offload_backend!r}; "
+                f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
+            )
+        uses_disk = kv_offload_backend == "disk"
+        disk = (
+            _parse_disk_config(extra_config, vllm_config, kv_cache_config)
+            if uses_disk
+            else _DiskConfig()
         )
-        # cpu_bytes_to_use is server-wide for compatibility;
-        # cpu_bytes_to_use_per_rank overrides for per-rank capacity.
+        # Disk sizes hot KV per worker; the CPU backend divides a total budget.
         world_size = vllm_config.parallel_config.world_size
-        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
-        if "cpu_bytes_to_use_per_rank" in extra_config:
+        cpu_capacity_per_rank = (
+            disk.hot_cache_bytes
+            if uses_disk
+            else int(extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES))
+            // world_size
+        )
+        if not uses_disk and "cpu_bytes_to_use_per_rank" in extra_config:
             explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
             if explicit != cpu_capacity_per_rank:
                 logger.warning(
@@ -114,49 +199,22 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
-        kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
-        if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
-            raise ValueError(
-                f"Unknown kv_offload_backend {kv_offload_backend!r}; "
-                f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
-            )
-        disk_mode = kv_offload_backend == "disk"
         self._cache_hit_source = (
-            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+            CacheHitSource.DISK if uses_disk else CacheHitSource.HOST
         )
 
-        disk_path = extra_config.get("disk_path", None) or None
-        disk_capacity_bytes = int(
-            extra_config.get("disk_capacity_bytes", 100 * (1024**3))
-        )
-        disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
-        use_page_cache = bool(extra_config.get("use_page_cache", False))
         cpu_hugepage_size = parse_hugepage_size(
             extra_config.get("cpu_hugepage_block_size")
         )
 
-        if disk_mode:
-            if disk_path is None:
-                raise ValueError(
-                    'kv_offload_backend="disk" requires disk_path to be set.'
-                )
-            if disk_capacity_bytes <= 0:
-                raise ValueError(
-                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
-                )
-            if cpu_hugepage_size is not None:
-                raise ValueError(
-                    'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
-                )
-        else:
+        if not uses_disk:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:
                 logger.warning(
                     'kv_offload_backend is "cpu", ignoring disk-only config: %s. '
-                    'Set kv_offload_backend="disk" to enable the disk backend.',
+                    'Set kv_offload_backend="disk" to enable SSD offload.',
                     ", ".join(ignored),
                 )
-            disk_path = None
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -176,7 +234,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             world_size,
             "lazy" if lazy_offload else "eager",
             kv_offload_backend,
-            disk_path or "none",
+            disk.path or "none",
         )
         if num_cpu_blocks is not None:
             logger.info(
@@ -199,9 +257,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
-                disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
-                use_page_cache=use_page_cache if disk_mode else False,
+                disk_capacity_bytes=disk.capacity_bytes,
+                use_page_cache=disk.use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                hot_cache_tokens_per_request=disk.hot_cache_tokens,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -209,11 +268,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
                 cpu_capacity_per_rank,
                 kv_offload_backend=kv_offload_backend,
-                disk_path=disk_path,
-                disk_capacity_bytes=disk_capacity_bytes,
-                disk_buffer_slots=disk_buffer_slots,
-                use_page_cache=use_page_cache,
+                disk_path=disk.path,
+                disk_capacity_bytes=disk.capacity_bytes,
+                disk_buffer_slots=disk.buffer_slots,
+                use_page_cache=disk.use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                max_load_slots=disk.max_load_slots,
                 cpu_hugepage_size=cpu_hugepage_size,
             )
 

@@ -10,6 +10,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 from __future__ import annotations
 
 import mmap
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -115,6 +116,47 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
         torch.cuda.Stream(priority=low_pri),
     )
     return backend, gpu["k"], cpu["k"]
+
+
+def test_dma_synchronize_drains_queued_copies():
+    backend, gpu, cpu = _make_backend()
+    try:
+        gpu.fill_(37)
+        fence = torch.Event()
+        fence.record(torch.cuda.current_stream())
+        events: list[tuple[int, torch.Event]] = []
+        backend.launch_copy([0], [0], True, 0, events, wait_event=fence)
+        backend.synchronize()
+        assert events[0][1].query()
+        assert torch.equal(cpu[0], gpu[0].cpu())
+        backend.launch_copy([0], [1], False, 1, events)
+        backend.synchronize()
+        assert events[1][1].query()
+        assert torch.equal(gpu[1].cpu(), cpu[0])
+    finally:
+        backend.shutdown()
+
+
+@pytest.mark.parametrize("backend_cls", [DmaCopyBackend, DiskBackend])
+def test_synchronize_after_shutdown_returns(backend_cls):
+    backend = backend_cls()
+    backend.shutdown()
+    done = threading.Event()
+    errors = []
+
+    def synchronize():
+        try:
+            backend.synchronize()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=synchronize, daemon=True)
+    thread.start()
+    assert done.wait(5), "synchronize waited on a closed queue"
+    thread.join()
+    assert not errors
 
 
 @pytest.fixture

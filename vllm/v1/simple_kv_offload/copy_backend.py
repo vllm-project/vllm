@@ -33,6 +33,7 @@ class DmaCopyBackend:
         self._queue: queue.SimpleQueue | None = None
         self._thread: threading.Thread | None = None
         self._shutdown: bool = False
+        self._error: Exception | None = None
 
     def init(
         self,
@@ -77,6 +78,7 @@ class DmaCopyBackend:
         events_list: list[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
+        self.check_error()
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
         self._queue.put(
@@ -91,6 +93,20 @@ class DmaCopyBackend:
             )
         )
 
+    def check_error(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("CPU KV transfer failed") from self._error
+
+    def synchronize(self) -> None:
+        if self._shutdown or self._queue is None:
+            return
+        self.check_error()
+        done = threading.Event()
+        self._queue.put(done)
+        while not done.wait(0.1):
+            self.check_error()
+        self.check_error()
+
     def shutdown(self) -> None:
         if self._shutdown:
             return
@@ -100,31 +116,43 @@ class DmaCopyBackend:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
-    @staticmethod
     def _copy_loop(
+        self,
         q: queue.SimpleQueue,
         device: torch.device,
         load_stream: torch.cuda.Stream,
         store_stream: torch.cuda.Stream,
     ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = q.get()
-            if item is None:
-                return
-            (
-                src_blocks,
-                dst_blocks,
-                params,
-                is_store,
-                event_idx,
-                events_list,
-                wait_event,
-            ) = item
-            stream = store_stream if is_store else load_stream
-            if wait_event is not None:
-                stream.wait_event(wait_event)
-            copy_blocks(src_blocks, dst_blocks, params)
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
+        try:
+            current_platform.set_device(device)
+            while True:
+                item = q.get()
+                if item is None or isinstance(item, threading.Event):
+                    load_stream.synchronize()
+                    store_stream.synchronize()
+                    if item is None:
+                        return
+                    item.set()
+                    continue
+                (
+                    src_blocks,
+                    dst_blocks,
+                    params,
+                    is_store,
+                    event_idx,
+                    events_list,
+                    wait_event,
+                ) = item
+                stream = store_stream if is_store else load_stream
+                if wait_event is not None:
+                    stream.wait_event(wait_event)
+                copy_blocks(src_blocks, dst_blocks, params)
+                event = torch.Event()
+                event.record(stream)
+                events_list.append((event_idx, event))
+        except Exception as exc:
+            try:
+                load_stream.synchronize()
+                store_stream.synchronize()
+            finally:
+                self._error = exc
