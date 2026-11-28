@@ -1243,6 +1243,69 @@ def test_text_fallback_does_not_turn_text_into_special_tokens():
         processor.apply(inputs, TimingContext(enabled=False))
 
 
+def test_text_fallback_keeps_prompt_with_lossy_decode():
+    """InternLM2's slow tokenizer pads special tokens with spaces when
+    decoding, which must not leak into the re-encoded prompt.
+    """
+    ctx = build_model_context(
+        "OpenGVLab/InternVL2-2B", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
+    text = "<|im_start|>user\n<image>\nDescribe this image.<|im_end|>\n"
+    image = random_image(np.random.RandomState(0), min_wh=448, max_wh=449)
+    inputs = ProcessorInputs(
+        prompt=tokenizer.encode(text, add_special_tokens=False),
+        mm_data_items=processor.info.parse_mm_data({"image": image}),
+    )
+
+    token_ids = processor.apply(inputs, TimingContext(enabled=False))[
+        "prompt_token_ids"
+    ]
+
+    num_patches = token_ids.count(tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>"))
+    image_text = "<img>" + "<IMG_CONTEXT>" * num_patches + "</img>"
+    expected = tokenizer.encode(
+        text.replace("<image>", image_text), add_special_tokens=False
+    )
+    assert token_ids == expected
+
+
+class _FakeSpecialTokenizer(_FakeTokenizer):
+    """Also has "<s>" as the added token 7."""
+
+    _MERGES = {**_FakeTokenizer._MERGES, "<s>": (7,)}
+    _INVERSE = {ids: text for text, ids in _MERGES.items()}
+
+    def get_added_vocab(self) -> dict[str, int]:
+        return {"<s>": 7}
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        [ord(c) for c in "<s>"],  # replaces the real <s>
+        [ord("<")],  # cuts through the real <s>
+    ],
+)
+def test_text_fallback_keeps_special_token_positions(target):
+    """Removing the real `<s>` while its text spelling later in the prompt
+    becomes `<s>` keeps the special token counts, but must still be rejected.
+    """
+    processor = _TextFallbackProcessor(_FakeSpecialTokenizer())
+
+    with pytest.raises(PromptUpdateMismatchError, match="special tokens"):
+        processor._apply_prompt_updates(
+            [7, 1000, *map(ord, "<s>")],  # "<s>food<s>", only the first is special
+            {
+                "image": [
+                    [PromptReplacement("image", target, [200]).resolve(0)],
+                    [PromptReplacement("image", [101, 111, 111], [201]).resolve(1)],
+                ]
+            },
+        )
+
+
 class _TextProcessorKwargs(TypedDict, total=False):
     padding: bool
 

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict, deque
+from bisect import bisect_left
+from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -1028,6 +1029,49 @@ class MultiModalProcessingResult(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
+def _decode_with_added_spans(
+    tokenizer: TokenizerLike,
+    token_ids: list[int],
+    added_tokens: Mapping[int, str],
+) -> tuple[str, list[tuple[int, int, int]]] | None:
+    """Decode `token_ids` and find the `(start, end, token_id)` text span of
+    each added token in the result.
+
+    Added tokens are decoded on their own, without the spaces that some slow
+    tokenizers put around them. Each run of other tokens is decoded after the
+    added token preceding it, so that context-dependent decoders (e.g.
+    stripping a leading space only at the start of the text) behave as in a
+    full decode.
+    Returns `None` if a run cannot be separated from its context.
+    """
+    pieces = list[str]()
+    spans = list[tuple[int, int, int]]()
+    text_len = 0
+    run_start = 0
+    for i, token_id in enumerate([*token_ids, None]):
+        if token_id is not None and token_id not in added_tokens:
+            continue
+
+        if run_start < i:
+            context = token_ids[max(run_start - 1, 0) : run_start]
+            context_text = tokenizer.decode(context) if context else ""
+            text = tokenizer.decode(context + token_ids[run_start:i])
+            if not text.startswith(context_text):
+                return None
+            pieces.append(text[len(context_text) :])
+            text_len += len(pieces[-1])
+
+        if token_id is not None:
+            content = added_tokens[token_id]
+            text = tokenizer.decode([token_id])
+            pieces.append(content if text.strip() == content else text)
+            spans.append((text_len, text_len + len(pieces[-1]), token_id))
+            text_len += len(pieces[-1])
+        run_start = i + 1
+
+    return "".join(pieces), spans
+
+
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """Abstract base class to process multi-modal inputs to be used in vLLM.
 
@@ -1666,6 +1710,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         update: ResolvedPromptUpdate,
         prompt_text: str,
         tokenizer: TokenizerLike,
+        decode: Callable[[list[int]], str],
         *,
         start_idx: int = 0,
     ) -> Generator[PromptTargetMatch, None, None]:
@@ -1679,7 +1724,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             return
 
-        target_text = tokenizer.decode(target)
+        target_text = decode(target)
         if not target_text:
             return
 
@@ -1707,24 +1752,54 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         target in the prompt, we instead perform text-based updates on the
         decoded token IDs, then encode them back.
 
-        Raises `PromptUpdateMismatchError` if the result would gain or lose
-        added tokens other than through the updates themselves, e.g. when
-        the text spelling of a special token in the prompt is re-encoded as
-        that special token.
+        Raises `PromptUpdateMismatchError` if a match differs from its target
+        in added tokens or cuts through one, or if the added tokens of the
+        result differ from those of the untouched prompt spans plus the update
+        contents, in order (e.g. when the text spelling of a special token is
+        re-encoded as that token).
         """
         tokenizer = self.info.get_tokenizer()
-        prompt_text = tokenizer.decode(token_ids)
-        added_ids = set(tokenizer.get_added_vocab().values())
-        expected_added = Counter(t for t in token_ids if t in added_ids)
+        added_tokens = {v: k for k, v in tokenizer.get_added_vocab().items()}
+        added_ids = added_tokens.keys()
+        mismatch_error = PromptUpdateMismatchError(
+            "Matching multimodal placeholders in the decoded prompt would "
+            "change its special tokens. Make sure the prompt keeps one "
+            "placeholder token per multimodal item (e.g. that "
+            "truncate_prompt_tokens does not remove them)."
+        )
+
+        def decode_with_spans(ids: list[int]) -> tuple[str, list[tuple[int, int, int]]]:
+            decoded = _decode_with_added_spans(tokenizer, ids, added_tokens)
+            if decoded is None:
+                raise mismatch_error
+            return decoded
+
+        def decode(ids: list[int]) -> str:
+            return decode_with_spans(ids)[0]
+
+        prompt_text, spans = decode_with_spans(token_ids)
+        span_starts = [start for start, _, _ in spans]
+
+        def get_added_ids(start_idx: int, end_idx: int) -> list[int]:
+            if start_idx > end_idx:
+                raise mismatch_error
+            lo = bisect_left(span_starts, start_idx)
+            hi = bisect_left(span_starts, end_idx)
+            if (lo > 0 and spans[lo - 1][1] > start_idx) or (
+                hi > 0 and spans[hi - 1][1] > end_idx
+            ):
+                raise mismatch_error
+            return [token_id for _, _, token_id in spans[lo:hi]]
 
         matched_updates, result = _plan_prompt_updates_with(
             mm_prompt_updates,
             lambda update, start_idx: self._iter_text_matches(
-                update, prompt_text, tokenizer, start_idx=start_idx
+                update, prompt_text, tokenizer, decode, start_idx=start_idx
             ),
         )
 
         out_texts = list[str]()
+        expected_added_ids = list[int]()
         prev_end_idx = 0
         for matched_update in matched_updates:
             update = matched_update.update
@@ -1737,17 +1812,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             else:
                 assert_never(update.mode)
 
+            target_added_ids = (
+                []
+                if isinstance(update.target, PromptIndex)
+                else [t for t in update.target if t in added_ids]
+            )
+            if get_added_ids(match.start_idx, match.end_idx) != target_added_ids:
+                raise mismatch_error
+
             out_texts.append(prompt_text[prev_end_idx:end_idx_to_insert])
-            out_texts.append(tokenizer.decode(update.content.full))
+            out_texts.append(decode(update.content.full))
+            expected_added_ids += get_added_ids(prev_end_idx, end_idx_to_insert)
+            expected_added_ids += [t for t in update.content.full if t in added_ids]
             prev_end_idx = match.end_idx
 
-            expected_added.update(t for t in update.content.full if t in added_ids)
-            if update.mode == UpdateMode.REPLACE and not isinstance(
-                update.target, PromptIndex
-            ):
-                expected_added.subtract(t for t in update.target if t in added_ids)
-
         out_texts.append(prompt_text[prev_end_idx:])
+        expected_added_ids += get_added_ids(prev_end_idx, len(prompt_text))
 
         if encode_segments_separately:
             # Encode each segment separately instead of joining into one
@@ -1762,13 +1842,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 "".join(out_texts), add_special_tokens=False
             )
 
-        if Counter(t for t in new_token_ids if t in added_ids) != expected_added:
-            raise PromptUpdateMismatchError(
-                "Matching multimodal placeholders in the decoded prompt would "
-                "change its special tokens. Make sure the prompt keeps one "
-                "placeholder token per multimodal item (e.g. that "
-                "truncate_prompt_tokens does not remove them)."
-            )
+        if [t for t in new_token_ids if t in added_ids] != expected_added_ids:
+            raise mismatch_error
 
         return new_token_ids, result
 
