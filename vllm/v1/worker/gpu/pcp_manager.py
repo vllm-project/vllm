@@ -223,16 +223,25 @@ class PCPManager:
 
     @staticmethod
     def _reorder_segments(
-        segments: list[RankSegment], is_prefilling: np.ndarray
+        segments: list[RankSegment],
+        is_prefilling: np.ndarray,
+        has_context: dict[int, bool] | None = None,
     ) -> list[RankSegment]:
-        """Order this rank's rows decodes-first, then prefills, canonically."""
+        """Order this rank's rows decodes-first, then prefills, canonically.
 
-        def sort_key(segment: RankSegment) -> tuple[bool, int, int]:
+        ``has_context`` maps a row's global start to whether any token precedes
+        it in its request. When given, prefill rows without context come first,
+        so the MLA context planner packs the rest into one chunk.
+        """
+
+        def sort_key(segment: RankSegment) -> tuple[bool, bool, int, int]:
             req_idx = segment.global_batch_req_idx
+            start = segment.global_batch_slice.start
             return (
                 bool(is_prefilling[req_idx]),
+                has_context is not None and has_context[start],
                 req_idx,
-                segment.global_batch_slice.start,
+                start,
             )
 
         segments.sort(key=sort_key)
@@ -315,14 +324,25 @@ class PCPManager:
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
+        num_computed_tokens: np.ndarray | None = None,
     ) -> list[RankSegment]:
         rank_segments = []
         rank_offset = 0
+        # Under PCP + DCP the indexer plan needs a request's rows adjacent, so
+        # rows are grouped by context only without DCP.
+        has_context: dict[int, bool] | None = (
+            {} if num_computed_tokens is not None and self.dcp_world_size == 1 else None
+        )
         for global_batch_req_idx, chunk_offset, chunk_len in self._iter_rank_chunks(
             rank, num_scheduled_tokens, is_prefilling
         ):
             global_batch_start = int(query_start_loc_np[global_batch_req_idx])
             chunk_start = global_batch_start + chunk_offset
+            if has_context is not None:
+                assert num_computed_tokens is not None
+                has_context[chunk_start] = (
+                    int(num_computed_tokens[global_batch_req_idx]) + chunk_offset > 0
+                )
             rank_segments.append(
                 RankSegment(
                     global_batch_req_idx=global_batch_req_idx,
@@ -331,7 +351,7 @@ class PCPManager:
                 )
             )
             rank_offset += chunk_len
-        return self._reorder_segments(rank_segments, is_prefilling)
+        return self._reorder_segments(rank_segments, is_prefilling, has_context)
 
     def _build_batch_layout(
         self,
@@ -350,6 +370,7 @@ class PCPManager:
                 num_scheduled_tokens,
                 is_prefilling,
                 query_start_loc_np,
+                num_computed_tokens,
             )
             num_rank_tokens = sum(segment.num_tokens for segment in segments)
             segments_by_rank.append(segments)
