@@ -740,9 +740,7 @@ def _check_flash_shared_table(shm_fits):
         assert torch.all(eager.tables()[0] == expected)
 
         # FP8 row scales may arrive before the table and share storage too.
-        fp8 = FlashEmbedding(
-            sizes, 8, None, True, share_group=group, prefix="test.fp8"
-        )
+        fp8 = FlashEmbedding(sizes, 8, None, True, share_group=group, prefix="test.fp8")
         scale = torch.full((sum(sizes),), rank + 3.0, dtype=torch.bfloat16)
         table8 = torch.full((sum(sizes), 8), float(rank + 1), dtype=torch.float8_e4m3fn)
         fp8.load_weights(
@@ -806,6 +804,7 @@ def _check_flash_shared_load_order():
     offered = torch.ones((sum(sizes), 8), dtype=torch.bfloat16)
     # The mismatch must be detected before entering the allocation collective.
     with pytest.MonkeyPatch.context() as patch:
+
         def unexpected_allocation(*args):
             pytest.fail("Entered shared allocation with mismatched tensor order")
 

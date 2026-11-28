@@ -195,9 +195,7 @@ class FlashNgramHashState(nn.Module):
 
 
 class FlashEmbedding(nn.Module):
-    def __init__(
-        self, sizes, dim, dtype, cpu_offload, share_group=None, *, prefix=""
-    ):
+    def __init__(self, sizes, dim, dtype, cpu_offload, share_group=None, *, prefix=""):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.head_start, self.head_end = head_range(
