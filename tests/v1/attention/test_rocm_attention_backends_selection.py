@@ -130,6 +130,16 @@ def test_rocm_backends_do_not_support_mm_prefix():
     )
 
 
+def test_aiter_unified_attention_supports_non_causal():
+    """DFlash/DSpark draft blocks need non-causal attention. aiter runs it
+    where it can, else the vLLM Triton unified kernel does."""
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+
+    assert RocmAiterUnifiedAttentionBackend.supports_non_causal()
+
+
 def test_segmented_attention_uses_dedicated_backend_components():
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionBackend,
