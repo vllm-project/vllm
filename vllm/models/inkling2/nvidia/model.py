@@ -26,6 +26,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -68,6 +71,7 @@ from .lora import (
 )
 from .lora import register as register_lora
 from .moe import Inkling2MoE, QuantFormat
+from .moe_ct import PROJECTIONS, Inkling2CTExperts, Inkling2CTScheme
 from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
 from .ops.attn_res import attn_res
@@ -166,7 +170,7 @@ class Inkling2DecoderLayer(nn.Module):
         self,
         config: Inkling2ModelConfig,
         layer_id: int,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
         num_passes: int = 1,
     ) -> None:
@@ -205,11 +209,13 @@ class Inkling2DecoderLayer(nn.Module):
             config.hidden_size, eps, num_inputs=self.num_attn_inputs
         )
         self.mlp_norm = Inkling2RMSNorm(config.hidden_size, eps)
-        expert_format: QuantFormat = (
-            "mxfp8"
-            if quant_config is not None and quant_config.is_mxfp8_layer(layer_id)
-            else "nvfp4"
-        )
+        expert_format: QuantFormat | Inkling2CTScheme
+        if isinstance(quant_config, CompressedTensorsConfig):
+            expert_format = Inkling2CTScheme.from_config(quant_config, f"{prefix}.mlp")
+        elif quant_config is not None and quant_config.is_mxfp8_layer(layer_id):
+            expert_format = "mxfp8"
+        else:
+            expert_format = "nvfp4"
         self.mlp = Inkling2MoE(config, expert_format, config.layer_visit_ids(layer_id))
         self.attn_sconv, self.mlp_sconv = (
             Inkling2ShortConv(
@@ -249,7 +255,7 @@ class Inkling2Model(nn.Module):
     def __init__(
         self,
         config: Inkling2ModelConfig,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -295,7 +301,7 @@ class Inkling2Model(nn.Module):
         self,
         config: Inkling2ModelConfig,
         layer_id: int,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> Inkling2DecoderLayer:
         return Inkling2DecoderLayer(config, layer_id, quant_config, prefix)
@@ -535,6 +541,10 @@ class Inkling2ForConditionalGeneration(
         (".rel_l2_clip.scale", ".r_scale"),
         (".rel_logits_proj.proj", ".rel_logits_proj"),
     )
+    # Per-expert tensors of compressed-tensors checkpoints (`moe_ct`).
+    _ct_expert = re.compile(
+        r"(.+\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.(\w+)"
+    )
     _shards = {
         ".attn.wq_du.": (".attn.qkvr.", 0),
         ".attn.wr_du.": (".attn.qkvr.", 1),
@@ -551,7 +561,9 @@ class Inkling2ForConditionalGeneration(
         super().__init__()
         config: Inkling2MMConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        assert quant_config is None or isinstance(quant_config, Inkling2QuantConfig)
+        assert quant_config is None or isinstance(
+            quant_config, Inkling2QuantConfig | CompressedTensorsConfig
+        )
         assert vllm_config.parallel_config.pipeline_parallel_size == 1
         if vllm_config.model_config.enable_prompt_embeds:
             # The reference applies embed_norm to raw input embeddings, which
@@ -559,6 +571,7 @@ class Inkling2ForConditionalGeneration(
             raise ValueError("Inkling2 does not support prompt embeddings")
         self.config = config
         self.text_config = text_config = config.text_config
+        self.compressed_tensors = isinstance(quant_config, CompressedTensorsConfig)
         self.visual = (
             Inkling2VisionEncoder(config.vision_config, text_config.hidden_size)
             if config.vision_config is not None
@@ -763,6 +776,8 @@ class Inkling2ForConditionalGeneration(
         }
         loaded: set[str] = set()
         loaded_shards: set[tuple[str, int]] = set()
+        # compressed-tensors experts: loaded local (expert, projection) pairs.
+        expert_shards: Counter[str] = Counter()
         visual_weights: list[tuple[str, torch.Tensor]] = []
         for name, weight in weights:
             if name.startswith("model.visual."):
@@ -777,6 +792,12 @@ class Inkling2ForConditionalGeneration(
                     name = name.replace(old, new)
                     shard_id = shard
                     break
+            expert = self._ct_expert.fullmatch(name)
+            if expert is not None:
+                experts, expert_id, projection, key = expert.groups()
+                if key == "weight_shape":
+                    continue  # Metadata of the packed format.
+                name = f"{experts}.{PROJECTIONS[projection][0]}_{key}"
             if name not in params:
                 m = re.search(
                     r"\.(layers|attn_queries|mlp_queries)\.(\d+)(?:\.|$)", name
@@ -785,16 +806,27 @@ class Inkling2ForConditionalGeneration(
                     continue
                 raise ValueError(f"Unexpected checkpoint tensor: {name}")
             param = params[name]
+            if expert is not None:
+                module = self.get_submodule(experts)
+                assert isinstance(module, Inkling2CTExperts)
+                if module.load_expert(param, weight, int(expert_id), projection, key):
+                    expert_shards[name] += 1
+                continue
             if param.dtype != weight.dtype:
-                if ".mlp.experts." in name and weight.dtype == torch.bfloat16:
+                if self.compressed_tensors and weight.dtype == torch.float32:
+                    # transformers keeps the short convs, router and loop
+                    # controllers in float32, and llm-compressor saves them so.
+                    weight = weight.to(param.dtype)
+                elif ".mlp.experts." in name and weight.dtype == torch.bfloat16:
                     raise ValueError(
                         f"{name}: BF16 expert weights are not supported; the "
                         "Inkling2 experts are NVFP4 / MXFP8, as declared per "
                         "tensor in the checkpoint's hf_quant_config.json"
                     )
-                raise ValueError(
-                    f"{name}: checkpoint dtype {weight.dtype} != {param.dtype}"
-                )
+                else:
+                    raise ValueError(
+                        f"{name}: checkpoint dtype {weight.dtype} != {param.dtype}"
+                    )
             loader: Callable[..., None] = getattr(
                 param, "weight_loader", default_weight_loader
             )
@@ -808,6 +840,12 @@ class Inkling2ForConditionalGeneration(
         for name, count in Counter(name for name, _ in loaded_shards).items():
             fused = next(f for f in num_shards if f in name)
             if count == num_shards[fused]:
+                loaded.add(name)
+        for name, count in expert_shards.items():
+            experts = self.get_submodule(name.rsplit(".", 1)[0])
+            assert isinstance(experts, Inkling2CTExperts)
+            projections = 2 if name.rsplit(".", 1)[1].startswith("w13_") else 1
+            if count == experts.num_experts * projections:
                 loaded.add(name)
         if self.visual is not None:
             loaded |= {f"visual.{n}" for n in self.visual.load_weights(visual_weights)}

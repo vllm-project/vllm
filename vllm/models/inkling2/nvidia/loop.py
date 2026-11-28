@@ -18,6 +18,9 @@ import torch
 from torch import nn
 
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 
 from ..configs import Inkling2ModelConfig
 from ..quant_config import Inkling2QuantConfig
@@ -72,7 +75,7 @@ class Inkling2LoopDecoderLayer(Inkling2DecoderLayer):
         self,
         config: Inkling2ModelConfig,
         layer_id: int,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> None:
         super().__init__(
@@ -139,7 +142,7 @@ class Inkling2LoopModel(Inkling2Model):
     def __init__(
         self,
         config: Inkling2ModelConfig,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> None:
         # Serving options set through --hf-overrides skip the constructor.
@@ -182,7 +185,7 @@ class Inkling2LoopModel(Inkling2Model):
         self,
         config: Inkling2ModelConfig,
         layer_id: int,
-        quant_config: Inkling2QuantConfig | None,
+        quant_config: Inkling2QuantConfig | CompressedTensorsConfig | None,
         prefix: str,
     ) -> Inkling2DecoderLayer:
         if layer_id in config.loop_core_layers:

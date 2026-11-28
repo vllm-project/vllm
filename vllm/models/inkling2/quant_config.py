@@ -3,7 +3,8 @@
 """Per-tensor precision metadata of Inkling2 checkpoints (hf_quant_config.json).
 
 Only the routed experts are quantized (NVFP4 or MXFP8); they are handled by
-`Inkling2MoE`. Every other layer runs unquantized.
+`Inkling2MoE`. Every other layer runs unquantized. Checkpoints requantized
+with llm-compressor use `CompressedTensorsConfig` instead (`nvidia/moe_ct.py`).
 """
 
 from __future__ import annotations
@@ -62,7 +63,10 @@ class Inkling2QuantConfig(QuantizationConfig):
     ) -> QuantizationMethods | None:
         # Released checkpoints also declare a ModelOpt `quantization_config`
         # in config.json; their per-tensor precisions are in
-        # hf_quant_config.json.
+        # hf_quant_config.json. Requantized (e.g. llm-compressor) checkpoints
+        # keep their own method.
+        if hf_quant_cfg.get("quant_method") == "compressed-tensors":
+            return None
         architectures = getattr(hf_config, "architectures", None) or []
         if INKLING2_ARCHITECTURES & set(architectures):
             return "inkling2"

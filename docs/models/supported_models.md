@@ -750,6 +750,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
+    `Inkling2ForConditionalGeneration` also loads checkpoints whose routed
+    experts were requantized with [LLM Compressor](../features/quantization/llm_compressor/README.md)
+    (compressed-tensors W4A16 with or without zero points, W8A16, W4A8, W8A8
+    INT8, FP8 dynamic and FP8 block; the other layers stay BF16). The
+    quantization method is detected from `config.json`, and these experts run
+    on Humming expert GEMMs.
+
+!!! note
     `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
     accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
     To choose the route of each page with the checkpoint's density router, see
