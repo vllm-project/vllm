@@ -2315,7 +2315,22 @@ class VllmConfig:
                     "nixl_ep",
                     "mooncake_ep",
                 ]
-            assert a2a_backend in supported_backends, (
+            schedule = self.parallel_config.dbo_schedule
+            if schedule == "attention-feed-forward-overlap":
+                # The MoE already runs on the feed-forward pool's stream, so
+                # only backends whose collectives stay on the caller's stream
+                # fit; the others switch between the compute and comm streams.
+                supported_backends = [
+                    b
+                    for b in supported_backends
+                    if b in ("deepep_low_latency", "nixl_ep")
+                ]
+            # Without expert parallelism this schedule has no all-to-all.
+            needs_all2all = (
+                schedule != "attention-feed-forward-overlap"
+                or self.parallel_config.enable_expert_parallel
+            )
+            assert not needs_all2all or a2a_backend in supported_backends, (
                 "Microbatching currently only supports the "
                 f"{', '.join(supported_backends)} all2all backends on this "
                 f"platform. {a2a_backend} is not supported. To fix use one of "

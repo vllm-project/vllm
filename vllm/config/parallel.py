@@ -46,7 +46,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
+DBOSchedule = Literal[
+    "dispatch-combine-overlap", "all-reduce-overlap", "attention-feed-forward-overlap"
+]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
@@ -411,7 +413,16 @@ class ParallelConfig:
     `dispatch-combine-overlap` its expert all-to-all, `all-reduce-overlap` its
     TP all-reduces. `all-reduce-overlap` needs tensor parallelism on one DP rank
     without expert parallelism and is the default there; everywhere else the
-    default is `dispatch-combine-overlap`."""
+    default is `dispatch-combine-overlap`. `attention-feed-forward-overlap`
+    (experimental) splits the SMs into two CUDA green-context pools and
+    overlaps one microbatch's attention with the rest of the other's layer; it
+    also runs on a single DP rank, needs FULL CUDA graphs (CUDA 13.4 or later)
+    to pay off and, with expert parallelism, the `deepep_low_latency` or
+    `nixl_ep` all2all backend."""
+    dbo_attention_sms: int = Field(default=64, ge=8)
+    """Number of SMs in the attention pool under `attention-feed-forward-overlap`;
+    the rest of the layer runs on the remaining SMs. One of the two pools must
+    be a multiple of 8 SMs."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 

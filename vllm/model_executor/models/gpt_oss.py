@@ -52,6 +52,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.ubatching import (
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 from .interfaces import (
     EagleModelMixin,
@@ -166,6 +170,11 @@ class OAIAttention(nn.Module):
             quant_config=quant_config,
             prefix=prefix,
         )
+        # Under attention-feed-forward-overlap only full attention runs on the
+        # attention pool (the compute stream).
+        self.overlap_attention = (
+            config.sliding_window is None or self.layer_idx % 2 != 0
+        )
 
     def _build_attention(
         self,
@@ -197,7 +206,11 @@ class OAIAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        if self.overlap_attention:
+            dbo_yield_and_switch_from_comm_to_compute("attention-feed-forward-overlap")
         attn_output = self.attn(q, k, v)
+        if self.overlap_attention:
+            dbo_yield_and_switch_from_compute_to_comm("attention-feed-forward-overlap")
         output, _ = self.o_proj(attn_output)
         return output
 

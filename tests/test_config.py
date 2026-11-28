@@ -6023,3 +6023,49 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         for rank in range(8)
     ]
     assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
+
+
+def test_attention_feed_forward_overlap_rejects_stream_switching_all2all_backends(
+    monkeypatch,
+):
+    """The high-throughput and naive prepare/finalize switch streams around
+    their collectives; attention-feed-forward-overlap runs the MoE on the
+    feed-forward pool's stream, so with expert parallelism only the backends
+    whose collectives stay on the caller's stream work."""
+    # opt-125m has no experts; expert parallelism needs an MoE model, so
+    # present it as one (the guard reads only the backend name).
+    monkeypatch.setattr(ModelConfig, "get_num_experts", lambda self: 128)
+
+    def make(backend: str) -> VllmConfig:
+        return VllmConfig(
+            model_config=ModelConfig("facebook/opt-125m", dtype="float16", seed=0),
+            parallel_config=ParallelConfig(
+                enable_dbo=True,
+                dbo_schedule="attention-feed-forward-overlap",
+                enable_expert_parallel=True,
+                all2all_backend=backend,
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+            ),
+        )
+
+    with pytest.raises(ValueError, match="deepep_high_throughput is not supported"):
+        make("deepep_high_throughput")
+    assert make("deepep_low_latency").parallel_config.use_ubatching
+
+
+def test_attention_feed_forward_overlap_needs_no_all2all_without_ep():
+    """On one DP rank without expert parallelism the schedule has no
+    all-to-all, so the default backend passes, and it is never the default."""
+    config = VllmConfig(
+        model_config=ModelConfig("facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, dbo_schedule="attention-feed-forward-overlap"
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+    )
+    assert config.parallel_config.use_ubatching
+    assert ParallelConfig(enable_dbo=True).dbo_schedule == "dispatch-combine-overlap"
