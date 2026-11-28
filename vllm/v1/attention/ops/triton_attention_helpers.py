@@ -149,6 +149,8 @@ def split_k_segment_layout(
     SLIDING_WINDOW: tl.constexpr,
     TILE_SIZE: tl.constexpr,
     WINDOW_SEGMENTS: tl.constexpr,
+    query_len=1,
+    MIN_TILES_PER_SEGMENT: tl.constexpr = 1,
 ):
     """Split-K (3D) segment layout of one sequence.
 
@@ -156,18 +158,23 @@ def split_k_segment_layout(
     covers tiles `[base_tile + s * tiles_per_segment, base_tile + (s + 1) *
     tiles_per_segment)` and segments `s >= num_active` have no tiles. The
     segments split the whole sequence, or with `WINDOW_SEGMENTS` only the
-    sliding window of a single decode query at position `seq_len - 1` (as
-    pruned by `compute_tile_loop_bounds`). Shared by
-    `kernel_unified_attention` and `reduce_segments`, which must agree on
-    the layout.
+    sliding window of the sequence's `query_len` queries at positions
+    `[seq_len - query_len, seq_len)` (as pruned by
+    `compute_tile_loop_bounds`; keys past the last query are covered too, so
+    this also holds for non-causal windows). Segments hold at least
+    `MIN_TILES_PER_SEGMENT` tiles. Shared by `kernel_unified_attention` and
+    `reduce_segments`, which must agree on the layout.
     """
     if WINDOW_SEGMENTS:
-        base_tile = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
+        first_key = seq_len - query_len - SLIDING_WINDOW + 1
+        base_tile = tl.maximum(first_key, 0) // TILE_SIZE
         num_tiles = cdiv_fn(seq_len, TILE_SIZE) - base_tile
     else:
         base_tile = 0
         num_tiles = cdiv_fn(seq_len, TILE_SIZE)
     tiles_per_segment = cdiv_fn(num_tiles, NUM_SEGMENTS)
+    if MIN_TILES_PER_SEGMENT > 1:
+        tiles_per_segment = tl.maximum(tiles_per_segment, MIN_TILES_PER_SEGMENT)
     num_active = cdiv_fn(num_tiles, tiles_per_segment)
     return base_tile, tiles_per_segment, num_active
 

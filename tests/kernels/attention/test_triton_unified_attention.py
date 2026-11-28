@@ -20,6 +20,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
+    NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT,
     reduce_segments,
     unified_attention,
 )
@@ -141,7 +142,7 @@ def _spy_reduce_segments(monkeypatch):
         (6, {"num_seqs": 1}, True),
         (8, {}, True),
         (9, {"num_seqs": 1}, False),
-        (5, {"causal": False}, False),
+        (5, {"causal": False}, True),
         (5, {"causal": "per_sequence"}, False),
         (5, {"threshold": 1}, False),
         (5, {"batch_invariant": True}, False),
@@ -176,10 +177,12 @@ def test_splitk_admission_preserves_decode_and_bounds_verification(
         (1, {}, True, True),
         (1, {"window_size": (-1, -1)}, True, False),
         (1, {"window_aware_segments": False}, True, False),
-        # Spec-decode verify still runs split-K, but with several queries.
-        (5, {}, True, False),
+        # Spec-decode verify rows, causal or not (DFlash draft block).
+        (5, {}, True, True),
+        (5, {"causal": False}, True, True),
+        (5, {"causal": False, "window_size": (-1, -1)}, True, False),
         (1, {"threshold": 1}, False, False),
-        (1, {"causal": False}, True, False),
+        (1, {"causal": False}, True, True),
         (1, {"causal": "per_sequence"}, True, False),
         (1, {"mm_prefix": True}, True, False),
         (1, {"chunk_lookback": 1}, True, False),
@@ -189,8 +192,9 @@ def test_splitk_admission_preserves_decode_and_bounds_verification(
 def test_window_aware_segments_gate(
     monkeypatch, query_len, options, expect_3d, expect_window_segments
 ):
-    """Only plain causal sliding-window decode splits the window's tiles into
-    the split-K segments, and both kernels get the same segment layout."""
+    """Plain sliding windows (causal or not, one or several queries) split
+    the window's tiles into the split-K segments, and both kernels get the
+    same segment layout."""
     num_seqs = 2
     options = {"window_size": (1023, 0), **options}
     if options.get("causal") == "per_sequence":
@@ -211,6 +215,12 @@ def test_window_aware_segments_gate(
     if expect_3d:
         assert reduce["WINDOW_SEGMENTS"] is expect_window_segments
         assert reduce["SLIDING_WINDOW"] == (1024 if expect_window_segments else 0)
+        # Non-causal rows require fuller segments: next_power_of_2(num_seqs).
+        min_tiles = 1
+        if options.get("causal", True) is False:
+            min_tiles = min(num_seqs, NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT)
+        assert kernel["MIN_TILES_PER_SEGMENT"] == min_tiles
+        assert reduce["MIN_TILES_PER_SEGMENT"] == min_tiles
     else:
         assert reduce is None
 
@@ -307,6 +317,82 @@ def test_split_k_window_segment_tile_ranges(
                 )
             else:
                 assert hi <= lo
+
+
+@triton.jit
+def _split_k_query_block_tile_ranges(
+    output_ptr,
+    seq_len,
+    query_len,
+    SLIDING_WINDOW: tl.constexpr,
+    USE_CAUSAL: tl.constexpr,
+    MIN_TILES_PER_SEGMENT: tl.constexpr,
+):
+    TILE_SIZE: tl.constexpr = 16
+    BLOCK_M: tl.constexpr = 16
+    NUM_QUERIES_PER_KV: tl.constexpr = 4
+    BLOCK_Q: tl.constexpr = BLOCK_M // NUM_QUERIES_PER_KV
+    q_block = tl.program_id(0)
+    segm_idx = tl.program_id(1)
+    base_tile, tiles_per_segment, num_active = split_k_segment_layout(
+        seq_len, 16, SLIDING_WINDOW, TILE_SIZE, True, query_len, MIN_TILES_PER_SEGMENT
+    )
+    args = (
+        seq_len - query_len,  # context_len
+        seq_len,
+        query_len,
+        q_block,
+        segm_idx,
+        tiles_per_segment,
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        NUM_QUERIES_PER_KV,
+        SLIDING_WINDOW,
+        False,  # USE_MM_PREFIX
+    )
+    loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+        *args, True, USE_CAUSAL, segm_base_tile_or_0=base_tile
+    )
+    # Bounds of the 2D launch (no segments) for this query block.
+    tile_lo, tile_hi, _ = compute_tile_loop_bounds(*args, False, USE_CAUSAL)
+    out = output_ptr + (q_block * 16 + segm_idx) * 5
+    tl.store(out, loop_lo)
+    tl.store(out + 1, loop_hi)
+    tl.store(out + 2, num_active)
+    tl.store(out + 3, tile_lo)
+    tl.store(out + 4, tile_hi)
+
+
+@pytest.mark.parametrize("query_len", [1, 4, 8])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("min_tiles", [1, 2, 8])
+@pytest.mark.parametrize("sliding_window", [17, 1024])
+@pytest.mark.parametrize("seq_len", [8, 40, 600, 1031, 1100, 1500, 4097, 32768])
+def test_split_k_window_segments_cover_query_blocks(
+    query_len, causal, min_tiles, sliding_window, seq_len
+) -> None:
+    """With several (causal or non-causal) queries per sequence, the active
+    window segments of every query block walk disjoint tile ranges whose
+    union is exactly the block's 2D (unsegmented) tile range."""
+    if seq_len < query_len:
+        pytest.skip("context shorter than the query")
+    num_q_blocks = -(-query_len // 4)
+    ranges = torch.empty((num_q_blocks, 16, 5), dtype=torch.int32, device=DEVICE_TYPE)
+    _split_k_query_block_tile_ranges[(num_q_blocks, 16)](
+        ranges,
+        seq_len,
+        query_len,
+        SLIDING_WINDOW=sliding_window,
+        USE_CAUSAL=causal,
+        MIN_TILES_PER_SEGMENT=min_tiles,
+    )
+    for block_ranges in ranges.tolist():
+        num_active = block_ranges[0][2]
+        tile_lo, tile_hi = block_ranges[0][3], block_ranges[0][4]
+        # The kernel returns early for segments >= num_active.
+        got = [t for lo, hi, *_ in block_ranges[:num_active] for t in range(lo, hi)]
+        assert got == list(range(tile_lo, tile_hi))
 
 
 @pytest.mark.parametrize("empty_state", ["masked", "unvisited", "all_empty"])
@@ -429,8 +515,9 @@ def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) ->
     ],
 )
 @pytest.mark.parametrize("sliding_window", [None, 32])
+@pytest.mark.parametrize("causal", [True, False])
 def test_speculative_splitk_matches_reference(
-    monkeypatch, seq_lens, num_heads, q_dtype, sliding_window
+    monkeypatch, seq_lens, num_heads, q_dtype, sliding_window, causal
 ):
     reduce_grids = _spy_reduce_segments(monkeypatch)
     test_triton_unified_attn(
@@ -444,6 +531,31 @@ def test_speculative_splitk_matches_reference(
         num_blocks=8,
         q_dtype=q_dtype,
         seq_threshold_3D=32,
+        causal=causal,
+    )
+    assert len(reduce_grids) == 1
+
+
+@pytest.mark.parametrize("sliding_window", [64, 1024])
+@pytest.mark.parametrize("causal", [True, False])
+def test_splitk_sliding_window_long_context_matches_reference(
+    monkeypatch, sliding_window, causal
+):
+    """Split-K over a window much shorter than the sequence, as for the
+    DFlash drafter's non-causal sliding-window draft rows."""
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    test_triton_unified_attn(
+        seq_lens=[(8, 8), (8, 1100), (8, 4097), (1, 3000)],
+        num_heads=(8, 2),
+        head_size=128,
+        sliding_window=sliding_window,
+        dtype=torch.bfloat16,
+        block_size=16,
+        soft_cap=None,
+        num_blocks=1024,
+        q_dtype=None,
+        seq_threshold_3D=32,
+        causal=causal,
     )
     assert len(reduce_grids) == 1
 
@@ -556,6 +668,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    causal: bool = True,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -583,8 +696,16 @@ def ref_paged_attn(
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
-        mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
-        if sliding_window is not None:
+        if not causal:
+            # Keys within the window on either side of the query.
+            query_pos = torch.arange(kv_len - query_len, kv_len)[:, None]
+            dist = (query_pos - torch.arange(kv_len)[None, :]).abs()
+            mask = torch.zeros(query_len, kv_len, dtype=torch.bool)
+            if sliding_window is not None:
+                mask = dist >= sliding_window
+        else:
+            mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+        if causal and sliding_window is not None:
             sliding_window_mask = (
                 torch.triu(
                     empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
@@ -840,6 +961,7 @@ def test_triton_unified_attn(
     num_blocks: int,
     q_dtype: torch.dtype | None,
     seq_threshold_3D: int,
+    causal: bool = True,
 ) -> None:
     torch.set_default_device(DEVICE_TYPE)
 
@@ -852,7 +974,9 @@ def test_triton_unified_attn(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    window_size = (-1, -1)
+    if sliding_window is not None:
+        window_size = (sliding_window - 1, 0 if causal else sliding_window - 1)
     scale = head_size**-0.5
 
     query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
@@ -921,7 +1045,7 @@ def test_triton_unified_attn(
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
-        causal=True,
+        causal=causal,
         window_size=window_size,
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
@@ -946,6 +1070,7 @@ def test_triton_unified_attn(
         scale=scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
+        causal=causal,
     )
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
