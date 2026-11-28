@@ -623,6 +623,16 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_seqs,
         max(prompt_len, decode_query_len),
     )
+    if num_reqs < 1:
+        # The token budget cannot fit even one synthetic prefill (e.g.
+        # max_num_batched_tokens <= num_speculative_tokens + 1); skip warmup.
+        logger.warning_once(
+            "Skipping kernel warmup: max_num_batched_tokens=%d cannot fit a "
+            "%d-token warmup request.",
+            model_runner.max_num_tokens,
+            prompt_len,
+        )
+        return
     block_tables = getattr(model_runner, "block_tables", None)
     null_blocks = block_tables is not None and (
         block_tables.redirect_writes_to_null_block
