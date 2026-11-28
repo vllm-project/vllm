@@ -200,6 +200,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledBlockScaleFp8ScaledMMKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
     AiterTritonPerTensorFp8ScaledMMLinearKernel,
 )
@@ -382,6 +383,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
+        AiterPreshuffledBlockScaleFp8ScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterTritonPerTensorFp8ScaledMMLinearKernel,
@@ -531,6 +533,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterPreshuffledBlockScaleFp8ScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -1502,6 +1505,7 @@ __all__ = [
     "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+    "AiterPreshuffledBlockScaleFp8ScaledMMKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "AiterTritonPerTensorFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
