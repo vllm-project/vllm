@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -44,7 +43,7 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
 def share_target_lm_head(
     draft_model: nn.Module,
     target_lm_head: nn.Module | None,
-    quantization: Literal["fp8", "nvfp4"] | None,
+    quantization: str | None,
     can_share: bool = True,
 ) -> nn.Module | None:
     """Install the target lm_head, or its quantized copy, on a drafter that
