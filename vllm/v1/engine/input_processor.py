@@ -454,6 +454,16 @@ class InputProcessor:
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
         try:
             current_platform.validate_request(engine_input, params)
+            if (
+                isinstance(params, SamplingParams)
+                and params.stop
+                and self.tokenizer is None
+            ):
+                raise VLLMValidationError(
+                    "stop strings require a tokenizer. Use stop_token_ids "
+                    "when running without a tokenizer.",
+                    parameter="stop",
+                )
             self._validate_model_inputs(encoder_input, decoder_input)
         except Exception:
             # Rendering recorded the multimodal items as sent to the engine,

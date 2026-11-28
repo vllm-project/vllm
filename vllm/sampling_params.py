@@ -326,7 +326,7 @@ class SamplingParams(
     """Random seed to use for the generation."""
     stop: str | list[str] | None = None
     """String(s) that stop the generation when they are generated. The returned
-    output will not contain the stop strings."""
+    output will not contain the stop strings. Requires a tokenizer."""
     stop_token_ids: list[int] | None = None
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special

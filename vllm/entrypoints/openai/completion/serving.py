@@ -188,6 +188,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
+        if request.stop and self.renderer.tokenizer is None:
+            # Reject before a streaming response can send its HTTP status.
+            return self.create_error_response(
+                "stop strings require a tokenizer. Use stop_token_ids "
+                "when running without a tokenizer.",
+                param="stop",
+            )
+
         return await self.online_renderer.render_completion(request)
 
     async def create_completion(
