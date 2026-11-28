@@ -60,6 +60,7 @@ CacheDType = Literal[
     "octave_k3v3_compact",
     "ultraquant_4bit",
     "int4_per_token_head",
+    "k8v4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
@@ -258,6 +259,10 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "k8v4_per_token_head" stores the keys as int8 and the values as int4, with
+    dynamic per-(token, head) scales (Triton attention backend). It sits
+    between "int4_per_token_head" and "int8_per_token_head" in memory and
+    accuracy.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in

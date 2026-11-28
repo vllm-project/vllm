@@ -8,6 +8,11 @@ different from the core kernel to share it. Owns the whole mode: nibble
 pack/unpack, the reshape (write) kernel, the split-dot attention (read)
 kernel, the RHT transform, and the public `reshape_and_cache_int4` /
 `unified_attention_int4` entry points.
+
+The same kernels also serve K8V4_PER_TOKEN_HEAD (`key_int8=True`): int8 keys
+with one symmetric scale per (token, head) and the values exactly as INT4.
+The attention scores are where 4-bit keys lose most of their accuracy, while
+4-bit values average out over the tokens.
 """
 
 from __future__ import annotations
@@ -93,8 +98,14 @@ def _reshape_cache_int4_kernel(
     head_size: tl.constexpr,
     head_size_v: tl.constexpr,
     PACKED_HEAD_PADDED: tl.constexpr,
+    KEY_HEAD_PADDED: tl.constexpr,
+    KEY_INT8: tl.constexpr,
 ):
-    """INT4 asymmetric quantization with zero-point steganography."""
+    """INT4 asymmetric quantization with zero-point steganography.
+
+    With KEY_INT8 the key is stored as int8 with a symmetric scale
+    (absmax / 127) and no zero-point; the value is stored as INT4.
+    """
     tok = tl.program_id(0)
     head = tl.program_id(1)
 
@@ -109,79 +120,27 @@ def _reshape_cache_int4_kernel(
     even_offs = half_offs * 2
     odd_offs = half_offs * 2 + 1
 
-    half_k = head_size // 2
-    even_k_mask = even_offs < head_size
-    odd_k_mask = odd_offs < head_size
     key_base = key_ptr + tok * stride_key_tok + head * stride_key_head
-
-    k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
-    k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
-
-    k_min = tl.minimum(
-        tl.min(tl.where(even_k_mask, k_even, float("inf"))),
-        tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
-    )
-    k_max = tl.maximum(
-        tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
-        tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
-    )
-    k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
-    k_zp_f = tl.clamp(
-        tl.where(
-            -k_min / k_scale >= 0,
-            (-k_min / k_scale + 0.5).to(tl.int32),
-            (-k_min / k_scale - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    inv_k = 1.0 / k_scale
-    k_even_s = k_even * inv_k + k_zp_f
-    k_odd_s = k_odd * inv_k + k_zp_f
-    k_even_q = tl.clamp(
-        tl.where(
-            k_even_s >= 0,
-            (k_even_s + 0.5).to(tl.int32),
-            (k_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_odd_q = tl.clamp(
-        tl.where(
-            k_odd_s >= 0,
-            (k_odd_s + 0.5).to(tl.int32),
-            (k_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    k_zp_int = k_zp_f.to(tl.int32)
-    k_scale_bits = k_scale.to(tl.int32, bitcast=True)
-    k_scale_packed = ((k_scale_bits & -16) | (k_zp_int & 0xF)).to(
-        tl.float32, bitcast=True
-    )
-
-    tl.store(
-        k_scale_cache_ptr
-        + blk * stride_ks_blk
-        + slot_in_blk * stride_ks_slot
-        + head * stride_ks_head,
-        k_scale_packed,
-    )
-
-    k_packed = pack_int4_nibbles(k_even_q.to(tl.uint8), k_odd_q.to(tl.uint8))
-    tl.store(
+    key_cache_base = (
         key_cache_ptr
         + blk * stride_kc_blk
         + slot_in_blk * stride_kc_slot
         + head * stride_kc_head
-        + half_offs,
-        k_packed,
-        mask=half_offs < half_k,
     )
+    k_scale_ptr = (
+        k_scale_cache_ptr
+        + blk * stride_ks_blk
+        + slot_in_blk * stride_ks_slot
+        + head * stride_ks_head
+    )
+    if KEY_INT8:
+        _store_key_int8(
+            key_base, key_cache_base, k_scale_ptr, head_size, KEY_HEAD_PADDED
+        )
+    else:
+        _store_key_int4(
+            key_base, key_cache_base, k_scale_ptr, head_size, PACKED_HEAD_PADDED
+        )
 
     half_v = head_size_v // 2
     even_v_mask = even_offs < head_size_v
@@ -258,6 +217,97 @@ def _reshape_cache_int4_kernel(
     )
 
 
+@triton.jit
+def _store_key_int4(
+    key_base,
+    key_cache_base,
+    k_scale_ptr,
+    head_size: tl.constexpr,
+    PACKED_HEAD_PADDED: tl.constexpr,
+):
+    """INT4 key: asymmetric scale, zero-point in the scale's mantissa."""
+    half_offs = tl.arange(0, PACKED_HEAD_PADDED)
+    even_offs = half_offs * 2
+    odd_offs = half_offs * 2 + 1
+    half_k = head_size // 2
+    even_k_mask = even_offs < head_size
+    odd_k_mask = odd_offs < head_size
+
+    k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
+    k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
+
+    k_min = tl.minimum(
+        tl.min(tl.where(even_k_mask, k_even, float("inf"))),
+        tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
+    )
+    k_max = tl.maximum(
+        tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
+        tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
+    )
+    k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
+    k_zp_f = tl.clamp(
+        tl.where(
+            -k_min / k_scale >= 0,
+            (-k_min / k_scale + 0.5).to(tl.int32),
+            (-k_min / k_scale - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    inv_k = 1.0 / k_scale
+    k_even_s = k_even * inv_k + k_zp_f
+    k_odd_s = k_odd * inv_k + k_zp_f
+    k_even_q = tl.clamp(
+        tl.where(
+            k_even_s >= 0,
+            (k_even_s + 0.5).to(tl.int32),
+            (k_even_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+    k_odd_q = tl.clamp(
+        tl.where(
+            k_odd_s >= 0,
+            (k_odd_s + 0.5).to(tl.int32),
+            (k_odd_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    k_zp_int = k_zp_f.to(tl.int32)
+    k_scale_bits = k_scale.to(tl.int32, bitcast=True)
+    k_scale_packed = ((k_scale_bits & -16) | (k_zp_int & 0xF)).to(
+        tl.float32, bitcast=True
+    )
+
+    tl.store(k_scale_ptr, k_scale_packed)
+
+    k_packed = pack_int4_nibbles(k_even_q.to(tl.uint8), k_odd_q.to(tl.uint8))
+    tl.store(key_cache_base + half_offs, k_packed, mask=half_offs < half_k)
+
+
+@triton.jit
+def _store_key_int8(
+    key_base,
+    key_cache_base,
+    k_scale_ptr,
+    head_size: tl.constexpr,
+    KEY_HEAD_PADDED: tl.constexpr,
+):
+    """INT8 key: symmetric scale absmax / 127, round half away from zero."""
+    offs = tl.arange(0, KEY_HEAD_PADDED)
+    mask = offs < head_size
+    k = tl.load(key_base + offs, mask=mask, other=0.0).to(tl.float32)
+    k_scale = tl.maximum(tl.max(tl.abs(k)) / 127.0, 1e-6)
+    k_s = tl.clamp(k / k_scale, -127.0, 127.0)
+    k_q = tl.where(k_s >= 0, (k_s + 0.5).to(tl.int32), (k_s - 0.5).to(tl.int32))
+    tl.store(k_scale_ptr, k_scale)
+    tl.store(key_cache_base + offs, k_q.to(tl.int8), mask=mask)
+
+
 def _run_reshape_kernel(
     kernel,
     *,
@@ -269,8 +319,9 @@ def _run_reshape_kernel(
     v_scale_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     packing_factor: int,
+    key_int8: bool = False,
 ) -> None:
-    """Launch the packed INT4 reshape kernel."""
+    """Launch the packed INT4 reshape kernel (int8 keys with `key_int8`)."""
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
     assert head_size % packing_factor == 0 and head_size_v % packing_factor == 0
@@ -310,6 +361,8 @@ def _run_reshape_kernel(
         head_size=head_size,
         head_size_v=head_size_v,
         PACKED_HEAD_PADDED=packed_padded,
+        KEY_HEAD_PADDED=triton.next_power_of_2(head_size),
+        KEY_INT8=key_int8,
         num_warps=num_warps,
     )
 
@@ -387,6 +440,7 @@ def _attn_packed(
     # 2 → INT4 nibble pair (asymmetric + zp).  The packed KV cache stores
     # one byte per ``packed_offs``, holding PACKING_FACTOR values.
     PACKING_FACTOR: tl.constexpr,
+    KEY_INT8: tl.constexpr,
     # K/V alignment and offset of V from K (kv_tile_alignment).
     v_cache_delta: tl.int64,
     K_ALIGN: tl.constexpr,
@@ -457,19 +511,29 @@ def _attn_packed(
         + query_offset_1[:, None] * query_stride_1
     )
     q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-    Q_s0 = tl.load(
-        query_ptr + q_base + offs_s0[None, :],
-        mask=mask_s0[None, :] & q_mask,
-        other=0.0,
-    ).to(tl.float32)
-    Q_s1 = tl.load(
-        query_ptr + q_base + offs_s1[None, :],
-        mask=mask_s1[None, :] & q_mask,
-        other=0.0,
-    ).to(tl.float32)
+    if KEY_INT8:
+        # INT8 keys are not packed: one Q stream over the whole head.
+        offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+        dim_mask = offs_d < HEAD_SIZE
+        Q = tl.load(
+            query_ptr + q_base + offs_d[None, :],
+            mask=dim_mask[None, :] & q_mask,
+            other=0.0,
+        ).to(tl.float32)
+    else:
+        Q_s0 = tl.load(
+            query_ptr + q_base + offs_s0[None, :],
+            mask=mask_s0[None, :] & q_mask,
+            other=0.0,
+        ).to(tl.float32)
+        Q_s1 = tl.load(
+            query_ptr + q_base + offs_s1[None, :],
+            mask=mask_s1[None, :] & q_mask,
+            other=0.0,
+        ).to(tl.float32)
 
-    # INT4 asymmetric correction needs sum(Q) per row.
-    Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+        # INT4 asymmetric correction needs sum(Q) per row.
+        Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -519,17 +583,35 @@ def _attn_packed(
         ).to(tl.int64)
 
         slot_in_blk = seq_offset % BLOCK_SIZE
-        k_off = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + packed_offs[:, None] * stride_k_cache_3
-            + slot_in_blk[None, :] * stride_k_cache_1
-        )
-        K_packed = tl.load(
-            key_cache_ptr + k_off,
-            mask=packed_dim_mask[:, None] & tile_mask[None, :],
-            other=0,
-        )
+        if KEY_INT8:
+            k_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d[:, None] * stride_k_cache_3
+                + slot_in_blk[None, :] * stride_k_cache_1
+            )
+            K = tl.load(
+                key_cache_ptr + k_off,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0,
+            ).to(tl.float32)
+        else:
+            k_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + packed_offs[:, None] * stride_k_cache_3
+                + slot_in_blk[None, :] * stride_k_cache_1
+            )
+            K_packed = tl.load(
+                key_cache_ptr + k_off,
+                mask=packed_dim_mask[:, None] & tile_mask[None, :],
+                other=0,
+            )
+            # INT4 unpacks nibbles as plain uint [0..15]; the zero-point
+            # is applied on the score side.
+            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+            K_s0 = K_s0_u.to(tl.float32)
+            K_s1 = K_s1_u.to(tl.float32)
         v_off = (
             physical_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_2
@@ -541,11 +623,8 @@ def _attn_packed(
             mask=packed_dim_mask[None, :] & tile_mask[:, None],
             other=0,
         )
-        # Dequantize KV.  INT4 unpacks nibbles as plain uint [0..15];
-        # the zero-point is applied on the score side.
-        K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
-        K_s0 = K_s0_u.to(tl.float32)
-        K_s1 = K_s1_u.to(tl.float32)
+        # Dequantize V.  INT4 unpacks nibbles as plain uint [0..15];
+        # the zero-point is applied on the output side.
         V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
         V_s0 = V_s0_u.to(tl.float32)
         V_s1 = V_s1_u.to(tl.float32)
@@ -565,9 +644,12 @@ def _attn_packed(
 
         # INT4 steganographs the 4-bit zero-point in the low 4 bits of
         # the float32 scale's mantissa.
-        ks_bits = ks_raw.to(tl.int32, bitcast=True)
-        k_zp = (ks_bits & 0xF).to(tl.float32)
-        k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
+        if KEY_INT8:
+            k_token_head_scales = ks_raw
+        else:
+            ks_bits = ks_raw.to(tl.int32, bitcast=True)
+            k_zp = (ks_bits & 0xF).to(tl.float32)
+            k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
         vs_bits = vs_raw.to(tl.int32, bitcast=True)
         v_zp = (vs_bits & 0xF).to(tl.float32)
         v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
@@ -587,11 +669,15 @@ def _attn_packed(
         # Score: split-dot across the 2 INT4 streams; fused
         # softmax_scale * per-(token, head) k_scale in one mul.  INT4
         # subtracts the ``zp * sum(Q)`` correction term.
+        # INT8 keys: one plain dot, no zero-point.
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
-        S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-            scale * k_token_head_scales[None, :]
-        )
+        if KEY_INT8:
+            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
+        else:
+            raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
+                scale * k_token_head_scales[None, :]
+            )
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -712,6 +798,7 @@ def _launch_packed_attn(
     softmax_segm_max,
     softmax_segm_expsum,
     packing_factor: int,
+    key_int8: bool = False,
 ):
     """Launch `_attn_packed` for one of the sub-byte modes.
 
@@ -844,6 +931,7 @@ def _launch_packed_attn(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         PACKING_FACTOR=packing_factor,
+        KEY_INT8=key_int8,
         v_cache_delta=v_cache_delta,
         K_ALIGN=k_align,
         V_ALIGN=v_align,
@@ -886,8 +974,12 @@ def reshape_and_cache_int4(
     *,
     k_scale_cache: torch.Tensor,
     v_scale_cache: torch.Tensor,
+    key_int8: bool = False,
 ) -> None:
-    """Pre-rotate (RHT), pack to INT4 and write into the paged cache."""
+    """Pre-rotate (RHT), pack to INT4 and write into the paged cache.
+
+    With `key_int8` (K8V4_PER_TOKEN_HEAD) the key is written as int8.
+    """
     key = single_rht(key.float()).to(key.dtype)
     value = single_rht(value.float()).to(value.dtype)
     _run_reshape_kernel(
@@ -900,6 +992,7 @@ def reshape_and_cache_int4(
         v_scale_cache=v_scale_cache,
         slot_mapping=slot_mapping,
         packing_factor=_INT4_PACKING_FACTOR,
+        key_int8=key_int8,
     )
 
 
@@ -930,8 +1023,11 @@ def unified_attention_int4(
     softmax_segm_output: torch.Tensor | None = None,
     softmax_segm_max: torch.Tensor | None = None,
     softmax_segm_expsum: torch.Tensor | None = None,
+    key_int8: bool = False,
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
+
+    With `key_int8` (K8V4_PER_TOKEN_HEAD) the key cache holds int8 keys.
 
     The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two
     divisor of `head_size` (`b == head_size` for power-of-two sizes), so
@@ -969,6 +1065,7 @@ def unified_attention_int4(
         softmax_segm_max=softmax_segm_max,
         softmax_segm_expsum=softmax_segm_expsum,
         packing_factor=_INT4_PACKING_FACTOR,
+        key_int8=key_int8,
     )
 
     out_f = single_rht(out.float(), inverse=True) / rht_norm

@@ -386,7 +386,7 @@ def kernel_unified_attention(
     stride_vs_head: int | None = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) and K8V4 (16) use the
     # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
@@ -1045,11 +1045,11 @@ def unified_attention(
     use_causal = bool(causal) if not use_per_seq_causal else True
     per_seq_causal_ptr = causal if use_per_seq_causal else None
 
-    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # Sub-byte packed modes (INT4, K8V4) need a bespoke kernel (split-dot +
     # sub-byte unpack); everything else goes through the core kernel below.
-    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+    if kv_quant_mode.is_int4_packed:
         assert use_causal and not use_per_seq_causal, (
-            "INT4_PER_TOKEN_HEAD only supports causal attention"
+            f"{kv_quant_mode.name} only supports causal attention"
         )
         from vllm.v1.attention.ops.int4_per_token_head import (
             unified_attention_int4,
@@ -1083,6 +1083,7 @@ def unified_attention(
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
             softmax_segm_expsum=softmax_segm_expsum,
+            key_int8=kv_quant_mode == KVQuantMode.K8V4_PER_TOKEN_HEAD,
         )
         return
 

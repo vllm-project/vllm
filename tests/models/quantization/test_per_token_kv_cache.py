@@ -4,7 +4,7 @@
 """End-to-end accuracy tests for per-token-head KV cache quantization.
 
 Compares logprobs between a baseline bf16 model and the same model with
-per-token-head quantized KV cache (int4, int8 or fp8) using the Triton
+per-token-head quantized KV cache (int4, k8v4, int8 or fp8) using the Triton
 attention backend, on the prompt tokens and on the greedy continuation.
 
 Run: pytest tests/models/quantization/test_per_token_kv_cache.py -v -s
@@ -19,9 +19,11 @@ from ..utils import check_logprobs_close, check_logprobs_shift
 # (mean, largest) logprob shift from bf16 allowed per position, see
 # `check_logprobs_shift`. On MI355X, over the request groupings and GEMM kernel
 # sets tried, the mean is 0.21-0.24 for int4, 0.04-0.05 for int8 and 0.07-0.08
-# for fp8; the largest is at most 1.51, 0.33 and 0.70.
+# for fp8; the largest is at most 1.51, 0.33 and 0.70. k8v4 is measured on
+# CUDA only (A40 and RTX PRO 6000 Blackwell): mean 0.099-0.102, largest 0.47.
 LOGPROB_SHIFT_BOUNDS = {
     "int4_per_token_head": (0.3, 2.0),
+    "k8v4_per_token_head": (0.13, 0.7),
     "int8_per_token_head": (0.065, 0.45),
     "fp8_per_token_head": (0.105, 1.0),
 }
@@ -42,7 +44,12 @@ LOGPROB_SHIFT_BOUNDS = {
 )
 @pytest.mark.parametrize(
     "kv_cache_dtype",
-    ["int4_per_token_head", "int8_per_token_head", "fp8_per_token_head"],
+    [
+        "int4_per_token_head",
+        "k8v4_per_token_head",
+        "int8_per_token_head",
+        "fp8_per_token_head",
+    ],
 )
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -64,10 +71,11 @@ def test_per_token_head_kv_cache_accuracy(
     cache.
 
     The logprob shift is bounded per dtype at every prompt and generated
-    position that shares its context with the baseline. int8 and fp8 must also
-    keep the baseline's greedy token in their top logprobs at the first
+    position that shares its context with the baseline. k8v4, int8 and fp8 must
+    also keep the baseline's greedy token in their top logprobs at the first
     divergence. int4 cannot: its 16 levels move a flat distribution by more
     than its top-8 spans (#69766), so it is held to the shift bounds alone.
+    k8v4 keeps the keys at 8 bits, which is where int4 loses that token.
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")

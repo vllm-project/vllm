@@ -129,7 +129,12 @@ def test_split_k_segment_rows_cover_verify_queries(
     ],
 )
 @pytest.mark.parametrize(
-    "kv_quant_mode", [KVQuantMode.NONE, KVQuantMode.INT4_PER_TOKEN_HEAD]
+    "kv_quant_mode",
+    [
+        KVQuantMode.NONE,
+        KVQuantMode.INT4_PER_TOKEN_HEAD,
+        KVQuantMode.K8V4_PER_TOKEN_HEAD,
+    ],
 )
 def test_split_k_scratch_rows_follow_speculative_config(
     monkeypatch,
@@ -139,8 +144,8 @@ def test_split_k_scratch_rows_follow_speculative_config(
     rows,
     kv_quant_mode,
 ):
-    # The INT4 launcher never runs multi-query split-K.
-    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+    # The INT4 launcher (also K8V4) never runs multi-query split-K.
+    if kv_quant_mode.is_int4_packed:
         rows = max_num_seqs
     builder, _ = _build(
         monkeypatch,
