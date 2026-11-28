@@ -800,20 +800,21 @@ def _fused_q_kernel(
     USE_FNUZ: tl.constexpr,
 ):
     tok_idx = tl.program_id(0).to(tl.int64)
-    pid = tl.program_id(1)
-    head_idx = tl.program_id(2)
+    head_task = tl.program_id(1)
+    MQA_HEAD_PAIRS: tl.constexpr = (NUM_Q_HEADS + 1) // 2
+    INDEX_HEADS: tl.constexpr = NUM_INDEX_Q_HEADS if HAS_INDEXER else 0
+    NOPE_START: tl.constexpr = MQA_HEAD_PAIRS + INDEX_HEADS
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
 
-    if pid == 2:
+    if head_task >= NOPE_START:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
         # query path ql_nope is consumed as-is (no pack), so skip entirely.
         if not QUANTIZE_MQA:
             return
-        if 2 * head_idx >= NUM_Q_HEADS:
-            return
+        head_idx = head_task - NOPE_START
 
         scale = tl.load(q_scale_ptr)
         for local_head in range(2):
@@ -838,10 +839,9 @@ def _fused_q_kernel(
                     mask=ql_nope_mask,
                 )
         return
-    elif pid == 0:
+    elif head_task < MQA_HEAD_PAIRS:
         # q_pe RoPE + quantize + pack into the tail of mqa_q_fp8.
-        if 2 * head_idx >= NUM_Q_HEADS:
-            return
+        head_idx = head_task
 
         pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _get_cos_sin(
@@ -900,14 +900,13 @@ def _fused_q_kernel(
                     tl.store(q_pe_dst + rot_off * 2, r1.to(out_ty))
                     tl.store(q_pe_dst + rot_off * 2 + 1, r2.to(out_ty))
         return
-    elif pid == 1:
+    else:
         # Index Q RoPE + fp8 quant, all in registers. The roped bf16 index_q is
         # never consumed (only the fp8 below is), so we avoid an in-place
         # store-then-reload round-trip.
         if not HAS_INDEXER:
             return
-        if head_idx >= NUM_INDEX_Q_HEADS:
-            return
+        head_idx = head_task - MQA_HEAD_PAIRS
 
         pos = tl.load(pos_ptr + tok_idx)
         index_q_block = tl.arange(0, INDEX_Q_HEAD_DIM)
@@ -1001,12 +1000,8 @@ def fused_q(
     assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
-    # Grid's 3rd dim must cover the MQA-pack heads (pid 0/2 iterate 2 heads
-    # each) and, when present, the indexer heads (pid 1).
-    mqa_grid_heads = (num_q_heads + 1) // 2
     if not has_indexer:
-        # Shared layer: cached 1-element dummies; pid 1 skipped by HAS_INDEXER
-        # and never dereferences them.
+        # Shared layer: cached 1-element dummies, unused by the kernel.
         index_q = _dummy((1, 1, 1), q_pe.dtype, q_pe.device)
         index_q_cos_sin_cache = q_pe_cos_sin_cache
         index_weights = _dummy((1, 1), torch.float32, q_pe.device)
@@ -1032,7 +1027,6 @@ def fused_q(
             quantize_mqa=quantize_mqa,
         ):
             cutedsl_kernel = fused_q_cutedsl
-    grid_heads = max(mqa_grid_heads, num_index_q_heads)
     if quantize_mqa:
         # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
         mqa_q_fp8 = torch.empty(
@@ -1042,7 +1036,7 @@ def fused_q(
             dtype=_FP8_DTYPE,
             device=q_pe.device,
         )
-        # Placeholder; pid 0 packs q_pe into mqa_q_fp8 instead.
+        # Placeholder; the RoPE programs pack q_pe into mqa_q_fp8 instead.
         q_pe_out = mqa_q_fp8
         mqa_q = mqa_q_fp8
     else:
@@ -1078,7 +1072,13 @@ def fused_q(
     pdl_kwargs = (
         {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
     )
-    _fused_q_kernel[(num_tokens, 3, grid_heads)](
+    # One program per pair of RoPE or quantized NoPE heads, and one per
+    # indexer head when this layer owns an indexer.
+    mqa_head_pairs = triton.cdiv(num_q_heads, 2)
+    head_tasks = mqa_head_pairs * (2 if quantize_mqa else 1)
+    if has_indexer:
+        head_tasks += num_index_q_heads
+    _fused_q_kernel[(num_tokens, head_tasks)](
         positions,
         q_pe,
         q_pe.stride(0),
