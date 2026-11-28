@@ -508,14 +508,3 @@ class InklingParser(ParserEngine):
                 content=content,
             )
         return reasoning, content, tool_call_info
-
-    @staticmethod
-    def _extract_args_value(parsed: dict) -> str | None:
-        # Inkling wraps arguments under "args" rather than "arguments".
-        for key in ("args", "arguments", "parameters"):
-            if key in parsed:
-                val = parsed[key]
-                if isinstance(val, str):
-                    return val
-                return json.dumps(val, ensure_ascii=False)
-        return None

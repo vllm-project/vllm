@@ -563,6 +563,24 @@ class TestStreaming:
         assert json.loads(args) == {"a": 1}
         assert "name" not in args
 
+    @pytest.mark.parametrize("chunk_size", [1, 3, 1000])
+    def test_string_encoded_arguments_match_non_streaming(
+        self, parser, mock_request, chunk_size
+    ):
+        # Arguments sent as a JSON-encoded string: streaming must send the
+        # same arguments as non-streaming, which falls back to
+        # `_extract_args_json` when the arg converter rejects the value.
+        text = _tool_block("get_weather", '"{\\"city\\": \\"SF\\"}"')
+        _, _, tools = parser.parse(text, mock_request)
+        assert tools[0].name == "get_weather"
+
+        results = _stream(parser, mock_request, text, chunk_size)
+        assert collect_function_name(results) == "get_weather"
+        assert collect_tool_arguments(results) == tools[0].arguments
+        # The caller receives the bare args object, not the Inkling
+        # `{"name": ..., "args": ...}` wrapper.
+        assert json.loads(collect_tool_arguments(results)) == {"city": "SF"}
+
     @pytest.mark.parametrize("chunk_size", [1, 9])
     def test_parallel_calls_streaming(self, mock_tokenizer, mock_request, chunk_size):
         parser = InklingParser(mock_tokenizer)

@@ -1207,7 +1207,8 @@ class ParserEngine(Parser):
             final_json = converter(slot.args, False)
         except (json.JSONDecodeError, ValueError, TypeError):
             logger.debug("arg converter failed (flush): %s", slot.args[:80])
-            return None
+            # Same fallback as the non-streaming path (_build_extracted_result).
+            final_json = self._extract_args_json(slot.args, slot.name)
 
         if final_json:
             final_json = self._fix_arg_types(final_json, slot.name)
@@ -1283,7 +1284,7 @@ class ParserEngine(Parser):
 
     @staticmethod
     def _extract_args_value(parsed: dict) -> str | None:
-        for key in ("arguments", "parameters"):
+        for key in ("args", "arguments", "parameters"):
             if key in parsed:
                 val = parsed[key]
                 if isinstance(val, str):
