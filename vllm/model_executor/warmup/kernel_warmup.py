@@ -263,10 +263,20 @@ def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
     return buckets
 
 
-def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
-    if not worker.vllm_config.kernel_config.enable_rocm_aiter_gemm_warmup:
+def rocm_aiter_gemm_warmup(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
+    """Build AITER's tuned GEMM kernels for every bucket the runner can hit.
+
+    Args:
+        runner: The model runner to warm up.
+        skip_attn: Additionally skip attention in the warmup dummy runs, for
+            callers that hold no KV cache (the weight cache daemon).
+
+    """
+    if not runner.vllm_config.kernel_config.enable_rocm_aiter_gemm_warmup:
         return
-    max_m = worker.scheduler_config.max_num_batched_tokens
+    max_m = runner.vllm_config.scheduler_config.max_num_batched_tokens
     # Other AITER tables key exact M at multiples of 8 up to 512; max_m - 1
     # covers Triton's divisibility specialization.
     sizes = sorted(
@@ -282,7 +292,9 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
     )
     start = time.perf_counter()
     for num_tokens in sizes:
-        worker.model_runner._dummy_run(num_tokens, skip_eplb=True)
+        runner._dummy_run(
+            num_tokens, skip_eplb=True, skip_attn=skip_attn, is_profile=skip_attn
+        )
     logger.info(
         "Warmed up AITER GEMMs at %d token counts in %.1fs.",
         len(sizes),
@@ -354,7 +366,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         rocm_segmented_attn_autotune_warmup(worker)
-        _rocm_aiter_gemm_warmup(worker)
+        rocm_aiter_gemm_warmup(worker.model_runner)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)

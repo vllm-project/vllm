@@ -3,9 +3,12 @@
 """Compiled runtime artifact warmup cache."""
 
 import hashlib
+import json
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
+
+import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
@@ -21,6 +24,8 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
     _install,
     _manifest,
 )
+from vllm.platforms import current_platform
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
@@ -39,6 +44,7 @@ class CompileArtifactWarmupCache(WarmupCache):
         self._store_names = tuple(store_names)
         self._store_sources: list[ArtifactStore] | None = None
         self._payload: dict[str, Any] | None = None
+        self._adopted = False
 
     @property
     def store_sources(self) -> list[ArtifactStore]:
@@ -49,7 +55,13 @@ class CompileArtifactWarmupCache(WarmupCache):
     def adopt_before_load(
         self, daemon: "WeightCacheDaemon", transport: "SeedTransport"
     ) -> None:
-        if daemon.seed_config.source is None or not self.store_sources:
+        if not self.store_sources:
+            return
+        # A shared store is addressed by the deployment digest, so it serves a
+        # bundle with no source daemon online; D2D is the fallback.
+        if self._adopt_from_stores(daemon):
+            return
+        if daemon.seed_config.source is None:
             return
         deadline = time.monotonic() + 300.0
         while time.monotonic() < deadline:
@@ -81,12 +93,15 @@ class CompileArtifactWarmupCache(WarmupCache):
         )
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
-        # Compiler outputs are created by the preceding FlashInfer warmup. A
-        # target already fetched its bundle before model construction.
-        if daemon.seed_config.listen is not None:
-            self.prepare()
+        # Compiler outputs are created by the preceding warmup passes. A target
+        # already fetched its bundle before model construction, so republishing
+        # it would only add a second copy under the same index.
+        if self._adopted:
+            return
+        if daemon.seed_config.listen is not None or self.store_sources:
+            self.prepare(daemon)
 
-    def prepare(self) -> None:
+    def prepare(self, daemon: "WeightCacheDaemon | None" = None) -> None:
         self._payload = None
         stores = self.store_sources
         if not stores:
@@ -100,6 +115,11 @@ class CompileArtifactWarmupCache(WarmupCache):
             key = artifact_key(self.kind, digest, "bundle.tar")
             for store in stores:
                 store.put(key, bundle)
+                # A store that cannot take the bundle only logs, so an index
+                # written now would send every later daemon on a fetch that
+                # can only fail. Treat a dropped bundle as nothing published.
+                if len(store.get(key) or b"") != len(bundle):
+                    raise RuntimeError(f"{store.name} did not store {key}")
         except Exception as error:
             logger.warning(
                 "Cannot publish compile cache; continuing without it: %s", error
@@ -111,6 +131,64 @@ class CompileArtifactWarmupCache(WarmupCache):
             "bundle_size": len(bundle),
             "sha256": digest,
         }
+        logger.info(
+            "Published the compile cache bundle %s: %d files, %.1f MiB",
+            key,
+            len(manifest["entries"]),
+            len(bundle) / 2**20,
+        )
+        if daemon is not None:
+            self._publish_index(daemon)
+
+    def _index_key(self, daemon: "WeightCacheDaemon") -> str:
+        """Key naming this deployment's bundle in every shared store.
+
+        Unlike the bundle itself the index is not content-addressed, so a
+        daemon that has compiled nothing yet can still find it. The digest
+        covers everything that makes one rank's compiled modules unusable by
+        another: the weight fingerprint (model, quantization, parallel layout
+        and kernel backends) plus the device architecture and the toolchain
+        that emitted the code.
+        """
+        hasher = safe_hash(b"", usedforsecurity=False)
+        for part in (
+            str(daemon.cache_key),
+            str(current_platform.get_device_capability()),
+            current_platform.get_device_name(daemon.device_index),
+            torch.__version__,
+            str(torch.version.hip or torch.version.cuda),
+        ):
+            hasher.update(part.encode())
+            hasher.update(b"\0")
+        return artifact_key(self.kind, hasher.hexdigest(), "index.json")
+
+    def _publish_index(self, daemon: "WeightCacheDaemon") -> None:
+        key = self._index_key(daemon)
+        descriptor = json.dumps(self._payload).encode()
+        for store in self.store_sources:
+            store.put(key, descriptor)
+        logger.info("Published the compile cache index: %s", key)
+
+    def _adopt_from_stores(self, daemon: "WeightCacheDaemon") -> bool:
+        """Install the bundle a shared store holds for this deployment."""
+        key = self._index_key(daemon)
+        for store in self.store_sources:
+            if (descriptor := store.get(key)) is None:
+                continue
+            try:
+                self.install(daemon, self.validate_payload(json.loads(descriptor)))
+            except Exception as error:
+                logger.warning(
+                    "Cannot install the shared compile cache %s; using local "
+                    "compilation: %s",
+                    key,
+                    error,
+                )
+                return False
+            logger.info("Adopted the compile cache from a shared store: %s", key)
+            self._adopted = True
+            return True
+        return False
 
     def request_params(self, ctx: Any) -> dict[str, Any]:
         return {"version": 1}

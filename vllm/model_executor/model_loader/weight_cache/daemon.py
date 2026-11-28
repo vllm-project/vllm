@@ -151,6 +151,9 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import 
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.rocm_aiter import (
+    RocmAiterWarmupCache,
+)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
 )
@@ -198,8 +201,11 @@ class WeightCacheDaemon:
             raise ValueError("The weight cache daemon does not support EPLB.")
         self.seed_config = seed_config or SeedConfig()
         warmup_cache_stores = tuple(warmup_cache_stores)
+        # The compile artifact cache bundles whatever the passes before it left
+        # in the cache roots, so it must stay last.
         self.warmup_caches: list[WarmupCache] = [
             FlashInferWarmupCache(warmup_cache_stores),
+            RocmAiterWarmupCache(),
             CompileArtifactWarmupCache(warmup_cache_stores),
         ]
         self.weight_seed = WeightShardSeed(self)
