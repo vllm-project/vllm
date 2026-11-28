@@ -133,6 +133,9 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.requests: list[HF3FSRequestMetadata] = []
+        # Requests preempted in this step.
+        # Their blocks may be reused by this step's forward.
+        self.preempted_req_ids: set[str] = set()
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""
