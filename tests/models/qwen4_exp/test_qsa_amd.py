@@ -399,6 +399,64 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     assert topk_call["topk_tokens"] == block_topk
 
 
+@pytest.mark.parametrize(
+    ("rows", "columns", "prefill"),
+    [(385, 12288, True), (384, 12288, False), (385, 12287, False)],
+    ids=["wide", "decode_rows", "narrow"],
+)
+def test_qsa_selection_uses_prefill_topk_for_wide_cdna4_chunks(
+    monkeypatch: pytest.MonkeyPatch, rows: int, columns: int, prefill: bool
+) -> None:
+    token_topk, compress_ratio = 8, 4
+    logits = torch.empty((rows, columns), dtype=torch.float32)
+    visible_blocks = torch.full((rows,), 4, dtype=torch.int32)
+    calls: dict[str, tuple] = {}
+    monkeypatch.setattr(
+        qsa_ops,
+        "qsa_mqa_paged",
+        lambda *args, **kwargs: (logits, visible_blocks),
+    )
+    monkeypatch.setattr(qsa_ops.current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: 4)
+    monkeypatch.setattr(
+        qsa_ops.ops, "top_k_per_row_decode", lambda *a: calls.update(decode=a)
+    )
+    monkeypatch.setattr(
+        qsa_ops.ops, "top_k_per_row_prefill", lambda *a: calls.update(prefill=a)
+    )
+    monkeypatch.setattr(qsa_ops, "expand_qsa_block_indices_cuda", lambda *a: None)
+
+    qsa_ops.qsa_select_paged_tokens(
+        torch.empty((rows, 1, 1)),
+        torch.empty((1, columns, 1, 1)),
+        torch.empty((1, 1), dtype=torch.int32),
+        torch.zeros(rows, dtype=torch.int32),
+        torch.arange(rows, dtype=torch.int32),
+        torch.tensor([4 * columns], dtype=torch.int32),
+        token_topk,
+        compress_ratio,
+    )
+
+    assert set(calls) == {"prefill" if prefill else "decode"}
+    if prefill:
+        (
+            topk_logits,
+            row_starts,
+            row_ends,
+            blocks,
+            num_rows,
+            stride0,
+            stride1,
+            topk,
+        ) = calls["prefill"]
+        assert topk_logits is logits
+        assert torch.equal(row_starts, torch.zeros_like(visible_blocks))
+        assert row_ends is visible_blocks
+        assert blocks.shape == (rows, token_topk // compress_ratio)
+        assert (num_rows, stride0, stride1) == (rows, columns, 1)
+        assert topk == token_topk // compress_ratio
+
+
 def _qsa_mqa_paged_reference(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -506,6 +564,68 @@ def test_qsa_mqa_paged_matches_reference(
     ).to(torch.int32)
     torch.testing.assert_close(visible_blocks, expected_visible, rtol=0, atol=0)
     # Logits at or past visible_blocks are undefined.
+    columns = torch.arange(logits.shape[1], device="cuda")
+    logits = logits.masked_fill(columns >= expected_visible[:, None], -torch.inf)
+    expected = _qsa_mqa_paged_reference(
+        q, k_cache, page_table, token_to_req, expected_visible
+    )
+    torch.testing.assert_close(logits, expected, rtol=1e-4, atol=1e-5)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    "profile",
+    [(16, 64, 1, 4, 1), (16, 32, 2, 2, 2), (16, 32, 4, 2, 1)],
+    ids=["one_tile", "decode_tiles", "prefill_tiles"],
+)
+@pytest.mark.parametrize("num_heads", [2, 4, 6])
+@pytest.mark.parametrize("dtype", ["bf16", "fp8"])
+def test_qsa_mqa_paged_column_tiles_match_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: tuple[int, ...],
+    num_heads: int,
+    dtype: str,
+) -> None:
+    # A prefill chunk, MTP-style 4-row decodes and an empty row share 16-row
+    # blocks; the longest row sees 300 columns, so a program's last column tile
+    # is partly or wholly past every row. Fewer than four heads leave held
+    # query tiles zero; more than four reload the rest per tile.
+    monkeypatch.setattr(qsa_ops, "_mqa_profile", lambda rows: profile)
+    set_random_seed(0)
+    page_size, compress_ratio, table_width = 16, 4, 24
+    positions = [range(1100, 1203), *(range(n - 4, n) for n in (37, 590, 1001)), [2]]
+    lengths = torch.tensor([1203, 37, 590, 1001, 3], device="cuda", dtype=torch.int32)
+    token_to_req = torch.tensor(
+        [r for r, p in enumerate(positions) for _ in p],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    query_positions = torch.tensor(
+        [i for p in positions for i in p], device="cuda", dtype=torch.int64
+    )
+    num_requests = lengths.numel()
+    num_pages = num_requests * table_width + 8
+    q = _indexer_tensor((token_to_req.numel(), num_heads, 32), dtype)
+    k_cache = _indexer_tensor((num_pages, page_size, 1, 32), dtype)
+    page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32)[
+        : num_requests * table_width
+    ].view(num_requests, table_width)
+
+    logits, visible_blocks = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        lengths,
+        compress_ratio,
+    )
+
+    expected_visible = torch.minimum(
+        (query_positions + 1) // compress_ratio,
+        lengths[token_to_req.long()] // compress_ratio,
+    ).to(torch.int32)
+    torch.testing.assert_close(visible_blocks, expected_visible, rtol=0, atol=0)
     columns = torch.arange(logits.shape[1], device="cuda")
     logits = logits.masked_fill(columns >= expected_visible[:, None], -torch.inf)
     expected = _qsa_mqa_paged_reference(

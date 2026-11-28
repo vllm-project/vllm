@@ -52,6 +52,7 @@ def _qsa_mqa_paged_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    TILES: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     UPCAST_FP8: tl.constexpr,
 ) -> None:
@@ -72,82 +73,121 @@ def _qsa_mqa_paged_kernel(
     )
     if tl.program_id(1) == 0:
         tl.store(visible_blocks_ptr + rows, visible, mask=row_valid)
-    if tl.program_id(1) * BLOCK_N >= tl.max(tl.where(row_valid, visible, 0), axis=0):
+    max_visible = tl.max(tl.where(row_valid, visible, 0), axis=0)
+    if tl.program_id(1) * TILES * BLOCK_N >= max_visible:
         return
-    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     dims = tl.arange(0, BLOCK_D)
-    logical_page = columns // PAGE_SIZE
-    page_offset = columns % PAGE_SIZE
-    column_valid = (columns < num_columns) & (logical_page < PAGE_TABLE_WIDTH)
-    safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
-    score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    valid = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int1)
-
-    # Rows are request-major; a block spanning requests scores each with its keys.
-    request = tl.min(tl.where(request_valid, safe_requests, num_requests), axis=0)
-    while request < num_requests:
-        in_request = request_valid & (safe_requests == request)
-        request_visible = tl.max(tl.where(in_request, visible, 0), axis=0)
-        if tl.program_id(1) * BLOCK_N < request_visible:
-            physical_page = tl.load(
-                page_table_ptr
-                + request * stride_table_req
-                + safe_logical_page * stride_table_page,
-                mask=column_valid,
-                other=-1,
-            )
-            key_valid = (
-                column_valid & (physical_page >= 0) & (physical_page < num_pages)
-            )
-            # physical_page * block stride can overflow int32 for large caches.
-            safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
-            keys = tl.load(
-                k_cache_ptr
-                + safe_physical_page[:, None] * stride_cache_block
-                + page_offset[:, None] * stride_cache_token
-                + dims[None, :] * stride_cache_dim,
-                mask=key_valid[:, None] & (dims[None, :] < HEAD_DIM),
-                other=0.0,
-            )
-            keys = tl.trans(keys)
-            if UPCAST_FP8:
-                keys = keys.to(tl.bfloat16)
-            else:
-                keys = keys.to(q_ptr.dtype.element_ty)
-            request_score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-            for head in tl.static_range(0, NUM_HEADS):
-                query = tl.load(
-                    q_ptr
-                    + rows[:, None] * stride_q_row
-                    + head * stride_q_head
-                    + dims[None, :] * stride_q_dim,
-                    mask=in_request[:, None] & (dims[None, :] < HEAD_DIM),
-                    other=0.0,
-                )
-                if UPCAST_FP8:
-                    query = query.to(tl.bfloat16)
-                dot = tl.dot(query, keys, out_dtype=tl.float32)
-                request_score += tl.maximum(dot, 0.0)
-            request_valid_2d = (
-                in_request[:, None]
-                & key_valid[None, :]
-                & (columns[None, :] < visible[:, None])
-            )
-            score = tl.where(request_valid_2d, request_score, score)
-            valid |= request_valid_2d
-        request = tl.min(
-            tl.where(
-                request_valid & (safe_requests > request), safe_requests, num_requests
-            ),
-            axis=0,
-        )
-
-    score /= score_divisor
-    tl.store(
-        logits_ptr + rows[:, None] * stride_logits_row + columns[None, :],
-        tl.where(valid, score, -float("inf")),
-        mask=row_valid[:, None] & (columns[None, :] < num_columns),
+    # The first four heads' queries stay in registers across the TILES column
+    # tiles; absent heads load as zero and add relu(0) = 0.
+    query_ptrs = q_ptr + rows[:, None] * stride_q_row + dims[None, :] * stride_q_dim
+    query_mask = request_valid[:, None] & (dims[None, :] < HEAD_DIM)
+    query0 = tl.load(query_ptrs, mask=query_mask, other=0.0)
+    query1 = tl.load(
+        query_ptrs + stride_q_head, mask=query_mask & (NUM_HEADS > 1), other=0.0
     )
+    query2 = tl.load(
+        query_ptrs + 2 * stride_q_head, mask=query_mask & (NUM_HEADS > 2), other=0.0
+    )
+    query3 = tl.load(
+        query_ptrs + 3 * stride_q_head, mask=query_mask & (NUM_HEADS > 3), other=0.0
+    )
+    if UPCAST_FP8:
+        query0 = query0.to(tl.bfloat16)
+        query1 = query1.to(tl.bfloat16)
+        query2 = query2.to(tl.bfloat16)
+        query3 = query3.to(tl.bfloat16)
+    for tile in range(TILES):
+        start = (tl.program_id(1) * TILES + tile) * BLOCK_N
+        if start < max_visible:
+            columns = start + tl.arange(0, BLOCK_N)
+            logical_page = columns // PAGE_SIZE
+            page_offset = columns % PAGE_SIZE
+            column_valid = (columns < num_columns) & (logical_page < PAGE_TABLE_WIDTH)
+            safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
+            score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            valid = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int1)
+
+            # Rows are request-major; a block spanning requests scores each
+            # with its keys.
+            request = tl.min(
+                tl.where(request_valid, safe_requests, num_requests), axis=0
+            )
+            while request < num_requests:
+                in_request = request_valid & (safe_requests == request)
+                request_visible = tl.max(tl.where(in_request, visible, 0), axis=0)
+                if start < request_visible:
+                    physical_page = tl.load(
+                        page_table_ptr
+                        + request * stride_table_req
+                        + safe_logical_page * stride_table_page,
+                        mask=column_valid,
+                        other=-1,
+                    )
+                    key_valid = (
+                        column_valid
+                        & (physical_page >= 0)
+                        & (physical_page < num_pages)
+                    )
+                    # physical_page * block stride can overflow int32 for large caches.
+                    safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+                    keys = tl.load(
+                        k_cache_ptr
+                        + safe_physical_page[:, None] * stride_cache_block
+                        + page_offset[:, None] * stride_cache_token
+                        + dims[None, :] * stride_cache_dim,
+                        mask=key_valid[:, None] & (dims[None, :] < HEAD_DIM),
+                        other=0.0,
+                    )
+                    keys = tl.trans(keys)
+                    if UPCAST_FP8:
+                        keys = keys.to(tl.bfloat16)
+                    else:
+                        keys = keys.to(q_ptr.dtype.element_ty)
+                    # Rows outside this request are masked out of the result below.
+                    request_score = tl.maximum(
+                        tl.dot(query0, keys, out_dtype=tl.float32), 0.0
+                    )
+                    request_score += tl.maximum(
+                        tl.dot(query1, keys, out_dtype=tl.float32), 0.0
+                    )
+                    request_score += tl.maximum(
+                        tl.dot(query2, keys, out_dtype=tl.float32), 0.0
+                    )
+                    request_score += tl.maximum(
+                        tl.dot(query3, keys, out_dtype=tl.float32), 0.0
+                    )
+                    for head in tl.static_range(4, NUM_HEADS):
+                        query = tl.load(
+                            query_ptrs + head * stride_q_head,
+                            mask=query_mask,
+                            other=0.0,
+                        )
+                        if UPCAST_FP8:
+                            query = query.to(tl.bfloat16)
+                        dot = tl.dot(query, keys, out_dtype=tl.float32)
+                        request_score += tl.maximum(dot, 0.0)
+                    request_valid_2d = (
+                        in_request[:, None]
+                        & key_valid[None, :]
+                        & (columns[None, :] < visible[:, None])
+                    )
+                    score = tl.where(request_valid_2d, request_score, score)
+                    valid |= request_valid_2d
+                request = tl.min(
+                    tl.where(
+                        request_valid & (safe_requests > request),
+                        safe_requests,
+                        num_requests,
+                    ),
+                    axis=0,
+                )
+
+            score /= score_divisor
+            tl.store(
+                logits_ptr + rows[:, None] * stride_logits_row + columns[None, :],
+                tl.where(valid, score, -float("inf")),
+                mask=row_valid[:, None] & (columns[None, :] < num_columns),
+            )
 
 
 @triton.jit
@@ -726,6 +766,20 @@ def _compress_qsa_groups_kernel(
     )
 
 
+def _mqa_profile(rows: int) -> tuple[int, int, int, int, int]:
+    """(BLOCK_M, BLOCK_N, column tiles per program, warps, stages)."""
+    if get_cdna_version() != 4 or rows < 128:
+        return 16, 64, 1, 4, 1
+    # Measured on MI355X: prefill chunks, then MTP verify decode.
+    return (16, 32, 4, 2, 1) if rows >= 2048 else (16, 32, 2, 2, 2)
+
+
+def _use_prefill_topk(rows: int, columns: int) -> bool:
+    # gfx950's length-aware decode top-k takes at most 384 rows; past that the
+    # decode kernel's radix path loses to the prefill kernel on wide rows.
+    return get_cdna_version() == 4 and rows > 384 and columns >= 12288
+
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -826,8 +880,11 @@ def qsa_mqa_paged(
             num_warps=rows_warps,
         )
         return logits, visible_blocks
-    block_m, block_n = 16, 64
-    grid = (triton.cdiv(q.shape[0], block_m), triton.cdiv(columns, block_n))
+    block_m, block_n, tiles, warps, stages = _mqa_profile(q.shape[0])
+    grid = (
+        triton.cdiv(q.shape[0], block_m),
+        triton.cdiv(columns, block_n * tiles),
+    )
     _qsa_mqa_paged_kernel[grid](
         q,
         k_cache,
@@ -858,11 +915,13 @@ def qsa_mqa_paged(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_D=triton.next_power_of_2(q.shape[2]),
+        TILES=tiles,
         COMPRESS_RATIO=compress_ratio,
         UPCAST_FP8=(
             q.dtype == current_platform.fp8_dtype() and get_cdna_version() != 3
         ),
-        num_warps=4,
+        num_warps=warps,
+        num_stages=stages,
     )
     return logits, visible_blocks
 
@@ -1002,6 +1061,17 @@ def qsa_select_paged_tokens(
                 topk_workspace,
                 block_topk,
                 columns,
+            )
+        elif _use_prefill_topk(blocks.shape[0], columns):
+            ops.top_k_per_row_prefill(
+                logits,
+                torch.zeros_like(visible_blocks),
+                visible_blocks,
+                blocks,
+                blocks.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                block_topk,
             )
         else:
             ops.top_k_per_row_decode(
