@@ -598,6 +598,7 @@ steps:
       - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla.py
       - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla_gfx950.py
       - tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
+      - tests/kernels/attention/test_rocm_aiter_mla_sparse_quant_specialize.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer.py
       - vllm/models/kimi_k3/amd/dsa.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer_prefill.py
@@ -621,6 +622,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_kimi_mxfp4_indexer.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_flydsl_sparse_mla.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_sparse_quant_specialize.py
 
 - label: ":nvidia: (L4) Quantization Kernels"
   key: kernels-quantization-test

@@ -173,7 +173,7 @@ def _launch_aiter_top_k_per_row_prefill(
     _localize_aiter_prefill_topk(indices, row_starts)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
     kv_cache_ptr,  # [n_blks, blk_size//tile_block, head_dim // 16B, tile_block, 16B]
