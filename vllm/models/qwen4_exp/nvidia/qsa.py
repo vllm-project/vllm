@@ -514,18 +514,17 @@ class Qwen4ExpQSAImpl(
         assert num_decode_tokens + prefill_query.shape[0] == num_tokens
         if self.index_group is None:
             nvidia_metadata = cast(Qwen4ExpQSANvidiaMetadata, attn_metadata)
-            if num_decode_tokens:
-                self.attend(
-                    layer,
-                    decode_query,
-                    kv_cache,
-                    selected[:num_decode_tokens],
-                    nvidia_metadata.block_table,
-                    token_to_req[:num_decode_tokens],
-                    False,
-                    out[:num_decode_tokens],
-                    output_gate[:num_decode_tokens],
-                )
+            self.attend(
+                layer,
+                decode_query,
+                kv_cache,
+                selected[:num_decode_tokens],
+                nvidia_metadata.block_table,
+                token_to_req[:num_decode_tokens],
+                False,
+                out[:num_decode_tokens],
+                output_gate[:num_decode_tokens],
+            )
             if num_decode_tokens == num_tokens:
                 return output
             prefill_rows = slice(num_decode_tokens, num_tokens)
@@ -582,18 +581,17 @@ class Qwen4ExpQSAImpl(
                 (slice(0, num_decode_tokens), decode_query),
                 (slice(num_decode_tokens, num_tokens), prefill_query),
             ):
-                if query.shape[0]:
-                    self.attend(
-                        layer,
-                        query,
-                        self.kv_view(cache.view.cache),
-                        selected[rows],
-                        cache.block_table,
-                        req_rows[rows],
-                        use_prefill_config,
-                        out[rows],
-                        output_gate[rows],
-                    )
+                self.attend(
+                    layer,
+                    query,
+                    self.kv_view(cache.view.cache),
+                    selected[rows],
+                    cache.block_table,
+                    req_rows[rows],
+                    use_prefill_config,
+                    out[rows],
+                    output_gate[rows],
+                )
             return output
         if num_decode_tokens:
             physical = group.convert_logical_to_physical_topk(
@@ -649,6 +647,8 @@ class Qwen4ExpQSAImpl(
         output_gate: torch.Tensor,
         valid_counts: torch.Tensor | None = None,
     ) -> None:
+        if query.shape[0] == 0:
+            return
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
