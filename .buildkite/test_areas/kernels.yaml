@@ -40,6 +40,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - vllm/v1/worker/gpu/buffer_utils.py
   - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py

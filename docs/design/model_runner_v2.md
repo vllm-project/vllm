@@ -142,6 +142,8 @@ Benefits:
 
 MRV2 uses UVA in some paths to let GPU kernels access large CPU-resident tensors directly (for example `prefill_token_ids`) without duplicating those tensors into GPU memory.
 
+On CUDA systems with coherent UVA, MRV2 uploads `query_start_loc` with a GPU kernel that reads pinned host staging buffers. This lets the step's input upload run while bulk KV transfers occupy the H2D copy engine. Staging slots are sized for the maximum number of concurrent batches and protected by completion events. Other platforms retain the explicit H2D upload.
+
 ## 6. Triton-Native Sampler
 
 MRV2 reimplements sampling mostly in Triton for better numeric/memory control and optimization.

@@ -9,6 +9,10 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import (
@@ -141,6 +145,50 @@ class UvaBufferPool:
         uva = self.copy_to_uva(x)
         # CPU-to-GPU copy
         return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
+
+
+def _metadata_sm_copy_warmup_inputs(size: int, dtype: torch.dtype) -> dict[str, Any]:
+    return dict(
+        grid=(triton.cdiv(size, 256),),
+        src=TritonWarmupTensor(dtype),
+        dst=TritonWarmupTensor(dtype),
+        n=size,
+        BLOCK_SIZE=256,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(warmup_inputs=_metadata_sm_copy_warmup_inputs)
+@triton.jit
+def _metadata_sm_copy(src, dst, n: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    values = tl.load(src + offsets, mask=offsets < n, other=0)
+    tl.store(dst + offsets, values, mask=offsets < n)
+
+
+class SmMetadataCopy:
+    """Copy one-dimensional CPU arrays through coherent UVA using GPU cores.
+
+    Completion events protect pinned staging slots until the kernel reads them.
+    Size the pool for the caller's maximum number of concurrent batches.
+    """
+
+    def __init__(self, size: int, dtype: torch.dtype, max_concurrency: int):
+        assert is_uva_available()
+        self._pool = UvaBufferPool(size, dtype, max_concurrency)
+        self._events: list[torch.Event | None] = [None] * max_concurrency
+        self._slot = 0
+        _metadata_sm_copy.register_warmup(size=size, dtype=dtype)
+
+    def copy(self, x: np.ndarray, out: torch.Tensor) -> None:
+        event = self._events[self._slot]
+        if event is not None and not event.query():
+            event.synchronize()
+        src = self._pool.copy_to_uva(x)
+        _metadata_sm_copy[(triton.cdiv(len(x), 256),)](src, out, len(x), 256)
+        if event is None:
+            event = self._events[self._slot] = torch.Event(device=out.device)
+        event.record()
+        self._slot = (self._slot + 1) % len(self._events)
 
 
 class UvaBackedTensor:

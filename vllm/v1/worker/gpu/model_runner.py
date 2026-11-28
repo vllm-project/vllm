@@ -81,6 +81,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -116,7 +117,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
+from vllm.v1.worker.gpu.buffer_utils import (
+    SmMetadataCopy,
+    set_default_max_concurrency,
+)
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -349,6 +353,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        self._query_start_loc_copy: SmMetadataCopy | None = None
+        if current_platform.is_cuda() and is_uva_available():
+            with self.jit_warmup_registry.activate():
+                self._query_start_loc_copy = SmMetadataCopy(
+                    self.max_num_reqs + 1,
+                    torch.int32,
+                    max_concurrency=max(2, vllm_config.max_concurrent_batches),
+                )
         self.fast_prefill: FastPrefillHelper | None = None
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -1573,7 +1585,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         query_start_loc = self.input_buffers.query_start_loc
-        async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+        if self._query_start_loc_copy is None:
+            async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+        else:
+            self._query_start_loc_copy.copy(query_start_loc_np, query_start_loc)
         if adaptive_verification is not None:
             (
                 cu_num_logits,
