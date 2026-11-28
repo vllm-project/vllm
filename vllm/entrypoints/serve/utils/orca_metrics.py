@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions that create ORCA endpoint load report response headers."""
 
-import json
 from collections.abc import Mapping
+
+import orjson
 
 from vllm.logger import init_logger
 from vllm.v1.metrics.reader import Gauge, get_metrics_snapshot
@@ -60,9 +61,10 @@ def create_orca_header(
     # output example:
     # endpoint-load-metrics: JSON “named_metrics”: {“custom-metric-util”: 0.4}
     elif metrics_format.lower() == "json":
-        header["endpoint-load-metrics"] = f"JSON {json.dumps(orca_report)}"
+        payload = orjson.dumps(orca_report).decode()
+        header["endpoint-load-metrics"] = f"JSON {payload}"
 
-    logger.info("Created ORCA header %s", header)
+    logger.debug("Created ORCA header %s", header)
 
     return header
 
