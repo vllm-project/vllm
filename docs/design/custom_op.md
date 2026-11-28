@@ -78,6 +78,8 @@ For example:
 
 --8<-- "vllm/model_executor/layers/activation.py:swigluoai_and_mul"
 
+--8<-- "vllm/model_executor/layers/activation.py:swiglustep_and_mul"
+
 --8<-- "vllm/model_executor/layers/activation.py:fatrelu_and_mul"
 ```
 

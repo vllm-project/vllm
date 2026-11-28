@@ -22,8 +22,10 @@ logger = init_logger(__name__)
 def _swiglustep_and_mul_kernel(
     o_ptr,
     o_stride,
+    o_inner_stride: tl.constexpr,
     x_ptr,
     x_stride,
+    x_inner_stride: tl.constexpr,
     limit: tl.constexpr,
     d: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -35,8 +37,8 @@ def _swiglustep_and_mul_kernel(
     offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < d
 
-    gate = tl.load(x_row_ptr + offsets, mask=mask).to(tl.float32)
-    up = tl.load(x_row_ptr + offsets + d, mask=mask).to(tl.float32)
+    gate = tl.load(x_row_ptr + offsets * x_inner_stride, mask=mask).to(tl.float32)
+    up = tl.load(x_row_ptr + (offsets + d) * x_inner_stride, mask=mask).to(tl.float32)
 
     gate_silu = tl.sigmoid(gate) * gate
     gate_clamped = tl.minimum(gate_silu, limit)
@@ -44,7 +46,7 @@ def _swiglustep_and_mul_kernel(
 
     result = gate_clamped * up_clamped
     result = result.to(x_ptr.dtype.element_ty)
-    tl.store(o_row_ptr + offsets, result, mask=mask)
+    tl.store(o_row_ptr + offsets * o_inner_stride, result, mask=mask)
 
 
 def swiglustep_and_mul_triton(
@@ -61,8 +63,10 @@ def swiglustep_and_mul_triton(
     _swiglustep_and_mul_kernel[grid](
         output,
         output.stride(0),
+        output.stride(1),
         input,
         input.stride(0),
+        input.stride(1),
         limit=limit,
         d=d,
         BLOCK_SIZE=1024,
@@ -517,7 +521,11 @@ class SwigluStepAndMul(CustomOp):
     Shapes:
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
+
+    The Triton implementation accepts strided inputs.
     """
+
+    # --8<-- [end:swiglustep_and_mul]
 
     def __init__(self, limit: float = 7.0):
         super().__init__()
@@ -537,7 +545,9 @@ class SwigluStepAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        swiglustep_and_mul_triton(out, x, self.limit)
+        swiglustep_and_mul_triton(
+            out.view(-1, d), x.reshape(-1, x.shape[-1]), self.limit
+        )
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
