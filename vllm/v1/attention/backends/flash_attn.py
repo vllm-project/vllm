@@ -397,6 +397,8 @@ class FlashAttentionBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # int4_per_token_head is added dynamically in supports_kv_cache_dtype /
+    # get_supported_kv_cache_dtypes when FA int4 kernels are available.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
@@ -404,6 +406,24 @@ class FlashAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
+
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Pack C=136 for INT4 (shared with Triton) before any allow-list."""
+        from vllm.v1.attention.backends.per_token_head_packing import (
+            customize_per_token_head_spec,
+        )
+
+        return customize_per_token_head_spec(spec)
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        dtypes = list(cls.supported_kv_cache_dtypes)
+        from vllm.v1.attention.backends.fa_int4 import fa_int4_kernels_available
+
+        if fa_int4_kernels_available() and "int4_per_token_head" not in dtypes:
+            dtypes.append("int4_per_token_head")
+        return dtypes
 
     @staticmethod
     def _get_sm90_fa4_fp8_kv_block_size(
@@ -531,7 +551,7 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+        if kv_cache_dtype not in cls.get_supported_kv_cache_dtypes():
             return False
         if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
@@ -1355,31 +1375,6 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
-        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
-        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
-        fixed_k = canonicalize_singleton_dim_strides(key_cache)
-        fixed_v = canonicalize_singleton_dim_strides(value_cache)
-        if fixed_k is not key_cache or fixed_v is not value_cache:
-            logger.debug(
-                "Canonicalized degenerate KV cache strides (FlashAttention): "
-                "shape=%s, key strides before=%s after=%s, "
-                "value strides before=%s after=%s",
-                key_cache.shape,
-                key_cache.stride(),
-                fixed_k.stride(),
-                value_cache.stride(),
-                fixed_v.stride(),
-            )
-        key_cache, value_cache = fixed_k, fixed_v
-
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            # queries are quantized in the attention layer
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
-
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -1387,14 +1382,98 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
         scheduler_metadata = attn_metadata.scheduler_metadata
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
-        q_descale = (
-            self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
-            if self.supports_quant_query_input
-            else None
+        # Int4 C=136: carve packed halves + per-token-head scales (never
+        # split(head_size) on content=136). Gated so FA_INT4_AVAILABLE=False
+        # keeps the dense/fp8 path unchanged. M1 FA int4 is decode-only —
+        # prefill (q_len>1) reuses Triton int4 on the same pages.
+        from vllm.v1.attention.backends.fa_int4 import (
+            ensure_int4_scale_caches,
+            fa_int4_enabled,
+            finalize_fa_int4_output,
+            prepare_fa_int4_query,
+            run_int4_triton_attention,
         )
-        k_descale = self._descale(layer._k_scale, layer._k_scale_float, descale_shape)
-        v_descale = self._descale(layer._v_scale, layer._v_scale_float, descale_shape)
+
+        use_fa_int4_env = (
+            self.kv_cache_dtype == "int4_per_token_head" and fa_int4_enabled()
+        )
+        if use_fa_int4_env and max_seqlen_q > 1:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            run_int4_triton_attention(
+                query[:num_actual_tokens],
+                kv_cache,
+                output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                block_table=block_table,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                sinks=self.sinks,
+                alibi_slopes=self.alibi_slopes,
+                mm_prefix_range=getattr(
+                    attn_metadata, "mm_prefix_range_tensor", None
+                ),
+                rswa_prefix_lens=getattr(attn_metadata, "rswa_prefix_lens", None),
+                rswa_window=getattr(attn_metadata, "rswa_window", None),
+            )
+            return output
+
+        use_fa_int4 = use_fa_int4_env  # implies max_seqlen_q == 1
+        if use_fa_int4:
+            # kv_cache: (blocks, nkv, block_size, C=136)
+            key_u8, value_u8, k_scale_cache, v_scale_cache = (
+                ensure_int4_scale_caches(kv_cache)
+            )
+            # Kernel expects [blocks, block_size, Hkv, packed_hs]
+            key_cache = key_u8.transpose(1, 2)
+            value_cache = value_u8.transpose(1, 2)
+            q_descale = None
+            k_descale = k_scale_cache
+            v_descale = v_scale_cache
+        else:
+            # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(
+                self.head_size, dim=-1
+            )
+            # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+            # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+            # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+            fixed_k = canonicalize_singleton_dim_strides(key_cache)
+            fixed_v = canonicalize_singleton_dim_strides(value_cache)
+            if fixed_k is not key_cache or fixed_v is not value_cache:
+                logger.debug(
+                    "Canonicalized degenerate KV cache strides (FlashAttention): "
+                    "shape=%s, key strides before=%s after=%s, "
+                    "value strides before=%s after=%s",
+                    key_cache.shape,
+                    key_cache.stride(),
+                    fixed_k.stride(),
+                    value_cache.stride(),
+                    fixed_v.stride(),
+                )
+            key_cache, value_cache = fixed_k, fixed_v
+
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                # queries are quantized in the attention layer
+                key_cache = key_cache.view(current_platform.fp8_dtype())
+                value_cache = value_cache.view(current_platform.fp8_dtype())
+
+            descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+            q_descale = (
+                self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
+                if self.supports_quant_query_input
+                else None
+            )
+            k_descale = self._descale(
+                layer._k_scale, layer._k_scale_float, descale_shape
+            )
+            v_descale = self._descale(
+                layer._v_scale, layer._v_scale_float, descale_shape
+            )
 
         if self.dcp_world_size > 1:
             self._forward_with_dcp(
@@ -1493,8 +1572,19 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 causal = not has_window
 
+            # Triton write RHT-rotates K/V; FA decode must RHT(Q) and
+            # inverse-RHT(out) with the same norm as unified_attention_int4.
+            q_fa = query[:num_actual_tokens]
+            sm_scale = self.scale
+            fa_int4_rht_norm = None
+            fa_int4_q_dtype = q_fa.dtype
+            if use_fa_int4:
+                q_fa, sm_scale, fa_int4_rht_norm, fa_int4_q_dtype = (
+                    prepare_fa_int4_query(q_fa, self.scale)
+                )
+
             _FA4_DENSE_ATTENTION_KERNEL(
-                q=query[:num_actual_tokens],
+                q=q_fa,
                 k=key_cache,
                 v=value_cache,
                 out=output[:num_actual_tokens],
@@ -1502,7 +1592,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_q=max_seqlen_q,
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
+                softmax_scale=sm_scale,
                 causal=causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=sliding_window_size,
@@ -1519,6 +1609,12 @@ class FlashAttentionImpl(AttentionImpl):
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
             )
+            if use_fa_int4:
+                finalize_fa_int4_output(
+                    output[:num_actual_tokens],
+                    fa_int4_rht_norm,
+                    fa_int4_q_dtype,
+                )
             return output
 
     def do_kv_cache_update(
@@ -1532,6 +1628,36 @@ class FlashAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
+            return
+
+        # Int4 write: reuse Triton reshape_and_cache_int4 (same C=136 packing).
+        from vllm.v1.attention.backends.fa_int4 import (
+            ensure_int4_scale_caches,
+            fa_int4_enabled,
+        )
+
+        if self.kv_cache_dtype == "int4_per_token_head" and fa_int4_enabled():
+            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                triton_reshape_and_cache_flash_per_token_head_quant,
+            )
+            from vllm.v1.kv_cache_interface import KVQuantMode
+
+            key_u8, value_u8, k_scale_cache, v_scale_cache = (
+                ensure_int4_scale_caches(kv_cache)
+            )
+            # Write path expects [blocks, block_size, Hkv, packed_hs]
+            key_cache = key_u8.transpose(1, 2)
+            value_cache = value_u8.transpose(1, 2)
+            triton_reshape_and_cache_flash_per_token_head_quant(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                k_scale_cache,
+                v_scale_cache,
+                slot_mapping,
+                kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+            )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.

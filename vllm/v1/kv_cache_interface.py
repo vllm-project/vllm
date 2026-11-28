@@ -501,7 +501,21 @@ class AttentionSpec(KVCacheSpec):
         """Bytes per (head slot, stored state) cell of the page."""
         if self.state_content_bytes is not None:
             return self.state_content_bytes
-        return (self.head_size + self.head_size_v) * get_dtype_size(self.dtype)
+        # Dense fallback when customize_spec has not published packing.
+        # INT4 packs 2 values/byte; per-token-head modes also budget inline
+        # fp32 scales (matches TritonAttentionBackend.customize_spec). Without
+        # this, SlidingWindowSpec / uncustomized full pages budget C≈256–264
+        # while reshape expects packed C=136 (A1.5 / A2 on prod layout).
+        hs_k, hs_v = self.head_size, self.head_size_v
+        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            hs_k, hs_v = hs_k // 2, hs_v // 2
+            data_dtype_size = get_dtype_size(torch.uint8)
+        else:
+            data_dtype_size = get_dtype_size(self.dtype)
+        content = (hs_k + hs_v) * data_dtype_size
+        if self.kv_quant_mode.is_per_token_head:
+            content += 2 * get_dtype_size(torch.float32)
+        return content
 
     @property
     def unpadded_page_size_bytes(self) -> int:

@@ -720,6 +720,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 page_size_padded=shared_page,
+                # Preserve packing fields from the temporary customize_spec
+                # result so planners/allocators see packed C (not dense).
+                state_content_bytes=kv_cache_spec.state_content_bytes,
+                num_head_slots=kv_cache_spec.num_head_slots,
             )
             spec_config = vllm_config.speculative_config
             if (
