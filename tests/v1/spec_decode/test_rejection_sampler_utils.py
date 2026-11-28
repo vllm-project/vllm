@@ -1151,6 +1151,31 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
     )
 
 
+def _make_rejection_sampler(
+    inputs: dict, num_speculative_steps: int
+) -> RejectionSampler:
+    """Block-verification RejectionSampler that verifies `inputs` as given."""
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = SimpleNamespace(
+        apply_sampling_params=lambda logits, *args: logits,
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=inputs["temperature"]),
+            seeds=SimpleNamespace(gpu=inputs["seed"]),
+        ),
+        use_fp64_gumbel=False,
+        trace_replay_state=None,
+        may_mask_logits=np.zeros(len(inputs["idx_mapping"]), dtype=bool),
+    )
+    rejection_sampler.num_speculative_steps = num_speculative_steps
+    rejection_sampler.synthetic_conditional_rates = None
+    rejection_sampler.use_block_verification = True
+    rejection_sampler.fly_window_size = 0
+    rejection_sampler.fly_entropy_threshold = 0.3
+    rejection_sampler.fly_entropy_top_k = 3
+    rejection_sampler.watermark_key = None
+    return rejection_sampler
+
+
 def test_verify_rejects_unproposed_drafts():
     """Zero drafts padded onto a step starting in the prefill must be rejected."""
     torch.manual_seed(0)
@@ -1178,24 +1203,7 @@ def test_verify_rejects_unproposed_drafts():
     # decode step after a P/D remote KV load.
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
     prefill_len = first_pos + 1
-    rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(
-        apply_sampling_params=lambda logits, *args: logits,
-        sampling_states=SimpleNamespace(
-            temperature=SimpleNamespace(gpu=inputs["temperature"]),
-            seeds=SimpleNamespace(gpu=inputs["seed"]),
-        ),
-        use_fp64_gumbel=False,
-        trace_replay_state=None,
-        may_mask_logits=np.zeros(num_trials, dtype=bool),
-    )
-    rejection_sampler.num_speculative_steps = K
-    rejection_sampler.synthetic_conditional_rates = None
-    rejection_sampler.use_block_verification = True
-    rejection_sampler.fly_window_size = 0
-    rejection_sampler.fly_entropy_threshold = 0.3
-    rejection_sampler.fly_entropy_top_k = 3
-    rejection_sampler.watermark_key = None
+    rejection_sampler = _make_rejection_sampler(inputs, K)
     draft_logits = DraftLogitsCache(
         *inputs["draft_logits"].shape,
         dtype=inputs["draft_logits"].dtype,
@@ -1236,6 +1244,51 @@ def test_verify_rejects_unproposed_drafts():
     prefill_len.copy_(first_pos)
     _, num_sampled = verify()
     assert (num_sampled == K + 1).all()
+
+
+def test_verify_rejects_stale_sharded_draft_logits(monkeypatch: pytest.MonkeyPatch):
+    """Drafts whose sharded draft logits row went to another request, while
+    their request was skipped for a step, must be rejected."""
+    K = 3
+    # Every draft is token 0, which the target prefers to the uniform draft
+    # logits, so verification accepts any draft it checks.
+    target_logits_1d = torch.zeros(VOCAB_SIZE, device=DEVICE)
+    target_logits_1d[0] = 20.0
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        torch.zeros(VOCAB_SIZE, device=DEVICE),
+        K,
+        temperature=1.0,
+        num_trials=2,
+    )
+    inputs["draft_sampled"].zero_()
+
+    # On rank 0 of TP 2, request 0 drafts at batch position 0. Request 1 then
+    # drafts there, taking request 0's row while request 0 is skipped.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.draft_logits.get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=2),
+    )
+    draft_logits = DraftLogitsCache(
+        2, K, VOCAB_SIZE, dtype=torch.float32, fill=0.0, device=DEVICE, sharded=True
+    )
+    for req_state_idx in range(2):
+        idx_mapping = torch.tensor([req_state_idx], dtype=torch.int32, device=DEVICE)
+        draft_logits.assign(idx_mapping, idx_mapping.cpu().numpy())
+
+    _, _, num_sampled = _make_rejection_sampler(inputs, K)._verify(
+        inputs["target_logits"],
+        draft_logits,
+        inputs["draft_sampled"],
+        inputs["pos"],
+        inputs["cu_num_logits"],
+        inputs["idx_mapping"],
+        None,
+        inputs["expanded_idx_mapping"],
+        inputs["expanded_local_pos"],
+        None,
+    )
+    assert num_sampled.tolist() == [1, K + 1]
 
 
 @pytest.mark.parametrize(

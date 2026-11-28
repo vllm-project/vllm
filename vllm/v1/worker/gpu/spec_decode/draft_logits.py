@@ -6,7 +6,6 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.batch_shard import (
     shard_owner,
     shard_owners,
@@ -172,7 +171,9 @@ class DraftLogitsCache:
             return shard_owners(num_reqs, get_tp_group().world_size), None
         return self.shard_mapping_np[idx_mapping_np], self.shard_mapping
 
-    def stale_drafts(self, input_batch: InputBatch) -> torch.Tensor | None:
+    def stale_drafts(
+        self, expanded_idx_mapping: torch.Tensor, expanded_local_pos: torch.Tensor
+    ) -> torch.Tensor | None:
         """Mark the drafts whose draft logits were overwritten since drafting.
         Only valid for requests this rank owns.
 
@@ -183,7 +184,6 @@ class DraftLogitsCache:
         """
         if self.row_mapping is None:
             return None
-        expanded_idx_mapping = input_batch.expanded_idx_mapping
         num_logits = expanded_idx_mapping.shape[0]
         stale = expanded_idx_mapping.new_empty(num_logits, dtype=torch.bool)
         if num_logits == 0:
@@ -192,7 +192,7 @@ class DraftLogitsCache:
         _stale_drafts_kernel[(triton.cdiv(num_logits, block_size),)](
             stale,
             expanded_idx_mapping,
-            input_batch.expanded_local_pos,
+            expanded_local_pos,
             self.row_mapping,
             self.inverse_row_mapping,
             num_logits,

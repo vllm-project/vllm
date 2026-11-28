@@ -751,7 +751,8 @@ def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
     # Every drafted request verifies against its own row.
     for rank, o in enumerate(owners):
         owned = [s for s in step0 if o.shard_mapping_np[s] == rank]
-        stale = _np(o.stale_drafts(_draft_batch(owned, num_logits_per_req)))
+        batch = _draft_batch(owned, num_logits_per_req)
+        stale = o.stale_drafts(batch.expanded_idx_mapping, batch.expanded_local_pos)
         assert not stale.any()
 
     # Step 1 skips the request at position 1 and puts a new request there.
@@ -765,8 +766,9 @@ def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
     owner_of_skipped = 1 % tp_size
     o = owners[owner_of_skipped]
     assert o.shard_mapping_np[skipped] == owner_of_skipped
-    stale = _np(o.stale_drafts(_draft_batch([skipped, new], num_logits_per_req)))
-    stale = stale.reshape(2, num_logits_per_req)
+    batch = _draft_batch([skipped, new], num_logits_per_req)
+    stale = o.stale_drafts(batch.expanded_idx_mapping, batch.expanded_local_pos)
+    stale = _np(stale).reshape(2, num_logits_per_req)
     # Only draft rows (local position > 0) of the skipped request are stale.
     assert stale[0].tolist() == [False] + [True] * (num_logits_per_req - 1)
     assert not stale[1].any()
