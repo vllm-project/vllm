@@ -4092,8 +4092,10 @@ class Scheduler(SchedulerInterface):
             req_id
             for req_id, request in failed.items()
             if request.status == RequestStatus.RUNNING
+            # A request restarted since this load holds new blocks.
+            and not request.sync_kv_load_failed
         }
-        # Preempted by an earlier schedule() before this output arrived.
+        # Preempted, or restarted and resumed, before this output arrived.
         preempted_early = set(failed) - affected
         async_affected: set[str] = set()
         blocks_to_evict = [set(ids) for ids in bad_block_ids]

@@ -719,6 +719,58 @@ def test_sync_load_failure_reported_through_both_channels(policy: str):
         assert failed.status == RequestStatus.FINISHED_ERROR
 
 
+def test_restarted_request_ignores_the_report_of_its_older_load():
+    """With more than two steps in flight, a request can be restarted for
+    sharing another request's failed load, and resume, before the report of
+    its own earlier load arrives. Its new blocks were computed after the
+    restart, so that report must not restart it again."""
+    vllm_config = create_vllm_config(
+        kv_load_failure_policy="recompute", max_num_batched_tokens=256
+    )
+    vllm_config.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler(vllm_config)
+    block_size = scheduler.block_size
+    owner = create_request(num_tokens=4 * block_size, common_prefix_len=2 * block_size)
+    sharer = create_request(num_tokens=6 * block_size, common_prefix_len=2 * block_size)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {owner.request_id: 2 * block_size, sharer.request_id: 2 * block_size},
+            async_load=False,
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler.add_request(owner)
+    owner_load_step = scheduler.schedule()
+    # The sharer hits the owner's loaded blocks and loads two more.
+    scheduler.add_request(sharer)
+    sharer_load_step = scheduler.schedule()
+    (sharer_new,) = sharer_load_step.scheduled_new_reqs
+    assert sharer_new.num_computed_tokens == 4 * block_size
+    scheduler.schedule()
+
+    scheduler.update_from_output(
+        owner_load_step,
+        create_model_runner_output([owner], failed_sync_recving={owner.request_id}),
+    )
+    assert owner.status == sharer.status == RequestStatus.PREEMPTED
+    scheduler.schedule()
+    assert owner.status == sharer.status == RequestStatus.RUNNING
+
+    scheduler.update_from_output(
+        sharer_load_step,
+        create_model_runner_output(
+            [owner, sharer], failed_sync_recving={sharer.request_id}
+        ),
+    )
+
+    assert sharer.status == RequestStatus.RUNNING
+    assert sharer.num_preemptions == 1
+    assert not sharer.output_token_ids
+
+
 @pytest.mark.parametrize(("dcp", "expected"), [(1, ([3], [9])), (2, ([2, 3], [9]))])
 def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints(dcp, expected):
     """A recurrent-state block before the load start is a prefix-cache
