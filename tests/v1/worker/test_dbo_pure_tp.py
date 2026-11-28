@@ -209,3 +209,49 @@ def test_all_reduce_uses_device_communicator_outside_a_microbatch(
     monkeypatch.setattr(parallel_state, "_TP", group if is_tp_group else None)
     x = torch.ones(2)
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
+
+
+def _sm_control(monkeypatch, *, total_sms, comm_sms, deep_gemm, calls=None):
+    import vllm.v1.worker.ubatch_utils as ubatch_utils
+
+    monkeypatch.setenv("VLLM_DBO_COMM_SMS", str(comm_sms))
+    monkeypatch.setattr(ubatch_utils, "num_compute_units", lambda device: total_sms)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(
+        ubatch_utils,
+        "current_platform",
+        SimpleNamespace(is_cuda=lambda: True, is_rocm=lambda: False),
+    )
+    monkeypatch.setattr(ubatch_utils, "has_deep_gemm", lambda: deep_gemm)
+    monkeypatch.setattr(
+        ubatch_utils,
+        "deep_gemm_set_num_sms",
+        lambda sms: calls.append(sms) if calls is not None else None,
+    )
+    pure_tp = SimpleNamespace(
+        enable_dbo=True, all2all_backend=None, enable_expert_parallel=False
+    )
+    return ubatch_utils.create_sm_control_context(pure_tp)
+
+
+def test_pure_tp_reserves_no_sms_even_if_default_exceeds_device(monkeypatch):
+    ctx = _sm_control(monkeypatch, total_sms=48, comm_sms=64, deep_gemm=False)
+    assert (ctx.comm_sms, ctx.compute_sms) == (0, 48)
+    with ctx:
+        pass
+
+
+def test_sm_partition_applied_when_a_kernel_uses_it(monkeypatch):
+    calls: list[int] = []
+    ctx = _sm_control(
+        monkeypatch, total_sms=132, comm_sms=20, deep_gemm=True, calls=calls
+    )
+    assert (ctx.comm_sms, ctx.compute_sms) == (20, 112)
+    with ctx:
+        assert calls == [112]
+    assert calls == [112, 132]
+
+
+def test_sm_partition_larger_than_device_is_a_clear_error(monkeypatch):
+    with pytest.raises(ValueError, match="VLLM_DBO_COMM_SMS"):
+        _sm_control(monkeypatch, total_sms=48, comm_sms=64, deep_gemm=True)

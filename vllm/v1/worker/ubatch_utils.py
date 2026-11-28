@@ -63,7 +63,12 @@ class SMControlContextManager:
         device = torch.accelerator.current_device_index()
         total_sms = num_compute_units(device)
 
-        assert comm_sms < total_sms
+        if not 0 <= comm_sms < total_sms:
+            raise ValueError(
+                f"Dual batch overlap cannot reserve {comm_sms} SMs/CUs for "
+                f"communication: the device has {total_sms}. Set "
+                f"VLLM_DBO_COMM_SMS to a value in [0, {total_sms})."
+            )
         self.total_sms = total_sms
         self.compute_sms = total_sms - comm_sms
         self.comm_sms = comm_sms
@@ -95,7 +100,7 @@ def create_sm_control_context(
         # leave all CUs visible to the compute and communication kernels.
         comm_sms = 0
 
-    set_comm_sms = lambda sms: None
+    set_comm_sms: Callable[[int], None] | None = None
     if parallel_config.enable_expert_parallel:
         # Currently only DeepEP highthroughput supports SM control so this
         # only affects that case.
@@ -114,14 +119,18 @@ def create_sm_control_context(
             set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
 
     # TODO(lucas): support other kernels besides DeepGEMM
-    set_compute_sms = lambda sms: None
+    set_compute_sms: Callable[[int], None] | None = None
     if has_deep_gemm() and comm_sms > 0:
         set_compute_sms = lambda sms: deep_gemm_set_num_sms(sms)
 
+    if set_comm_sms is None and set_compute_sms is None:
+        # Nothing partitions SMs (e.g. pure TP), so reserve none.
+        comm_sms = 0
+
     return SMControlContextManager(
         comm_sms=comm_sms,
-        set_comm_sms=set_comm_sms,
-        set_compute_sms=set_compute_sms,
+        set_comm_sms=set_comm_sms or (lambda sms: None),
+        set_compute_sms=set_compute_sms or (lambda sms: None),
     )
 
 
