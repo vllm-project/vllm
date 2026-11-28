@@ -139,9 +139,6 @@ def test_split_k_scratch_rows_follow_speculative_config(
     rows,
     kv_quant_mode,
 ):
-    # The INT4 launcher never runs multi-query split-K.
-    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        rows = max_num_seqs
     builder, _ = _build(
         monkeypatch,
         TritonAttentionMetadataBuilder,
@@ -156,3 +153,143 @@ def test_split_k_scratch_rows_follow_speculative_config(
     assert builder.softmax_segm_output.shape == (rows, 8, 16, 128)
     assert builder.softmax_segm_max.shape == (rows, 8, 16)
     assert builder.softmax_segm_expsum.shape == (rows, 8, 16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("query_lens", [[4, 4], [1, 4, 2, 4]])
+def test_int4_multiquery_3d_split_k_parity_and_fallback(
+    monkeypatch, query_lens: list[int]
+):
+    """Multi-query INT4 batches within MAX_3D_QUERY_LEN use the 3D split-KV
+    path and match 2D output; undersized scratch safely falls back to 2D."""
+    import vllm.v1.attention.ops.int4_per_token_head as int4_mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_seqs = len(query_lens)
+    total_q = sum(query_lens)
+    kv_lens = [512 + 128 * i for i in range(num_seqs)]
+    max_kv = max(kv_lens)
+    head_size, num_q_heads, num_kv_heads, block_size, num_segments = 128, 32, 8, 16, 16
+    blocks_per_seq = (max_kv + block_size - 1) // block_size
+    num_blocks = num_seqs * blocks_per_seq
+
+    q = (
+        torch.randn(
+            (total_q, num_q_heads, head_size), dtype=torch.bfloat16, device=device
+        )
+        * 0.2
+    )
+    k_cache = torch.randint(
+        0,
+        256,
+        (num_blocks, block_size, num_kv_heads, head_size // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+    v_cache = torch.randint(
+        0,
+        256,
+        (num_blocks, block_size, num_kv_heads, head_size // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+    k_scale = (
+        torch.rand(
+            (num_blocks, block_size, num_kv_heads), dtype=torch.float32, device=device
+        )
+        * 0.05
+        + 0.01
+    )
+    v_scale = (
+        torch.rand(
+            (num_blocks, block_size, num_kv_heads), dtype=torch.float32, device=device
+        )
+        * 0.05
+        + 0.01
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+        num_seqs, blocks_per_seq
+    )
+    cu_seqlens_q = torch.tensor(
+        [0, *torch.tensor(query_lens).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device=device,
+    )
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+
+    common = dict(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max(query_lens),
+        seqused_k=seqused_k,
+        max_seqlen_k=max_kv,
+        softmax_scale=head_size**-0.5,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0.0,
+        k_scale_cache=k_scale,
+        v_scale_cache=v_scale,
+        sinks=None,
+        alibi_slopes=None,
+        use_alibi_sqrt=False,
+        qq_bias=None,
+        output_scale=None,
+        mm_prefix_range=None,
+    )
+
+    out_2d = torch.empty_like(q)
+    int4_mod.unified_attention_int4(out=out_2d, **common)
+
+    reduce_calls = 0
+    orig_reduce = int4_mod.reduce_segments
+
+    class _CountingKernel:
+        def __getitem__(self, grid):
+            nonlocal reduce_calls
+            reduce_calls += 1
+            return orig_reduce[grid]
+
+    monkeypatch.setattr(int4_mod, "reduce_segments", _CountingKernel())
+
+    segm_out = torch.empty(
+        (total_q, num_q_heads, num_segments, head_size),
+        dtype=torch.float32,
+        device=device,
+    )
+    segm_max = torch.empty(
+        (total_q, num_q_heads, num_segments), dtype=torch.float32, device=device
+    )
+    segm_exp = torch.empty(
+        (total_q, num_q_heads, num_segments), dtype=torch.float32, device=device
+    )
+    out_3d = torch.empty_like(q)
+    int4_mod.unified_attention_int4(
+        out=out_3d,
+        **common,
+        seq_threshold_3D=128 // num_kv_heads,
+        num_par_softmax_segments=num_segments,
+        softmax_segm_output=segm_out,
+        softmax_segm_max=segm_max,
+        softmax_segm_expsum=segm_exp,
+    )
+    assert reduce_calls == 1, "Expected 3D split-KV launch for multi-query INT4 batch"
+    torch.testing.assert_close(out_3d, out_2d, atol=2e-3, rtol=2e-3)
+
+    # Undersized scratch (fewer rows than q tokens) must fall back to 2D.
+    out_fallback = torch.empty_like(q)
+    int4_mod.unified_attention_int4(
+        out=out_fallback,
+        **common,
+        seq_threshold_3D=128 // num_kv_heads,
+        num_par_softmax_segments=num_segments,
+        softmax_segm_output=segm_out[: total_q - 1],
+        softmax_segm_max=segm_max[: total_q - 1],
+        softmax_segm_expsum=segm_exp[: total_q - 1],
+    )
+    assert reduce_calls == 1, (
+        "Expected 2D fallback when split-K scratch rows < q.shape[0]"
+    )
+    assert torch.equal(out_fallback, out_2d)
