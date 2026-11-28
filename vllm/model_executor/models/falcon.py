@@ -171,6 +171,7 @@ class FalconAttention(nn.Module):
                 self.head_dim,
                 self.inv_norm_factor,
                 num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
             )
@@ -188,6 +189,7 @@ class FalconAttention(nn.Module):
                 self.inv_norm_factor,
                 num_kv_heads=self.num_kv_heads,
                 alibi_slopes=alibi_slopes,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
             )
