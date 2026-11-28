@@ -54,6 +54,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
+    NemotronDecideStrategy,
     NextTokenStrategy,
     ReadContext,
     cap_pixels,
@@ -134,6 +135,8 @@ def test_strategy_selection():
     assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
     d3 = model("D3ForSequenceClassification", "raw_logits")
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
+    for nemotron in ("NemotronLabsDiffusionModel", "NemotronLabsDiffusionForCausalLM"):
+        assert select_read_strategy(model(nemotron), generate) is NemotronDecideStrategy
 
 
 def test_route_is_registered_by_default():
@@ -1560,3 +1563,191 @@ async def test_joint_reads_on_both_endpoints(dgemma, endpoint):
     assert [c.args[0] for c in engine.check_admission.call_args_list] == [1, 1, 1]
     assert engine.generate.call_count == 3
     assert response.usage.output_tokens == engine.generate.call_args.args[1].max_tokens
+
+
+class _NemotronTokenizer:
+    """One token per character (id = code point + 1000); the state separator
+    and the mask are single tokens; the chat template passes content through."""
+
+    SPECIAL = {"<SPECIAL_101>": 101, "<SPECIAL_100>": 100}
+    special_strings = tuple(SPECIAL)
+
+    def encode(self, text, add_special_tokens=False):
+        ids, i = [], 0
+        while i < len(text):
+            for name, tid in self.SPECIAL.items():
+                if text.startswith(name, i):
+                    ids.append(tid)
+                    i += len(name)
+                    break
+            else:
+                ids.append(ord(text[i]) + 1000)
+                i += 1
+        return ids
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "".join(f"<{m['role']}>{m['content']}</{m['role']}>" for m in messages)
+
+
+def _ids_text(ids):
+    return "".join(chr(t - 1000) if t >= 1000 else f"<{t}>" for t in ids)
+
+
+def _nemotron(decision_prompt: str | None) -> NemotronDecideStrategy:
+    hf_config = SimpleNamespace(is_causal=False, mask_token_id=100)
+    if decision_prompt is not None:
+        hf_config.decision_prompt = decision_prompt
+    tokenizer = _NemotronTokenizer()
+    engine = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=hf_config,
+            is_diffusion=False,
+            max_logprobs=20,
+            max_model_len=4096,
+        ),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4096)
+        ),
+    )
+    renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    )
+    return NemotronDecideStrategy(ReadContext(engine, renderer, None, "auto", {}))
+
+
+NEMOTRON_REQUEST = {
+    "state": {"ticket": "charged twice <SPECIAL_101>"},
+    "questions": {
+        "team": {
+            "type": "choice",
+            "instructions": "Which team?",
+            "criteria": {"billing": {"scope": "payments"}, "other": None},
+        },
+        "urgent": {"type": "noul", "instructions": "Urgent?"},
+        "tone": {"type": "score", "instructions": "Tone?", "criteria": [1, 2, 3]},
+    },
+}
+
+
+async def _nemotron_read(strategy, monkeypatch, request=NEMOTRON_REQUEST):
+    """(engine inputs, params, answers) of one read; each read's values are
+    log((k + 1) / sum) over its value ids."""
+    from vllm.entrypoints.generate.label_reads import LabelRead
+    from vllm.entrypoints.openai.decisions import strategies as strategies_mod
+
+    seen: dict[str, Any] = {}
+
+    async def fake_reads(engine_client, inputs, params, request_id, **kwargs):
+        seen["inputs"], seen["params"], seen["slots"] = (
+            inputs,
+            params,
+            kwargs["slots"],
+        )
+        reads = []
+        for inp, slot in zip(inputs, kwargs["slots"]):
+            ids = list(slot[0][1])
+            total = sum(range(1, len(ids) + 1))
+            result = SimpleNamespace(
+                prompt_token_ids=inp["prompt_token_ids"],
+                outputs=[SimpleNamespace(token_ids=[ids[-1]])],
+            )
+            logprobs = [math.log((k + 1) / total) for k in range(len(ids))]
+            reads.append(LabelRead(result=result, logprobs=logprobs))
+        return reads
+
+    monkeypatch.setattr(strategies_mod, "next_token_label_reads", fake_reads)
+    questions = [
+        build_question(qid, q["type"], q["instructions"], q.get("criteria"), 64, False)
+        for qid, q in request["questions"].items()
+    ]
+    reads = await strategy.read(
+        questions,
+        None,
+        strategy.render_state(request["state"]),
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    return seen, questions, reads
+
+
+@pytest.mark.asyncio
+async def test_nemotron_json_prompt_reads_each_question(monkeypatch):
+    strategy = _nemotron(None)
+    seen, questions, reads = await _nemotron_read(strategy, monkeypatch)
+    assert len(seen["inputs"]) == 3
+    assert all(not (p.extra_args or {}) for p in seen["params"])
+    text = _ids_text(seen["inputs"][0]["prompt_token_ids"][:-1])
+    assert text.startswith(f"<system>{NemotronDecideStrategy.SYSTEM_PROMPT}</system>")
+    assert '"state": {"ticket": "charged twice' in text
+    assert seen["inputs"][0]["prompt_token_ids"][-1] == 100  # read at the mask
+    assert [len(r.probs) for r in reads] == [2, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_nemotron_chunked_prompt_is_one_packed_read(monkeypatch):
+    strategy = _nemotron("chunked-text-v1")
+    seen, questions, reads = await _nemotron_read(strategy, monkeypatch)
+    # Every question of the request is one shared-context packed read.
+    assert len(seen["inputs"]) == 1
+    ids = seen["inputs"][0]["prompt_token_ids"]
+    layout = json.loads(seen["params"][0].extra_args["sc_layout"])
+    s = layout["s"]
+    assert ids[s - 1] == 101 and ids.count(101) == 1  # the state ends there
+    assert s + sum(layout["q"]) == len(ids)
+    assert [len(c) for c in layout["c"]] == [2, 2, 3]
+    ends = [s + sum(layout["q"][: k + 1]) - 1 for k in range(3)]
+    assert all(ids[e] == 100 for e in ends)  # each question read at its mask
+    text = _ids_text
+    state = text(ids[: s - 1])
+    # The state is shown as is (JSON text for JSON) and its special-token text
+    # is neutralized, so the separator appears once.
+    assert state.endswith('State:\n{"ticket": "charged twice \\u003cSPECIAL_101>"}')
+    first = text(ids[s : ends[0]])
+    assert first.startswith("Question:\nWhich team?\nOptions:\n")
+    # Options are read in the order given: option i gets code i.
+    assert 'Options:\nA: billing: {"scope": "payments"}\nB: other' in first
+    # A non-string meaning is shown as JSON.
+    assert 'billing: {"scope": "payments"}' in first
+    assert "other" in first and "other: null" not in first
+    assert "Options:\nA: " in text(ids[ends[0] + 1 : ends[1]])
+    assert [len(r.probs) for r in reads] == [2, 2, 3]
+    assert all(abs(sum(r.probs) - 1) < 1e-9 for r in reads)
+    assert reads[0].input_tokens == len(ids) and reads[1].input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_nemotron_chunked_answer_is_count_invariant(monkeypatch):
+    strategy = _nemotron("chunked-text-v1")
+    full, _, _ = await _nemotron_read(strategy, monkeypatch)
+    one = dict(
+        NEMOTRON_REQUEST, questions={"urgent": NEMOTRON_REQUEST["questions"]["urgent"]}
+    )
+    single, _, _ = await _nemotron_read(strategy, monkeypatch, one)
+    lay_full = json.loads(full["params"][0].extra_args["sc_layout"])
+    lay_one = json.loads(single["params"][0].extra_args["sc_layout"])
+    ids_full = full["inputs"][0]["prompt_token_ids"]
+    ids_one = single["inputs"][0]["prompt_token_ids"]
+    # Same state, and the question's own segment is the same tokens.
+    assert lay_full["s"] == lay_one["s"]
+    s = lay_full["s"]
+    start = s + lay_full["q"][0]
+    assert ids_full[:s] == ids_one[:s]
+    assert ids_full[start : start + lay_full["q"][1]] == ids_one[s:]
+
+
+def test_nemotron_strategy_needs_bidirectional_reads():
+    strategy_cls = NemotronDecideStrategy
+    with pytest.raises(ValueError, match="bidirectional"):
+        tok = _NemotronTokenizer()
+        engine = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(is_causal=True, mask_token_id=100),
+                is_diffusion=False,
+                max_logprobs=20,
+                max_model_len=4096,
+            )
+        )
+        renderer = SimpleNamespace(renderer=SimpleNamespace(get_tokenizer=lambda: tok))
+        strategy_cls(ReadContext(engine, renderer, None, "auto", {}))

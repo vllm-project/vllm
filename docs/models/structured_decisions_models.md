@@ -14,6 +14,7 @@ used for classification and routing.
 | `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 | `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
+| `NemotronLabsDiffusionModel` | `NemotronDecideStrategy` | `generate` | N/A | Nemotron Decide (bidirectional decision fine-tunes of `nvidia/Nemotron-Labs-Diffusion-8B`) |
 
 ### Multimodal Models
 
@@ -377,6 +378,38 @@ vllm serve vllm-sr/d3
   once and shared by every question of the request.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
+
+### Nemotron Decide
+
+Nemotron Decide checkpoints are Nemotron Labs Diffusion models fine-tuned for
+bidirectional decision reads: a question is answered by one forward over the
+whole prompt, read at a mask token.
+
+```bash
+vllm serve <checkpoint> --hf-overrides '{"ar_mode": true, "is_causal": false}' \
+    --logprobs-mode processed_logprobs
+```
+
+- `decision_prompt` in the model config (or `--hf-overrides`) selects the
+  prompt the checkpoint was trained on:
+    - `json` (default): a fixed system prompt, then the state, the question and
+      its options as one JSON object. One read per question.
+    - `chunked-text-v1`: the state as text, ending at a `<SPECIAL_101>`
+      separator, then the question and its options as lines. Every request is
+      one shared-context packed read: the state attends only to itself, each
+      question to the state and itself, question positions restart after the
+      state, and each question is read at its own mask slot. A question's
+      answer does not depend on the other questions of the request. These
+      reads need the `FLASH_ATTN` backend, which is selected by default.
+- Options are read in the order given: option i is listed under one-token
+  code i, and answers map back to the request's options. A question's probabilities are the softmax of its
+  codes' logprobs at its mask.
+- A choice can have up to 256 options, or up to 512 with `--max-logprobs` of
+  at least its option count. A packed read returns at most
+  `max(256, --max-logprobs) - 1` values, up to 1,024; wider requests are
+  split into several packed reads with the same state.
+- `instructions` returns 400, since the prompt is fixed. Prompts are never
+  chunked or truncated.
 
 ### Liquid d1
 
