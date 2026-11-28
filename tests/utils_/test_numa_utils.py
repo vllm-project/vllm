@@ -12,6 +12,11 @@ import pytest
 from vllm.config import ParallelConfig
 from vllm.config.utils import hash_config
 from vllm.utils import numa_utils
+from vllm.v1.executor.cuda_checkpoint_executor import CUDACheckpointExecutor
+from vllm.v1.executor.uniproc_executor import (
+    ExecutorWithExternalLauncher,
+    UniProcExecutor,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -860,6 +865,28 @@ def test_auto_numa_skips_unsupported_launchers(monkeypatch, parallel_kwargs):
         assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
     assert vllm_config.parallel_config.numa_bind is False
     assert detections == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_bind"),
+    [
+        (CUDACheckpointExecutor, True),
+        ("vllm.v1.executor.cuda_checkpoint_executor.CUDACheckpointExecutor", True),
+        (UniProcExecutor, True),
+        (ExecutorWithExternalLauncher, False),
+        ("vllm.v1.executor.no_such_module.Executor", False),
+    ],
+    ids=["ckpt-class", "ckpt-qualname", "uniproc-class", "external-class", "bad"],
+)
+def test_auto_numa_executor_subclasses(monkeypatch, backend, expected_bind):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    vllm_config = _make_config(numa_bind=None, distributed_executor_backend=backend)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert os.environ.get(numa_utils._NUMACTL_ARGS_ENV) == (
+            "--cpunodebind=0 --preferred=0" if expected_bind else None
+        )
+    assert vllm_config.parallel_config.numa_bind is expected_bind
 
 
 @pytest.mark.parametrize("nodes", [[0], [0, 1, 2], [0, -1], [0, None]])
