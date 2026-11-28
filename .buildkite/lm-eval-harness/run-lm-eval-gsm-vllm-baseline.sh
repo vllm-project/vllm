@@ -47,5 +47,5 @@ done
 
 lm_eval --model vllm \
   --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,add_bos_token=true,trust_remote_code=true,max_model_len=4096" \
-  --tasks gsm8k --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
+  --tasks gsm8k_platinum --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
   --batch_size "$BATCH_SIZE"
