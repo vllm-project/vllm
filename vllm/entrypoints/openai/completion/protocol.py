@@ -571,7 +571,12 @@ class CompletionRequest(OpenAIBaseModel):
         # it here so the client gets a clean 400 instead.
         for field_name in ("prompt_logprobs", "logprobs"):
             field_value = data.get(field_name)
-            if field_value is not None and not isinstance(field_value, (int, float)):
+            if field_value is not None and (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, (int, float))
+                or isinstance(field_value, float)
+                and not field_value.is_integer()
+            ):
                 raise VLLMValidationError(
                     f"`{field_name}` must be an integer.",
                     parameter=field_name,
@@ -676,7 +681,18 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
+    top_logprobs: list[dict[str, float] | None] = Field(
+        default_factory=list,
+        description=(
+            "Per position, the returned candidates keyed by their decoded text. "
+            "Candidates that decode to the same string share one entry, e.g. "
+            "byte-fallback tokens that each hold part of a multi-byte character "
+            '(Thai, CJK or emoji text) all decode to "". The entry keeps the '
+            "highest logprob among them (on a tie, the token at that position). "
+            "Set `return_tokens_as_token_ids` to get one entry per candidate, "
+            "keyed by `token_id:{id}`."
+        ),
+    )
 
 
 class CompletionResponseChoice(OpenAIBaseModel):

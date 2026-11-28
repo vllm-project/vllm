@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
@@ -285,6 +286,16 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Dynamic group-128 activations can be quantized outside the kernel
+        when no token padding is needed. The producer must write the scales
+        column-major, `(M, K // 128)` with strides `(1, M)`, as `self.quant_fp8`
+        does."""
+        key = self.config.activation_quant_key
+        if key == kFp8Dynamic128Sym and self.get_output_padding() is None:
+            return key
+        return None
 
     @classmethod
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):

@@ -130,7 +130,7 @@ async def test_session(basic_server_with_lora: RemoteOpenAIServer):
         "prompt": "what is 1+1?",
         "max_completion_tokens": 5,
         "temperature": 0.0,
-        "logprobs": False,
+        "logprobs": 0,
     }
 
     invocation_response = requests.post(

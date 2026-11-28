@@ -41,6 +41,17 @@ __device__ __forceinline__ int qk_column(int dim) {
   return (dim >> 3) * 12 + ((dim & 3) << 1) + ((dim >> 2) & 1);
 }
 
+// Dynamic shared memory holds one per token of the launch's window.
+struct alignas(16) TokenSmem {  // q and k are read as float4.
+  float q[kQkWidth];
+  float k[kQkWidth];
+  __nv_bfloat16 v[kDim];
+  __nv_bfloat16 out[kDim];
+  float decay;
+  float beta;
+};
+static_assert(kMaxMtpTokens * sizeof(TokenSmem) <= 48 * 1024);
+
 __device__ __forceinline__ float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
@@ -190,7 +201,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
       accepted > 0 && accepted <= state_indices_width
           ? state_indices[request * state_indices_width + accepted - 1]
           : 0;
-  if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
+  if (source_slot <= 0 || num_tokens > state_indices_width) {
     for (int linear = tid; linear < num_tokens * kDim; linear += kThreads) {
       const int token = bos + linear / kDim;
       const int value = linear % kDim;
@@ -202,13 +213,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
   }
 
   const int key_head = value_head / ValueHeadsPerKeyHead;
-  // Read as float4 below.
-  __shared__ __align__(16) float shared_q[kMaxMtpTokens][kQkWidth];
-  __shared__ __align__(16) float shared_k[kMaxMtpTokens][kQkWidth];
-  __shared__ __nv_bfloat16 shared_v[kMaxMtpTokens][kDim];
-  __shared__ __nv_bfloat16 shared_out[kMaxMtpTokens][kDim];
-  __shared__ float shared_decay[kMaxMtpTokens];
-  __shared__ float shared_beta[kMaxMtpTokens];
+  extern __shared__ TokenSmem tokens[];
 
   // One warp per token: l2-normalized q/k, v, decay and beta.
 #pragma unroll
@@ -227,7 +232,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
           __bfloat162float(mixed_qkv[mixed_base + key_head * kDim + dim]);
       k_values[i] = __bfloat162float(
           mixed_qkv[mixed_base + H * kDim + key_head * kDim + dim]);
-      shared_v[t][dim] =
+      tokens[t].v[dim] =
           mixed_qkv[mixed_base + 2 * H * kDim + value_head * kDim + dim];
       q_square += q_values[i] * q_values[i];
       k_square += k_values[i] * k_values[i];
@@ -244,8 +249,8 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int dim = lane + i * 32;
-      shared_q[t][qk_column(dim)] = q_values[i] * q_scale;
-      shared_k[t][qk_column(dim)] = k_values[i] * k_scale;
+      tokens[t].q[qk_column(dim)] = q_values[i] * q_scale;
+      tokens[t].k[qk_column(dim)] = k_values[i] * k_scale;
     }
     if (lane == 0) {
       const float a_value = __bfloat162float(
@@ -255,8 +260,8 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
       const float g = -__expf(a_log[value_head]) *
                       softplus_fast(a_value + load_dt_bias(dt_bias, value_head,
                                                            dt_bias_type));
-      shared_decay[t] = __expf(g);
-      shared_beta[t] = sigmoid_fast(b_value);
+      tokens[t].decay = __expf(g);
+      tokens[t].beta = sigmoid_fast(b_value);
     }
   }
   __syncthreads();
@@ -293,15 +298,15 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
       float2 kv[4], qv[4];
       {
         const float4 k0 =
-            *reinterpret_cast<const float4*>(&shared_k[t][qk_col]);
+            *reinterpret_cast<const float4*>(&tokens[t].k[qk_col]);
         const float4 k1 =
-            *reinterpret_cast<const float4*>(&shared_k[t][qk_col + 4]);
+            *reinterpret_cast<const float4*>(&tokens[t].k[qk_col + 4]);
         kv[0] = make_float2(k0.x, k0.y);
         kv[1] = make_float2(k0.z, k0.w);
         kv[2] = make_float2(k1.x, k1.y);
         kv[3] = make_float2(k1.z, k1.w);
       }
-      const float decay = shared_decay[t];
+      const float decay = tokens[t].decay;
       const float2 decay2 = make_float2(decay, decay);
       float part[8];  // {row0 a, row0 b, row1 a, ...}
 #pragma unroll
@@ -315,14 +320,14 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
         part[r * 2] = dot.x;
         part[r * 2 + 1] = dot.y;
       }
-      const float lane_delta = (__bfloat162float(shared_v[t][lane_value]) -
+      const float lane_delta = (__bfloat162float(tokens[t].v[lane_value]) -
                                 reduce_scatter(part, lane)) *
-                               shared_beta[t];
+                               tokens[t].beta;
       {
         const float4 q0 =
-            *reinterpret_cast<const float4*>(&shared_q[t][qk_col]);
+            *reinterpret_cast<const float4*>(&tokens[t].q[qk_col]);
         const float4 q1 =
-            *reinterpret_cast<const float4*>(&shared_q[t][qk_col + 4]);
+            *reinterpret_cast<const float4*>(&tokens[t].q[qk_col + 4]);
         qv[0] = make_float2(q0.x, q0.y);
         qv[1] = make_float2(q0.z, q0.w);
         qv[2] = make_float2(q1.x, q1.y);
@@ -344,7 +349,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
       }
       const float reduced_hq = reduce_scatter(part, lane);
       if ((lane & 3) == 0) {
-        shared_out[t][lane_value] = __float2bfloat16(reduced_hq);
+        tokens[t].out[lane_value] = __float2bfloat16(reduced_hq);
       }
       const int destination_slot =
           state_indices[request * state_indices_width + t];
@@ -375,7 +380,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
     float sum_square = 0.0f;
 #pragma unroll
     for (int i = 0; i < kDim / 32; ++i) {
-      const float value = __bfloat162float(shared_out[t][lane + i * 32]);
+      const float value = __bfloat162float(tokens[t].out[lane + i * 32]);
       sum_square += value * value;
     }
     sum_square = warp_reduce_sum(sum_square);
@@ -384,7 +389,7 @@ __global__ __launch_bounds__(kThreads, 4) void gdn_decode_16bit_kernel(
 #pragma unroll
     for (int i = 0; i < kDim / 32; ++i) {
       const int value = lane + i * 32;
-      const float output_value = __bfloat162float(shared_out[t][value]);
+      const float output_value = __bfloat162float(tokens[t].out[value]);
       const float gate_input = __bfloat162float(
           output_gate[static_cast<int64_t>(token) * strides.gate_row +
                       value_head * kDim + value]);
@@ -414,8 +419,9 @@ cudaError_t launch_gdn_decode_post_conv_mtp_16bit(
     __nv_bfloat16* out, int H, int HV, int state_indices_width,
     int dt_bias_type, bool norm_weight_is_bf16, float scale, float norm_eps,
     GdnDecodeStrides strides) {
+  const size_t smem_bytes = state_indices_width * sizeof(TokenSmem);
   gdn_decode_16bit_kernel<StateT, ValueHeadsPerKeyHead, SigmoidGate>
-      <<<grid, kThreads, 0, stream>>>(
+      <<<grid, kThreads, smem_bytes, stream>>>(
           mixed_qkv, a, b, a_log, dt_bias, state_indices, cu_seqlens,
           num_accepted_tokens, state, output_gate, norm_weight, out, H, HV,
           state_indices_width, dt_bias_type, norm_weight_is_bf16, scale,

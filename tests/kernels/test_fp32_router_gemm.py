@@ -14,6 +14,7 @@ at M=4/5, M=9/10, M=12/13, odd/even, M=15/16) are exercised on Blackwell, and th
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._custom_ops import fp32_router_gemm
 from vllm.platforms import current_platform
 
@@ -186,9 +187,11 @@ def test_rejects_invalid_inputs(hidden_dim, num_experts):
 @pytest.mark.parametrize(
     "hidden_dim,num_experts", [(5120, 256), (4096, 352), (8192, 256)]
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
 def test_router_retains_fp32_weights_and_logits(
-    default_vllm_config, dist_init, tokens, hidden_dim, num_experts
+    default_vllm_config, tokens, hidden_dim, num_experts
 ):
     """Low-latency routing must retain FP32 weight precision and logits."""
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
