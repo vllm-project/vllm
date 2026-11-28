@@ -30,9 +30,10 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -258,7 +259,7 @@ class ServingGenerativeScoring(BaseServing):
         # Build prompts for each item
         try:
             engine_inputs, prompt_token_counts = await self._build_prompts(
-                request, tokenizer, self.model_config.max_model_len
+                request, self.renderer, self.model_config.max_model_len
             )
         except (ValueError, TypeError) as e:
             logger.exception("Error building prompts")
@@ -358,10 +359,10 @@ class ServingGenerativeScoring(BaseServing):
 
         return response
 
+    @staticmethod
     async def _build_prompts(
-        self,
         request: GenerativeScoringRequest,
-        tokenizer: TokenizerLike,
+        renderer: BaseRenderer,
         max_model_len: int,
     ) -> tuple[list[EngineInput], list[int]]:
         """Build prompts by concatenating query and items.
@@ -371,16 +372,19 @@ class ServingGenerativeScoring(BaseServing):
 
         Args:
             request: The request containing query, items, and settings.
-            tokenizer: The tokenizer to use.
+            renderer: The renderer providing the tokenizer and executor.
             max_model_len: Maximum model context length for truncation.
 
         Returns:
             Tuple of (list of EngineInput, list of prompt token counts).
 
         """
+        tokenizer = renderer.get_tokenizer()
+        encode = make_async(tokenizer.encode, executor=renderer._executor)
+
         # Tokenize query if it's a string
         if isinstance(request.query, str):
-            query_token_ids = tokenizer.encode(
+            query_token_ids = await encode(
                 request.query,
                 add_special_tokens=request.add_special_tokens,
             )
@@ -394,7 +398,7 @@ class ServingGenerativeScoring(BaseServing):
             # Tokenize item if it's a string
             if isinstance(item, str):
                 # Don't add special tokens for items to avoid duplicate BOS/EOS
-                item_token_ids = tokenizer.encode(
+                item_token_ids = await encode(
                     item,
                     add_special_tokens=False,
                 )

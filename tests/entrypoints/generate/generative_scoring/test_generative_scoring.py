@@ -10,6 +10,7 @@ Tests cover:
 5. Prompt building and item ordering
 """
 
+import asyncio
 import math
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringItemResult,
@@ -30,11 +32,25 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.tokenizers import get_tokenizer
+from vllm.renderers import renderer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
+
+
+@pytest.fixture
+def renderer():
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=MODEL_NAME, max_model_len=512, renderer_num_workers=1
+        )
+    )
+    renderer = renderer_from_config(config)
+    try:
+        yield renderer
+    finally:
+        renderer.shutdown()
 
 
 @dataclass(slots=True)
@@ -74,17 +90,15 @@ class MockModelConfig:
         return self.vocab_size
 
 
-def _create_mock_engine():
-    """Create a mock AsyncLLM engine."""
+def _create_mock_engine(renderer):
+    """Create a mock AsyncLLM engine with a real renderer."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.get_tokenizer.return_value = renderer.get_tokenizer()
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
 
-    mock_renderer = MagicMock()
-    mock_renderer.tokenizer = get_tokenizer(MODEL_NAME)
-    mock_engine.renderer = mock_renderer
+    mock_engine.renderer = renderer
 
     return mock_engine
 
@@ -251,9 +265,9 @@ class TestValidation:
         ],
         ids=["invalid_token_id", "empty_items"],
     )
-    async def test_validation_errors(self, request_kwargs, expected_error):
+    async def test_validation_errors(self, renderer, request_kwargs, expected_error):
         """Test that invalid inputs return appropriate errors."""
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
         request = GenerativeScoringRequest(model=MODEL_NAME, **request_kwargs)
         result = await serving.create_generative_scoring(request, None)
@@ -274,23 +288,75 @@ class TestPromptBuilding:
         ],
         ids=["query_first", "item_first"],
     )
-    async def test_item_ordering(self, item_first, expected):
+    async def test_item_ordering(self, renderer, item_first, expected):
         """Test that item_first flag controls prompt concatenation order."""
-        mock_engine = _create_mock_engine()
-        serving = _create_serving(mock_engine)
-
         request = GenerativeScoringRequest(
             query=[100, 101],
             items=[[200, 201], [300, 301]],
             label_token_ids=[500, 501],
             item_first=item_first,
         )
-        engine_inputs, _ = await serving._build_prompts(
-            request, MagicMock(), max_model_len=4096
+        engine_inputs, _ = await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=4096
         )
 
         for i, exp in enumerate(expected):
             assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("item_first", [False, True])
+    @pytest.mark.parametrize("text_kind", ["spaces", "combining_marks"])
+    async def test_text_tokenization_preserves_tokens(
+        self, renderer, item_first, text_kind
+    ):
+        tokenizer = renderer.get_tokenizer()
+        max_model_len = 16
+        if text_kind == "spaces":
+            # A character cut changes the final retained whitespace token.
+            text = " " * ((max_model_len - 1) * tokenizer.max_chars_per_token) + "hello"
+        else:
+            # NFC moves the trailing grave accent to the initial 'a'. A cut
+            # before it changes even the first token, despite extra lookahead.
+            text = (
+                "a"
+                + "\u0315" * (max_model_len * tokenizer.max_chars_per_token)
+                + "\u0300"
+            )
+        query = [100] if item_first else text
+        item = text if item_first else [200]
+        request = GenerativeScoringRequest(
+            query=query, items=[item], label_token_ids=[500, 501], item_first=item_first
+        )
+        engine_inputs, _ = await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=max_model_len
+        )
+        query_ids = (
+            tokenizer.encode(query, add_special_tokens=request.add_special_tokens)
+            if isinstance(query, str)
+            else query
+        )
+        item_ids = (
+            tokenizer.encode(item, add_special_tokens=False)
+            if isinstance(item, str)
+            else item
+        )
+        full = item_ids + query_ids if item_first else query_ids + item_ids
+        assert engine_inputs[0]["prompt_token_ids"] == full[: max_model_len - 1]  # type: ignore[typeddict-item]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text_part", ["query", "item"])
+    async def test_text_tokenization_yields(self, renderer, text_part):
+        request = GenerativeScoringRequest(
+            query="hello" if text_part == "query" else [100],
+            items=["world" if text_part == "item" else [200]],
+            label_token_ids=[500, 501],
+        )
+        callback_ran = asyncio.Event()
+        asyncio.get_running_loop().call_soon(callback_ran.set)
+        await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=16
+        )
+        assert callback_ran.is_set(), "Tokenization blocked the event loop"
 
 
 class TestGeneration:
@@ -306,9 +372,9 @@ class TestGeneration:
         ],
         ids=["text", "token_ids"],
     )
-    async def test_successful_generation(self, cache_salt, query, items):
+    async def test_successful_generation(self, renderer, cache_salt, query, items):
         """Test scoring succeeds and preserves cache_salt for every item."""
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
 
         mock_logprobs = {1234: -0.5, 5678: -2.0, 100: -3.0}
@@ -346,9 +412,9 @@ class TestGeneration:
 
     @pytest.mark.asyncio
     async def test_missing_read_returns_server_error_without_traceback(
-        self, monkeypatch
+        self, renderer, monkeypatch
     ):
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
 
         async def mock_generate(*args, **kwargs):
