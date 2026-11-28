@@ -134,6 +134,10 @@ class Granite20bFCToolParser(ToolParser):
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+        # An exponent can change a number's already-streamed representation
+        # (12e-3 is first parsed as 12, then dumped as 0.012), so only
+        # parse numbers once they are complete.
+        flags &= ~Allow.NUM
         try:
             tool_call_arr = []
             is_complete = []
