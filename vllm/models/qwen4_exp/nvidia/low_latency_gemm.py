@@ -295,6 +295,21 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         1: SkinnyGemmConfig(1, 160, 2, k_unroll=2),
         2: SkinnyGemmConfig(2, 160, 4, k_unroll=2),
     },
+    # Shared-expert gate, replicated at every TP size. Decode CUDA graph
+    # sizes up to 16; larger batches keep the standard linear implementation.
+    (1, 2560): {
+        1: SkinnyGemmConfig(1, 160, 1, k_unroll=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 1, static_k=2560),
+        3: SkinnyGemmConfig(3, 160, 1, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, static_k=2560),
+        5: SkinnyGemmConfig(5, 128, 1, vector_width=4, static_k=2560),
+        6: SkinnyGemmConfig(6, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        10: SkinnyGemmConfig(10, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        12: SkinnyGemmConfig(12, 160, 1, static_k=2560),
+        14: SkinnyGemmConfig(14, 160, 1, k_unroll=2),
+        16: SkinnyGemmConfig(16, 160, 1, static_k=2560),
+    },
 }
 
 
