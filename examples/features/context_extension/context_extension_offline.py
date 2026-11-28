@@ -16,15 +16,16 @@ def create_llm():
     original_max_position_embeddings = 32768
     factor = 4.0
 
-    # Use yarn to extend context
+    # Use yarn to extend context. For YaRN, max_position_embeddings is the
+    # already-extended length, so it must be overridden as well.
     hf_overrides = {
+        "max_position_embeddings": int(original_max_position_embeddings * factor),
         "rope_parameters": {
             "rope_theta": rope_theta,
             "rope_type": "yarn",
             "factor": factor,
             "original_max_position_embeddings": original_max_position_embeddings,
         },
-        "max_model_len": int(original_max_position_embeddings * factor),
     }
 
     llm = LLM(model="Qwen/Qwen3-0.6B", hf_overrides=hf_overrides)

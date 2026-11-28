@@ -24,7 +24,7 @@ Run the vLLM server with the following command to extend the context length usin
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
-  --hf-overrides '{"rope_parameters": {"factor": 4.0, "original_max_position_embeddings": 32768, "rope_theta": 1000000, "rope_type": "yarn"}}' \
+  --hf-overrides '{"max_position_embeddings": 131072, "rope_parameters": {"factor": 4.0, "original_max_position_embeddings": 32768, "rope_theta": 1000000, "rope_type": "yarn"}}' \
   --max-model-len 131072
 ```
 
@@ -64,7 +64,12 @@ Common parameters include:
 - `factor`: The factor by which to extend the context length
 - `original_max_position_embeddings`: The original maximum position embeddings of the model
 
-The following parameters are specific to vLLM:
+For YaRN, vLLM follows Transformers and treats `max_position_embeddings` as the
+already-extended length, so `factor` is not applied to it again. Override
+`max_position_embeddings` to the extended length (`original_max_position_embeddings * factor`)
+alongside `rope_parameters`, otherwise the context stays capped at the checkpoint's value and a
+larger `--max-model-len` is rejected.
 
-- `max_model_len`: The new maximum sequence length after extension (original * factor).
-  Used for KV cache pre‑allocation and request limit at serving time.
+`--max-model-len` (or `max_model_len` in `LLM(...)`) is a vLLM engine argument, not an
+`--hf-overrides` key. It sets the request limit and KV cache pre-allocation and defaults to
+the derived length.
