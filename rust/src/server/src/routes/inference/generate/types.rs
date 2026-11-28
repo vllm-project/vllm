@@ -7,7 +7,6 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
-use validator::Validate;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
@@ -17,9 +16,7 @@ use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
-use crate::routes::openai::utils::types::{
-    ChatLogProbs, Normalizable, StreamOptions, StringOrArray, Usage,
-};
+use crate::routes::openai::utils::types::{ChatLogProbs, StreamOptions, StringOrArray, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -59,7 +56,7 @@ pub struct GenerateSamplingParams {
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]
 #[serde_with::serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateRequest {
     pub request_id: Option<String>,
     pub model: Option<String>,
@@ -93,8 +90,6 @@ pub struct GenerateRequest {
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
-
-impl Normalizable for GenerateRequest {}
 
 /// Response level of the generate API, mirroring Python's `OutputMode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]

@@ -8,8 +8,8 @@ from pathlib import Path
 from stat import S_ISREG
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import get_ec_entry_path
+from vllm.v1.kv_offload.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 
 
 class ECFileLookup(AsyncLookupManager):

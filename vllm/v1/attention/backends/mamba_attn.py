@@ -12,6 +12,9 @@ from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    get_replayssm_align_block_size,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -19,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
@@ -106,19 +110,26 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
-        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
-            vllm_config, layer_names
-        )
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
-        self.use_replayssm = vllm_config.cache_config.use_replayssm
+        # Of the layers built on this builder only Mamba2 decodes through
+        # ReplaySSM; e.g. Qwen4Exp's PLE short conv sits next to its GDN layers.
+        self.use_replayssm = (
+            vllm_config.cache_config.use_replayssm
+            and kv_cache_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+        )
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
-        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
-        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        self.use_flashinfer_replayssm = (
+            self.use_replayssm and vllm_config.use_flashinfer_replayssm
+        )
+        self.use_replayssm_trackers = (
+            self.use_replayssm and vllm_config.use_replayssm_trackers
+        )
 
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
@@ -402,7 +413,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """Compute metadata common to both Mamba1 and Mamba2."""
+        """Compute metadata common to all Mamba-like backends."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
@@ -532,10 +543,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.use_replayssm and not self.use_replayssm_trackers and num_decodes > 0:
             write_pos_d = self.decode_write_pos_d[:num_decodes]
             is_flush_d = self.decode_is_flush_d[:num_decodes]
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            cache_config = self.vllm_config.cache_config
+            if cache_config.enable_prefix_caching:
                 # All rows, so a padded full-CUDA-graph batch can reuse it.
                 replayssm_seq_lens_d = common_attn_metadata.seq_lens[:num_reqs]
-                replayssm_align_block_size = self.kv_cache_spec.block_size
+                replayssm_align_block_size = get_replayssm_align_block_size(
+                    cache_config, self.kv_cache_spec.block_size
+                )
 
         if self.use_flashinfer_replayssm and num_decodes > 0:
             assert self.decode_replayssm_scratch is not None

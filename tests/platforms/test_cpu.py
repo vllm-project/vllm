@@ -39,7 +39,7 @@ def _cpu_config(
     resolved_dtype: str,
     architecture: str | None = None,
     layer_types: tuple[str, ...] = ("linear_attention",),
-) -> SimpleNamespace:
+) -> VllmConfig:
     model_config = SimpleNamespace(
         architecture=architecture or model_type,
         has_inner_state=True,

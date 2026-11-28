@@ -6,6 +6,7 @@ per-entry pydantic path, which every other case still uses."""
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -294,6 +295,7 @@ async def test_flat_storage_selection(
     )
     out = await serving.serve_tokens(request)
     if stream:
+        assert isinstance(out, AsyncGenerator)
         [chunk async for chunk in out]
     assert seen == [(expected, expected)]
 

@@ -58,7 +58,6 @@ class Qwen3ASRRealtimeBuffer:
     """
 
     def __init__(self, sampling_rate: int, segment_duration_s: float = 5.0):
-        self._sampling_rate = sampling_rate
         self._segment_size = int(segment_duration_s * sampling_rate)
 
         self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * sampling_rate

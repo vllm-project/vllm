@@ -186,6 +186,7 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     scheduler._load_acks = {}
     scheduler._next_transfer_id = 0
     scheduler._expected_load_reports = load_reports
+    scheduler.bind_encoder_cache_query(lambda request, input_id: None)
     monkeypatch.setattr(module, "get_encoder_output_width", lambda *args: 1)
     request = image_request("loaded", request_id="r1")
 

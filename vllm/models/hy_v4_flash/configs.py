@@ -257,7 +257,6 @@ class HYV4FlashConfig(HYV4Config):
 
     def verify_parallel_config(self, parallel: "ParallelConfig") -> None:
         for name in (
-            "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
         ):

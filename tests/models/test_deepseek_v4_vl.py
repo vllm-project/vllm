@@ -3,11 +3,18 @@
 """The loader reaches the language model's post-load hook inside VL wrappers."""
 
 import importlib
+from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 from torch import nn
 
+import vllm.utils.gpu_sync_debug as gpu_sync_debug
+from tests.models.registry import HF_EXAMPLE_MODELS
+from tests.models.utils import dummy_hf_overrides
+from vllm import SamplingParams
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.deepseek_v4.common.ops.vision import (
@@ -20,6 +27,16 @@ from vllm.models.deepseek_v4.common.vision import (
     build_packed_merge_metadata,
     get_vision_cos_sin,
 )
+from vllm.models.deepseek_v41.common.mm_preprocess import (
+    IMAGE,
+    IMAGE_END,
+    IMAGE_NEW_LINE,
+    IMAGE_START,
+)
+from vllm.models.deepseek_v41.common.vl_cudagraph import (
+    DeepseekV4VLEncoderCudaGraphMixin,
+)
+from vllm.platforms import current_platform
 
 
 class _FakeLanguageModel(nn.Module):
@@ -145,3 +162,131 @@ def test_vision_spatial_merge_preserves_channel_order_and_padding(dtype, grids):
         )
     actual = vision_spatial_merge(x, metadata["merge_idx"], metadata["merge_mask"])
     torch.testing.assert_close(actual, torch.cat(expected), atol=0, rtol=0)
+
+
+class _SpanHost(DeepseekV4VLEncoderCudaGraphMixin, nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(vision_downsample_ratio=3)
+        self.image_start = nn.Parameter(torch.randn(hidden_size, dtype=torch.float32))
+        self.image_newline = nn.Parameter(torch.randn(hidden_size, dtype=torch.float32))
+        self.image_end = nn.Parameter(torch.randn(hidden_size, dtype=torch.float32))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_deepseek_v41_build_image_span_no_gpu_sync(monkeypatch, dtype) -> None:
+    """Eager and CUDA-graph span assembly must match reference without GPU sync."""
+    torch.manual_seed(0)
+    device = torch.device(current_platform.device_type)
+    dim = 64
+    host = _SpanHost(dim).to(device)
+
+    types_0 = [IMAGE_START, IMAGE, IMAGE, IMAGE_NEW_LINE, IMAGE_END]
+    types_1 = [IMAGE_START, IMAGE, IMAGE_NEW_LINE, IMAGE, IMAGE_NEW_LINE, IMAGE_END]
+    # Unpinned CPU tensor sliced per image, matching `mm_preprocess` (`keep_on_cpu`).
+    packed_types = torch.tensor(types_0 + types_1, dtype=torch.int64)
+    assert not packed_types.is_pinned()
+    device_types_0 = packed_types[: len(types_0)].to(device)
+
+    rows_0 = torch.randn(2, dim, device=device, dtype=dtype)
+    rows_1 = torch.randn(2, dim, device=device, dtype=dtype)
+    padded_aligner_out = torch.cat(
+        [rows_0, rows_1, torch.full((3, dim), float("nan"), device=device, dtype=dtype)]
+    )
+
+    start = host.image_start.to(dtype)
+    newline = host.image_newline.to(dtype)
+    end = host.image_end.to(dtype)
+    expected_0 = torch.stack([start, rows_0[0], rows_0[1], newline, end])
+    expected_1 = torch.stack([start, rows_1[0], newline, rows_1[1], newline, end])
+
+    # Warm up allocator and any lazy kernel init outside the checked region.
+    _ = host._build_image_span(rows_0, packed_types[: len(types_0)])
+
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
+    gpu_sync_debug.enable_gpu_sync_check()
+
+    @gpu_sync_debug.with_gpu_sync_check
+    def run_checked():
+        span_0 = host._build_image_span(rows_0, packed_types[: len(types_0)])
+        span_1 = host._build_image_span(rows_1, packed_types[len(types_0) :])
+        span_dev = host._build_image_span(rows_0, device_types_0)
+        dest: list[torch.Tensor | None] = [None, None]
+        host.postprocess_encoder_output(
+            outputs={"default": padded_aligner_out},
+            indices=[0, 1],
+            per_item_out_tokens=[len(types_0), len(types_1)],
+            dest=dest,
+            batch_mm_kwargs={
+                "vit_grid": [[3, 6], [6, 3]],
+                "llm_grid": [[1, 2], [2, 1]],
+                "types": packed_types,
+            },
+        )
+        return span_0, span_1, span_dev, dest
+
+    span_0, span_1, span_dev, dest = run_checked()
+    torch.testing.assert_close(span_0, expected_0, atol=0, rtol=0)
+    torch.testing.assert_close(span_1, expected_1, atol=0, rtol=0)
+    torch.testing.assert_close(span_dev, expected_0, atol=0, rtol=0)
+    assert dest[0] is not None and dest[1] is not None
+    torch.testing.assert_close(dest[0], expected_0, atol=0, rtol=0)
+    torch.testing.assert_close(dest[1], expected_1, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_rocm()
+        or (current_platform.is_cuda() and current_platform.has_device_capability(90))
+    ),
+    reason="Requires ROCm or CUDA capability >= 9.0",
+)
+def test_deepseek_v41_eager_image_no_gpu_sync(monkeypatch, vllm_runner) -> None:
+    """Eager vision encoding (`cudagraph_mm_encoder=False`) must not sync."""
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    arch = "DeepseekV41ForCausalLM"
+    model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
+    prompt = (
+        "<｜begin▁of▁sentence｜><｜User｜><｜deepseek_image｜>\n\n"
+        "What is in this image?<｜Assistant｜></think>"
+    )
+    images = [
+        Image.new("RGB", (224, 224), color=(128, 64, 32)),
+        Image.new("RGB", (336, 224), color=(32, 128, 64)),
+    ]
+
+    with vllm_runner(
+        model_info.default,
+        dtype="bfloat16",
+        max_model_len=2048,
+        max_num_seqs=2,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 1},
+        load_format="dummy",
+        attention_backend=(
+            "ROCM_FLASHMLA_SPARSE_DSV41"
+            if current_platform.is_rocm()
+            else "FLASHMLA_SPARSE_DSV41"
+        ),
+        hf_overrides=partial(
+            dummy_hf_overrides,
+            model_arch=arch,
+            exist_overrides={"vision_n_layers": 1},
+        ),
+    ) as runner:
+        outputs = runner.llm.generate(
+            [{"prompt": prompt, "multi_modal_data": {"image": img}} for img in images],
+            SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True),
+        )
+
+    assert [len(output.outputs[0].token_ids) for output in outputs] == [4, 4]

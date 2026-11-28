@@ -6,6 +6,10 @@ from prometheus_client import CollectorRegistry
 from vllm.config import SpeculativeConfig
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import (
+    QueuedWorkload,
+    ScheduledWorkload,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
@@ -99,11 +103,16 @@ def test_scheduler_iteration_details_serialization():
         elapsed_ms=6.7,
         num_encoder_inputs=2,
         num_encoder_output_tokens=392,
+        scheduled_workload=ScheduledWorkload(
+            sum_decode_kv_tokens=9, var_decode_kv_tokens=0.5
+        ),
     )
+    queued_workload = QueuedWorkload(num_prefill_requests=1, sum_prefill_tokens=7)
     outputs = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_records=[iteration_details],
+            queued_workload=queued_workload,
         )
     )
 
@@ -113,6 +122,7 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_records == [iteration_details]
+    assert decoded.scheduler_stats.queued_workload == queued_workload
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

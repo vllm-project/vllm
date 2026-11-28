@@ -38,6 +38,19 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 logger = init_logger(__name__)
 
 
+def _has_multimodal_data(prompt: object) -> bool:
+    """Whether a raw prompt (or either side of an encoder-decoder prompt)
+    carries `multi_modal_data`."""
+    if not isinstance(prompt, dict):
+        return False
+    if prompt.get("multi_modal_data") is not None:
+        return True
+    return any(
+        _has_multimodal_data(prompt.get(key))
+        for key in ("encoder_prompt", "decoder_prompt")
+    )
+
+
 class InputProcessor:
     def __init__(
         self,
@@ -76,12 +89,26 @@ class InputProcessor:
             )
             mm_budget.reset_cache()  # Not used anymore
 
-        # Raw-prompt preprocessing (tokenization and multimodal processing)
-        # is blocking, so async callers should run it on the renderer's
-        # thread pool to keep their event loop responsive.
-        self.process_inputs_async = make_async(
+        self._process_text_inputs_async = make_async(
             self.process_inputs, executor=self.renderer._executor
         )
+        self._process_mm_inputs_async = make_async(
+            self.process_inputs, executor=self.renderer._mm_executor
+        )
+
+    async def process_inputs_async(
+        self,
+        request_id: str,
+        prompt: PromptType | EngineInput,
+        *args: Any,
+        **kwargs: Any,
+    ) -> EngineCoreRequest:
+        """Run `process_inputs` off the event loop."""
+        if _has_multimodal_data(prompt):
+            fn = self._process_mm_inputs_async
+        else:
+            fn = self._process_text_inputs_async
+        return await fn(request_id, prompt, *args, **kwargs)
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -399,6 +426,9 @@ class InputProcessor:
 
             engine_input: EngineInput = prompt  # type: ignore[assignment]
         else:
+            if self.lora_config is not None and isinstance(params, SamplingParams):
+                self.lora_config.validate_prompt_logprobs(params)
+
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
                 "and will be removed in the future. You should instead pass "
@@ -518,6 +548,7 @@ class InputProcessor:
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
+            skip_mm_cache = bool(decoder_input.get("skip_mm_cache", False))
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -536,9 +567,14 @@ class InputProcessor:
             mm_features = []
             for modality, idx in sorted_mm_idxs:
                 base_mm_hash = decoder_mm_hashes[modality][idx]
+                mm_item = decoder_mm_inputs[modality][idx]
+                item_skip_mm_cache = skip_mm_cache or (
+                    mm_item is not None
+                    and any(elem.skip_mm_cache for elem in mm_item.values())
+                )
                 mm_features.append(
                     MultiModalFeatureSpec(
-                        data=decoder_mm_inputs[modality][idx],
+                        data=mm_item,
                         modality=modality,
                         identifier=self._get_mm_identifier(
                             base_mm_hash,
@@ -546,6 +582,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        skip_mm_cache=item_skip_mm_cache,
                     )
                 )
 

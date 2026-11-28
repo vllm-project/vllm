@@ -14,6 +14,7 @@ every rank.
 import itertools
 from functools import lru_cache
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -255,58 +256,62 @@ class DeepseekV4ViT(nn.Module):
             x = block(x, cos, sin, cu_seqlens, max_seqlen)
         return self.norm(x)
 
+    def build_packed_vit_metadata(
+        self,
+        grids: list[list[int]] | list[tuple[int, int]],
+        *,
+        device: torch.device,
+        max_seqlen_override: int | None = None,
+        cached: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        """Precompute packed-batch ViT metadata for `forward_packed`.
 
-def build_packed_vit_metadata(
-    grids: list[list[int]] | list[tuple[int, int]],
-    *,
-    rope_dim: int,
-    rope_theta: float,
-    device: torch.device,
-    max_seqlen_override: int | None = None,
-    cached: bool = True,
-) -> dict[str, torch.Tensor]:
-    """Precompute packed-batch ViT metadata for `DeepseekV4ViT.forward_packed`.
+        Args:
+            grids: `[n_vit_h, n_vit_w]` per image, in packing order.
+            device: Device for RoPE tables and the default for `cu_seqlens`.
+            max_seqlen_override: Worst-case value baked in at CUDA graph capture
+                (the attention wrapper reads `max_seqlen` on the host, so the
+                capture-time value becomes a graph constant).
+            cached: Use the shared `lru_cache` for RoPE tables. Capture-time
+                dummy grids pass `False` to avoid evicting real entries.
 
-    Args:
-        grids: `[n_vit_h, n_vit_w]` per image, in packing order.
-        rope_dim: RoPE embedding dimension of the ViT.
-        rope_theta: RoPE base frequency of the ViT.
-        device: Device for the returned tensors (except `max_seqlen`,
-            which stays on the host).
-        max_seqlen_override: Worst-case value baked in at CUDA graph capture
-            (the attention wrapper reads `max_seqlen` on the host, so the
-            capture-time value becomes a graph constant).
-        cached: Use the shared `lru_cache` for RoPE tables. Capture-time
-            dummy grids pass `False` to avoid evicting real entries.
+        """
+        cos_sin = get_vision_cos_sin if cached else _compute_vision_cos_sin
+        cos_list: list[torch.Tensor] = []
+        sin_list: list[torch.Tensor] = []
+        cu_seqlens = [0]
+        max_seqlen = 0
+        for n_h, n_w in grids:
+            cos, sin = cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
+            cos_list.append(cos)
+            sin_list.append(sin)
+            num_patches = n_h * n_w
+            cu_seqlens.append(cu_seqlens[-1] + num_patches)
+            max_seqlen = max(max_seqlen, num_patches)
+        if cos_list:
+            cos = async_tensor_h2d(torch.cat(cos_list), device)
+            sin = async_tensor_h2d(torch.cat(sin_list), device)
+        else:
+            cos = torch.zeros((0, 1, self.rope_dim), dtype=torch.float32, device=device)
+            sin = torch.zeros((0, 1, self.rope_dim), dtype=torch.float32, device=device)
+        if max_seqlen_override is not None:
+            max_seqlen = max_seqlen_override
 
-    """
-    cos_sin = get_vision_cos_sin if cached else _compute_vision_cos_sin
-    cos_list: list[torch.Tensor] = []
-    sin_list: list[torch.Tensor] = []
-    cu_seqlens = [0]
-    max_seqlen = 0
-    for n_h, n_w in grids:
-        cos, sin = cos_sin(n_h, n_w, rope_dim, rope_theta)
-        cos_list.append(cos)
-        sin_list.append(sin)
-        n = n_h * n_w
-        cu_seqlens.append(cu_seqlens[-1] + n)
-        max_seqlen = max(max_seqlen, n)
-    if cos_list:
-        cos = async_tensor_h2d(torch.cat(cos_list), device)
-        sin = async_tensor_h2d(torch.cat(sin_list), device)
-    else:
-        cos = torch.zeros((0, 1, rope_dim), dtype=torch.float32, device=device)
-        sin = torch.zeros((0, 1, rope_dim), dtype=torch.float32, device=device)
-    if max_seqlen_override is not None:
-        max_seqlen = max_seqlen_override
-    return {
-        "vit_cos": cos,
-        "vit_sin": sin,
-        "cu_seqlens": async_tensor_h2d(cu_seqlens, device, dtype=torch.int32),
-        # Read on the host by the attention wrapper; keep on CPU.
-        "max_seqlen": torch.tensor(max_seqlen, dtype=torch.int32),
-    }
+        vision_attn = self.blocks[0].attn
+        cu_seqlens_tensor = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            vision_attn.attn.attn_backend,
+            np.asarray(cu_seqlens, dtype=np.int32),
+            vision_attn.hidden_size,
+            vision_attn.tp_size,
+            device,
+        )
+        return {
+            "vit_cos": cos,
+            "vit_sin": sin,
+            "cu_seqlens": cu_seqlens_tensor,
+            # Read on the host by the attention wrapper; keep on CPU.
+            "max_seqlen": torch.tensor(max_seqlen, dtype=torch.int32),
+        }
 
 
 def build_packed_merge_metadata(
@@ -433,11 +438,8 @@ def encode_images(
         ]
 
     r = aligner.downsample_ratio
-    vit_metadata = build_packed_vit_metadata(
-        vit_grid,
-        rope_dim=vision_model.rope_dim,
-        rope_theta=vision_model.rope_theta,
-        device=patches.device,
+    vit_metadata = vision_model.build_packed_vit_metadata(
+        vit_grid, device=patches.device
     )
     merge_metadata = build_packed_merge_metadata(
         vit_grid, r, device=patches.device, dtype=aligner.w1.weight.dtype

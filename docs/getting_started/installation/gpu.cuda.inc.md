@@ -136,6 +136,8 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
+    With `VLLM_USE_RUST_FRONTEND=1`, `vllm serve` warns at startup when `rust/` in your checkout differs from the commit the packaged `vllm/vllm-rs` was built from, for example after changing `rust/` on a branch installed with `VLLM_USE_PRECOMPILED=1`. Rebuild the binary as above.
+
 Wheels are published an hour or two after a commit lands on `main`. If the wheel for
 your merge-base with upstream `main` is not available yet, the installer uses the
 nearest older commit that has one, searching up to 20 commits back. It stops with an

@@ -1438,7 +1438,7 @@ class TestLayerwiseGroups:
             "language_model.layers.",  # Kimi-K2.5, Nemotron-VL
             "thinker.model.layers.",  # Qwen2.5/3-Omni
             "transformer.h.",  # GPT-2, GPT-J, Bloom, Falcon
-            "transformer.blocks.",  # MPT, DBRX
+            "transformer.blocks.",  # MPT
             "transformer.encoder.layers.",  # ChatGLM
             "backbone.layers.",  # Mamba, Mamba2
             "gpt_neox.layers.",  # GPT-NeoX
@@ -1584,7 +1584,7 @@ BAKE_MODELS = [
     # Not an fp8 checkpoint: `process_weights_after_loading` swaps the vLLM
     # parameter subclasses out on those, and the plain second `load_weights`
     # this test compares against then cannot run.
-    pytest.param("vllm-project/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
+    pytest.param("vllm/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
 ]
 
 

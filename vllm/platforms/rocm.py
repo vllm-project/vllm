@@ -221,6 +221,7 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX115X = "gfx115" in _GCN_ARCH
+_ON_GFX117X = any(arch in _GCN_ARCH for arch in ["gfx1170", "gfx1171"])
 _ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
@@ -325,6 +326,10 @@ def on_gfx1151() -> bool:
 
 def on_gfx115x() -> bool:
     return _ON_GFX115X
+
+
+def on_gfx117x() -> bool:
+    return _ON_GFX117X
 
 
 def on_gfx1201() -> bool:
@@ -749,6 +754,7 @@ class RocmPlatform(Platform):
                 AttentionBackendEnum.ROCM_ATTN,
             )
         is_turboquant_run = _uses_turboquant(vllm_config)
+        is_ultraquant_run = _uses_ultraquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
                 invalid_reasons_i = _get_invalid_reasons(
@@ -756,6 +762,7 @@ class RocmPlatform(Platform):
                     device_capability,
                     attn_selector_config,
                     is_turboquant_run=is_turboquant_run,
+                    is_ultraquant_run=is_ultraquant_run,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]

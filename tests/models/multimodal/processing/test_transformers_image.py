@@ -251,16 +251,7 @@ def test_repeated_image_hits_the_processor_cache():
         ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "<image>\nWhat is this?"),
         ("google/gemma-3-4b-it", "<start_of_image> What is this?"),
         ("HuggingFaceTB/SmolVLM-256M-Instruct", "<image>What is this?"),
-        pytest.param(
-            "BAAI/Emu3-Chat-hf",
-            "<image> and more text",
-            marks=pytest.mark.xfail(
-                reason="Emu3Processor prepends the BOS token itself because the "
-                "tokenizer doesn't, so the unexpanded prompt vLLM tokenizes "
-                "never gets one.",
-                strict=False,
-            ),
-        ),
+        ("BAAI/Emu3-Chat-hf", "<image> and more text"),
     ],
 )
 def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
@@ -273,14 +264,10 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     info = mm_processor.info
     image = ImageAsset("cherry_blossom").pil_image
 
-    hf_processor = info.get_hf_processor()
-    prompt_ids = info.get_tokenizer().encode(
-        prompt, **info.default_tok_params.get_encode_kwargs()
-    )
     hf_ids = info.ctx.call_hf_processor(
-        hf_processor,
-        dict(text=hf_processor.decode(prompt_ids), images=[image]),
-        dict(truncation=False, add_special_tokens=False),
+        info.get_hf_processor(),
+        dict(text=prompt, images=[image]),
+        dict(truncation=False),
     )["input_ids"][0].tolist()
 
     result = mm_processor(

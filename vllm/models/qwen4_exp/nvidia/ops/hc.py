@@ -189,6 +189,42 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 MIN_FUSED_UP_M = 48
 
 
+# Benchmarked on the full PDL chain (not isolated kernels), so the crossover
+# includes the early-trigger overlap.
+SM100_DOWN_MIN_M = 9
+
+
+def hc_down_silu_sm100_supported(
+    w_down: torch.Tensor, rank: int, hc_count: int
+) -> bool:
+    return (
+        hasattr(torch.ops._C, "qwen4_exp_hc_down_silu")
+        and current_platform.is_device_capability_family(100)
+        and hc_count == 4
+        and rank == 320
+        and w_down.dtype == torch.bfloat16
+        and w_down.ndim == 2
+        and w_down.shape[0] >= rank + hc_count
+        and w_down.shape[1] == 4 * 2560
+    )
+
+
+def hc_down_silu_sm100(
+    xn: torch.Tensor, w_down: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused down+inject GEMM + SiLU on SM100 (tcgen05), H=10240, rank=320.
+
+    SiLU reads the fp32 accumulator: results differ from the unfused path
+    at bf16 noise level. `w_down` must be a static weight: it is loaded
+    before the PDL wait, so no in-flight earlier kernel may write it.
+    """
+    M = xn.shape[0]
+    lowrank = xn.new_empty(M, 320)
+    inj_out = xn.new_empty(M, 4)
+    torch.ops._C.qwen4_exp_hc_down_silu(lowrank, inj_out, xn, w_down)
+    return lowrank, inj_out
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _hc_up_gate_mix_sm90_kernel(
     lowrank,
@@ -287,6 +323,9 @@ def hc_up_gate_mix(
     """Fuse the BF16 up projection and gate mix for four streams, H=2560, K=320.
 
     SM90 rounds the gate to BF16 before sigmoid. SM100 keeps it in FP32.
+
+    `w_up` must be a static weight: the kernel loads it before its PDL wait,
+    so it must not be written by the kernel launched just before.
     """
     if current_platform.is_device_capability(90):
         assert lowrank.shape == (xn.shape[0], 320)
@@ -441,6 +480,8 @@ def _hc_combine_norm_kernel(
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+        # Early at every M on purpose: neutral at large M, faster at small M.
+        tl.extra.cuda.gdc_launch_dependents()
 
     # Start the uncached residual load first, then issue the other combine
     # loads before consuming any of them.
@@ -465,9 +506,6 @@ def _hc_combine_norm_kernel(
     out = out.to(tl.float32)
     sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
     rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_launch_dependents()
 
     if inj_ptr is not None:
         # Loading the weight earlier helps decode but keeps the tile live across
@@ -529,6 +567,8 @@ __all__ = [
     "grouped_gemma_rmsnorm",
     "hc_combine",
     "hc_combine_norm",
+    "hc_down_silu_sm100",
+    "hc_down_silu_sm100_supported",
     "hc_gate_mix",
     "hc_silu",
 ]

@@ -66,6 +66,26 @@ def _padded_prompt_logprobs(
     return logprobs + [None] * (num_prompt_tokens - len(logprobs))
 
 
+def _get_echoed_prompt_logprobs(
+    prompt_token_ids: list[int],
+    prompt_logprobs: PromptLogprobs | None,
+    echo_mask: list[bool] | None,
+) -> tuple[list[int], PromptLogprobs]:
+    """Select visible prompt IDs and logprobs without changing engine inputs."""
+    logprobs = _padded_prompt_logprobs(prompt_logprobs, len(prompt_token_ids))
+    if echo_mask is None:
+        return prompt_token_ids, logprobs
+
+    visible_ids: list[int] = []
+    visible_logprobs: PromptLogprobs = []
+    for i, (token_id, logprob) in enumerate(zip(prompt_token_ids, logprobs)):
+        if i < len(echo_mask) and not echo_mask[i]:
+            continue
+        visible_ids.append(token_id)
+        visible_logprobs.append(logprob)
+    return visible_ids, visible_logprobs
+
+
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
 _PROBE_INDEX = 987654321
 _encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
@@ -325,6 +345,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                prompt_echo_masks=(
+                    [
+                        p.get("prompt_echo_mask") if p["type"] == "token" else None
+                        for p in engine_inputs
+                    ]
+                    if request.echo and request.logprobs is not None
+                    else None
+                ),
             )
 
             if self.enable_log_outputs and self.request_logger:
@@ -381,6 +409,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         )
 
         last_res: RequestOutput | None = None
+        first_content_token_ts: float | None = None
         try:
             # Requests that can only emit plain delta chunks render them from a
             # per-stream template; everything else uses the model path below.
@@ -417,6 +446,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
+                    if (
+                        self.enable_per_request_metrics
+                        and num_prompts == 1
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and request.max_tokens != 0
+                        and output.text
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
+
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
                     # with the echo implementation.
@@ -425,6 +466,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
+                        echo_token_ids = prompt_token_ids
+                        echo_logprobs = None
+                        if request.logprobs is not None:
+                            engine_input = engine_inputs[prompt_idx]
+                            echo_mask = (
+                                engine_input.get("prompt_echo_mask")
+                                if not request.return_token_ids
+                                and engine_input["type"] == "token"
+                                else None
+                            )
+                            echo_token_ids, echo_logprobs = _get_echoed_prompt_logprobs(
+                                prompt_token_ids, prompt_logprobs, echo_mask
+                            )
                         prompt_text = "" if request.return_token_ids else res.prompt
                         if prompt_text is None:
                             prompt_text = self._extract_prompt_text(
@@ -433,26 +487,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
-                            delta_token_ids = prompt_token_ids
-                            out_logprobs = (
-                                _padded_prompt_logprobs(
-                                    prompt_logprobs, len(prompt_token_ids)
-                                )
-                                if request.logprobs is not None
-                                else None
-                            )
+                            delta_token_ids = echo_token_ids
+                            out_logprobs = echo_logprobs
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
-                                *prompt_token_ids,
+                                *echo_token_ids,
                                 *output.token_ids,
                             ]
                             out_logprobs = (
                                 [
-                                    *_padded_prompt_logprobs(
-                                        prompt_logprobs, len(prompt_token_ids)
-                                    ),
+                                    *(echo_logprobs or []),
                                     *(output.logprobs or []),
                                 ]
                                 if request.logprobs is not None
@@ -615,7 +661,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, total_completion_tokens
+                            last_metrics,
+                            total_completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
@@ -657,6 +705,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         model_name: str,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        *,
+        prompt_echo_masks: list[list[bool] | None] | None = None,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
@@ -664,7 +714,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         kv_transfer_params = None
         ec_transfer_params = None
         last_final_res = None
-        for final_res in final_res_batch:
+        for prompt_idx, final_res in enumerate(final_res_batch):
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -679,30 +729,34 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                 assert request.max_tokens is not None
                 if request.echo:
+                    echo_token_ids = prompt_token_ids
+                    echo_logprobs = None
+                    if request.logprobs is not None:
+                        echo_mask = (
+                            prompt_echo_masks[prompt_idx]
+                            if not request.return_token_ids
+                            and prompt_echo_masks is not None
+                            else None
+                        )
+                        echo_token_ids, echo_logprobs = _get_echoed_prompt_logprobs(
+                            prompt_token_ids, prompt_logprobs, echo_mask
+                        )
                     if request.return_token_ids:
                         prompt_text = ""
                     assert prompt_text is not None
                     if request.max_tokens == 0:
-                        token_ids = prompt_token_ids
-                        out_logprobs = (
-                            _padded_prompt_logprobs(
-                                prompt_logprobs, len(prompt_token_ids)
-                            )
-                            if request.logprobs is not None
-                            else None
-                        )
+                        token_ids = echo_token_ids
+                        out_logprobs = echo_logprobs
                         output_text = prompt_text
                     else:
-                        token_ids = [*prompt_token_ids, *output.token_ids]
+                        token_ids = [*echo_token_ids, *output.token_ids]
 
                         if request.logprobs is None:
                             out_logprobs = None
                         else:
                             assert output.logprobs is not None
                             out_logprobs = [
-                                *_padded_prompt_logprobs(
-                                    prompt_logprobs, len(prompt_token_ids)
-                                ),
+                                *(echo_logprobs or []),
                                 *output.logprobs,
                             ]
 
@@ -869,24 +923,31 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # logprobs, as defined in the openai API
                 # (cf. https://github.com/openai/openai-openapi/blob/
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
-                out_top_logprobs.append(
-                    {
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        self._get_decoded_token(
-                            top_lp[1],
-                            top_lp[0],
-                            tokenizer,
-                            return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
-                        for top_lp in itertools.islice(
-                            step_top_logprobs.items(),
-                            completion_top_logprobs_limit(
-                                num_output_top_logprobs, bool(logprob_token_ids)
-                            ),
-                        )
-                    }
-                )
+                step_out_top_logprobs: dict[str, float] = {}
+                for top_token_id, top_lp in itertools.islice(
+                    step_top_logprobs.items(),
+                    completion_top_logprobs_limit(
+                        num_output_top_logprobs, bool(logprob_token_ids)
+                    ),
+                ):
+                    top_token = self._get_decoded_token(
+                        top_lp,
+                        top_token_id,
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id,
+                    )
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    top_logprob = max(top_lp.logprob, -9999.0)
+                    # Byte fragments all decode to "", so keep the highest
+                    # logprob per string. On a tie the earlier candidate
+                    # stays, and the token at this position is always first.
+                    if (
+                        top_token not in step_out_top_logprobs
+                        or top_logprob > step_out_top_logprobs[top_token]
+                    ):
+                        step_out_top_logprobs[top_token] = top_logprob
+                out_top_logprobs.append(step_out_top_logprobs)
 
             if len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)

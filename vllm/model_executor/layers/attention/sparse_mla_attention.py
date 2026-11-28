@@ -305,6 +305,7 @@ def build_shardq_metadata(
         num_decode_tokens=num_decode_tokens,
         num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
         token_ids=async_tensor_h2d(split.token_ids, device=device),
+        local_token_ids_cpu=split.local_token_ids,
         rank_offsets=async_tensor_h2d(
             np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
         ),

@@ -90,6 +90,13 @@ class Segment(NamedTuple):
     # only when logprobs are requested.
     token_logprobs: tuple[int, LogprobsOnePosition] | None = None
 
+    @property
+    def is_content(self) -> bool:
+        return (
+            _SegmentType.from_channel_and_recipient(self.channel, self.recipient)
+            == _SegmentType.CONTENT
+        )
+
 
 @dataclass(slots=True)
 class ChunkResult:

@@ -154,13 +154,21 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
+        if self.supports_mm_inputs:
+            self.execute_mm_encoder(scheduled_encoder_inputs)
+
+        if input_batch.num_tokens == 0:
+            # Idle PCP ranks still run the padded forward, but embedding an
+            # empty token batch can launch an invalid TP all-reduce kernel.
+            return self.dummy_inputs_embeds(
+                input_batch.num_tokens_after_padding
+            ).zero_()
+
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
 
         if self.supports_mm_inputs:
-            self.execute_mm_encoder(scheduled_encoder_inputs)
-
             mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
             if self.mm_pruner is not None and mm_embeds:
                 # EVS: recompute mrope positions for pruned media.
@@ -210,12 +218,9 @@ class DefaultModelState(ModelState):
         return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
-        model_inputs = {}
-        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
-            model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
-        if self.rope_state is not None:
-            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
-        return model_inputs
+        if self.rope_state is None:
+            return {}
+        return {"positions": self.rope_state.get_positions(num_tokens)}
 
     def prepare_attn(
         self,

@@ -339,6 +339,25 @@ def test_fused_post_conv_int64_token_offset():
             torch.bfloat16,
             id="ratio3-9reqs-fp16",
         ),
+        # Largest window. One request splits V on SM90+, 16 requests do not.
+        pytest.param(2, 4, (16,), torch.float32, torch.bfloat16, id="tp4-t16-fp32"),
+        pytest.param(4, 4, (16, 9), torch.float16, torch.float32, id="tp4-t16-fp16"),
+        pytest.param(
+            2,
+            1,
+            (16,) * 13 + (9, 3, 0),
+            torch.float32,
+            torch.float32,
+            id="16reqs-t16-fp32",
+        ),
+        pytest.param(
+            2,
+            1,
+            (16,) * 13 + (9, 3, 0),
+            torch.bfloat16,
+            torch.bfloat16,
+            id="16reqs-t16-bf16",
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])

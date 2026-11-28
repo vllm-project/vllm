@@ -727,8 +727,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         is_dram = desc_is_dram[local_ids]
 
         if self._skip_dram_xfer:
-            # TP rank 0 reads the DRAM (shared host pool) part for every
-            # local rank; keep only the device part. Register the request
+            # The node's host leader reads the DRAM (shared host pool) part for
+            # every local rank; keep only the device part. Register the request
             # even if nothing is left, so it still completes and notifies.
             keep = ~is_dram
             local_ids = local_ids[keep]

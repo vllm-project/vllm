@@ -15,6 +15,7 @@ from vllm.entrypoints.common.cli_args import (
     propagate_flash_late_interaction,
     validate_parsed_serve_args,
 )
+from vllm.entrypoints.common.stale_rust_frontend import warn_if_rust_frontend_stale
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
@@ -289,6 +290,8 @@ def run_multi_api_server(args: argparse.Namespace):
         raise ValueError(
             "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
         )
+    if rust_frontend_path:
+        warn_if_rust_frontend_stale(rust_frontend_path)
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()

@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
     LoadSpec,
@@ -51,6 +52,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
+from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     SlidingWindowManager,
@@ -97,6 +99,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
         )
 
     positional = scheduler.build_connector_meta(output({}))
+    assert isinstance(positional, UMBPConnectorMetadata)
     assert {
         (plan.group_id, plan.block_id) for plan in positional.iter_store_plans()
     } == {
@@ -106,6 +109,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
 
     scheduler._request_trackers["m"].saved_tokens = 0
     handed_off = scheduler.build_connector_meta(output({"m": [(1, 9, 32)]}))
+    assert isinstance(handed_off, UMBPConnectorMetadata)
     handed_off_plans = list(handed_off.iter_store_plans())
     assert (1, 9) in {(plan.group_id, plan.block_id) for plan in handed_off_plans}
     assert not any(
@@ -245,6 +249,7 @@ def test_single_sliding_window_stores_a_replayable_tail():
             matched,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.block_ids == [5, 6]
         expected_hashes = [b"c", b"d"]
         assert loaded.keys == [codec.key(block_hash) for block_hash in expected_hashes]
@@ -357,6 +362,7 @@ def test_lookup_stops_before_the_aligned_prompt_end():
             48,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.keys == [
             codec.key(b"a", 0),
             codec.key(b"b", 0),
@@ -506,6 +512,7 @@ def test_hybrid_lookup_uses_latest_mamba_checkpoint(lookup_async, monkeypatch):
         codec,
     )
     try:
+        assert scheduler._lookup_coordinator is not None
         pool = scheduler._lookup_coordinator.block_pool
         for operation in (
             "get_new_blocks",
@@ -563,7 +570,9 @@ def test_hybrid_shadow_lookup_cleans_up_after_failure(monkeypatch, failure_stage
     request = make_request("r", num_tokens=33)
     handle.hits = {codec.key(h, g): True for h in request.block_hashes for g in (0, 1)}
     coordinator = scheduler._lookup_coordinator
+    assert coordinator is not None
     pool = coordinator.block_pool
+    assert isinstance(pool, umbp_scheduler._LookupBlockPool)
     free_blocks = pool.get_num_free_blocks()
 
     def fail(*args, **kwargs):
@@ -658,6 +667,8 @@ def test_scheduler_accepts_only_computed_hash_aligned_tail(boundary, monkeypatch
         request, ([7],), [(0, 7, boundary)]
     )
     metadata = scheduler.build_connector_meta(make_scheduler_output())
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
 
     assert len(metadata.store_plans) == (1 if boundary == 12 else 0)
     if metadata.store_plans:
@@ -696,6 +707,8 @@ def test_scheduler_stores_exact_hybrid_boundary_state():
         )
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
     assert len(metadata.store_plans) == 1
     plan = metadata.store_plans[0]
     assert plan.group_id == 1
@@ -769,6 +782,33 @@ def test_hybrid_fine_hash_lookup_is_not_limited_by_gpu_page_count():
         scheduler.close()
 
 
+@pytest.mark.parametrize(
+    ("hybrid", "prefix_match_unit", "configured", "expected"),
+    [
+        (True, 4, None, True),
+        (True, 4, False, False),
+        (True, None, None, False),
+        (False, None, None, False),
+    ],
+)
+def test_partial_hash_hits_default_on_for_mamba_hybrids(
+    hybrid, prefix_match_unit, configured, expected
+):
+    extra = {"mode": "embedded"}
+    if configured is not None:
+        extra["enable_partial_hash_hits"] = configured
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(extra, prefix_match_unit=prefix_match_unit),
+        _hybrid_kv_cache_config() if hybrid else _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("partial-default")),
+    )
+    try:
+        assert scheduler.enable_partial_hash_hits is expected
+    finally:
+        scheduler.close()
+
+
 def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config(
@@ -810,6 +850,7 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         make_scheduler_output(finished={request.request_id})
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert len(metadata.store_plans) == 2
     assert {(plan.group_id, plan.block_id) for plan in metadata.store_plans} == {
         (0, 7),
@@ -828,6 +869,56 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
     assert not scheduler.has_pending_push_work()
 
 
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_boundary_page_comes_from_the_current_block_table(lazy_offload):
+    """Lazy stores never grow the request tracker, so a boundary's attention
+    page must come from core's table, which chunked prefill may have grown."""
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"mode": "embedded", "lazy_offload": lazy_offload}, prefix_match_unit=4
+        ),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("boundary-table")),
+    )
+    request = make_request(
+        "grow",
+        num_tokens=33,
+        block_hashes=[bytes([index]) for index in range(8)],
+        block_ids=([1], [5]),
+    )
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: ([1], [5])), 0
+    )
+    scheduler.build_connector_meta(
+        make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="grow", num_computed_tokens=0, block_ids=([1], [5])
+                )
+            ],
+            scheduled_tokens={"grow": 16},
+        )
+    )
+    table = ([1, 2], [5, 6])
+    metadata = scheduler.build_connector_meta(
+        make_scheduler_output(
+            cached_reqs=SimpleNamespace(
+                req_ids=["grow"], num_computed_tokens=[16], new_block_ids=[([2], [6])]
+            ),
+            scheduled_tokens={"grow": 4},
+            block_state=KVConnectorBlockState(
+                req_ids={"grow"},
+                resolve_block_ids=lambda req_id: table,
+                boundary_state_offloads={"grow": [(1, 6, 20)]},
+            ),
+        )
+    )
+
+    stored = {(plan.group_id, plan.block_id) for plan in metadata.store_plans}
+    assert {(1, 6), (0, 2)} <= stored
+
+
 @pytest.mark.parametrize(
     "device",
     [
@@ -840,8 +931,12 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
-    """A hash-only tail survives request cleanup, then restores byte for byte."""
+@pytest.mark.parametrize("request_state", ["running", "finished"])
+def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
+    """A boundary inside an attention block restores byte for byte.
+
+    Core hands it off while the request runs, or keeps it as the finished tail.
+    """
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -911,15 +1006,31 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
     )
     sources = [pool.blocks[1], pool.blocks[2]]
-    pool.touch(sources)
-    assert not scheduler.register_finished_partial_tail(
-        request, source_ids, [(1, 2, 12)]
-    )
-    assert scheduler.request_finished(request, source_ids) == (False, None)
-    pool.free_blocks(sources)
-    output = make_scheduler_output(finished={"tail"})
+    if request_state == "finished":
+        pool.touch(sources)
+        assert not scheduler.register_finished_partial_tail(
+            request, source_ids, [(1, 2, 12)]
+        )
+        assert scheduler.request_finished(request, source_ids) == (False, None)
+        pool.free_blocks(sources)
+        output = make_scheduler_output(finished={"tail"})
+    else:
+        output = make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="tail", num_computed_tokens=0, block_ids=source_ids
+                )
+            ],
+            scheduled_tokens={"tail": 12},
+            block_state=KVConnectorBlockState(
+                req_ids={"tail"},
+                resolve_block_ids=lambda req_id: source_ids,
+                boundary_state_offloads={"tail": [(1, 2, 12)]},
+            ),
+        )
     try:
         metadata = scheduler.build_connector_meta(output)
+        assert isinstance(metadata, UMBPConnectorMetadata)
         assert len(metadata.store_plans) == 2
         worker.enqueue_stores(metadata)
         worker.wait_for_save()
@@ -936,14 +1047,18 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         assert [block.ref_cnt for block in sources] == [0, 0]
         for cache in caches.values():
             cache.zero_()
+        # Core leaves no write to an asynchronous load's blocks queued on the
+        # caller stream, which the transfer is not ordered behind.
+        torch.accelerator.synchronize()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
         scheduler.update_state_after_alloc(
             request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
         )
-        output.finished_req_ids = set()
-        worker.start_load_kv(None, scheduler.build_connector_meta(output))
+        worker.start_load_kv(
+            None, scheduler.build_connector_meta(make_scheduler_output())
+        )
         deadline = time.monotonic() + 10
         while (finished := worker.get_finished(set())) == (None, None):
             assert time.monotonic() < deadline, "load completion was not reported"
@@ -954,7 +1069,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             expected = torch.zeros_like(cache)
             expected[block_id] = pages[name]
             assert torch.equal(cache, expected), name
-        counters = worker.get_kv_connector_stats().reduce()
+        connector_stats = worker.get_kv_connector_stats()
+        assert connector_stats is not None
+        counters = connector_stats.reduce()
         page_bytes = sum(group.page_size_bytes for group in groups)
         assert counters["load_num_bytes"] == page_bytes
         assert counters["store_num_bytes"] == page_bytes
@@ -1032,6 +1149,8 @@ def test_eager_restored_prefix_rechecks_residency_per_group_and_rank(
     )
     try:
         meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, UMBPConnectorMetadata)
+        assert scheduler.codec is not None
         expected = {(0, b"c"), (0, b"d"), (1, b"d")} if restored_tokens == 32 else set()
         if failure == "missing-rank":
             expected.add((0, b"a"))
