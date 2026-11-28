@@ -774,15 +774,19 @@ def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
     assert not stale[1].any()
 
 
-@pytest.mark.parametrize("pcp_size", [1, 2])
-def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
+@pytest.mark.parametrize("pcp_size,pp_size", [(1, 1), (2, 1), (1, 2)])
+def test_draft_logits_stay_replicated_under_pcp_and_pp(pcp_size: int, pp_size: int):
     """PCPManager.sync_drafts indexes the draft logits cache by request state,
-    so PCP keeps the cache replicated even under batch-sharded sampling."""
+    and PP micro-batches would take each other's rows, so PCP and PP keep the
+    cache replicated even under batch-sharded sampling."""
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
     speculator = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size)
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=pcp_size,
+                pipeline_parallel_size=pp_size,
+            )
         ),
         max_num_reqs=8,
         num_speculative_steps=2,
@@ -803,8 +807,9 @@ def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
         DraftModelSpeculator._init_draft_logits(speculator, target_model=None)
 
     draft_logits = speculator.draft_logits
-    assert (draft_logits.row_mapping is not None) == (pcp_size == 1)
-    assert draft_logits.values.shape[0] == (4 if pcp_size == 1 else 8)
+    sharded = pcp_size == pp_size == 1
+    assert (draft_logits.row_mapping is not None) == sharded
+    assert draft_logits.values.shape[0] == (4 if sharded else 8)
 
 
 def test_owners_of_reads_owner_table_or_batch_position():
