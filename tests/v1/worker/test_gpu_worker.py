@@ -9,12 +9,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
@@ -774,10 +776,12 @@ def test_ranks_agree_on_extensible_kv_cache(
     from vllm.v1.worker.gpu_worker import Worker
 
     reduced: list[tuple[int, object]] = []
+    # Any rank has it on, then any rank cannot keep it.
+    results = iter([1, int(any_rank_unsupported)])
 
     def all_reduce_int(group, value: int, op) -> int:
         reduced.append((value, op))
-        return int(any_rank_unsupported)
+        return next(results)
 
     monkeypatch.setattr(
         gpu_worker, "vmm_unavailable_reason", lambda export_handle_types: local_reason
@@ -786,9 +790,43 @@ def test_ranks_agree_on_extensible_kv_cache(
     monkeypatch.setattr(
         gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
     )
-    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=None))
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+    )
     assert Worker.extensible_kv_cache_unsupported_reason(worker) == expected
-    assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
+    assert reduced == [
+        (1, dist.ReduceOp.MAX),
+        (int(local_reason is not None), dist.ReduceOp.MAX),
+    ]
+
+
+def _vote_on_rank(rank: int, world_size: int, port: int, enabled: tuple[bool, ...]):
+    from vllm.distributed.parallel_state import init_distributed_environment
+    from vllm.v1.worker.gpu_worker import Worker
+
+    init_distributed_environment(
+        world_size, rank, f"tcp://127.0.0.1:{port}", rank, backend="gloo"
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=enabled[rank]),
+    )
+    with patch.object(gpu_worker, "vmm_unavailable_reason", lambda handle_types: None):
+        reason = Worker.extensible_kv_cache_unsupported_reason(worker)
+    agreed = all(enabled) or not any(enabled)
+    assert (reason is None) == agreed, f"rank {rank}: {reason!r}"
+
+
+@pytest.mark.parametrize("enabled", [(True, True), (True, False), (False, False)])
+def test_ranks_that_resolved_extensible_kv_cache_differently_agree(enabled):
+    """Each host resolves the default on its own (an IMEX channel decides it
+    under NIXL). A rank with the cache on drops it when a peer has it off:
+    otherwise it waits in a block-count all-reduce the peer never joins."""
+    world_size = len(enabled)
+    mp.spawn(
+        _vote_on_rank, args=(world_size, get_open_port(), enabled), nprocs=world_size
+    )
 
 
 @pytest.mark.parametrize("connector_pool", [None, object()])

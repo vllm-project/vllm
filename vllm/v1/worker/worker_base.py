@@ -141,6 +141,8 @@ class WorkerBase:
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         """Why this worker cannot back an extensible KV cache, or None."""
+        if not self.vllm_config.cache_config.enable_extensible_kv_cache:
+            return None
         return f"{type(self).__name__} does not support the extensible KV cache"
 
     def disable_extensible_kv_cache(self) -> None:

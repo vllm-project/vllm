@@ -374,6 +374,27 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
 
 
+def test_engine_that_resolved_extensible_kv_cache_off_still_asks_its_workers():
+    """Its workers must join the vote of peers on hosts that resolved it on."""
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        return [None, None]
+
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=False)
+    )
+    fake = _fake_executor(vllm_config, collective_rpc)
+    assert fake.extensible_kv_cache_unsupported_reason([{"layer": object()}]) is None
+    assert fake.extensible_kv_cache_unsupported_reason([{}]) is None
+    assert calls == ["extensible_kv_cache_unsupported_reason"] * 2
+
+    fake = _fake_executor(vllm_config, lambda method: [None, "some ranks have it off"])
+    reason = fake.extensible_kv_cache_unsupported_reason([{"layer": object()}])
+    assert reason == "some ranks have it off"
+
+
 @requires_cuda_not_rocm
 def test_extensible_kv_cache_does_not_fall_back_under_a_posix_fd_importer():
     """The torch allocator's KV cache cannot be exported as POSIX file

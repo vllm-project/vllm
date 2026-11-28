@@ -154,13 +154,21 @@ class Executor(ABC):
     def extensible_kv_cache_unsupported_reason(
         self, layer_configs: list[dict[str, KVCacheLayerConfig]]
     ) -> str | None:
-        """Why the extensible KV cache cannot be used on some worker, if so."""
-        if not any(layer_configs):
-            return "the model has no KV cache"
+        """Why the extensible KV cache cannot be used on some worker, if so.
+
+        Called by every engine, even one that resolved it off: its workers
+        must join the vote of peers that have it on."""
         unsupported: list[str | None] = self.collective_rpc(
             "extensible_kv_cache_unsupported_reason"
         )
-        return next((r for r in unsupported if r), None)
+        reason = next((r for r in unsupported if r), None)
+        if (
+            reason is None
+            and self.vllm_config.cache_config.enable_extensible_kv_cache
+            and not any(layer_configs)
+        ):
+            return "the model has no KV cache"
+        return reason
 
     def disable_extensible_kv_cache(self, reason: str) -> None:
         """Turn the extensible KV cache off here and on every worker."""

@@ -309,8 +309,9 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
-        if vllm_config.cache_config.enable_extensible_kv_cache:
-            # Disable it, everywhere, where it cannot be used.
+        # Every engine votes, as each host resolves the default itself. Elastic EP
+        # has it off everywhere: a rank joining its scale-up would vote alone.
+        if not vllm_config.parallel_config.enable_elastic_ep:
             executor = self.model_executor
             reason = executor.extensible_kv_cache_unsupported_reason(layer_configs)
             if reason is not None:

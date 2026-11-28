@@ -1031,12 +1031,18 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
-        # Every rank must reach the same decision: one that keeps the feature
-        # would wait in the block-count all-reduces for one that dropped it.
-        reason = vmm_unavailable_reason(kv_cache_export_handle_types(self.vllm_config))
-        if all_reduce_int(
-            get_world_group().cpu_group, int(reason is not None), ReduceOp.MAX
-        ):
+        # Every rank must decide alike, though each host resolves the default: one
+        # that keeps the feature would wait in all-reduces one that dropped it skips.
+        group = get_world_group().cpu_group
+        enabled = self.cache_config.enable_extensible_kv_cache
+        if not all_reduce_int(group, int(enabled), ReduceOp.MAX):
+            return None
+        reason = (
+            vmm_unavailable_reason(kv_cache_export_handle_types(self.vllm_config))
+            if enabled
+            else "some ranks have it off"
+        )
+        if all_reduce_int(group, int(reason is not None), ReduceOp.MAX):
             return reason or "another rank cannot use it"
         return None
 
