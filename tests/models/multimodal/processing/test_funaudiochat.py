@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -18,6 +19,7 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.funaudiochat import (
+    FunAudioChatAudioEncoder,
     FunAudioChatDummyInputsBuilder,
     FunAudioChatMultiModalProcessor,
     FunAudioChatProcessingInfo,
@@ -26,6 +28,7 @@ from vllm.multimodal.processing import InputProcessingContext
 from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import encode_audio_url
 from vllm.transformers_utils.configs.funaudiochat import FunAudioChatConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 class RecordingFeatureExtractor:
@@ -343,3 +346,38 @@ def test_render_audio_embeds_ignore_waveform_budget(local_funaudiochat_model):
         )
         assert response.status_code == 200, response.text[:512]
         assert len(response.json()["features"]["mm_placeholders"]["audio"]) == 2
+
+
+@pytest.mark.parametrize("flash_attn_installed", [True, False])
+@pytest.mark.parametrize(
+    ("backend", "is_flash_attn_backend", "long_audio_ok"),
+    [
+        (AttentionBackendEnum.FLASH_ATTN, True, True),
+        (AttentionBackendEnum.ROCM_AITER_FA, True, True),
+        # The Triton varlen kernel (the default on RDNA4) does not need flash_attn.
+        (AttentionBackendEnum.TRITON_ATTN, False, True),
+        (AttentionBackendEnum.TORCH_SDPA, False, False),
+    ],
+)
+def test_long_audio_attn_backend(
+    backend, is_flash_attn_backend, long_audio_ok, flash_attn_installed, monkeypatch
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.models.funaudiochat._has_module",
+        lambda name: flash_attn_installed,
+    )
+    attn = SimpleNamespace(
+        attn_backend=backend, is_flash_attn_backend=is_flash_attn_backend
+    )
+    encoder = object.__new__(FunAudioChatAudioEncoder)
+    encoder.layers = [SimpleNamespace(self_attn=SimpleNamespace(attn=attn))]
+
+    # Short audio never needs a particular backend.
+    encoder._check_long_audio_attn_backend(100)
+    if long_audio_ok and (
+        flash_attn_installed or backend == AttentionBackendEnum.TRITON_ATTN
+    ):
+        encoder._check_long_audio_attn_backend(7500)
+    else:
+        with pytest.raises(RuntimeError, match="FlashAttention"):
+            encoder._check_long_audio_attn_backend(7500)

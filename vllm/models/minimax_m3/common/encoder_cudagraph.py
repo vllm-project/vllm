@@ -59,17 +59,19 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             )
 
         # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
-        # .tolist() on CUDA cu_seqlens; neither can be captured.
+        # .tolist() on CUDA cu_seqlens; neither can be captured. TRITON_ATTN
+        # takes the same varlen path as FLASH_ATTN (the default on RDNA4).
         backend = self.vision_tower.vision_model.attn_backend
         if backend not in (
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         ):
             raise ValueError(
                 f"cudagraph_mm_encoder is not supported with the "
                 f"{backend.name} ViT attention backend for MiniMax M3. Set "
-                "--mm-encoder-attn-backend FLASH_ATTN or ROCM_AITER_FA "
-                "(ROCm), or disable cudagraph_mm_encoder."
+                "--mm-encoder-attn-backend FLASH_ATTN, ROCM_AITER_FA or "
+                "TRITON_ATTN (ROCm), or disable cudagraph_mm_encoder."
             )
 
         def pad_rope_planes(dst: torch.Tensor, src: torch.Tensor) -> None:
