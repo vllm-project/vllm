@@ -238,15 +238,15 @@ re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
+def _reduced_vocabulary(
+    tokenizer: TokenizerLike, eos_token_id: int | None
+) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
 
     """
-    eos_token_id = tokenizer.eos_token_id
-
     unicode_to_bytes = {
         v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
     }
@@ -308,15 +308,21 @@ def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     return vocabulary
 
 
-def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
-    """Get the `Vocabulary` object for a given tokenizer."""
+def get_outlines_vocabulary(
+    tokenizer: TokenizerLike, eos_token_id: int | None = None
+) -> oc.Vocabulary:
+    """Get the `Vocabulary` object for a given tokenizer.
+
+    `eos_token_id` overrides `tokenizer.eos_token_id`, for tokenizers that
+    define no EOS token.
+    """
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    reduced_vocab = _reduced_vocabulary(tokenizer)
-    vocabulary = OutlinesVocabulary(
-        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
-    )
+    if eos_token_id is None:
+        eos_token_id = tokenizer.eos_token_id
+    reduced_vocab = _reduced_vocabulary(tokenizer, eos_token_id)
+    vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
     tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
     return vocabulary
