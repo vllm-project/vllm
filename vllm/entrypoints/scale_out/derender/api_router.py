@@ -5,6 +5,10 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorResponse,
+    PostProcessPoolingRequest,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
@@ -124,3 +128,27 @@ async def derender_completion(
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
     return JSONResponse(content=result.model_dump())
+
+
+@router.post(
+    "/pooling/postprocess",
+    dependencies=[Depends(validate_json_request)],
+    response_model=IOProcessorResponse,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def postprocess_pooling(request: PostProcessPoolingRequest, raw_request: Request):
+    handler = derender(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Pooling Render API")
+
+    result = await handler.postprocess_pooling_request(request)
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return result

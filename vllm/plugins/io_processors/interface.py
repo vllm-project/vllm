@@ -78,3 +78,17 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         )
         collected_output = [output[1] for output in sorted_output]
         return self.post_process(collected_output, request_id=request_id, **kwargs)
+
+    def get_request_metadata(self, request_id: str) -> dict | None:
+        """Return the per-request state saved by `pre_process`, if any.
+
+        Used when pre- and post-processing run on different instances: the
+        returned dict is transferred alongside the model input and restored
+        on the post-processing instance via `update_request_metadata`.
+        The dict must be msgpack-serializable.
+        """
+        return None
+
+    def update_request_metadata(self, request_id: str, metadata: dict | None) -> None:
+        """Restore per-request state produced by `get_request_metadata`."""
+        return

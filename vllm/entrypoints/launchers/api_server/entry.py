@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import vllm.envs as envs
+from vllm.distributed.io_transfer import ensure_io_transfer_shutdown
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import init_parser_plugin
@@ -198,6 +199,7 @@ async def run_server_worker(
     try:
         await shutdown_task
     finally:
+        ensure_io_transfer_shutdown()
         sock.close()
 
 
