@@ -7,6 +7,7 @@ import time
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import init_logger
@@ -83,6 +84,7 @@ def deep_select_topk(
     end: torch.Tensor | None = None,
     output_idx: torch.Tensor | None = None,
     indices_dtype: torch.dtype = torch.int32,
+    mask_out_of_range: bool = False,
 ) -> torch.Tensor:
     """Select the top-k indices per row of `input` with DeepSelect.
 
@@ -96,6 +98,9 @@ def deep_select_topk(
         output_idx: Optional preallocated (num_rows, topk) output tensor whose
             stride(0) is 32B-aligned (e.g. a slice of a wider buffer).
         indices_dtype: Output dtype when `output_idx` is not provided.
+        mask_out_of_range: Replace indices at or past `end` with -1. DeepSelect
+            writes one to slot 0 of a row with NaN logits; callers that bound
+            the indices themselves leave this off.
 
     Returns:
         The (num_rows, topk) indices tensor.
@@ -133,6 +138,10 @@ def deep_select_topk(
         # logits from uninitialized KV cache; the reference topk kernels do
         # not trap on NaN, and trapping would abort CUDA graph capture.
     )
+    if mask_out_of_range:
+        assert end is not None
+        selected = output_idx[:num_rows, :topk]
+        selected.masked_fill_(selected >= end.unsqueeze(1), IDX_OOB_FILL_VALUE)
     return output_idx
 
 
@@ -173,6 +182,14 @@ class SparseIndexerTopk(torch.nn.Module):
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
+        )
+        self._prefill_deep_select = (
+            self._has_deep_select
+            and _HAS_DEEP_SELECT_C
+            and (
+                backend == "deep_select"
+                or (backend == "auto" and not envs.VLLM_BATCH_INVARIANT)
+            )
         )
         self._has_flashinfer_topk = has_flashinfer()
         self._has_flashinfer_gvr2 = (
@@ -290,6 +307,19 @@ class SparseIndexerTopk(torch.nn.Module):
             and current_platform.is_device_capability_family(100)
             and topk_tokens in (512, 1024, 2048)
             and self.resolve_backend(logits, topk_tokens, num_rows) == "persistent"
+        )
+
+    def prefill_takes_bf16_logits(
+        self, logits: torch.Tensor, topk_tokens: int, dcp_world_size: int
+    ) -> bool:
+        """Whether a prefill chunk ranks its BF16 logits with DeepSelect instead
+        of an FP32 copy: for "deep_select", and for "auto" unless batch-invariant
+        mode is on. The DCP top-k merge reads FP32 logits."""
+        return (
+            self._prefill_deep_select
+            and logits.dtype == torch.bfloat16
+            and dcp_world_size == 1
+            and is_deep_select_supported(logits, topk_tokens)
         )
 
     def _resolve_auto(
