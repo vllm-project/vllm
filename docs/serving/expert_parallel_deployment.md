@@ -292,6 +292,13 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `use_async` | Use non-blocking EPLB with policy computation in a persistent CPU subprocess per worker | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
+| `enable_migration_batching` | Limit concurrent expert transfers during async EPLB | `false` |
+| `migration_max_peers` | Concurrent peer transfers per rank when batching is enabled; sends and receives both count | `1` |
+
+Values of `migration_max_peers` above 1 have been validated with NIXL over TCP.
+Other communicators require validation before increasing this limit. Higher limits
+did not improve transfer time in the measured TCP workload; keep the default
+unless measurements on your workload show a benefit.
 
 Async EPLB (`"use_async": true`, the default) runs policy computation in one persistent CPU subprocess per worker to isolate it from the inference worker's Python GIL. The policy and its CPU inputs must be serializable. Load collection, device-to-host copies, and expert migration retain their existing execution paths. The child limits native CPU thread pools to one thread; CPU core contention still depends on the deployment's CPU allocation. A failed or timed-out child reports an async worker error. Policy state is copied at startup and subsequently owned by the child; synchronous EPLB (`"use_async": false`) and profiling calls continue using the original policy instance in the inference worker. The 60-second IPC timeout covers the handshake or a planning request from sending through the complete response. Engine shutdown explicitly stops and reaps the planner. Custom policies holding locks or other process-local resources need [serialization support](../design/plugin_system.md); existing plugins may require adaptation to this default. There is no separate planner-process switch or automatic thread fallback.
 
