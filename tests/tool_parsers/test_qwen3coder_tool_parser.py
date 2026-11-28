@@ -222,6 +222,32 @@ def stream_delta_message_generator(
         read_offset = new_read_offset
 
 
+@pytest.mark.parametrize(
+    "before,between,after",
+    [("", "", "Final answer."), ("  Before. ", " Between. ", " After.  ")],
+)
+def test_extract_tool_calls_keeps_text_around_tool_calls(
+    qwen3_tool_parser, before, between, after
+):
+    """A complete response must keep the same prose as a streaming response."""
+    model_output = (
+        f"{before}<tool_call><function=get_current_weather>"
+        "<parameter=city>Tokyo</parameter></function></tool_call>"
+        f"{between}<tool_call><function=calculate_area>"
+        "<parameter=shape>square</parameter></function></tool_call>"
+        f"{after}"
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+
+    assert result.content == (before + between + after).strip()
+    assert [call.function.name for call in result.tool_calls] == [
+        "get_current_weather",
+        "calculate_area",
+    ]
+
+
 def test_extract_tool_calls_no_tools(qwen3_tool_parser):
     model_output = "This is a test response without any tool calls"
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
