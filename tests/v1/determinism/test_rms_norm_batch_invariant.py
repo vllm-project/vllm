@@ -171,6 +171,44 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
     )
 
 
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize("hidden_size", [512, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("unaligned", ["input", "residual", "weight"])
+def test_fused_add_rms_norm_batch_invariant_pointer_alignment(
+    hidden_size: int,
+    dtype: torch.dtype,
+    unaligned: str,
+):
+    """Fused residual-add + RMSNorm must not depend on pointer alignment.
+
+    The kernel only uses 128-bit memory ops on 16-byte aligned tensors, so a
+    tensor that starts one element into its allocation takes another path.
+    """
+    import vllm._custom_ops as ops
+
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    tensors = {
+        "input": torch.randn(3, hidden_size, dtype=dtype, device=device),
+        "residual": torch.randn(3, hidden_size, dtype=dtype, device=device),
+        "weight": torch.randn(hidden_size, dtype=dtype, device=device),
+    }
+
+    def run(shifted: str | None) -> tuple[torch.Tensor, torch.Tensor]:
+        args = {name: tensor.clone() for name, tensor in tensors.items()}
+        if shifted is not None:
+            tensor = args[shifted]
+            buffer = torch.empty(tensor.numel() + 1, dtype=dtype, device=device)
+            args[shifted] = buffer[1:].view_as(tensor).copy_(tensor)
+            assert args[shifted].data_ptr() % 16 != 0
+        ops.fused_add_rms_norm(args["input"], args["residual"], args["weight"], 1e-6)
+        return args["input"], args["residual"]
+
+    for aligned_out, shifted_out in zip(run(None), run(unaligned)):
+        torch.testing.assert_close(aligned_out, shifted_out, rtol=0.0, atol=0.0)
+
+
 FP8_DTYPE = current_platform.fp8_dtype()
 
 # The large launch (num_tokens=300 >= 256) drops an un-pinned kernel to block
