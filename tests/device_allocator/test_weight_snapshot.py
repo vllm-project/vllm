@@ -1,0 +1,261 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Weight snapshot: save/restore of post-processed model state."""
+
+import os
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch import nn
+
+from vllm.device_allocator import weight_snapshot as ws
+
+cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+class _Quant:
+    """A non-module object holding per-expert scales, as MoE quant methods do."""
+
+    def __init__(self, device):
+        self.scales = [torch.rand(4, device=device), torch.rand(4, device=device)]
+        self.group = 16
+
+
+class _Toy(nn.Module):
+    def __init__(self, device="cuda"):
+        super().__init__()
+        self.linear = nn.Linear(8, 8, device=device)
+        self.register_buffer("table", torch.rand(3, 5, device=device))
+        self.quant = _Quant(device)
+        self.alias = self.linear.weight.data  # same storage, second name
+        self.calibrated = 0.0
+
+
+def _roots(model):
+    return {"model": model}
+
+
+def _perturb(model):
+    with torch.no_grad():
+        for t in (model.linear.weight, model.linear.bias, model.table):
+            t.zero_()
+        for t in model.quant.scales:
+            t.zero_()
+    model.calibrated = -1.0
+
+
+@cuda
+def test_roundtrip_restores_tensors_scalars_and_aliases(tmp_path):
+    src = _Toy()
+    src.calibrated = 3.5
+    path = tmp_path / "snap.bin"
+    ws.save(_roots(src), path)
+
+    dst = _Toy()
+    _perturb(dst)
+    ws.restore(_roots(dst), path)
+
+    torch.testing.assert_close(dst.linear.weight, src.linear.weight)
+    torch.testing.assert_close(dst.linear.bias, src.linear.bias)
+    torch.testing.assert_close(dst.table, src.table)
+    for a, b in zip(dst.quant.scales, src.quant.scales):
+        torch.testing.assert_close(a, b)
+    assert dst.calibrated == 3.5
+    assert dst.alias.data_ptr() == dst.linear.weight.data_ptr()
+
+
+@cuda
+def test_pinned_host_state_is_not_saved(tmp_path):
+    path = tmp_path / "snap.bin"
+    model = _Toy()
+    model.table_host = torch.rand(3, 5).pin_memory()
+    ws.save(_roots(model), path)
+    assert not path.exists()
+
+
+@cuda
+def test_shape_mismatch_is_rejected(tmp_path):
+    path = tmp_path / "snap.bin"
+    ws.save(_roots(_Toy()), path)
+    dst = _Toy()
+    dst.table = torch.rand(4, 5, device="cuda")
+    with pytest.raises(RuntimeError, match="does not match the model"):
+        ws.restore(_roots(dst), path)
+
+
+@cuda
+@pytest.mark.parametrize("cut", ["data", "header"])
+def test_truncated_snapshot_is_rejected(tmp_path, cut):
+    path = tmp_path / "snap.bin"
+    ws.save(_roots(_Toy()), path)
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) - 1] if cut == "data" else data[:4])
+    dst = _Toy()
+    before = dst.linear.weight.detach().clone()
+    with pytest.raises(RuntimeError, match="truncated"):
+        ws.restore(_roots(dst), path)
+    assert torch.equal(dst.linear.weight, before)
+
+
+def test_short_reads_are_retried_and_eof_raises(tmp_path):
+    path = tmp_path / "f.bin"
+    path.write_bytes(bytes(range(16)))
+    buf = bytearray(16)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        real = os.preadv
+        with pytest.MonkeyPatch.context() as m:
+            # One byte per call: a short read must be retried, not accepted.
+            m.setattr(ws.os, "preadv", lambda f, b, p: real(f, [b[0][:1]], p))
+            ws._pread_exact(fd, buf, 0, 16)
+        assert bytes(buf) == bytes(range(16))
+        with pytest.raises(RuntimeError, match="truncated"):
+            ws._pread_exact(fd, bytearray(32), 0, 32)
+    finally:
+        os.close(fd)
+
+
+@cuda
+def test_old_format_is_rejected(tmp_path, monkeypatch):
+    path = tmp_path / "snap.bin"
+    monkeypatch.setattr(ws, "_MAGIC", "vllm-weight-snapshot-v0")
+    ws.save(_roots(_Toy()), path)
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError, match="old format"):
+        ws.restore(_roots(_Toy()), path)
+
+
+def _config(
+    model,
+    tp=1,
+    quant=None,
+    dtype=torch.bfloat16,
+    ep=False,
+    dp=1,
+    placement="linear",
+):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            model=model,
+            revision=None,
+            dtype=dtype,
+            quantization=quant,
+            hf_overrides={},
+            multimodal_config=None,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp,
+            pipeline_parallel_size=1,
+            enable_expert_parallel=ep,
+            data_parallel_size=dp,
+            expert_placement_strategy=placement,
+        ),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        speculative_config=None,
+    )
+
+
+def _hf_snapshot(root, repo, commit):
+    d = root / "hub" / f"models--{repo.replace('/', '--')}" / "snapshots" / commit
+    d.mkdir(parents=True)
+    (d / "config.json").write_text('{"hidden_size": 8}')
+    return d
+
+
+@pytest.mark.cpu_test
+def test_key_ignores_where_the_hf_checkpoint_lives(tmp_path):
+    a = _hf_snapshot(tmp_path / "a", "org/model", "abc123")
+    b = _hf_snapshot(tmp_path / "b", "org/model", "abc123")
+    assert ws.weights_key(_config(str(a))) == ws.weights_key(_config(str(b)))
+
+
+@pytest.mark.cpu_test
+def test_key_changes_with_weight_shaping_settings(tmp_path):
+    d = str(_hf_snapshot(tmp_path, "org/model", "abc123"))
+    base = ws.weights_key(_config(d))
+    assert base != ws.weights_key(_config(d, tp=2))
+    assert base != ws.weights_key(_config(d, quant="fp8"))
+    assert base != ws.weights_key(_config(d, dtype=torch.float16))
+    other = str(_hf_snapshot(tmp_path / "x", "org/model", "def456"))
+    assert base != ws.weights_key(_config(other))
+
+
+@pytest.mark.cpu_test
+def test_key_changes_with_expert_layout(tmp_path):
+    d = str(_hf_snapshot(tmp_path, "org/model", "abc123"))
+    ep = ws.weights_key(_config(d, ep=True))
+    # Same per-rank shapes, different experts on each rank: must not collide.
+    assert ep != ws.weights_key(_config(d, ep=True, placement="round_robin"))
+    assert ep != ws.weights_key(_config(d, ep=True, dp=2))
+
+
+@pytest.mark.cpu_test
+def test_key_of_local_dir_tracks_weight_files(tmp_path):
+    d = tmp_path / "local"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model.safetensors").write_bytes(b"x" * 10)
+    before = ws.weights_key(_config(str(d)))
+    (d / "model.safetensors").write_bytes(b"x" * 11)
+    assert before != ws.weights_key(_config(str(d)))
+
+
+@pytest.mark.cpu_test
+def test_snapshot_path_is_per_rank(tmp_path):
+    root = str(tmp_path)
+    assert ws.snapshot_path(root, "k", 0) != ws.snapshot_path(root, "k", 1)
+
+
+def _files(root, *names):
+    for n in names:
+        (root / n).write_bytes(b"x")
+
+
+def test_clear_removes_this_ranks_files_and_disables_snapshot(tmp_path):
+    _files(
+        tmp_path, "aaa-rank0.bin", "bbb-rank0.bin", "aaa-rank0.tmp123", "aaa-rank1.bin"
+    )
+    assert ws.resolve(str(tmp_path), "aaa", 0, clear=True, rebuild=False) is None
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["aaa-rank1.bin"]
+
+
+def test_rebuild_removes_only_the_current_key(tmp_path):
+    _files(tmp_path, "aaa-rank0.bin", "bbb-rank0.bin")
+    path = ws.resolve(str(tmp_path), "aaa", 0, clear=False, rebuild=True)
+    assert path == tmp_path / "aaa-rank0.bin" and not path.exists()
+    assert (tmp_path / "bbb-rank0.bin").exists()
+
+
+def test_default_keeps_the_snapshot(tmp_path):
+    _files(tmp_path, "aaa-rank0.bin")
+    path = ws.resolve(str(tmp_path), "aaa", 0, clear=False, rebuild=False)
+    assert path == tmp_path / "aaa-rank0.bin" and path.exists()
+
+
+def test_clear_and_rebuild_are_exclusive(tmp_path):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ws.resolve(str(tmp_path), "aaa", 0, clear=True, rebuild=True)
+
+
+@cuda
+def test_restore_fills_dummy_weights_with_plausible_bytes():
+    from vllm.model_executor.model_loader import dummy_loader
+
+    orig = dummy_loader.initialize_single_dummy_weight
+    undo = ws._plausible_dummy_weights()
+    try:
+        w = torch.empty(4, 8, dtype=torch.bfloat16, device="cuda")
+        packed = torch.empty(16, dtype=torch.uint8, device="cuda")
+        for t in (w, packed):
+            dummy_loader.initialize_single_dummy_weight(t)
+        # 0x3C3C is a finite, positive bf16; quantization checks accept it.
+        assert torch.isfinite(w).all() and (w > 0).all()
+        assert (packed == 0x3C).all()
+    finally:
+        undo()
+    assert dummy_loader.initialize_single_dummy_weight is orig
+
+
+def test_is_restoring_is_false_outside_a_restore():
+    assert ws.is_restoring() is False
