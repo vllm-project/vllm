@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-M BF16 tensor-core projections for SM120/SM121: batched `x @ w.T` with
-deterministic split-K for narrow outputs, and a grouped q/k/v projection."""
+"""Low-M BF16 tensor-core projections for Inkling 2.
+
+SM12x uses deterministic split-K for narrow outputs. SM90 and SM12x share
+the grouped QKV projection.
+"""
 
 import functools
 from typing import NamedTuple
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
@@ -252,7 +256,21 @@ def use_qkv_bmm(
         and x_q.shape == x_k.shape == x_v.shape
         and x_q.dtype == x_k.dtype == x_v.dtype == w.dtype == torch.bfloat16
         and x_q.stride(1) == x_k.stride(1) == x_v.stride(1) == w.stride(1) == 1
-        and current_platform.is_device_capability_family(120)
+        and (
+            current_platform.is_device_capability_family(
+                120, device_id=x_q.get_device()
+            )
+            or (
+                # Padded rank-local Mini projections for TP1, TP2, TP4 and TP8.
+                w.shape in ((8600, 2304), (4304, 2304), (2152, 2304), (1080, 2304))
+                and x_q.shape[1] == w.shape[1]
+                and x_q.device == x_k.device == x_v.device == w.device
+                and not envs.VLLM_BATCH_INVARIANT
+                and current_platform.is_device_capability(
+                    90, device_id=x_q.get_device()
+                )
+            )
+        )
     )
 
 
