@@ -328,6 +328,8 @@ If the dataset you want to benchmark is not supported yet in vLLM, even then you
 {"prompt": "What is the capital of China?"}
 ```
 
+With `--backend vllm-pooling --endpoint /pooling --skip-tokenizer-init`, `prompt` can be a JSON object. Its fields are sent at the top level of the pooling request. Text prompts such as `"00123"` keep their leading zeros.
+
 ```bash
 # start server
 vllm serve meta-llama/Llama-3.1-8B-Instruct
