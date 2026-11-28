@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOMode,
+    parse_custom_mem_pool,
     resolve_host_ip,
     set_role,
     zmq_ctx,
@@ -40,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
     MoRIIOConnector,
     MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
+    create_custom_mem_pool,
 )
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
@@ -762,6 +764,23 @@ def test_resolve_host_ip_prefers_extra_config():
     fallback = get_ip()
     assert resolve_host_ip({}) == fallback
     assert resolve_host_ip({"host_ip": ""}) == fallback
+
+
+def test_custom_mem_pool_config():
+    assert parse_custom_mem_pool({}, "rdma") is None
+    assert parse_custom_mem_pool({"custom_mem_pool": "amd_gem"}, "rdma") == "AMD_GEM"
+    with pytest.raises(ValueError, match="Unsupported custom_mem_pool"):
+        parse_custom_mem_pool({"custom_mem_pool": "NVLINK"}, "rdma")
+    # GEM BOs have no HIP IPC handle, so xGMI cannot open them.
+    with pytest.raises(ValueError, match="RDMA backend"):
+        parse_custom_mem_pool({"custom_mem_pool": "AMD_GEM"}, "xgmi")
+
+
+def test_custom_mem_pool_rejects_cumem_allocator():
+    vllm_config = create_vllm_config()
+    vllm_config.model_config.enable_cumem_allocator = True
+    with pytest.raises(ValueError, match="custom_mem_pool is incompatible"):
+        create_custom_mem_pool("AMD_GEM", vllm_config)
 
 
 def test_write_mode_excludes_spec_lookahead_blocks():

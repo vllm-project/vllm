@@ -208,6 +208,30 @@ Advanced users can also configure MoRI itself using environment variables such a
 
 Use xGMI when the prefiller and decoder run on the same physical host so transfers go over the AMD GPU fabric and skip the NIC entirely. Currently only configured using MoRI-specific environment variables; see the [MoRI repository](https://github.com/rocm/mori).
 
+### KV cache in amdgpu GEM BOs
+
+`custom_mem_pool` in `kv_connector_extra_config` selects the allocator of the KV cache. It is unset by default, which allocates the KV cache with `hipMalloc`; `"AMD_GEM"` allocates it as amdgpu GEM BOs through MoRI. Set it on both instances when the ranks fail at the first request with HIP errors such as `HIP error 209: no kernel image is available`:
+
+```bash
+--kv-transfer-config '{
+  "kv_connector": "MoRIIOConnector",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    ...,
+    "custom_mem_pool": "AMD_GEM"
+  }
+}'
+```
+
+amdgpu-dkms counts `hipMalloc` memory that a NIC pins twice in the KFD allocation limit: 30.x does so for dma-buf registrations (the only kind on hosts without peer memory), and 31.10 through 31.60 for every registration ([ROCm/mori#721](https://github.com/ROCm/mori/issues/721)). Once MoRIIO registers a KV cache larger than the VRAM left after allocating it, every later device allocation on that GPU fails. KFD counts a GEM BO once.
+
+Requirements and limits:
+
+- MoRI must ship `mori.io.HipGemAllocator` ([ROCm/mori#1051](https://github.com/ROCm/mori/pull/1051)).
+- It needs the RDMA backend: HIP has no IPC handle for these buffers, so the xGMI backend cannot open them.
+- The NIC that pins each buffer at allocation must pin dma-buf memory. AINIC (ionic) and Thor2 (bnxt_re) do; mlx5 does not. MoRI tries the devices in `MORI_RDMA_DEVICES` (all devices when unset) with mlx5 last, and `MORI_HIP_GEM_PIN_DEVICE` names one.
+- It cannot be combined with sleep mode or `enable_cumem_allocator`.
+
 ## Multi-node deployment
 
 The example below shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.

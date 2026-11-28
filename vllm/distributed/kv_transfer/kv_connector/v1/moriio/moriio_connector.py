@@ -447,6 +447,13 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def get_mem_pool_context(self) -> contextlib.AbstractContextManager | None:
+        """Allocate the KV cache from the connector's memory pool when
+        `custom_mem_pool` is set in `kv_connector_extra_config`."""
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_mem_pool_context()
+
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
@@ -2013,6 +2020,35 @@ class MoRIIOConnectorScheduler:
         connector_output.finished_sending = safe or None
 
 
+def create_custom_mem_pool(
+    pool_type: str | None, vllm_config: VllmConfig
+) -> torch.cuda.MemPool | None:
+    """The MemPool to allocate the KV cache from for `custom_mem_pool`."""
+    if pool_type is None:
+        return None
+    model_config = vllm_config.model_config
+    if model_config.enable_sleep_mode or model_config.enable_cumem_allocator:
+        raise ValueError(
+            "custom_mem_pool is incompatible with enable_sleep_mode or "
+            "enable_cumem_allocator; CuMemAllocator cannot manage allocations "
+            "from the custom pool."
+        )
+    try:
+        from mori.io import make_hip_gem_mem_pool
+    except ImportError as e:
+        raise ImportError(
+            f"custom_mem_pool={pool_type!r} requires a MoRI build that ships "
+            "mori.io.HipGemAllocator."
+        ) from e
+    # A MemPool serves the device it is created on.
+    mem_pool = make_hip_gem_mem_pool(torch.accelerator.current_device_index())
+    logger.info(
+        "MoRIIO custom memory pool %s: the KV cache is allocated as amdgpu GEM BOs",
+        pool_type,
+    )
+    return mem_pool
+
+
 class MoRIIOConnectorWorker:
     """Implementation of Worker side methods."""
 
@@ -2032,6 +2068,9 @@ class MoRIIOConnectorWorker:
         self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
         self.mode = (
             MoRIIOMode.READ if self.moriio_config.read_mode else MoRIIOMode.WRITE
+        )
+        self._mem_pool = create_custom_mem_pool(
+            self.moriio_config.custom_mem_pool, vllm_config
         )
 
         logger.info("Initializing MoRIIO worker %s", engine_id)
@@ -2821,6 +2860,11 @@ class MoRIIOConnectorWorker:
             return 0
         mr_base = self.moriio_wrapper.get_unpack_memory_metadata(metas[region]).data
         return remote_moriio_meta.kv_caches_base_addr[idx] - mr_base
+
+    def get_mem_pool_context(self) -> contextlib.AbstractContextManager | None:
+        if self._mem_pool is None:
+            return None
+        return torch.cuda.use_mem_pool(self._mem_pool)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
