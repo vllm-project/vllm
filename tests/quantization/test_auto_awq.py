@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch import nn
 
 from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
-from vllm.config import set_current_vllm_config
+from vllm.compilation.counter import compilation_counter
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.compilation import CompilationConfig, CompilationMode
+from vllm.config.scheduler import SchedulerConfig
+from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
@@ -237,3 +243,112 @@ def test_auto_awq_config_get_name():
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
     assert AutoAWQConfig.get_name() == "auto_awq"
+
+
+# =============================================================================
+# Decode/prefill dispatch under torch.compile
+# =============================================================================
+
+AWQ_COMPILE_K = 256
+AWQ_COMPILE_N = 512
+AWQ_COMPILE_GROUP_SIZE = 128
+AWQ_COMPILE_MAX_TOKENS = 512
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0})
+class _AutoAWQLinearModel(nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQConfig,
+            AutoAWQLinearMethod,
+        )
+
+        quant_config = AutoAWQConfig(
+            weight_bits=4,
+            group_size=AWQ_COMPILE_GROUP_SIZE,
+            zero_point=True,
+            lm_head_quantized=False,
+        )
+        self.quant_method = AutoAWQLinearMethod(quant_config)
+        pack_factor = quant_config.pack_factor
+        num_groups = AWQ_COMPILE_K // AWQ_COMPILE_GROUP_SIZE
+        self.linear = nn.Module()
+        for name, shape, dtype in (
+            ("qweight", (AWQ_COMPILE_K, AWQ_COMPILE_N // pack_factor), torch.int32),
+            ("qzeros", (num_groups, AWQ_COMPILE_N // pack_factor), torch.int32),
+            ("scales", (num_groups, AWQ_COMPILE_N), torch.float16),
+        ):
+            self.linear.register_parameter(
+                name, nn.Parameter(torch.zeros(shape, dtype=dtype), requires_grad=False)
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.quant_method.apply(self.linear, x)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="AutoAWQLinearMethod's awq_gemm path runs on CUDA and ROCm.",
+)
+def test_auto_awq_linear_dispatch_under_torch_compile(
+    monkeypatch, disable_vllm_compile_cache
+):
+    """With VLLM_COMPILE, one compiled graph serves every batch size in a
+    compile range, so the awq_gemm vs. dequantize + matmul choice must be
+    made per call: M=1 has to reach awq_gemm, and M>=256 has to keep
+    awq_dequantize + matmul."""
+    from vllm.model_executor.layers.quantization import auto_awq
+
+    calls: list[str] = []
+
+    def fake_awq_gemm(x, qweight, scales, qzeros, split_k_iters):
+        calls.append("awq_gemm")
+        return x.new_zeros(x.shape[0], qweight.shape[1] * 8)
+
+    def fake_awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy):
+        calls.append("awq_dequantize")
+        return scales.new_zeros(qweight.shape[0], qweight.shape[1] * 8)
+
+    monkeypatch.setattr(auto_awq.ops, "awq_gemm", fake_awq_gemm)
+    monkeypatch.setattr(auto_awq.ops, "awq_dequantize", fake_awq_dequantize)
+
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=AWQ_COMPILE_MAX_TOKENS,
+            max_model_len=AWQ_COMPILE_MAX_TOKENS,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+    )
+    # Decode and prefill sizes must share one compile range (and so one
+    # graph), otherwise this test passes even with a compile-time branch.
+    assert vllm_config.compilation_config.get_compile_ranges() == [
+        Range(start=1, end=AWQ_COMPILE_MAX_TOKENS)
+    ]
+
+    device = torch.device(current_platform.device_type)
+
+    def run(model: nn.Module, num_tokens: int) -> list[str]:
+        calls.clear()
+        x = torch.randn(num_tokens, AWQ_COMPILE_K, dtype=torch.float16, device=device)
+        with set_forward_context({}, vllm_config=vllm_config):
+            out = model(x)
+        assert out.shape == (num_tokens, AWQ_COMPILE_N)
+        return list(calls)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        torch.device(device),
+        torch.inference_mode(),
+    ):
+        model = _AutoAWQLinearModel(vllm_config=vllm_config, prefix="").eval()
+        with compilation_counter.expect(
+            num_graphs_seen=1,
+            num_backend_compilations=1,
+        ):
+            # The first call compiles the graph with a prefill-sized input,
+            # like the profile run does.
+            assert run(model, AWQ_COMPILE_MAX_TOKENS) == ["awq_dequantize"]
+            assert run(model, 1) == ["awq_gemm"]
+            assert run(model, 256) == ["awq_dequantize"]
