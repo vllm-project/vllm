@@ -8,6 +8,7 @@ import types
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
@@ -38,6 +39,7 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
     has_flashinfer_fp8_blockscale_gemm,
+    has_flashinfer_trtllm_fp8_groupwise_gemm,
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.torch_utils import set_random_seed
@@ -504,3 +506,37 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
     # ordering can flap an output between adjacent BF16 values one ULP apart.
     assert rel_diff < 0.003
     assert cosine >= 0.99999
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_trtllm_fp8_groupwise_gemm(),
+    reason="FlashInfer TRT-LLM groupwise FP8 GEMM is enabled on SM100 and SM103 only.",
+)
+@pytest.mark.parametrize("M", [1, 7, 32, 33, 64, 512])
+@pytest.mark.parametrize(
+    "N,K",
+    [
+        (12288, 2048),
+        (2048, 4096),
+        (1024, 2048),
+        (2048, 512),
+        (4096, 256),
+        (576, 7168),
+        (8192, 7168),
+    ],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_small_m_matches_cutlass(M, N, K):
+    """The small-M dispatch of the CUTLASS block kernel (FlashInfer TRT-LLM for
+    small M, CUTLASS otherwise) must equal `cutlass_scaled_mm` bit for bit."""
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    A = (torch.randn(M, K, device="cuda") / 4).to(fp8)
+    B = (torch.randn(N, K, device="cuda") / 4).to(fp8)
+    As = (torch.rand(K // 128, M, device="cuda") + 0.5).t()
+    Bs = torch.rand((N + 127) // 128, K // 128, device="cuda") + 0.5
+    ref = ops.cutlass_scaled_mm(
+        A, B.t(), out_dtype=torch.bfloat16, scale_a=As, scale_b=Bs.t()
+    )
+    out = torch.ops.vllm.fp8_block_scaled_mm_small_m(A, B, As, Bs)
+    assert torch.equal(out, ref)
