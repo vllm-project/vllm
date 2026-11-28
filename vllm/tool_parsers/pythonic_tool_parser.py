@@ -23,6 +23,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    ends_inside_string_literal,
+    find_last_complete_call_end,
     handle_single_tool,
     make_valid_python,
 )
@@ -55,6 +57,8 @@ class PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        # Index in the text of the end of the last call already released.
+        self._released_call_end = -1
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -127,8 +131,34 @@ class PythonicToolParser(ToolParser):
         try:
             valid_and_added_text = make_valid_python(current_text)
             if valid_and_added_text is None:
-                return None
+                # The next call may never parse (e.g. it is malformed), so
+                # parse up to the end of the last complete call, once, to
+                # still release that call's withheld closing characters.
+                # Only a `)` closing a top-level call counts: a naive
+                # `rfind("),")` can match inside a quoted argument
+                # (e.g. `fmt="),"`), truncating mid-string and emitting
+                # incomplete JSON.
+                last_call_end = find_last_complete_call_end(current_text)
+                if last_call_end <= self._released_call_end:
+                    return None
+                self._released_call_end = last_call_end
+                valid_and_added_text = make_valid_python(
+                    current_text[: last_call_end + 1]
+                )
+                if valid_and_added_text is None:
+                    return None
             valid_text, added_text = valid_and_added_text
+            if ")]" not in added_text:
+                # Every call parsed is complete and is released below.
+                self._released_call_end = len(valid_text) - len(added_text) - 1
+
+            # The raw text may end inside an unterminated string literal.
+            # The completion above closed that string speculatively; if
+            # the call never completes (e.g. it is malformed), emitting
+            # its partial arguments now leaves the client with invalid
+            # JSON that no later delta can repair. Withhold the last
+            # call until its string closes.
+            ends_in_string = ends_inside_string_literal(current_text)
 
             module = ast.parse(valid_text)
             parsed = getattr(module.body[0], "value", None)
@@ -155,6 +185,15 @@ class PythonicToolParser(ToolParser):
                 )
                 if new_call_complete:
                     self.current_tool_index += 1
+
+                if (
+                    index == len(tool_calls) - 1
+                    and not new_call_complete
+                    and ends_in_string
+                ):
+                    # Last call's final string argument is still open;
+                    # see above. It is re-processed on the next delta.
+                    continue
 
                 withheld_suffix = added_text[:-2] if not new_call_complete else ""
                 if not new_call_complete and added_text[-2] == ")":

@@ -247,6 +247,86 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
 
 
+def test_streaming_valid_call_before_malformed_call(default_tokenizer: TokenizerLike):
+    """The delta that completes a valid call also starts a malformed one. The
+    valid call's withheld closing characters must still be streamed."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output_deltas = [
+        "<|python_start|>[get_weather(city='LA",
+        "', metric='C'), get",
+        "_weather(city=)]<|python_end|>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_streaming_malformed_call_with_quoted_separator(
+    default_tokenizer: TokenizerLike,
+):
+    """Regression test for the review on #69342: the separator `"),"` can
+    appear inside a quoted argument (`fmt="),"`), so recovery must only
+    use a separator between top-level calls. The malformed call is never
+    emitted, and no partial arguments with invalid JSON may leak out —
+    including when a delta ends inside the quoted argument."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output_deltas = [
+        "<|python_start|>[get_weather(city='Par",
+        "is'), get_time(fmt=\")",
+        '", timezone=)]<|python_end|>',
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == FunctionCall(
+        name="get_weather",
+        arguments='{"city": "Paris"}',
+    )
+
+
+def test_streaming_malformed_call_random_splits(default_tokenizer: TokenizerLike):
+    """The valid call is released complete and the malformed call is never
+    emitted, regardless of where the stream is split."""
+    import random
+
+    text = (
+        "<|python_start|>[get_weather(city='Paris'), "
+        'get_time(fmt="),", timezone=)]<|python_end|>'
+    )
+    expected = FunctionCall(
+        name="get_weather",
+        arguments='{"city": "Paris"}',
+    )
+    rng = random.Random(20261123)
+    for _ in range(20):
+        parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+            default_tokenizer
+        )
+        n_deltas = rng.randint(2, 6)
+        cuts = sorted(rng.sample(range(1, len(text)), n_deltas - 1))
+        deltas = []
+        prev = 0
+        for cut in cuts + [len(text)]:
+            deltas.append(text[prev:cut])
+            prev = cut
+        reconstructor = run_tool_extraction_streaming(
+            parser, deltas, assert_one_tool_per_delta=False
+        )
+        assert len(reconstructor.tool_calls) == 1, deltas
+        assert reconstructor.tool_calls[0].function == expected, deltas
+
+
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """Test regex timeout is handled gracefully."""

@@ -1077,6 +1077,95 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
+def find_last_complete_call_end(text: str) -> int:
+    """Index of the `)` closing the last complete top-level tool call.
+
+    Scans `text` tracking string literals (single/double quotes, escapes)
+    and bracket depth, mirroring `make_valid_python`. A `)` only counts
+    when it closes a call whose `(` sits directly inside the outer `[`
+    (bracket stack `["[", "("]` before popping) and is followed by a `,`
+    (allowing whitespace in between), i.e. a separator between top-level
+    calls. A `"),"` inside a quoted argument (e.g. `fmt="),"`), inside a
+    nested call, or inside a dict/list argument never counts.
+
+    Used by the streaming fallback: when the text after the last complete
+    call never parses, truncate here and release the calls before it
+    instead of truncating at a naive `rfind("),")`, which can match inside
+    a quoted argument and emit incomplete JSON.
+
+    Returns:
+        The index of that `)`, or -1 if there is no complete top-level
+        call followed by a separator.
+
+    """
+    bracket_stack: list[str] = []
+    last_call_end = -1
+    for index, char in enumerate(text):
+        # Inside a string literal only an unescaped matching quote is
+        # significant; brackets and commas are literal text.
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
+                bracket_stack.pop()
+            continue
+        if char in {"[", "(", "{"}:
+            bracket_stack.append(char)
+        elif char == "]":
+            if not bracket_stack or bracket_stack[-1] != "[":
+                break
+            bracket_stack.pop()
+        elif char == ")":
+            if not bracket_stack or bracket_stack[-1] != "(":
+                break
+            if (
+                bracket_stack == ["[", "("]
+                # Separator between top-level calls: `)` followed by `,`.
+                and text[index + 1 :].lstrip().startswith(",")
+            ):
+                last_call_end = index
+            bracket_stack.pop()
+        elif char == "}":
+            if not bracket_stack or bracket_stack[-1] != "{":
+                break
+            bracket_stack.pop()
+        elif char in {"'", '"'}:
+            bracket_stack.append(char)
+    return last_call_end
+
+
+def ends_inside_string_literal(text: str) -> bool:
+    """Whether `text` ends inside an unterminated string literal.
+
+    Scans `text` tracking string literals (single/double quotes, escapes)
+    and bracket depth, mirroring `make_valid_python`. Returns True when
+    the final character is inside a string whose closing quote has not
+    arrived yet. Brackets inside a string are literal text; a mismatched
+    bracket makes the scan untrustworthy, so it returns False and lets the
+    caller fall back to `make_valid_python`.
+    """
+    bracket_stack: list[str] = []
+    for index, char in enumerate(text):
+        # Inside a string literal only an unescaped matching quote is
+        # significant; brackets are literal text.
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
+                bracket_stack.pop()
+            continue
+        if char in {"[", "(", "{"}:
+            bracket_stack.append(char)
+        elif char == "]":
+            if not bracket_stack or bracket_stack.pop() != "[":
+                return False
+        elif char == ")":
+            if not bracket_stack or bracket_stack.pop() != "(":
+                return False
+        elif char == "}":
+            if not bracket_stack or bracket_stack.pop() != "{":
+                return False
+        elif char in {"'", '"'}:
+            bracket_stack.append(char)
+    return bool(bracket_stack) and bracket_stack[-1] in {"'", '"'}
+
+
 def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
