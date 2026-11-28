@@ -16,6 +16,7 @@ steps:
     - tools/vllm-rocm/amdsmi/
     - docker/Dockerfile
     - docker/Dockerfile.cpu
+    - docker/Dockerfile.rust
     - docker/Dockerfile.rocm
     - docker/Dockerfile.rocm_base
     - docker/docker-bake.hcl
