@@ -250,6 +250,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/layers/draft_vocab.py
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
     - vllm/model_executor/models/qwen3_5_mtp.py
@@ -465,9 +466,13 @@ steps:
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
     - vllm/model_executor/models/qwen3_next_mtp.py
+    - vllm/model_executor/layers/draft_vocab.py
+    - vllm/model_executor/layers/quantization/online/lm_head.py
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+    - tests/model_executor/layers/test_draft_vocab.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+    - pytest -v -s model_executor/layers/test_draft_vocab.py -m 'distributed(num_gpus=2)'
   mirror:
     amd:
       automatic_shard: true

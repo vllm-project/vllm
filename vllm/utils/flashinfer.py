@@ -172,6 +172,13 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_gemv_bf16_fp4_gather() -> bool:
+    """Return whether FlashInfer exposes the gathered-row NVFP4 GEMV."""
+    mod = _get_submodule("flashinfer") if has_flashinfer() else None
+    return mod is not None and callable(getattr(mod, "gemv_bf16_fp4_gather", None))
+
+
+@functools.cache
 def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
     """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
     if not has_flashinfer():

@@ -19,7 +19,9 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
     base_method = "mtp"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
     supported_options = EagleSpeculatorConfig.supported_options | {
-        "index_share_for_mtp_iteration"
+        "index_share_for_mtp_iteration",
+        "draft_token_map_static_rows",
+        "draft_token_map_dynamic_rows",
     }
     supports_pcp = True
 
@@ -104,6 +106,13 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
         super().apply_options(spec)
+        if spec.draft_token_map_static_rows is None:
+            if spec.draft_token_map_dynamic_rows is not None:
+                raise ValueError(
+                    "draft_token_map_dynamic_rows needs draft_token_map_static_rows."
+                )
+        elif spec.draft_lm_head_quantization == "fp8":
+            raise ValueError("draft_token_map rows are NVFP4, not fp8.")
         if spec.index_share_for_mtp_iteration is None:
             return
         if spec.draft_model_config is None:

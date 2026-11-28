@@ -67,6 +67,34 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
+## Reduced draft vocabulary
+
+An MTP drafter that shares the target's lm_head reads the whole vocabulary for
+every draft token, a large share of the draft step on bandwidth-bound GPUs.
+`draft_token_map_static_rows` restricts the drafter to an NVFP4 copy of the
+first N token ids, which BPE tokenizers give to the most frequent tokens.
+`draft_token_map_dynamic_rows` adds, per draft token, the rows a rank-256
+projection of the lm_head scores highest, which recovers tokens the static rows
+miss (e.g. other languages):
+
+```bash
+vllm serve <mtp-model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
+                           "draft_token_map_static_rows": 32768,
+                           "draft_token_map_dynamic_rows": 16384}'
+```
+
+- The target verifies with its full lm_head, so only the acceptance length can
+  change.
+- Requires Model Runner V2 and an MTP drafter sharing an unquantized fp16/bf16
+  lm_head (Qwen3.5, Qwen4Exp, NemotronH). Dynamic rows also need a bf16
+  lm_head, an SM12x GPU and FlashInfer.
+- With tensor parallelism, the static rows and the rows picked from are split
+  evenly over the ranks, and the ranks gather the draft logits. Loading the
+  drafter briefly gathers the full lm_head on every rank.
+- The gain shrinks with batch size: measure decode speed and acceptance length
+  at your concurrency.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.

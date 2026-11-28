@@ -6,14 +6,17 @@ private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
+from collections.abc import Callable
 from itertools import chain
 from math import lcm
 from typing import ClassVar, Literal
 from weakref import WeakKeyDictionary
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module, Parameter
 
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearKernel,
@@ -33,6 +36,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+    pad_vocab_size,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
@@ -232,7 +237,20 @@ def lm_head_padding_size(tp_size: int) -> int:
     return lcm(DEFAULT_VOCAB_PADDING_SIZE, 16 * tp_size)
 
 
-def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
+def gather_org_rows(lm_head: VocabParallelEmbedding) -> torch.Tensor:
+    """The `org_vocab_size` rows of an unquantized `lm_head`, gathered from the
+    TP ranks that shard it."""
+    weight = lm_head.weight.data
+    if lm_head.tp_size > 1:
+        weight = tensor_model_parallel_all_gather(
+            weight[: lm_head.shard_indices.num_org_elements_padded], dim=0
+        )
+    return weight[: lm_head.org_vocab_size]
+
+
+def _quantize_copy(
+    lm_head: VocabParallelEmbedding, quantization: str, num_rows: int | None = None
+) -> ParallelLMHead:
     if (
         not isinstance(
             lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
@@ -244,22 +262,40 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             "Quantizing an lm_head copy needs an unquantized fp16/bf16 lm_head "
             "without bias."
         )
+    rows, org_rows = lm_head.num_embeddings, lm_head.org_vocab_size
+    padding_size = lm_head.padding_size
+    if num_rows is not None:
+        rows = org_rows = num_rows
+        # Those rows are split over the TP ranks anew.
+        padding_size = lcm(padding_size, lm_head_padding_size(lm_head.tp_size))
     # Online methods take their output dtype from the default dtype, which is
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
     with set_default_torch_dtype(dtype):
         head = ParallelLMHead(
-            lm_head.num_embeddings,
+            rows,
             lm_head.embedding_dim,
             params_dtype=dtype,
-            org_num_embeddings=lm_head.org_vocab_size,
-            padding_size=lm_head.padding_size,
+            org_num_embeddings=org_rows,
+            padding_size=padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
-    # Never loaded: a new param sharing the source storage, never a copy of it.
-    head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
+    # Never loaded: a new param sharing the source storage (its first rows,
+    # with num_rows), never a copy of it. With num_rows and TP, this rank's
+    # shard of those rows is gathered from the ranks that hold them.
+    if num_rows is None:
+        weight = lm_head.weight.data
+    else:
+        # The same source rows at every TP size, so the global scale is too.
+        end = pad_vocab_size(num_rows, lm_head.padding_size)
+        start = head.shard_indices.padded_org_vocab_start_index
+        weight = gather_org_rows(lm_head)[:end][start:]
+    weight = weight[: head.weight.shape[0]]
+    if weight.shape[0] < head.weight.shape[0]:
+        weight = F.pad(weight, (0, 0, 0, head.weight.shape[0] - weight.shape[0]))
+    head.weight = torch.nn.Parameter(weight, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
     # The copy is never loaded. The online loader wrapper captures the layer,
     # so keeping it would leave each copy to the cycle collector.
@@ -269,13 +305,18 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
     return head
 
 
-# Each quantized copy maps to the head it is derived from. Weak keys, and no
-# module attribute, so the copy never owns the source as a submodule.
-_SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDictionary()
+# Each quantized copy maps to the head and row count it is derived from. Weak
+# keys, and no module attribute, so the copy never owns the source as a
+# submodule.
+_SOURCES: WeakKeyDictionary[Module, tuple[VocabParallelEmbedding, str, int | None]] = (
+    WeakKeyDictionary()
+)
 
 
 def quantized_lm_head_copy(
-    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
+    lm_head: VocabParallelEmbedding,
+    quantization: Literal["fp8", "nvfp4"],
+    num_rows: int | None = None,
 ) -> ParallelLMHead:
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
@@ -284,12 +325,16 @@ def quantized_lm_head_copy(
     platform's W4A16 kernel. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
+
+    With `num_rows`, the copy is a head over just the first `num_rows` rows of
+    `lm_head`, padded and split over TP ranks like any lm_head. Building or
+    refreshing it is then a collective over the TP group.
     """
-    head = _quantize_copy(lm_head, quantization)
+    head = _quantize_copy(lm_head, quantization, num_rows)
     # Keep it out of layerwise reload, which would re-run
     # process_weights_after_loading on the already-quantized weight.
     get_layerwise_info(head).reset()
-    _SOURCES[head] = (lm_head, quantization)
+    _SOURCES[head] = (lm_head, quantization, num_rows)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",
         quantization,
@@ -300,19 +345,38 @@ def quantized_lm_head_copy(
 
 
 @torch.no_grad()
+def refresh_quantized_lm_head(head: Module) -> None:
+    """Re-derive one `quantized_lm_head_copy` from its source head, in place."""
+    fresh = _quantize_copy(*_SOURCES[head])
+    for name, tensor in chain(
+        fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
+    ):
+        getattr(head, name).copy_(tensor)
+
+
+# Other state derived from a source lm_head, keyed by the module that owns it:
+# re-derived with the quantized copies, see register_lm_head_refresh.
+_REFRESH_HOOKS: WeakKeyDictionary[Module, Callable[[], None]] = WeakKeyDictionary()
+
+
+def register_lm_head_refresh(module: Module, refresh: Callable[[], None]) -> None:
+    """Have `refresh_quantized_lm_heads` call `refresh` on any model holding
+    `module`, after weight updates of the source lm_head."""
+    _REFRESH_HOOKS[module] = refresh
+
+
+@torch.no_grad()
 def refresh_quantized_lm_heads(model: Module) -> None:
-    """Re-derive the quantized lm_head copies in `model` from their source heads.
+    """Re-derive the quantized lm_head copies in `model`, and the state
+    registered with `register_lm_head_refresh`, from their source heads.
 
     Copies in place, so CUDA graphs keep pointing at valid tensors.
     """
     for module in model.modules():
-        if module not in _SOURCES:
-            continue
-        fresh = _quantize_copy(*_SOURCES[module])
-        for name, tensor in chain(
-            fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
-        ):
-            getattr(module, name).copy_(tensor)
+        if module in _SOURCES:
+            refresh_quantized_lm_head(module)
+        if (refresh := _REFRESH_HOOKS.get(module)) is not None:
+            refresh()
 
 
 # (parent, attribute, copy) for each copy swapped out by share_source_lm_heads.

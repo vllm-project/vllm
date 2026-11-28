@@ -127,6 +127,8 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
     "draft_lm_head_quantization",
+    "draft_token_map_static_rows",
+    "draft_token_map_dynamic_rows",
     "index_share_for_mtp_iteration",
     "xpress_topc",
     "speculator_options",
@@ -536,6 +538,17 @@ class SpeculativeConfig:
     and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
+    draft_token_map_static_rows: int | None = Field(default=None, ge=1)
+    """Draft from the first N rows of the shared lm_head, as an NVFP4 copy,
+    instead of the full vocabulary. BPE tokenizers give the frequent tokens
+    the low ids. The target verifies with its full head, so only the
+    acceptance length can change. MTP drafters with an unquantized fp16/bf16
+    lm_head. Under tensor parallelism the rows are split over the ranks."""
+    draft_token_map_dynamic_rows: int | None = Field(default=None, ge=1)
+    """Rows outside `draft_token_map_static_rows` picked per draft token by a
+    rank-256 projection of the lm_head, which recovers acceptance on traffic
+    the static rows miss (e.g. other languages). Needs a bf16 lm_head, SM12x
+    and FlashInfer."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -736,6 +749,8 @@ class SpeculativeConfig:
             "code_revision",
             "index_share_for_mtp_iteration",
             "draft_lm_head_quantization",
+            "draft_token_map_static_rows",
+            "draft_token_map_dynamic_rows",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
             "prompt_lookup_min",

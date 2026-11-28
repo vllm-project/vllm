@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.draft_vocab import draft_ids_to_target
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -289,9 +290,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         # Map draft-vocab ids to target ids (identity for full-vocab drafts).
-        if self.draft_id_to_target_id is None:
-            return draft_ids
-        return draft_ids + self.draft_id_to_target_id[draft_ids]
+        return draft_ids_to_target(draft_ids, self.draft_id_to_target_id)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)
