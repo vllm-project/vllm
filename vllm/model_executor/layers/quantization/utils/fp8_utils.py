@@ -45,6 +45,53 @@ logger = init_logger(__name__)
 FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
 
 
+@triton.jit
+def _masked_per_tensor_fp8_scale_kernel(
+    x_ptr,
+    padding_ptr,
+    scale_ptr,
+    num_elements,
+    num_cols,
+    stride_row,
+    stride_col,
+    FP8_MAX: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    rows, cols = offsets // num_cols, offsets % num_cols
+    in_bounds = offsets < num_elements
+    is_padding = tl.load(padding_ptr + rows, mask=in_bounds, other=1)
+    values = tl.load(
+        x_ptr + rows * stride_row + cols * stride_col,
+        mask=in_bounds & ~is_padding,
+        other=0.0,
+    ).to(tl.float32)
+    amax = tl.max(tl.abs(values), 0)
+    # Match the CUDA dynamic quantizer's rounded division exactly.
+    tl.atomic_max(scale_ptr, tl.div_rn(amax, FP8_MAX), sem="relaxed")
+
+
+def masked_per_tensor_fp8_scale(
+    x: torch.Tensor, is_padding: torch.Tensor
+) -> torch.Tensor:
+    """Dynamic per-tensor scale excluding graph padding from the reduction."""
+    assert x.ndim == 2 and is_padding.shape == (x.shape[0],)
+    scale = torch.zeros(1, device=x.device, dtype=torch.float32)
+    block = 4096
+    _masked_per_tensor_fp8_scale_kernel[(triton.cdiv(x.numel(), block),)](
+        x,
+        is_padding,
+        scale,
+        x.numel(),
+        x.shape[1],
+        x.stride(0),
+        x.stride(1),
+        FP8_MAX=get_fp8_min_max()[1],
+        BLOCK=block,
+    )
+    return scale
+
+
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype

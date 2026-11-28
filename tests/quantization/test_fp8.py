@@ -5,17 +5,23 @@
 Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
+import json
+import shutil
 from types import SimpleNamespace
 from typing import Any
 
+import huggingface_hub
 import pytest
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+from vllm import SamplingParams
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
@@ -1024,3 +1030,107 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+@pytest.fixture(scope="module")
+def qwen3_dynamic_tensor_fp8_checkpoint(tmp_path_factory):
+    """RTN real public weights into the Quark dynamic per-tensor FP8 format."""
+    from pathlib import Path
+
+    source = Path(huggingface_hub.snapshot_download("Qwen/Qwen3-0.6B"))
+    dest = tmp_path_factory.mktemp("qwen3-dynamic-tensor-fp8")
+    for path in source.iterdir():
+        if path.suffix in (".json", ".jinja", ".model", ".txt") and (
+            path.name != "model.safetensors.index.json"
+        ):
+            shutil.copyfile(path, dest / path.name)
+    config = json.loads((dest / "config.json").read_text())
+    config["quantization_config"] = {
+        "quant_method": "quark",
+        "export": {"pack_method": "reorder", "kv_cache_group": []},
+        "global_quant_config": {
+            "weight": {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_tensor",
+                "is_dynamic": False,
+            },
+            "input_tensors": {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_tensor",
+                "is_dynamic": True,
+            },
+        },
+        "layer_quant_config": {},
+        "layer_type_quant_config": {},
+        "exclude": ["lm_head"],
+    }
+    (dest / "config.json").write_text(json.dumps(config))
+    weights = {}
+    for shard in source.glob("*.safetensors"):
+        with safe_open(shard, framework="pt", device="cpu") as checkpoint:
+            for name in checkpoint.keys():  # noqa: SIM118 -- safe_open is not a dict
+                value = checkpoint.get_tensor(name)
+                if name.endswith("_proj.weight") and value.ndim == 2:
+                    scale = (
+                        (value.float().abs().max() / 448).clamp(min=1e-10).reshape(1)
+                    )
+                    weights[name] = (
+                        (value.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+                    )
+                    weights[name.removesuffix(".weight") + ".weight_scale"] = scale
+                else:
+                    weights[name] = value
+    save_file(weights, dest / "model.safetensors", metadata={"format": "pt"})
+    return str(dest)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph regression")
+@pytest.mark.parametrize("quant_backend", ["native", "cuda"])
+def test_quark_dynamic_tensor_fp8_history_independent(
+    vllm_runner, qwen3_dynamic_tensor_fp8_checkpoint, quant_backend
+):
+    params = SamplingParams(temperature=0, max_tokens=1, logprobs=20, ignore_eos=True)
+    with vllm_runner(
+        qwen3_dynamic_tensor_fp8_checkpoint,
+        dtype="bfloat16",
+        max_model_len=64,
+        max_num_batched_tokens=32,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.3,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=True,
+        seed=0,
+        compilation_config={
+            "mode": 3,
+            "custom_ops": ["none", "+quant_fp8"]
+            if quant_backend == "cuda"
+            else ["none"],
+            "cudagraph_mode": "PIECEWISE",
+            "prefill_cudagraph_capture_token_sizes": [8],
+            "max_prefill_cudagraph_capture_tokens": 8,
+            "decode_cudagraph_capture_request_sizes": [1],
+        },
+    ) as model:
+        for victim in ([8801, 8802, 8803, 8804, 8805], [42, 314, 159, 265, 358]):
+            samples = []
+            for start in (7101, 7201, 7101):
+                model.llm.generate(
+                    {"prompt_token_ids": list(range(start, start + 8))},
+                    params,
+                    use_tqdm=False,
+                )
+                output = model.llm.generate(
+                    {"prompt_token_ids": victim}, params, use_tqdm=False
+                )[0].outputs[0]
+                samples.append(
+                    (
+                        output.token_ids,
+                        {
+                            token: item.logprob
+                            for token, item in output.logprobs[0].items()
+                        },
+                    )
+                )
+            # Each victim has the same tokens, batch layout, graph and cache
+            # settings. Only an unrelated preceding request is different.
+            assert samples[0] == samples[1] == samples[2]

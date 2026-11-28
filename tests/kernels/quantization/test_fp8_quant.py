@@ -25,6 +25,117 @@ SCALE_UBS = [True, False]
 SEEDS = [0]
 
 
+@pytest.mark.parametrize("padding_value", [100.0, float("nan")])
+@torch.inference_mode()
+def test_dense_dynamic_per_tensor_fp8_ignores_padding(padding_value):
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.kernels.linear.scaled_mm import (
+        CutlassFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTensorSym,
+        kFp8StaticTensorSym,
+    )
+
+    if not CutlassFP8ScaledMMLinearKernel.is_supported()[0]:
+        pytest.skip("requires a supported Cutlass FP8 GPU")
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=0, custom_ops=["all"])
+    )
+    with set_current_vllm_config(config):
+        kernel = CutlassFP8ScaledMMLinearKernel(
+            FP8ScaledMMLinearLayerConfig(
+                weight_quant_key=kFp8StaticTensorSym,
+                activation_quant_key=kFp8DynamicTensorSym,
+                weight_shape=(64, 64),
+                input_dtype=torch.bfloat16,
+                out_dtype=torch.bfloat16,
+            ),
+            ["weight", "weight_scale", "input_scale", "input_scale_ub"],
+        )
+    set_random_seed(0)
+    layer = torch.nn.Linear(64, 64, bias=False, device="cuda", dtype=torch.bfloat16)
+    layer.weight = torch.nn.Parameter(
+        layer.weight.to(FP8_DTYPE).t(), requires_grad=False
+    )
+    layer.register_buffer("weight_scale", torch.ones(1, device="cuda"))
+    x = torch.randn(8, 64, device="cuda", dtype=torch.bfloat16)
+    mask = torch.arange(8, device="cuda") >= 5
+    with set_forward_context(None, config):
+        expected = kernel.apply_weights(layer, x[:5])
+    x[5:] = padding_value
+    with set_forward_context(None, config, is_padding=mask):
+        actual = kernel.apply_weights(layer, x)[:5]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("backend", ["cuda", "native", "compiled_native"])
+@pytest.mark.parametrize("padding_value", [100.0, float("nan")])
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_padding_graph(backend, padding_value):
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=0, custom_ops=["all"])
+    )
+    with set_current_vllm_config(config):
+        quant = QuantFP8(False, GroupShape.PER_TENSOR, compile_native=False)
+    fn = quant.forward_cuda if backend == "cuda" else quant.forward_native
+    if backend == "compiled_native":
+        fn = torch.compile(fn, fullgraph=True, dynamic=True)
+    set_random_seed(0)
+    x = torch.randn(8, 64, device="cuda", dtype=torch.bfloat16)
+    mask = torch.arange(8, device="cuda") >= 5
+    x[5:] = padding_value
+    # Warm up compilation and allocations before capturing the graph.
+    for _ in range(3):
+        fn(x, is_padding=mask)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual, actual_scale = fn(x, is_padding=mask)
+    for valid_rows in (5, 3, 5):
+        mask.copy_(torch.arange(8, device="cuda") >= valid_rows)
+        expected, expected_scale = fn(x[:valid_rows])
+        graph.replay()
+        torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual[:valid_rows].float(), expected.float(), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize("shape", [(8, 17), (9, 1025), (128, 4096), (17, 8193)])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("padding_value", [100.0, float("nan")])
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_padding_shapes(shape, strided, dtype, padding_value):
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+
+    n, k = shape
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=0, custom_ops=["all"])
+    )
+    with set_current_vllm_config(config):
+        quant = QuantFP8(False, GroupShape.PER_TENSOR, compile_native=False)
+    set_random_seed(0)
+    x = torch.randn(n * (2 if strided else 1), k, device="cuda", dtype=dtype)
+    if strided:
+        x = x[::2]
+    mask = torch.arange(n, device="cuda") >= n - 3
+    x[-3:] = padding_value
+    actual, scale = quant.forward_cuda(x, is_padding=mask)
+    expected, expected_scale = quant.forward_cuda(x[:-3])
+    torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual[:-3].float(), expected.float(), rtol=0, atol=0)
+
+
 def opcheck_fp8_quant(
     output,
     input,

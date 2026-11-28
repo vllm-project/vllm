@@ -12,6 +12,8 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/kernels/linear/scaled_mm/
+  - vllm/v1/worker/gpu/model_runner.py
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/utils.py
   - vllm/transformers_utils/model_arch_config_convertor.py
@@ -41,6 +43,8 @@ steps:
       source_file_dependencies:
       - csrc/
       - vllm/model_executor/layers/quantization
+      - vllm/model_executor/kernels/linear/scaled_mm/
+      - vllm/v1/worker/gpu/model_runner.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/utils.py
       - tests/quantization
