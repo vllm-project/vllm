@@ -246,9 +246,20 @@ requires_packed_experts = pytest.mark.skipif(
 def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
     """Expert GEMM over tile-padded expert segments equals an fp64 matmul of
     the dequantized operands, scaled per row (NVFP4) and rounded to bf16."""
+    _check_bmm(fmt, tile, n, k, counts=[3, 0, 17, 1])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(120), reason="SM120 native MXFP8"
+)
+def test_mini_mxfp8_gate_up_prefill():
+    # Row 65 exercises the second 64-row subtile of a 128-row routed tile.
+    _check_bmm("mxfp8", 128, 2304, 2304, counts=[65, 0, 1])
+
+
+def _check_bmm(fmt: str, tile: int, n: int, k: int, counts: list[int]):
     torch.manual_seed(0)
     nvfp4 = fmt == "nvfp4"
-    counts = [3, 0, 17, 1]
     random_q = random_nvfp4 if nvfp4 else random_mxfp8
     weight, weight_scale = random_q(len(counts), n, k)
     shapes = ((n, k), (n, k))
