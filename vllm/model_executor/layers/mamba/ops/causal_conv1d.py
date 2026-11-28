@@ -98,12 +98,19 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         conv_state_indices_ptr + idx_seq * stride_cache_indices
     ).to(tl.int64)
 
+    # Skip padded sequences: cache_indices[idx] == pad_slot_id marks an entry
+    # that is not processed (see the causal_conv1d_fn contract). A negative
+    # index would otherwise form an out-of-bounds state pointer that reads and
+    # writes the row before conv_states.
+    skip_padded_seq = conv_states_input_coord == pad_slot_id
     if HAS_NULL_BLOCK:  # noqa
-        if conv_states_input_coord == null_block_id:
-            # not processing as this is a null block (padding)
-            if launch_pdl:
-                tl.extra.cuda.gdc_launch_dependents()
-            return
+        skip_padded_seq = skip_padded_seq or (
+            conv_states_input_coord == null_block_id
+        )
+    if skip_padded_seq:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
+        return
     conv_states_base = (
         conv_states_ptr
         + (conv_states_input_coord * stride_conv_state_seq)
