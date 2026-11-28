@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -139,7 +140,199 @@ def test_runtime_selected_by_max_tokens_across_dp(
     )
     # Every rank must take the same runtime, so a small local batch still gets
     # the prefill runtime when another DP rank is over the decode capacity.
-    assert experts.select_runtime(4) == expected
+    runtime, max_tokens = experts.select_runtime(4)
+    assert runtime == expected
+    # The route hint is the EP-wide row count (the DP-group max), identical on
+    # every rank, not this rank's own local batch of 4.
+    assert max_tokens == max(tokens_across_dp)
+
+
+@pytest.mark.cpu_test
+def test_select_runtime_without_forward_context_passes_no_hint(monkeypatch):
+    # No forward context (TBO ubatch, plugin bridge, a step without DP
+    # metadata): select_runtime returns max_tokens=None, so forward keeps the
+    # staged route rather than guessing a row bound from the local batch.
+    experts = _make_experts(monkeypatch)
+    experts._runtimes = [(128, "decode"), (4096, "prefill")]
+    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: False)
+    runtime, max_tokens = experts.select_runtime(64)
+    assert runtime == "decode"
+    assert max_tokens is None
+
+
+class _RouteRuntime:
+    """A MegaMoEV2 whose forward() picks its route from a max_tokens hint."""
+
+    small_m_mtpr = 512
+
+    def forward(self, x, wts, ids, *, max_tokens=None, mask_invalid_slots=None):
+        return x
+
+
+class _StagedOnlyRuntime:
+    """An older MegaMoEV2 whose forward() takes no max_tokens (staged only)."""
+
+    small_m_mtpr = 0
+
+    def forward(self, x, wts, ids):
+        return x
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "runtime_cls, max_tokens, capturing, expected",
+    [
+        # No row bound (no forward context): keep the staged route.
+        (_RouteRuntime, None, False, {}),
+        # Older AITER (forward without max_tokens): never hint, any build.
+        (_StagedOnlyRuntime, 256, False, {}),
+        (_StagedOnlyRuntime, 8192, True, {}),
+        # Decode-sized call, eager and captured: small-input route is captured.
+        (_RouteRuntime, 256, False, {"max_tokens": 256}),
+        (_RouteRuntime, 512, True, {"max_tokens": 512}),
+        # Prefill-sized call: hinted eagerly, but never while capturing a graph
+        # (the large-input route is not graph-captured).
+        (_RouteRuntime, 8192, False, {"max_tokens": 8192}),
+        (_RouteRuntime, 8192, True, {}),
+    ],
+)
+def test_route_hint(monkeypatch, runtime_cls, max_tokens, capturing, expected):
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    hint = DeepseekV4AiterMegaMoEExperts.route_hint(runtime_cls(), max_tokens)
+    assert hint == expected
+
+
+@pytest.mark.cpu_test
+def test_each_layer_gets_a_distinct_large_m_slot(monkeypatch):
+    # All layers share one MegaMoEV2 instance but need independent large-input
+    # protocol state, so each takes a distinct slot.
+    a = _make_experts(monkeypatch)
+    b = _make_experts(monkeypatch)
+    c = _make_experts(monkeypatch)
+    assert b.layer_slot == a.layer_slot + 1
+    assert c.layer_slot == a.layer_slot + 2
+
+
+@pytest.mark.cpu_test
+def test_runtime_built_lazily_accounts_for_later_layers(monkeypatch):
+    """The MTP/DSpark drafter's MoE layers are constructed -- and claim their
+    large-input protocol slots -- only after the target model's own
+    finalize_weights() has already run (process_weights_after_loading runs
+    per model, target before drafter). If get_runtime() read
+    `_num_layer_slots` while building there, it would freeze
+    large_m_state_slots at the target-only count, and the drafter's
+    select_layer_state(layer_slot) calls would later land out of range.
+    Building the runtime lazily, on first actual use via select_runtime(),
+    instead picks up every layer's slot: forward() -- target's or the
+    drafter's -- only runs once the whole model has finished loading."""
+    target = _make_experts(monkeypatch)
+    target._capacities = [128]
+    # Nothing is built yet: finalize_weights() (simulated above by setting
+    # _capacities directly) must not eagerly build a runtime.
+    assert target._runtimes == []
+
+    # A drafter's MoE layer is constructed, and claims a layer slot, after
+    # the target's weights are finalized but before the shared runtime is
+    # ever actually used.
+    drafter = _make_experts(monkeypatch)
+    assert drafter.layer_slot == target.layer_slot + 1
+
+    recorded_slot_counts = []
+    monkeypatch.setattr(
+        DeepseekV4AiterMegaMoEExperts,
+        "get_runtime",
+        lambda self, max_tok_per_rank: (
+            recorded_slot_counts.append(
+                (max_tok_per_rank, DeepseekV4AiterMegaMoEExperts._num_layer_slots)
+            )
+            or "runtime"
+        ),
+    )
+    target._ensure_runtimes()
+    assert recorded_slot_counts == [
+        (128, DeepseekV4AiterMegaMoEExperts._num_layer_slots)
+    ]
+    assert target._runtimes == [(128, "runtime")]
+
+    # A second call must not rebuild (or re-read the now-stale slot count).
+    target._ensure_runtimes()
+    assert recorded_slot_counts == [
+        (128, DeepseekV4AiterMegaMoEExperts._num_layer_slots)
+    ]
+
+
+@pytest.mark.cpu_test
+def test_takes_routed():
+    class WithRouted:
+        def __init__(self, *, routed: bool = False, **kwargs):
+            pass
+
+    class WithoutRouted:
+        def __init__(self, **kwargs):
+            pass
+
+    assert mega_moe_module._takes_routed(WithRouted) is True
+    assert mega_moe_module._takes_routed(WithoutRouted) is False
+
+
+@pytest.mark.cpu_test
+def test_get_runtime_passes_routed_only_when_supported(monkeypatch):
+    """ROCm/aiter#7788 (2d789d0) only builds the small-input and large-input
+    routes when MegaMoEV2 is constructed with routed=True; otherwise
+    small_m_mtprs is () and large_m_enabled is False, so max_tokens has no
+    fused route to pick and every call silently stays on the staged route."""
+
+    def _fake_mega_moe_v2_module(takes_routed: bool):
+        calls = []
+
+        if takes_routed:
+
+            class FakeMegaMoEV2:
+                def __init__(self, *, routed: bool = False, **kwargs):
+                    calls.append({"routed": routed, **kwargs})
+
+                def forward(self, *a, max_tokens=None, **k):
+                    raise NotImplementedError
+        else:
+
+            class FakeMegaMoEV2:
+                def __init__(self, **kwargs):
+                    calls.append(kwargs)
+
+                def forward(self, *a, max_tokens=None, **k):
+                    raise NotImplementedError
+
+        mod = ModuleType("aiter.ops.flydsl.kernels.mega_moe")
+        mod.MegaMoEV2 = FakeMegaMoEV2  # type: ignore[attr-defined]
+        return mod, calls
+
+    for takes_routed in (True, False):
+        mega_moe_module._takes_max_tokens.cache_clear()
+        mega_moe_module._takes_routed.cache_clear()
+        # A fresh cache per iteration: get_runtime() caches by (ep_group,
+        # device, dims, ...), which repeats across iterations here, and a hit
+        # would skip the (reconfigured) fake MegaMoEV2 entirely.
+        monkeypatch.setattr(DeepseekV4AiterMegaMoEExperts, "_runtime_cache", {})
+        fake_mod, calls = _fake_mega_moe_v2_module(takes_routed)
+        for name in (
+            "aiter",
+            "aiter.ops",
+            "aiter.ops.flydsl",
+            "aiter.ops.flydsl.kernels",
+        ):
+            monkeypatch.setitem(sys.modules, name, ModuleType(name))
+        monkeypatch.setitem(sys.modules, "aiter.ops.flydsl.kernels.mega_moe", fake_mod)
+        monkeypatch.setattr(
+            torch.accelerator, "current_device_index", lambda: 0, raising=False
+        )
+
+        experts = _make_experts(monkeypatch, max_num_batched_tokens=128)
+        experts.get_runtime(128)
+
+        assert len(calls) == 1
+        assert ("routed" in calls[0]) is takes_routed
+        if takes_routed:
+            assert calls[0]["routed"] is True
 
 
 @pytest.mark.cpu_test
