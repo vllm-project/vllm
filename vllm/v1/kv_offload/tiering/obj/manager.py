@@ -36,6 +36,7 @@ from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 if TYPE_CHECKING:
     from nixl._api import nixl_prepped_dlist_handle, nixl_xfer_handle
 
+    from vllm.distributed.kv_events import SharingScope
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
@@ -142,6 +143,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
         access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
+        sharing_scope: "SharingScope | None" = None,
     ):
         """Args:
         offloading_spec: Offloading configuration.
@@ -159,6 +161,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         access_mode: `read` serves loads but never writes blocks, `write`
             writes blocks but never serves loads, and `readwrite` (default)
             does both.
+        sharing_scope: Resource sharing contract. Use `instance`, `shared`, or
+            `None` for unknown.
 
         """
         super().__init__(
@@ -169,6 +173,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             access_mode=access_mode,
         )
         self.locality = Locality(locality) if locality is not None else None
+        if sharing_scope is not None and sharing_scope not in ("instance", "shared"):
+            raise ValueError("sharing_scope must be instance, shared, or None")
+        self.sharing_scope = sharing_scope
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -428,6 +435,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            sharing_scope=self.sharing_scope,
                             req_context=job.req_context,
                         )
                     )

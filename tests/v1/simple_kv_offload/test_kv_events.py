@@ -514,8 +514,11 @@ def test_block_removed_relabeled_medium_cpu() -> None:
 
     # Fill CPU with 4 blocks (2 + 2).
     _do_eager_store(fix, num_blocks=2)
-    # Drain store events so they don't clutter the eviction check.
-    list(sched.take_events())
+    first_stores = {
+        tuple(event.block_hashes): event.sharing_scope
+        for event in sched.take_events()
+        if isinstance(event, BlockStored)
+    }
     _do_eager_store(fix, num_blocks=2)
     list(sched.take_events())
 
@@ -529,6 +532,7 @@ def test_block_removed_relabeled_medium_cpu() -> None:
         f"expected >=2 BlockRemoved from eviction, got {len(removed)}"
     )
     for ev in removed:
+        assert first_stores[tuple(ev.block_hashes)] == ev.sharing_scope == "instance"
         assert ev.medium == MEDIUM_CPU, (
             f"BlockRemoved should be relabeled CPU, got {ev.medium}"
         )
@@ -723,7 +727,11 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
 
     # Fill disk with 4 blocks (2 + 2).
     _do_eager_store(fix, num_blocks=2)
-    list(sched.take_events())
+    first_stores = {
+        tuple(event.block_hashes): event.sharing_scope
+        for event in sched.take_events()
+        if isinstance(event, BlockStored)
+    }
     _do_eager_store(fix, num_blocks=2)
     list(sched.take_events())
 
@@ -736,6 +744,7 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
         f"expected >=2 BlockRemoved from eviction, got {len(removed)}"
     )
     for ev in removed:
+        assert first_stores[tuple(ev.block_hashes)] == ev.sharing_scope == "instance"
         assert ev.medium == MEDIUM_STORAGE, (
             f"BlockRemoved should be relabeled STORAGE, got {ev.medium}"
         )

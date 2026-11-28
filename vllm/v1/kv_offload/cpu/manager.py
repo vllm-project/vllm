@@ -4,6 +4,7 @@ import math
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -32,6 +33,9 @@ from vllm.v1.kv_offload.cpu.common import (
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_events import SharingScope
 
 
 @dataclass(slots=True)
@@ -72,8 +76,11 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         info: CPUOffloadingInfo | None = None,
+        *,
+        sharing_scope: "SharingScope | None" = "instance",
     ):
         self.medium: Medium = Medium.CPU
+        self.sharing_scope = sharing_scope
         self._num_chunks: int = num_chunks
         self._config_info: ConfigInfoMapping = (
             info.as_config_info() if info is not None else {}
@@ -413,6 +420,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=to_evict,
                     medium=self.medium,
                     removed=True,
+                    sharing_scope=self.sharing_scope,
                 )
             )
 
@@ -492,6 +500,7 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                     removal_expected=True,
                     req_context=req_context,
+                    sharing_scope=self.sharing_scope,
                 )
             )
 

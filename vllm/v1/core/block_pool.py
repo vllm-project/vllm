@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    SharingScope,
 )
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -123,6 +124,7 @@ class BlockPool:
         metrics_collector: Optional metrics collector for tracking block residency.
         num_hash_lookahead_tokens: Tokens after each block covered by its hash.
         medium: Storage medium reported in KV cache events.
+        sharing_scope: Sharing contract of this pool, if known.
 
     """
 
@@ -135,10 +137,12 @@ class BlockPool:
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
+        sharing_scope: SharingScope | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.medium = medium
+        self.sharing_scope = sharing_scope
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
@@ -368,6 +372,7 @@ class BlockPool:
             block_size=block_size,
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
             medium=self.medium,
+            sharing_scope=self.sharing_scope,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=to_event_extra_keys(extra_keys_list),
             group_idx=kv_cache_group_id,
@@ -562,6 +567,7 @@ class BlockPool:
                     if request.lora_request
                     else None,
                     medium=self.medium,
+                    sharing_scope=self.sharing_scope,
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
@@ -634,6 +640,7 @@ class BlockPool:
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=self.medium,
+                    sharing_scope=self.sharing_scope,
                     group_idx=get_group_id(block_hash),
                 )
             )

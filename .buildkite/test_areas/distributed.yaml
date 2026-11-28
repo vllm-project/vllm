@@ -2,6 +2,26 @@ group: Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":computer: (CPU) KV Event Wire and Replay"
+  key: kv-event-wire-replay
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_events.py
+  - vllm/config/kv_events.py
+  - vllm/distributed/kv_transfer/kv_connector/
+  - vllm/v1/core/
+  - vllm/v1/kv_offload/
+  - tests/distributed/
+  commands:
+  - >-
+    pytest -v -s
+    distributed/test_kv_cache_events.py
+    distributed/test_events.py
+
 - label: ":nvidia: (L4) Distributed Comm Ops"
   key: distributed-comm-ops
   automatic_shard: true

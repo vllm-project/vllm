@@ -3,6 +3,9 @@
 """Integration tests for SimpleCPUOffloadConnector with real models."""
 
 import time
+from contextlib import closing
+from typing import cast
+from uuid import uuid4
 
 import pytest
 import torch
@@ -13,9 +16,11 @@ from transformers import (
     Llama4TextConfig,
 )
 
+from tests.distributed.conftest import MockSubscriber
 from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams, TokensPrompt, envs
 from vllm.config import KVTransferConfig, ParallelConfig
+from vllm.distributed.kv_events import MEDIUM_CPU, BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 from vllm.utils import numa_utils
 from vllm.v1.metrics.reader import Counter
@@ -64,6 +69,8 @@ def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
         model.save_pretrained(tmp_path)
         del model
 
+    endpoint = f"inproc://simple-cpu-offload-{uuid4().hex}"
+    replay_endpoint = f"{endpoint}-replay"
     with vllm_runner(
         str(tmp_path),
         skip_tokenizer_init=True,
@@ -79,6 +86,12 @@ def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
         kv_cache_memory_bytes=16 << 20,
         enable_prefix_caching=True,
         disable_hybrid_kv_cache_manager=False,
+        kv_events_config={
+            "enable_kv_cache_events": True,
+            "enable_kv_event_metadata": True,
+            "endpoint": endpoint,
+            "replay_endpoint": replay_endpoint,
+        },
         kv_transfer_config=KVTransferConfig(
             kv_connector="SimpleCPUOffloadConnector",
             kv_role="kv_both",
@@ -119,6 +132,24 @@ def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
                 always_check_logprobs=True,
             )
         assert mixed_hit.num_cached_tokens == 16
+
+        with closing(
+            MockSubscriber(endpoint, replay_endpoint, decode_type=KVEventBatch)
+        ) as subscriber:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                subscriber.request_replay(0)
+                cpu_stores = [
+                    event
+                    for _, batch in subscriber.receive_replay()
+                    for event in cast(KVEventBatch, batch).events
+                    if isinstance(event, BlockStored) and event.medium == MEDIUM_CPU
+                ]
+                if cpu_stores:
+                    break
+            else:
+                pytest.fail("SimpleCPUOffload did not publish CPU store events")
+            assert all(event.sharing_scope == "instance" for event in cpu_stores)
 
 
 def test_hybrid_cpu_hit_is_requeued_after_it_finishes(vllm_runner, tmp_path):

@@ -72,6 +72,11 @@ class _KVEventsToggle:
 class KVEventsConfig(PublisherConfig, _KVEventsToggle):
     """Configuration for KV event publishing."""
 
+    enable_kv_event_metadata: bool = False
+    """Include logical source and known resource sharing scope in KV events.
+    Requires `enable_kv_cache_events`. When False, both fields are omitted.
+    """
+
     # Dataclasses collect base fields in reverse MRO, so the toggle stays first.
     @property
     def enable_events(self) -> bool:

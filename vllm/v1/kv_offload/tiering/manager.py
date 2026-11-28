@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from typing_extensions import override
@@ -59,6 +59,9 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_events import SharingScope
 
 logger = init_logger(__name__)
 
@@ -136,6 +139,8 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
         info: CPUOffloadingInfo | None = None,
+        *,
+        sharing_scope: "SharingScope | None" = "instance",
     ):
         super().__init__(
             num_chunks=num_chunks,
@@ -143,6 +148,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
             info=info,
+            sharing_scope=sharing_scope,
         )
         self._mmap_region = mmap_region
         # read/write is for CPU<->secondary transfers,

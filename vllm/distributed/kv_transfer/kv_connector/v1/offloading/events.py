@@ -32,6 +32,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    SharingScope,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
@@ -495,6 +496,7 @@ class OffloadingEventsTracker:
         medium: Medium,
         locality: str | None,
         ownership: str | None,
+        sharing_scope: SharingScope | None,
     ) -> BlockStored:
         group_idx = get_offload_group_idx(key)
         # Static classification is part of the self-describing contract only;
@@ -519,6 +521,7 @@ class OffloadingEventsTracker:
             kv_cache_spec_sliding_window=spec.kv_cache_spec_sliding_window,
             locality=locality,
             ownership=ownership,
+            sharing_scope=sharing_scope,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -556,7 +559,7 @@ class OffloadingEventsTracker:
                         "hit before translation."
                     )
                 yield self._placeholder_stored(
-                    key, event.medium, locality, event.ownership
+                    key, event.medium, locality, event.ownership, event.sharing_scope
                 )
                 continue
 
@@ -587,6 +590,7 @@ class OffloadingEventsTracker:
                 ),
                 locality=locality,
                 ownership=event.ownership,
+                sharing_scope=event.sharing_scope,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -626,4 +630,5 @@ class OffloadingEventsTracker:
                 group_idx=group_idx,
                 locality=locality,
                 ownership=event.ownership,
+                sharing_scope=event.sharing_scope,
             )
