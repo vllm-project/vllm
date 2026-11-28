@@ -27,9 +27,11 @@ from ..cutedsl.oproj.prepared import PreparedOproj
 BATCHES = (*range(1, 9), 16, 32, 64)
 PREPARED_MAX = BATCHES[-1]
 # Rows the attention cores (MLA, DSA, their DCP mailboxes and scratch) can prepare:
-# 64 requests x 5 DSpark verify tokens. The step stays at PREPARED_MAX rows until the
-# KDA, MoE, o-projection and AttnRes providers serve wider batches.
-ATTENTION_MAX = 320
+# 96 requests x 5 DSpark verify tokens. Captured steps of more than PREPARED_MAX
+# requests and up to this many rows run the wide step (specialized attention, stock
+# o-projection, AttnRes and dense MLP); wider steps run the stock layers. The scratch,
+# mailboxes and fused indexer buffers are sized from it when the runtime is built.
+ATTENTION_MAX = 480  # at most moe.experts.WIDE_ROWS (1024)
 # Rows up to which the specialized attention layer beats the stock one at every measured
 # context (8K, 32K, 128K, AgentX; GB300, DSpark q5, fp8 KV, input projection through
 # o_proj, us per layer), per (layer kind, DCP):

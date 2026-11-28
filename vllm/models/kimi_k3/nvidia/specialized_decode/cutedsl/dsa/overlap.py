@@ -22,6 +22,8 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32
 
+import vllm.envs as envs
+
 from ..common.policy import batch_table
 from ..common.primitives import (
     alloc,
@@ -80,14 +82,14 @@ from ..mla.query import Q_SENT, tiled_from
 #   207.5 / 219.4, fork 233.6 / 249.8; R64 wait 250.0, fork 295.5, front 320.1
 #   (MlaQuery front 271.8).
 QUERY_OVERLAP = {
-    "tp": "1-20:late_front,21-320:fork",
-    "dcp": "1-320:front",
-    "dcp_split": "1-239:fork,240-320:wait",
-    "tp1": "1-320:fork",
+    "tp": "1-20:late_front,21-1024:fork",
+    "dcp": "1-1024:front",
+    "dcp_split": "1-239:fork,240-1024:wait",
+    "tp1": "1-1024:fork",
 }
 # TP without the fused indexer (the late modes follow its select): the TP table the
 # stack ran before them.
-QUERY_OVERLAP_UNFUSED = "1:front,2-9:serial,10:front,11-320:fork"
+QUERY_OVERLAP_UNFUSED = "1:front,2-9:serial,10:front,11-1024:fork"
 MODES = ("serial", "fork", "wait", "front", "late", "late_front")
 LATE = ("late", "late_front")  # TP with the fused indexer only (else: fork, front)
 NORM = ("fork", "late")  # QueryNorm writes the q_c rows
@@ -105,7 +107,14 @@ WIDE_MODES = ("serial", "fork")
 # again). Only the launch order changes, not what any kernel computes. Chosen by an
 # end-to-end A/B at c = 1 (TP16 + DCP16, DSpark k = 7), together with the local
 # top-k cluster policy (indexer.LOCAL_CLUSTER); other DCP sizes were not measured.
-QUERY_AFTER_FRONT = {16: "6-8:1"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+QUERY_AFTER_FRONT = {16: "6-8:1", 8: "5-15:1"}
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: DCP8 verify batches of 16-20 rows (four
+# requests at k = 4) also fork their MlaQuery after IndexFront. Only the launch order
+# changes, not what any kernel computes. Opt-in; default off.
+if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
+    QUERY_AFTER_FRONT[8] = "5-20:1"
 
 
 def query_after_front(batch, dcp):

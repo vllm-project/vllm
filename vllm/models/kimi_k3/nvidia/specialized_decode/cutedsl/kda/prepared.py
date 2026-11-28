@@ -10,12 +10,14 @@ import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_stream
 
+import vllm.envs as envs
+
 from ..common.host import fake, layout, stream, to_cute
 from ..common.policy import batch_table
 from . import fused_ws, specialized
 from .fused import KdaFused
 from .fused_ws import KdaFusedWS
-from .kernel import KdaSplit
+from .kernel import KdaSplit, KdaSplitB
 from .specialized import KdaWS
 from .stream import KdaStream
 from .wide import KdaWide
@@ -37,6 +39,15 @@ SPEC_SCHEDULE = {
     12: "1:1.8.2.8,2-4:1.8.3.8,5-9:1.8.3.4,10-12:1.8.2.2,13-16:1.8.3.2",
     6: "1:1.8.2.8.0.1,2:1.8.0.8,3-12:1.8.3.8,13-16:1.8.3.4",
 }
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 verify steps of four and five requests
+# take four-CTA clusters at two CTAs per SM (the same bits: only the CTA split of a
+# head's state rows changes); measured faster in A/B (layer chain microbenchmark: input
+# projection -> core -> o-projection and all-reduce). Default off; other shapes keep the
+# table above.
+if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
+    SPEC_SCHEDULE[12] = (
+        "1:1.8.2.8,2-3:1.8.3.8,4-5:1.8.2.4,6-9:1.8.3.4,10-12:1.8.2.2,13-16:1.8.3.2"
+    )
 
 
 # (request, head) items from which KdaWide (a whole head per CTA, two CTAs per SM)
@@ -105,6 +116,29 @@ FUSED_SPLIT = ((48, 8), (96, 4), (192, 2), (1 << 30, 1))
 # R96 - / 63.3 / 62.4, R128 - / 80.1 / 80.8; TP1 R4 - / 31.1 / 26.4, R8 58.7 / 50.0 /
 # 48.7, R16 - / 80.8 / 76.2, R64 - / 254.4 / 247.4, R128 - / 491.2 / 468.9.
 FUSED_WS_ITEMS = 192
+
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: RecoverSSM verify steps that take KdaSplit, for the
+# request counts by heads per rank in KDA_SPLIT_B_TABLE, run KdaSplitB (same bits: the
+# record slot read once and the convolution windows split over the output owners);
+# KDA_SPLIT_B_LEAN (heads -> request counts) adds the lean prologue (same bits) to
+# KdaSplitB. TP8 (12 heads per rank) one to eight requests and TP16 (6) one request:
+# measured faster in A/B (layer chain microbenchmark: in_proj -> core -> o_proj).
+KDA_SPLIT_B_TABLE = "12:1-8;6:1"
+KDA_SPLIT_B_LEAN = "12:1-8"
+
+
+def kda_split_b_listed(spec, heads, requests):
+    for item in filter(None, spec.split(";")):
+        h, _, counts = item.partition(":")
+        if int(h) == heads and requests in batch_table(f"{counts}:1"):
+            return True
+    return False
+
+
+def kda_split_b(heads, requests, tokens, record):
+    if not envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE or not record or tokens < 2:
+        return False
+    return kda_split_b_listed(KDA_SPLIT_B_TABLE, heads, requests)
 
 
 def fused_split(items):
@@ -198,6 +232,10 @@ def core(specs, heads, gate_mode, has_bias, device, tokens, record, fused=False)
     schedule = schedule.get(requests, (0, 0, 0)) if gate_mode != 2 else (0,) * 3
     if schedule[0] >= 2 and specs[9][1][-2:] != (128, 1):  # staging needs whole rows
         schedule = (1, *schedule[1:4])  # no evict hint without staging
+    if kda_split_b(heads, requests, tokens, record) and schedule[0] < 2:
+        if kda_split_b_listed(KDA_SPLIT_B_LEAN, heads, requests):
+            schedule = (*schedule, 0, 0, 0)[:5] + (1,)
+        return KdaSplitB(heads, requests, gate_mode, has_bias, schedule, tokens)
     return KdaSplit(heads, requests, gate_mode, has_bias, schedule, tokens, record)
 
 

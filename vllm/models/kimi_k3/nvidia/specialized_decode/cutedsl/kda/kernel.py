@@ -159,6 +159,7 @@ class KdaSplit:
         schedule=(0, 0, 0),
         tokens=1,
         record=False,
+        tuned=False,
     ):
         # The gate stage sends decays for tokens 2 * quarter + column (at most 8), while
         # the decay barrier expects 512 bytes per token: more tokens would never arrive.
@@ -185,6 +186,11 @@ class KdaSplit:
         assert not self.gate_staged or self.rows >= 64
         self.evict = bool(evict)  # staged state traffic marked L2 evict-first
         assert self.staged or not self.evict
+        # Tuned (record verify): the record slot read once per launch, and the
+        # query/key convolution windows written by every output owner (a slice each)
+        # instead of token 0's owner alone; the same values and addresses.
+        self.tuned = bool(tuned)
+        assert not self.tuned or (record and tokens > 1)
 
     @cute.jit
     def __call__(self, *args):
@@ -297,6 +303,9 @@ class KdaSplit:
                 nw = norm_weight[thread]
 
                 cute.arch.griddepcontrol_wait()
+                hoisted_row = None  # tuned: the record slot, read once
+                if cutlass.const_expr(self.tuned):
+                    hoisted_row = record_row(args, request)
                 inputs = cute.make_rmem_tensor(3 * T, BFloat16)
                 betas, gates = [], []
                 for t in cutlass.range_constexpr(T):
@@ -340,9 +349,12 @@ class KdaSplit:
                     shared_k[advance(thread, 128 * t)] = k
                     if cutlass.const_expr(self.record):  # noqa: SIM102
                         if partition == 0:
-                            args[19][record_row(args, request), head, t, thread] = (
-                                BFloat16(k)
-                            )
+                            if cutlass.const_expr(self.tuned):
+                                args[19][hoisted_row, head, t, thread] = BFloat16(k)
+                            else:
+                                args[19][record_row(args, request), head, t, thread] = (
+                                    BFloat16(k)
+                                )
                     vs.append(v)
                     qks += [q, k]
                     if cutlass.const_expr(t == T - 1):  # noqa: SIM102
@@ -430,7 +442,9 @@ class KdaSplit:
                         stop = min(start + self.wave, self.passes)
                         lanes = (group, group_lane)
                         corrections = None
-                        if cutlass.const_expr(self.record):
+                        if cutlass.const_expr(self.record and self.tuned):
+                            corrections = args[18][hoisted_row, head, t, None]
+                        elif cutlass.const_expr(self.record):
                             corrections = args[18][
                                 record_row(args, request), head, t, None
                             ]
@@ -492,7 +506,21 @@ class KdaSplit:
                             gate_t = self.sigmoid(Float32(gate_t))
                         result = raw_o * rstd * nw * gate_t
                         output[advance(token, t), qk_channel] = BFloat16(result)
-                        if cutlass.const_expr(t == 0):
+                        if cutlass.const_expr(self.tuned and t < self.cluster):
+                            # Owner t writes the warp slices w (section * 4 + warp)
+                            # with w % owners == t, after its output barrier (every
+                            # CTA of the cluster has read its taps by then).
+                            owners: cutlass.Constexpr = min(T, self.cluster)
+                            for section in cutlass.range_constexpr(2):
+                                if (section * 4 + warp) % owners == t:
+                                    channel = section * dim + qk_channel
+                                    window = (taps[section, 1], taps[section, 2])
+                                    window += tuple(
+                                        inputs[3 * u + section] for u in range(T)
+                                    )
+                                    for i, value in enumerate(window):
+                                        conv_page[channel, i] = conv_type(value)
+                        if cutlass.const_expr(t == 0 and not self.tuned):
                             for section in cutlass.range_constexpr(2):
                                 channel = section * dim + qk_channel
                                 window = (taps[section, 1], taps[section, 2])
@@ -822,3 +850,15 @@ class KdaSplit:
     @cute.jit
     def output_position(self, row: Int32):
         return ((row & 7) << 4) | ((row >> 5) << 2) | ((row & 31) >> 3)
+
+
+class KdaSplitB(KdaSplit):
+    """KdaSplit's RecoverSSM verify with the record slot read once per launch and the
+    query/key convolution windows written by every output owner instead of token 0's
+    owner alone: the same values, records and outputs, bit for bit; measured faster
+    in A/B (layer chain microbenchmark: in_proj -> core -> o_proj)."""
+
+    def __init__(self, heads, batch, gate_mode, has_bias, schedule=(0, 0, 0), tokens=1):
+        super().__init__(
+            heads, batch, gate_mode, has_bias, schedule, tokens, True, tuned=True
+        )

@@ -167,6 +167,13 @@ def front_tactic(tokens, rows=64, split=1):
     return (rows, n, split, min(8, (200 * 1024) // ((rows + n) * 256)))
 
 
+def front_gemm_tactic(tokens):
+    """Split-K tactic of the packed [shared gate_up | latent down] front (15872 x 7168):
+    128-row weight tiles (124 CTAs, one wave on 152 SMs) up to 64 tokens (GB300 cold L2,
+    us: T19 34.4 vs 35.6 at 64-row tiles, T60 35.6 vs 38.2), else `front_tactic`."""
+    return front_tactic(tokens, rows=128 if tokens <= 64 else 64)
+
+
 # Up to this many tokens the split-K front beats cuBLAS on every DEP projection
 # (GB300, [gate_up | down] 39.1 / 40.1 us at T5 / T20 vs 47.7 /
 # 47.4 cuBLAS; at T80 43.4 vs 47.5; at T320 114.8 vs 59.4).
@@ -195,9 +202,12 @@ class EpMoeLayer:
     (pack_front), shared down [7168, 6144], latent norm [3584], up [7168, 3584]; `act`
     the stock SiTU-and-mul; `routed(latent, topk_weights, topk_ids) -> BF16 latent`
     the EP experts. Batches above FRONT_MAX tokens (or unprepared) run the stock
-    order."""
+    order. `front_gemm`: tile the packed front with `front_gemm_tactic` (hybrid
+    decode) instead of `front_tactic`."""
 
-    def __init__(self, weights, act, routed, batches, *, side_stream=None):
+    def __init__(
+        self, weights, act, routed, batches, *, side_stream=None, front_gemm=False
+    ):
         from ...gemm.projection import PreparedProjection
 
         self.w, self.act, self.routed = weights, act, routed
@@ -206,7 +216,8 @@ class EpMoeLayer:
         fronts = [b for b in batches if b <= FRONT_MAX]
         pol = {b: front_tactic(b) for b in fronts}
         router = {b: front_tactic(b, split=4 if b <= 32 else 2) for b in fronts}
-        self.front = PreparedProjection(weights["front"], pol).prepare()
+        front = {b: front_gemm_tactic(b) for b in fronts} if front_gemm else pol
+        self.front = PreparedProjection(weights["front"], front).prepare()
         self.router = PreparedProjection(
             weights["gate"], router, output_dtype=torch.float32
         ).prepare()

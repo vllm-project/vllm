@@ -31,6 +31,20 @@ logger = init_logger(__name__)
 # TP16 x DCP16 serves DSpark verify steps of one request up to 7 draft tokens
 # (chosen by an end-to-end A/B there); other pairs are not measured yet.
 HEAD_GATHER = {(16, 16): "1-8:1"}
+# TP8 x DCP8 verify steps of one to eight requests (5-40 rows at k = 4) when
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: measured faster than NCCL's ring all-gather in A/B
+# (2-node microbench).
+HEAD_GATHER_OPT = {(8, 8): "1-40:1"}
+
+
+def head_gather_rows(tp, dcp):
+    """The HEAD_GATHER spec of this (TP, DCP) pair (with the optional entries)."""
+    import vllm.envs as envs
+
+    table = dict(HEAD_GATHER)
+    if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
+        table.update(HEAD_GATHER_OPT)
+    return table.get((tp, dcp), "")
 
 
 def install_logits_gather(model, group, tp, rank, device, dcp=1):
@@ -56,7 +70,7 @@ def install_logits_gather(model, group, tp, rank, device, dcp=1):
         or getattr(head, "tp_size", 1) != tp
     ):
         return ()
-    table = batch_table(HEAD_GATHER.get((tp, dcp), ""))
+    table = batch_table(head_gather_rows(tp, dcp))
     rows = tuple(sorted(r for r, on in table.items() if on))
     if not rows or tp == 1 or not lp.use_all_gather:
         return ()

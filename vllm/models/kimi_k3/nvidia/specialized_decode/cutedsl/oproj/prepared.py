@@ -18,6 +18,8 @@ import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass.cute.runtime import make_fake_stream
 
+import vllm.envs as envs
+
 from ....specialized_decode.symm import multicast_rendezvous, peer_rendezvous
 from ..common.host import dynamic_fake, dynamic_view, fake, stream, to_cute
 from ..common.policy import batch_table
@@ -54,8 +56,10 @@ class OprojMailbox:
 
 # Two-shot all-reduce batches per TP (2-/4-node GB300, 32 MLA layers, us/layer, max over
 # ranks, multicast vs two-shot: TP8 B16 8.85/11.40, B32 10.63/11.32, B64 18.06/13.18;
-# TP16 B16 9.78/12.28, B32 14.96/13.05, B64 28.06/14.07).
-TWOSHOT = {8: "33-64:1", 16: "17-64:1"}
+# TP16 B16 9.78/12.28, B32 14.96/13.05, B64 28.06/14.07). TP8 keeps multicast up to 40
+# rows (eight requests at k = 4): decode-step A/B at 131K context, per token, -2.9% /
+# -0.6% at 35 / 40 rows.
+TWOSHOT = {8: "41-64:1", 16: "17-64:1"}
 
 
 def twoshot_batches(tp):
@@ -63,10 +67,28 @@ def twoshot_batches(tp):
     return {batch for batch, on in table.items() if on}
 
 
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 verify batches of 17-24 rows take the
+# tcgen05 engine, as 25-40 rows do. Not bit-identical to the grouped mma.sync engine
+# (another order of the K partial sums). Opt-in; default off.
+OPU17 = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
+
+
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 consumers of 33-36 rows (seven requests at k
+# = 4) poll with four groups, summing every rank in rank order as one group does (the
+# same bits); measured faster in A/B (layer chain microbenchmark: input projection ->
+# core -> o-projection and all-reduce) at 35 rows, slower at 40. Default off.
+G4 = {8: "33-36:1"} if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE else {}
+
+
+def ordered_groups(batch, tp):
+    return bool(batch_table(G4.get(tp, "")).get(batch, 0))
+
+
 def engine(batch, tp):
-    """Producer engine above B8 (GB300): grouped mma.sync for TP8 up to B16, else
-    tcgen05."""
-    default = "mma" if tp == 8 and batch <= 16 else "umma"
+    """Producer engine above B8 (GB300): grouped mma.sync for TP8 up to B24, else
+    tcgen05. TP8 verify steps at k = 4, decode-step A/B at 131K context, per token:
+    mma.sync -2.3% at 20 rows (four requests), +2.1% at 25-30 rows."""
+    default = "mma" if tp == 8 and batch <= (16 if OPU17 else 24) else "umma"
     return default
 
 
@@ -97,7 +119,12 @@ def compile_oproj(
         return _compile_producer(kind, k, batch, tp, mla, cap, twoshot)
     if kind == "consumer":  # B64: one 128-thread group per CTA polls every rank
         groups = 4 if batch <= 32 and not twoshot else 1
-        return _compile_consumer(tp, nb, has_delta, front, cap, twoshot, groups)
+        ordered = not twoshot and ordered_groups(batch, tp)
+        if ordered:
+            groups = 4
+        return _compile_consumer(
+            tp, nb, has_delta, front, cap, twoshot, groups, ordered
+        )
     return _compile_fused(k, batch, tp, nb, has_delta, front, cap, ahead)
 
 
@@ -129,8 +156,10 @@ def _compile_producer(kind, k, batch, tp, mla, cap, twoshot):
 
 
 @cache
-def _compile_consumer(tp, nb, has_delta, front, cap, twoshot, groups):
-    kernel = OprojConsumer(nb, groups=groups, twoshot=twoshot, has_delta=has_delta)
+def _compile_consumer(tp, nb, has_delta, front, cap, twoshot, groups, ordered):
+    kernel = OprojConsumer(
+        nb, groups=groups, twoshot=twoshot, has_delta=has_delta, ordered=ordered
+    )
     extra = (_peers(tp, cap)[0], cutlass.Int64(0), cutlass.Int32(0)) if twoshot else ()
     box = _box(tp, cap, twoshot)
     return cute.compile(kernel, box, *_rows(front), *extra, make_fake_stream())

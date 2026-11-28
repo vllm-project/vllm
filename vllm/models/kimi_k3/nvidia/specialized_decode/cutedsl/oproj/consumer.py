@@ -10,7 +10,10 @@ next layer's AttnRes saved-block statistics (`ClusterAttnRes.statistics`: same
 arithmetic and exchange order) from the blocks group 0 prefetched, and stores them for
 that layer's `precomputed` AttnRes (args 11-15 after the AttnRes rows: next norm,
 next query, mixture [rows, 7168] FP32, (maximum, exponent sum) [rows, 2] FP32, next
-eps). The next layer must read the same saved blocks (its nb is this kernel's)."""
+eps). The next layer must read the same saved blocks (its nb is this kernel's).
+With `ordered` (several groups), groups 1.. hand group 0 the raw words of each of
+their rank slots and group 0 adds every rank in rank order, the one-group consumer's
+association (same bits as one group, with the slots polled by several groups)."""
 
 from functools import partial
 from typing import Any
@@ -134,6 +137,7 @@ class OprojConsumer:
         groups=4,
         twoshot=False,
         ahead=False,
+        ordered=False,
     ):
         if not 0 <= nb <= 8:
             raise ValueError("Output-projection AttnRes supports zero to eight blocks")
@@ -141,6 +145,9 @@ class OprojConsumer:
             raise ValueError("Statistics ahead need saved blocks and a second group")
         self.nb, self.has_delta = nb, has_delta
         self.groups, self.twoshot = groups, twoshot
+        # Two slots per group (raw words of each), one rank-order chain in group 0.
+        self.ordered = ordered and groups > 1
+        assert not self.ordered or not twoshot
         self.kpre = 1 << max(0, (2 * nb - 1).bit_length())
         self.npost = 4 if nb > 0 else 1
         self.ahead: Any = ClusterAttnRes(nb) if ahead else None
@@ -319,6 +326,29 @@ class OprojConsumer:
         return values
 
     @cute.jit
+    def poll_raw(self, mailbox, token, h, first, count):
+        """`ordered`: the words of slots first, first + 1 (count <= 2), polled as
+        `poll_sum` polls them."""
+        raw = zeros((2, 4), Uint32)
+        pending = Int32(0)
+        for rank in cutlass.range_constexpr(2):
+            if rank < count:
+                fetch(raw, rank, at(mailbox, first + rank, token, h))
+        for rank in cutlass.range_constexpr(2):
+            if rank < count:  # noqa: SIM102
+                if not published(raw[rank, j] for j in range(4)):
+                    pending |= 1 << rank
+        while pending != 0:
+            for rank in cutlass.range_constexpr(2):
+                if (pending & (1 << rank)) != 0:
+                    fetch(raw, rank, at(mailbox, first + rank, token, h))
+            for rank in cutlass.range_constexpr(2):
+                if (pending & (1 << rank)) != 0:  # noqa: SIM102
+                    if published(raw[rank, j] for j in range(4)):
+                        pending &= ~(1 << rank)
+        return raw
+
+    @cute.jit
     def publish(self, output, xmoe, hints, token, h, values):
         tid, _, _ = cute.arch.thread_idx()
         words = pack8(values)
@@ -345,10 +375,16 @@ class OprojConsumer:
         if group > 0:
             first = group * S
             count = min(S, mailbox.shape[0] - first)
-            values = self.poll_sum(mailbox, token, h, first, count)
-            for half in cutlass.range_constexpr(2):
-                words = tuple(float_bits(values[half * 4 + i]) for i in range(4))
-                store_shared_words(at(parts, group - 1, half, tid, 0), words)
+            if cutlass.const_expr(self.ordered):
+                raw = self.poll_raw(mailbox, token, h, first, count)
+                for slot in cutlass.range_constexpr(2):
+                    words = tuple(raw[slot, i] for i in range(4))
+                    store_shared_words(at(parts, group - 1, slot, tid, 0), words)
+            else:
+                values = self.poll_sum(mailbox, token, h, first, count)
+                for half in cutlass.range_constexpr(2):
+                    words = tuple(float_bits(values[half * 4 + i]) for i in range(4))
+                    store_shared_words(at(parts, group - 1, half, tid, 0), words)
             named_barrier(2, everyone, arrive=True)
             for r in cutlass.range_constexpr(self.slots(mailbox.shape[0])):
                 if r < count:
@@ -364,12 +400,19 @@ class OprojConsumer:
             if cutlass.const_expr(self.groups > 1):
                 named_barrier(2, everyone)
             for other in cutlass.range_constexpr(self.groups - 1):
-                for half in cutlass.range_constexpr(2):
-                    words = smem_words(at(parts, other, half, tid, 0))
-                    for j in cutlass.range_constexpr(2):
-                        k: cutlass.Constexpr = half * 2 + j
-                        part = tuple(map(bits_float, two(words, j)))
-                        attn[2 * k], attn[2 * k + 1] = pair_op(two(attn, k), part)
+                if cutlass.const_expr(self.ordered):
+                    for slot in cutlass.range_constexpr(2):  # the next ranks, in order
+                        words = smem_words(at(parts, other, slot, tid, 0))
+                        for j in cutlass.range_constexpr(4):
+                            part = unpack_bf16(words[j])
+                            attn[2 * j], attn[2 * j + 1] = pair_op(two(attn, j), part)
+                else:
+                    for half in cutlass.range_constexpr(2):
+                        words = smem_words(at(parts, other, half, tid, 0))
+                        for j in cutlass.range_constexpr(2):
+                            k: cutlass.Constexpr = half * 2 + j
+                            part = tuple(map(bits_float, two(words, j)))
+                            attn[2 * k], attn[2 * k + 1] = pair_op(two(attn, k), part)
             prefix_value = cute.make_rmem_tensor(8, Float32)
             for j in cutlass.range_constexpr(4):
                 rounded = unpack_bf16(pack_pair(*two(attn, j)))

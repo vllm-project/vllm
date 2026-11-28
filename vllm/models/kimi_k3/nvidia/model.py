@@ -141,6 +141,9 @@ logger = init_logger(__name__)
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
+# KimiMoE._hybrid_ep before the layer's first forward has built it (or not).
+_HYBRID_EP_UNBUILT = object()
+
 
 def shard_sequence_parallel_mlp(
     hidden_size: int,
@@ -518,6 +521,10 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        # The hybrid DEP MoE schedule: a DepMoe or None once the first forward
+        # has decided (_hybrid_ep_layer).
+        self._hybrid_ep: Any = _HYBRID_EP_UNBUILT
+
         if self.use_mega_moe:
             ep_group = get_ep_group()
             ep_size = ep_group.world_size
@@ -644,9 +651,56 @@ class KimiMoE(nn.Module):
         )
         return routed_hidden_states, router_output, topk_ids
 
+    def _hybrid_ep_layer(self):
+        """The DEP MoE schedule (EpMoeLayer: one split-K GEMM over the packed [shared
+        gate_up | latent down] weight, router and shared expert on a side stream beside
+        it and MegaMoE) for a sequence-parallel MegaMoE layer with a replicated shared
+        expert (hybrid decode: TP attention, a few tokens per rank, every rank streams
+        the whole shared + latent weights). Built on first use; None if not eligible."""
+        if self._hybrid_ep is not _HYBRID_EP_UNBUILT:
+            return self._hybrid_ep
+        from .specialized_decode.cutedsl.moe.ep.layer import FRONT_MAX
+        from .specialized_decode.runtime.dep import DepMoe, dep_moe_supported
+
+        se = self.shared_experts
+        eligible = (
+            envs.VLLM_KIMI_K3_HYBRID_EP_MOE
+            and se is not None
+            and self.use_sequence_parallel
+            and self.tp_size > 1
+            and dep_moe_supported(self)
+            and not se.shard_sequence_parallel
+            and se.gemm_rs_ar is None
+            and self.routed_expert_down_proj is not None
+            # Every weight DepMoe reads directly must be unquantized BF16.
+            and all(
+                isinstance(w := getattr(linear, "weight", None), torch.Tensor)
+                and w.dtype == torch.bfloat16
+                for linear in (
+                    self.gate,
+                    se.gate_up_proj,
+                    se.down_proj,
+                    self.routed_expert_down_proj,
+                    self.routed_expert_up_proj,
+                )
+            )
+        )
+        ep = None
+        if eligible:
+            side = self._down_proj_stream or torch.cuda.Stream()
+            ep = DepMoe(self, list(range(1, FRONT_MAX + 1)), side, front_gemm=True)
+            logger.info_once(
+                "Kimi K3 hybrid decode: MegaMoE layers run the DEP EpMoeLayer schedule"
+            )
+        self._hybrid_ep = ep
+        return ep
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
+        ep = self._hybrid_ep_layer() if self.use_mega_moe else None
+        if ep is not None and ep.serves(num_tokens):
+            return ep.run(hidden_states)
         # Overlap the gate with the routed down projection; the returned hidden
         # states are already down-projected. Keep the original ``hidden_states``
         # for the shared experts.

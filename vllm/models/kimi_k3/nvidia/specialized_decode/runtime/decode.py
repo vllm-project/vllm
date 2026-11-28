@@ -150,6 +150,12 @@ class SpecializedDecode:
         wide = {m for m in rounded if q > 1 and cap < m <= min(widest, ATTENTION_MAX)}
         self.wide = tuple(sorted(wide))
         self.attention_rows = max((*self.batches, *self.wide))
+        logger.info_once(
+            "Specialized decode steps: batches %s, wide %s (ATTENTION_MAX %d)",
+            self.batches,
+            self.wide,
+            ATTENTION_MAX,
+        )
         self.queries = (1, q) if q > 1 else (1,)
         # The longest sequence the deployment serves bounds the MLA split count.
         self.max_context, self.fi_kernels = config.max_context, config.fi_kernels

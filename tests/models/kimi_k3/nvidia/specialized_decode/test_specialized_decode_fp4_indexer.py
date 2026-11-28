@@ -848,6 +848,34 @@ def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
     the merging rank holds most of the top-K of some rows (its rescue push);
     the merging ranks 2, 5 and 13 put their slots across a 512-key stride
     (the rotated row order)."""
+    _check_exchange_merge_digits(*EXCHANGE16_CASES[case], 16, case, monkeypatch)
+
+
+EXCHANGE8_CASES = {
+    # (global contexts, q, logits kind, merging rank); 5, 10 or 15 rows
+    "a5": ([136505], 5, "random", 5),
+    "a5r0": ([136505], 5, "random", 0),
+    "short": ([100, 3000, 136505], 5, "random", 7),
+    "coarse": ([32773, 136505], 5, "coarse", 5),
+    "dups": ([32773, 136505, 60000], 5, "dups", 2),
+    "ints": ([136505, 60000, 32773], 5, "ints", 5),
+    "tied": ([136505, 32773], 5, "zero", 7),
+    "sat": ([32773, 136505, 60000], 5, "sat", 5),
+}
+
+
+@pytest.mark.parametrize("case", list(EXCHANGE8_CASES))
+def test_dcp8_topk_exchange_merge_digits(case, monkeypatch):
+    """The same over 8 ranks at 5, 10 and 15 rows: the "digits" form on half the
+    warps (DIGITS_HALF, VLLM_KIMI_K3_LOW_LATENCY_DECODE=1) against the radix
+    merge and the #63 merge, bit-equal."""
+    _check_exchange_merge_digits(*EXCHANGE8_CASES[case], 8, case, monkeypatch)
+
+
+def _check_exchange_merge_digits(contexts, q, kind, rank0, world, case, monkeypatch):
+    """`world` simulated DCP ranks (interleave 1) on one GPU: the "digits" merge
+    against the radix merge and the #63 merge's select + rescue (see
+    test_dcp16_topk_exchange_merge_digits)."""
     from types import SimpleNamespace as NS
 
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
@@ -864,8 +892,7 @@ def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
         topk_exchange as tx,
     )
 
-    contexts, q, kind, rank0 = EXCHANGE16_CASES[case]
-    world, topk = 16, 2048
+    topk = 2048
     n = dcp_merge_local_topk(topk, world)
     rows = len(contexts) * q
     ends = torch.tensor(
@@ -893,9 +920,12 @@ def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
     ws_d = _local_workspace(world, rank0, rows, topk, n)
     ws_r = _local_workspace(world, rank0, rows, topk, n)
     ws_ref = _local_workspace(world, rank0, rows, topk, n)
+    if world == 8:  # the "digits" form serves 8 ranks on half the warps (opt-in)
+        monkeypatch.setattr(tx, "DIGITS_HALF", True)
     merge_d = tx.ExchangeMerge(ex_d, ws_d, rows, topk, UNIT)
     assert merge_d.select == "digits"
     monkeypatch.setattr(tx, "MERGE_SELECT", {})
+    monkeypatch.setattr(tx, "DIGITS_HALF", False)
     merge_r = tx.ExchangeMerge(ex_r, ws_r, rows, topk, UNIT)
     assert merge_r.select == "radix"
     # This rank's MLA cache rows: reversed page ids per request.
@@ -1021,6 +1051,40 @@ def test_local_topk_cluster_bitwise(case):
     that overflow (every key tied: passes 2-4 on every CTA of the cluster), tens of
     ties at the threshold ("coarse") and hundreds at the maximum ("top_ties"); both
     epoch parities and two exchange ranks."""
+    _check_local_cluster(16, *LOCAL_CLUSTER_CASES[case], case)
+
+
+# DCP8 (n = 384): rows of at least 1552 8-key vectors (12,409 keys) split.
+LOCAL8_CLUSTER_CASES = {
+    "around_split": (
+        [190, 384, 385, 12408, 12409, 12415, 12416, 20000, 30000, 37000],
+        "random",
+    ),
+    "long": (
+        [12805, 16392, 24000, 32776, 33776, 37000, 12416, 16392, 37376, 20000]
+        + [13000, 30000, 25000, 18000, 36000],
+        "random",
+    ),
+    "all_tied": ([12805, 16392, 24000, 32776, 37000], "zero"),
+    "coarse": (
+        [12805, 16392, 24000, 32776, 33776, 37000, 12416, 2056, 30000, 20000]
+        + [13000, 37376, 25000, 18000, 400],
+        "coarse",
+    ),
+    "top_ties": ([12805, 16392, 24000, 32776, 2056], "top"),
+}
+
+
+@pytest.mark.parametrize("case", list(LOCAL8_CLUSTER_CASES))
+def test_local_topk_cluster_bitwise_dcp8(case):
+    """The same for DCP8 at 5, 10 and 15 rows (indexer.LOCAL_CLUSTER: DCP8 at
+    5-15 rows)."""
+    _check_local_cluster(8, *LOCAL8_CLUSTER_CASES[case], case)
+
+
+def _check_local_cluster(world, lengths, kind, case):
+    """The DCP local top-N of `len(lengths)` rows at DCP `world`: 4 CTAs per row
+    against one, bit for bit (see test_local_topk_cluster_bitwise)."""
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         dynamic_view,
@@ -1034,10 +1098,9 @@ def test_local_topk_cluster_bitwise(case):
         topk_exchange as tx,
     )
 
-    world, rows, pitch = 16, 8, LOCAL_CLUSTER_PITCH
+    rows, pitch = len(lengths), LOCAL_CLUSTER_PITCH
     assert indexer.local_cluster(world, rows) == 4
     n = dcp_merge_local_topk(2048, world)
-    lengths, kind = LOCAL_CLUSTER_CASES[case]
     assert max(lengths) <= pitch
     split_from = indexer.IndexerLocalTopk(rows, n, pitch, world, 4).split_from
     split = [(k + 7) // 8 >= split_from for k in lengths]
@@ -1057,7 +1120,7 @@ def test_local_topk_cluster_bitwise(case):
     ends = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     width = n + n // 32
     pairs = tx.ll_pairs(n)
-    for xrank, parity in ((3, 0), (12, 1)):
+    for xrank, parity in ((3, 0), (world - 4, 1)):
         got = {}
         for c, local in kernels.items():
             recv = torch.zeros(
