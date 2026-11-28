@@ -768,5 +768,36 @@ def test_dcp_group_ranks_match_collective_order(
         assert dcp_groups == groups["pcp"]
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("override", "configured", "dcp", "pcp", "expected"),
+    [
+        (None, None, 2, 1, False),
+        (None, False, 2, 1, False),
+        (None, True, 2, 1, True),
+        ("0", True, 2, 1, False),
+        ("1", False, 2, 1, True),
+        ("1", True, 1, 1, False),
+        ("1", True, 2, 2, False),
+    ],
+)
+def test_q_replication_respects_override_and_group_layout(
+    monkeypatch, override, configured, dcp, pcp, expected
+):
+    from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
+
+    if override is None:
+        monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_DCP_Q_REPLICATE", override)
+    config = ParallelConfig(
+        tensor_parallel_size=4,
+        decode_context_parallel_size=dcp,
+        prefill_context_parallel_size=pcp,
+        dcp_q_replicate=configured,
+    )
+    assert resolve_dcp_q_replicate(config) is expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -69,6 +69,22 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+### ROCm Kimi-K3 query replication
+
+For Kimi-K3 MLA and Kimi-K3.1 DSA, `--dcp-q-replicate` replicates query
+projection weights within each DCP group so eligible decode steps can avoid
+query all-gather. It is off by default; an explicitly set
+`VLLM_DCP_Q_REPLICATE=0` or `1` overrides the CLI setting.
+
+This requires DCP greater than one and PCP equal to one. DCP1 retains ordinary
+TP sharding. The existing MLA wrapper keeps rank-local Q views for MHA prefill
+and uses replicated Q for MQA. Replication increases weight memory and can add
+prefill computation, so measure the workload before enabling it.
+
+The AITER FP4/FP8 **BMM** paths and head-padding MLA backends remain unsupported
+and fail at initialization. This restriction is separate from FP8 KV-cache
+storage.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

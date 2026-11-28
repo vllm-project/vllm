@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
@@ -46,6 +46,20 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
     from vllm.distributed.parallel_state import GroupCoordinator
+
+
+def resolve_dcp_q_replicate(parallel_config: ParallelConfig) -> bool:
+    """Enable replicated Q only for contiguous DCP groups (no PCP)."""
+    requested = (
+        envs.VLLM_DCP_Q_REPLICATE
+        if envs.is_set("VLLM_DCP_Q_REPLICATE")
+        else parallel_config.dcp_q_replicate
+    )
+    return (
+        bool(requested)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+    )
 
 
 # LSE/output combine

@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -47,6 +48,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     indexer_k_quant_and_cache_triton,
     rocm_aiter_sparse_attn_indexer,
@@ -651,6 +653,11 @@ class KimiK3DSAAttention(nn.Module):
         self.num_local_heads = self.num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
+        q_proj_cls = (
+            DCPGroupColumnParallelLinear
+            if resolve_dcp_q_replicate(get_current_vllm_config().parallel_config)
+            else ColumnParallelLinear
+        )
 
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
@@ -662,7 +669,7 @@ class KimiK3DSAAttention(nn.Module):
                 disable_tp=True,
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
+            self.q_b_proj = q_proj_cls(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -677,7 +684,7 @@ class KimiK3DSAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
-            self.q_proj = ColumnParallelLinear(
+            self.q_proj = q_proj_cls(
                 self.hidden_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
