@@ -631,6 +631,7 @@ def make_nixl_scheduler(
         get_state_checkpoint_tokens=lambda num_tokens: 0
     )
     sched._is_hma_required = is_hma_required
+    sched.kv_recompute_threshold = 0
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,
