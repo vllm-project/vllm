@@ -102,6 +102,32 @@ Divide the increase in `vllm:prefix_cache_hits` by the increase in `vllm:prefix_
 
 For per-request counts, start the server with `--enable-prompt-tokens-details` to get `usage.prompt_tokens_details.cached_tokens` from `/v1/chat/completions` and `/v1/completions` (streaming needs `stream_options: {"include_usage": true}`). `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`.
 
+## Monitoring
+
+vLLM exports two Prometheus counters for the local prefix cache, both counted in tokens:
+
+- `vllm:prefix_cache_queries` - prompt tokens looked up in the prefix cache.
+- `vllm:prefix_cache_hits` - prompt tokens found in the prefix cache.
+
+Like other vLLM counters, they are exposed with a `_total` suffix, so the hit rate over the last 5 minutes is:
+
+```text
+sum(rate(vllm:prefix_cache_hits_total[5m]))
+/
+sum(rate(vllm:prefix_cache_queries_total[5m]))
+```
+
+`sum` combines the engines of a data parallel deployment. Add a `model_name` matcher to limit it to one model. This is the same ratio as the "Prefix cache hit rate" in vLLM's periodic log output, except that the log covers the most recent 1000 requests instead of a time window. The [Prometheus and Grafana example](../../examples/observability/prometheus_grafana/README.md) dashboard includes a panel for it.
+
+When reading the hit rate:
+
+- Hits are counted in full blocks (in `--prefix-match-unit` steps on hybrid models that set it), and the last prompt token is always recomputed to produce logits. With a block size of 16, a request whose first 2,010 tokens match a cached prompt gets 2,000 hit tokens.
+- If requests share only a common system prompt, the hit rate cannot exceed the system prompt length divided by the prompt length. A 2,048-token system prompt followed by 256 unique tokens tops out at 2048 / 2304, about 0.89, even when every request after the first one hits.
+- Each request is counted once, when it is first scheduled. Requests rescheduled after preemption, and requests that skip the cache lookup (for example, because they ask for prompt logprobs), are not counted.
+- A falling hit rate on unchanged traffic can mean that cached blocks are evicted before they are reused. `vllm:kv_cache_usage_perc` does not show this: cached blocks that no running request uses count as free and are evicted, least recently used first, whenever new blocks are needed, so eviction can happen while usage is well below 1.
+
+`vllm:prompt_tokens_by_source` splits prompt tokens by a `source` label with the values `local_compute`, `local_cache_hit` and `external_kv_transfer`. With a KV connector, `vllm:external_prefix_cache_queries` and `vllm:external_prefix_cache_hits` report the external cache the same way.
+
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
