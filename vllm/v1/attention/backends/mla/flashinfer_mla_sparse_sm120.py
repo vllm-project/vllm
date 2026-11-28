@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
+    _finish_dcp_partials,
     _get_workspace_buffer,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
@@ -36,6 +37,10 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
     is_sparse = True
     supports_dense_mha_prefill = False
+    can_return_lse_for_decode = True
+    supports_dcp = True
+    # FlashInfer SM120 sparse MLA returns base-2 softmax LSE.
+    lse_base_on_e = False
 
     def get_fp8_ds_mla_row_bytes(self) -> int:
         if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:
@@ -107,7 +112,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         assert self.topk_indices_buffer is not None
 
         self.supports_quant_query_input = False
-        self._workspace_buffer: torch.Tensor | None = None
 
     def forward_mqa(
         self,
@@ -116,6 +120,9 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not isinstance(self.index_group, HiSparseMLAIndexGroup):
+            return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
@@ -190,28 +197,26 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             return output, None
 
-        kv_rows, block_stride_rows = flat_kv_row_view(
-            kv_c_and_k_pe_cache, attn_metadata.block_size
-        )
-        topk_indices_physical = cast(
-            torch.Tensor,
-            triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                BLOCK_STRIDE_ROWS=block_stride_rows,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-            ),
-        )
-        return (
-            self._run_mqa_kernel(
-                q,
-                # The SM120 kernels are built for 64-row pages only.
-                kv_rows.view(-1, 64, kv_rows.shape[-1]),
-                topk_indices_physical,
-            ),
-            None,
+    def _forward_mqa_kernel(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        *,
+        layer: AttentionLayer,
+        block_size: int,
+        is_decode: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
+        kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
+        return self._run_sparse_kernel(
+            q,
+            # The SM120 kernels are built for 64-row pages only.
+            kv_rows.view(-1, 64, kv_rows.shape[-1]),
+            topk_indices,
+            valid_counts if self.dcp_world_size > 1 else None,
         )
 
     def _run_mqa_kernel(
@@ -220,35 +225,52 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         kv_cache: torch.Tensor,
         topk_indices_physical: torch.Tensor,
     ) -> torch.Tensor:
+        output, _ = self._run_sparse_kernel(q, kv_cache, topk_indices_physical)
+        return output
+
+    def _run_sparse_kernel(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices_physical: torch.Tensor,
+        valid_counts: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_actual_toks = q.shape[0]
 
         output = q.new_empty(
-            (num_actual_toks, self.num_heads, self.kv_lora_rank),
+            (num_actual_toks, q.shape[1], self.kv_lora_rank),
             dtype=q.dtype,
         )
 
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
+        lse = None
+        if self.need_to_return_lse_for_decode:
+            # Outputs must outlive scratch reuse by another layer or launch.
+            lse = q.new_empty((num_actual_toks, q.shape[1]), dtype=torch.float32)
 
         from vllm.utils.flashinfer import (
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
 
         sparse_capacity = topk_indices_physical.shape[1]
-        out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
+        flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
             kv_cache=kv_cache.view(torch.uint8).unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=_get_workspace_buffer(q.device),
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=None,
+            seq_lens=valid_counts,
             max_seq_len=sparse_capacity,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
             sparse_mla_top_k=sparse_capacity,
             kv_scale_format=self.kv_scale_format,
+            return_lse=lse is not None,
+            lse=lse,
         )
-        return out.squeeze(1)
+        if lse is not None:
+            assert valid_counts is not None
+            _finish_dcp_partials(output, lse, valid_counts)
+        return output, lse
