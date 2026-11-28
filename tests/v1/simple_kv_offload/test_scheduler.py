@@ -94,6 +94,7 @@ init_none_hash(sha256)
 def _make_kv_cache_config(
     num_blocks: int,
     num_groups: int = 1,
+    extra_retained_tokens: int = 0,
 ) -> KVCacheConfig:
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
@@ -115,7 +116,10 @@ def _make_kv_cache_config(
                 layer_names,
                 spec,
                 SlidingWindowManager,
-                SlidingWindowManager.config(sliding_window=BLOCK_SIZE * 4),
+                SlidingWindowManager.config(
+                    sliding_window=BLOCK_SIZE * 4,
+                    extra_retained_tokens=extra_retained_tokens,
+                ),
             )
         )
         tensors.append(
@@ -371,6 +375,56 @@ def test_lookahead_mamba_partial_tail_survives_finish(
         block_hasher=req._block_hasher,
     )
     assert sched.get_num_new_matched_tokens(divergent, 0)[0] < boundary
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_mtp_swa_hit_loads_every_allocated_block(
+    retention_interval: int | None,
+) -> None:
+    """A CPU hit must load the SWA blocks that multi-module MTP retains below
+    the window: the GPU allocates them and counts them computed."""
+    config = _make_lookahead_config(3)
+    config.scheduler_config.async_scheduling = False
+    config.scheduler_config.max_num_batched_tokens = 256
+    config.cache_config.prefix_cache_retention_interval = retention_interval
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
+    kv_config = _make_kv_cache_config(
+        32, num_groups=2, extra_retained_tokens=config.num_reprefillable_tokens
+    )
+    kv_config.prefix_cache_retention_interval = retention_interval
+    engine = create_scheduler(config, num_blocks=32, kv_cache_config=kv_config)
+    assert isinstance(engine.connector, SimpleCPUOffloadConnector)
+    sched = engine.connector.scheduler_manager
+    assert sched is not None
+    prompt = list(range(8 * BLOCK_SIZE + config.num_hash_lookahead_tokens + 1))
+    block_hasher = get_request_block_hasher(
+        BLOCK_SIZE, sha256, config.num_hash_lookahead_tokens
+    )
+    source, reload = (
+        Request(
+            rid, prompt, SamplingParams(max_tokens=1), None, block_hasher=block_hasher
+        )
+        for rid in ("source", "reload")
+    )
+    # Prefill the source in one step, store it on CPU, then drop it from GPU.
+    engine.add_request(source)
+    engine.update_from_output(
+        engine.schedule(), ModelRunnerOutput(["source"], sampled_token_ids=[[99]])
+    )
+    meta = engine.schedule().kv_connector_metadata
+    assert isinstance(meta, SimpleCPUOffloadMetadata)
+    simulate_store_completion(sched, meta.store_event)
+    assert engine.kv_cache_manager.reset_prefix_cache()
+
+    engine.add_request(reload)
+    meta = engine.schedule().kv_connector_metadata
+    assert isinstance(meta, SimpleCPUOffloadMetadata)
+    assert reload.num_computed_tokens == 8 * BLOCK_SIZE
+    swa_blocks = engine.kv_cache_manager.get_blocks("reload").blocks[1][:8]
+    allocated = [b.block_id for b in swa_blocks if not b.is_null]
+    assert set(allocated) <= set(meta.load_gpu_blocks)
 
 
 @pytest.mark.parametrize(
