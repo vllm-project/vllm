@@ -553,6 +553,13 @@ def test_cpu_mxfp4_emulation(default_vllm_config, act, use_bias):
     ref_w2 = dq_mxfp4_torch(w2, s2, torch.bfloat16)
     b13 = torch.randn(experts, 2 * intermediate) if use_bias else None
     b2 = torch.randn(experts, hidden) if use_bias else None
+    ref_layer = _StubMoELayer(
+        ref_w13,
+        ref_w2,
+        act,
+        b13.bfloat16() if b13 is not None else None,
+        b2.bfloat16() if b2 is not None else None,
+    )
     layer = _StubMoELayer(w13, w2, act, b13, b2)
     convert = (
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
@@ -575,41 +582,42 @@ def test_cpu_mxfp4_emulation(default_vllm_config, act, use_bias):
         w1_bias=getattr(layer, "w13_bias", None),
         w2_bias=getattr(layer, "w2_bias", None),
     )
-    impl = CPUEmulationExpertsMxfp4(config, quant_config)
-    impl.process_weights_after_loading(layer)
-    assert layer.w13_weight.dtype == layer.w2_weight.dtype == torch.bfloat16
+    ref_config = (
+        biased_moe_quant_config(ref_layer.w13_bias, ref_layer.w2_bias)
+        if use_bias
+        else FusedMoEQuantConfig.make()
+    )
     x = torch.randn(7, hidden, dtype=torch.bfloat16)
     router = torch.randn(7, experts)
     weights, ids = _softmax_topk(router, topk, False)
-    expected = ref_fused_moe(
-        x,
-        ref_w13,
-        ref_w2,
-        b13.to(torch.bfloat16) if b13 is not None else None,
-        b2.to(torch.bfloat16) if b2 is not None else None,
-        weights,
-        ids,
-        act,
-    )
-    output = torch.empty_like(x)
-    impl.apply(
-        output=output,
-        hidden_states=x,
-        w1=layer.w13_weight,
-        w2=layer.w2_weight,
-        topk_weights=weights,
-        topk_ids=ids,
-        activation=act,
-        global_num_experts=experts,
-        expert_map=None,
-        a1q_scale=None,
-        a2_scale=None,
-        workspace13=torch.empty(0),
-        workspace2=torch.empty(0),
-        expert_tokens_meta=None,
-        apply_router_weight_on_input=False,
-    )
-    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+    def run_experts(impl, layer):
+        impl.process_weights_after_loading(layer)
+        output = torch.empty_like(x)
+        impl.apply(
+            output=output,
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=weights,
+            topk_ids=ids,
+            activation=act,
+            global_num_experts=experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=torch.empty(0),
+            workspace2=torch.empty(0),
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        return output
+
+    # Both checkpoints should reach the same BF16 expert computation after loading.
+    expected = run_experts(CPUUnquantizedExperts(config, ref_config), ref_layer)
+    actual = run_experts(CPUEmulationExpertsMxfp4(config, quant_config), layer)
+    assert layer.w13_weight.dtype == layer.w2_weight.dtype == torch.bfloat16
+    torch.testing.assert_close(actual.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
