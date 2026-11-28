@@ -225,6 +225,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_INKLING2_FP8_DECODE_WEIGHTS: Literal["none", "draft", "all"] = "none"
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
@@ -1748,6 +1749,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Inkling 2 FP8 decode weights on SM12x (e.g. DGX Spark / GB10): decode
+    # steps of at most 16 tokens read e4m3 copies of the bf16 projection
+    # weights (one fp32 scale per output row) in the low-M GEMM kernels, which
+    # cuts weight bytes per step. Math stays bf16 with fp32 accumulation and
+    # prefill keeps the bf16 weights; the copies are made once at startup and
+    # take extra GPU memory (smaller KV cache).
+    # "none" (default): off. "draft": the DSpark drafter only; outputs are
+    # unchanged. "all": also the model's attention/dense projections and the
+    # LM head; outputs change slightly (FP8 rounding).
+    "VLLM_INKLING2_FP8_DECODE_WEIGHTS": env_with_choices(
+        "VLLM_INKLING2_FP8_DECODE_WEIGHTS", "none", ["none", "draft", "all"]
+    ),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(

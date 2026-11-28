@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-M BF16 tensor-core projections for SM120/SM121: batched `x @ w.T` with
-deterministic split-K for narrow outputs, and a grouped q/k/v projection."""
+deterministic split-K for narrow outputs, and a grouped q/k/v projection.
+Both also take e4m3 weights with one fp32 scale per output row (see
+`fp8_decode_weight`): the weight stream halves, the math stays bf16 x bf16."""
 
 import functools
 from typing import NamedTuple
@@ -22,6 +24,7 @@ _MAX_TILES = 4096
 def _ll_gemm_kernel(
     X,
     W,
+    Scale,
     Bias,
     Y,
     P,
@@ -57,8 +60,10 @@ def _ll_gemm_kernel(
     acc = tl.zeros((MP, BN), tl.float32)
     for _ in range(0, tl.minimum(K - s * K_PER_SPLIT, K_PER_SPLIT), BK):
         # Issuing W's copies before X's measured faster.
-        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0)
+        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0.0)
         x = tl.load(x_ptrs, (rows[:, None] < M) & (ks[None, :] < K), other=0)
+        if Scale is not None:
+            w = w.to(tl.bfloat16)
         acc += tl.dot(x, w)
         x_ptrs += BK
         w_ptrs += BK
@@ -83,6 +88,8 @@ def _ll_gemm_kernel(
                 )
             tl.atomic_xchg(C + tile, 0, sem="relaxed", scope="gpu")
     if is_last:
+        if Scale is not None:
+            acc *= tl.load(Scale + b * N + cols, cols < N, other=0)[None, :]
         if Bias is not None:
             acc += tl.load(Bias + cols, cols < N, other=0).to(tl.float32)[None, :]
         tl.store(
@@ -110,6 +117,7 @@ def _qkv_bmm_kernel(
     XK,
     XV,
     W,
+    Scale,
     Y,
     M,
     N,
@@ -145,7 +153,9 @@ def _qkv_bmm_kernel(
     acc_hi = tl.zeros((MP, BN), tl.float32)
     for _ in range(0, K, BK):
         x_mask = (rows[:, None] < M) & (ks[None, :] < K)
-        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0)
+        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0.0)
+        if Scale is not None:
+            w = w.to(tl.bfloat16)
         acc_lo += tl.dot(tl.load(x_lo, x_mask, other=0), w)
         acc_hi += tl.dot(tl.load(x_hi, x_mask, other=0), w)
         x_lo += BK
@@ -154,6 +164,8 @@ def _qkv_bmm_kernel(
         ks += BK
     segment = (cols >= S1).to(tl.int32) + (cols >= S2).to(tl.int32)
     acc = tl.where((segment == b_lo)[None, :], acc_lo, acc_hi)
+    if Scale is not None:
+        acc *= tl.load(Scale + cols, cols < N, other=0)[None, :]
     tl.store(
         Y + (rows[:, None] * SYM + cols[None, :]),
         acc.to(Y.dtype.element_ty),
@@ -196,11 +208,17 @@ def _counter(stream: int) -> torch.Tensor:
 
 
 def _ll_gemm(
-    x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None, out: torch.Tensor
+    x: torch.Tensor,
+    w: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    scale: torch.Tensor | None = None,
 ) -> None:
     nb, m, k = x.shape
     n = w.shape[1]
     assert 0 < m <= MAX_M and w.shape == (nb, n, k)
+    assert (scale is None) == (w.dtype != torch.float8_e4m3fn)
+    assert scale is None or (scale.shape == (nb, n) and scale.is_contiguous())
     assert x.stride(2) == w.stride(2) == 1
     assert bias is None or (bias.shape == (n,) and bias.stride(0) == 1)
     assert out.shape == (nb, m, n) and out.stride(2) == 1
@@ -217,6 +235,7 @@ def _ll_gemm(
     _ll_gemm_kernel[(n_tiles, nb, cfg.split)](
         x,
         w,
+        scale,
         bias,
         out,
         partials,
@@ -263,11 +282,12 @@ def qkv_bmm(
     w: torch.Tensor,
     k_start: int,
     v_start: int,
+    w_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """One launch of three linears on consecutive row ranges of `w` `[N, K]`:
     output columns `[0, k_start)` from `x_q`, `[k_start, v_start)` from `x_k`
     and the rest from `x_v`, each `[M, K]` with M <= 16. Returns `[M, N]`
-    with fp32 accumulation."""
+    with fp32 accumulation. An e4m3 `w` takes its per-row `w_scale` `[N]`."""
     xs = (x_q, x_k, x_v)
     m, k = x_q.shape
     n = w.shape[0]
@@ -276,6 +296,8 @@ def qkv_bmm(
     assert 0 < m <= MAX_M and w.shape == (n, k)
     assert all(x.shape == (m, k) and x.stride(1) == 1 for x in xs)
     assert w.stride(1) == 1 and s1 > 0 and s1 + bn <= s2 <= n  # one boundary per tile
+    assert (w_scale is None) == (w.dtype == torch.bfloat16)
+    assert w_scale is None or (w_scale.shape == (n,) and w_scale.is_contiguous())
     assert max(n * w.stride(0), *(m * x.stride(0) for x in xs)) < 2**31
     out = torch.empty((m, n), dtype=x_q.dtype, device=x_q.device)
     # About 1.6 waves of 32-column tiles at Inkling's 8608 columns; wider
@@ -285,6 +307,7 @@ def qkv_bmm(
         x_k,
         x_v,
         w,
+        w_scale,
         out,
         m,
         n,
@@ -312,23 +335,26 @@ def sm12x_bf16_ll_gemm(
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
     out: torch.Tensor | None = None,
+    weight_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Low-latency `x @ weight.T` (+ `bias` `[N]`) for at most `MAX_M` rows,
     with fp32 accumulation, into `out` if given. `weight` `[N, K]` takes `x`
     `[..., K]` -> `[..., N]`; `weight` `[B, N, K]` takes `x` `[B, M, K]` ->
-    `[B, M, N]`."""
+    `[B, M, N]`. An e4m3 `weight` takes its per-row `weight_scale`
+    (`[N]`, or `[B, N]` for a batched weight)."""
     n = weight.shape[-2]
     if weight.ndim == 3:
         if out is None:
             out = x.new_empty((*x.shape[:2], n), dtype=out_dtype or x.dtype)
-        _ll_gemm(x, weight, bias, out)
+        _ll_gemm(x, weight, bias, out, weight_scale)
         return out
     lead = x.shape[:-1]
     x2 = x.reshape(-1, x.shape[-1])
     if out is None:
         out = x.new_empty((x2.shape[0], n), dtype=out_dtype or x.dtype)
     if x2.shape[0]:
-        _ll_gemm(x2[None], weight[None], bias, out[None])
+        scale = None if weight_scale is None else weight_scale[None]
+        _ll_gemm(x2[None], weight[None], bias, out[None], scale)
     return out.view(*lead, n)
 
 
@@ -360,3 +386,50 @@ def use_sm12x_bf16_ll_gemm(
         )
         and current_platform.is_device_capability_family(120)
     )
+
+
+E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+def quantize_e4m3_rows(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """`weight` `[N, K]` -> (e4m3 `[N, K]`, fp32 per-row scale `[N]`), amax
+    scaling, so `weight ~= e4m3 * scale[:, None]`."""
+    w = weight.float()
+    scale = (w.abs().amax(dim=1) / E4M3_MAX).clamp(min=torch.finfo(torch.float32).tiny)
+    w8 = (w / scale[:, None]).clamp(-E4M3_MAX, E4M3_MAX).to(torch.float8_e4m3fn)
+    return w8.contiguous(), scale.contiguous()
+
+
+def fp8_decode_weight(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The e4m3 copy (weight, per-row scale) of a bf16 projection weight for
+    the low-M path, made on its first use and kept on the tensor. Made during
+    the profile run, so the KV-cache planner accounts for it; a weight first
+    seen while a CUDA graph is being captured, or a view, stays bf16."""
+    copy = getattr(weight, "_inkling2_fp8", None)
+    if copy is not None:
+        return copy
+    if (
+        weight._base is not None
+        or weight.ndim != 2
+        or weight.dtype != torch.bfloat16
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return None
+    copy = quantize_e4m3_rows(weight)
+    weight._inkling2_fp8 = copy
+    return copy
+
+
+@torch.no_grad()
+def refresh_fp8_decode_weights(module: torch.nn.Module) -> None:
+    """Re-quantize, in place, the e4m3 copies of `module`'s weights after their
+    bf16 values were replaced (reload, RL weight transfer). The copies keep
+    their addresses, so captured CUDA graphs stay valid."""
+    for weight in module.parameters():
+        copy = getattr(weight, "_inkling2_fp8", None)
+        if copy is not None:
+            w8, scale = quantize_e4m3_rows(weight)
+            copy[0].copy_(w8)
+            copy[1].copy_(scale)

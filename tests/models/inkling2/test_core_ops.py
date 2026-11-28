@@ -664,3 +664,114 @@ def test_sm12x_linear_large_batch_fallback():
     weight = torch.randn(129, 256, device=DEVICE).bfloat16()
     expected = torch.nn.functional.linear(x, weight)
     torch.testing.assert_close(linear(x, weight), expected, atol=0, rtol=0)
+
+
+def _fp8_reference(x, w8, scale):
+    return x.double() @ (w8.double() * scale.double()[:, None]).T
+
+
+@pytest.mark.parametrize(
+    "tokens", [1, 7, 16] if current_platform.is_device_capability_family(120) else []
+)
+# (2304, 9216) and (1024, 2304) take split-K; (6552, 2304) and (131, 130) don't.
+@pytest.mark.parametrize(
+    "shape", [(131, 130), (6552, 2304), (2304, 9216), (1024, 2304)]
+)
+def test_sm12x_ll_gemm_fp8_weight_and_graph(tokens, shape):
+    """An e4m3 weight with per-row scales matches the dequantized product."""
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+        quantize_e4m3_rows,
+        sm12x_bf16_ll_gemm,
+    )
+
+    torch.manual_seed(0)
+    n, k = shape
+    x = torch.randn(tokens, k, device=DEVICE).bfloat16()
+    weight = (torch.randn(n, k, device=DEVICE) * 0.02).bfloat16()
+    w8, scale = quantize_e4m3_rows(weight)
+    assert w8.dtype == torch.float8_e4m3fn and scale.shape == (n,)
+    # e4m3 keeps 3 mantissa bits: the dequantized weight is within 2^-4.
+    deq = w8.float() * scale[:, None]
+    assert ((deq - weight.float()).abs() <= weight.float().abs() / 16 + 1e-6).all()
+    bias = torch.randn(n, device=DEVICE).bfloat16()
+    out = torch.empty(tokens, n, device=DEVICE, dtype=torch.float32)
+
+    def run():
+        return sm12x_bf16_ll_gemm(x, w8, bias, out=out, weight_scale=scale)
+
+    def check():
+        reference = _fp8_reference(x, w8, scale) + bias.double()
+        tol = 1e-4 * reference.abs().amax() + 1e-4
+        assert ((out.double() - reference).abs() <= tol).all()
+
+    run()
+    check()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    check()
+
+
+@pytest.mark.parametrize(
+    "tokens", [1, 9] if current_platform.is_device_capability_family(120) else []
+)
+def test_sm12x_qkv_bmm_fp8_weight(tokens):
+    """The grouped q/k/v projection takes e4m3 weights and per-row scales."""
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+        qkv_bmm,
+        quantize_e4m3_rows,
+    )
+
+    torch.manual_seed(0)
+    n, k, s1, s2 = 8608, 2304, 6560, 7584
+    xs = [torch.randn(tokens, k, device=DEVICE).bfloat16() for _ in range(3)]
+    w8, scale = quantize_e4m3_rows((torch.randn(n, k, device=DEVICE) * 0.02).bfloat16())
+    out = qkv_bmm(*xs, w8, s1, s2, scale).double()
+    ranges = [(0, s1), (s1, s2), (s2, n)]
+    for x, (lo, hi) in zip(xs, ranges):
+        reference = _fp8_reference(x, w8[lo:hi], scale[lo:hi])
+        # bf16 output: one rounding (2^-8 relative) on top of fp32 accumulation.
+        tol = reference.abs() * 2**-8 + 1e-4 * reference.abs().amax() + 1e-4
+        assert ((out[:, lo:hi] - reference).abs() <= tol).all()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM12x only"
+)
+def test_fp8_decode_weight_is_cached_and_skips_views_and_capture():
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import fp8_decode_weight
+
+    weight = torch.randn(256, 512, device=DEVICE).bfloat16()
+    copy = fp8_decode_weight(weight)
+    assert copy is not None and fp8_decode_weight(weight) is copy
+    assert fp8_decode_weight(weight[:128]) is None
+    fresh = torch.randn(256, 512, device=DEVICE).bfloat16()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        assert fp8_decode_weight(fresh) is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM12x only"
+)
+def test_fp8_decode_weights_follow_an_in_place_reload():
+    """After the bf16 weight is overwritten in place (reload, RL weight
+    transfer), the post-load refresh re-quantizes the e4m3 copy in place, so
+    its addresses (captured by CUDA graphs) stay the same."""
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
+        fp8_decode_weight,
+        quantize_e4m3_rows,
+        refresh_fp8_decode_weights,
+    )
+
+    layer = torch.nn.Linear(512, 256, bias=False, device=DEVICE, dtype=torch.bfloat16)
+    w8, scale = fp8_decode_weight(layer.weight)
+    ptrs = (w8.data_ptr(), scale.data_ptr())
+    layer.weight.data.copy_(torch.randn_like(layer.weight))
+    refresh_fp8_decode_weights(layer)
+    expected_w8, expected_scale = quantize_e4m3_rows(layer.weight)
+    assert (w8.data_ptr(), scale.data_ptr()) == ptrs
+    assert torch.equal(w8.view(torch.uint8), expected_w8.view(torch.uint8))
+    assert torch.equal(scale, expected_scale)

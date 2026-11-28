@@ -5,24 +5,49 @@ reference `linear` with fp32 accumulation in ordered 1024-wide K groups."""
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 from . import use_sm100_kernels
-from .ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
+from .ll_gemm_sm120 import (
+    fp8_decode_weight,
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.
 LOW_M_MAX_TOKENS = 32
 
 
+def use_fp8_decode_weights(scope: str) -> bool:
+    """Whether `VLLM_INKLING2_FP8_DECODE_WEIGHTS` covers `scope` ("draft" for
+    the DSpark drafter, "target" for the model) on this device."""
+    mode = envs.VLLM_INKLING2_FP8_DECODE_WEIGHTS
+    return (
+        (mode == "all" or mode == scope)
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+    )
+
+
 def linear(
-    x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor | None = None
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor | None = None,
+    fp8_scope: str = "target",
 ) -> torch.Tensor:
     """bf16 `x @ weight.T` with fp32 accumulation (into `out` if given,
-    batches over LOW_M_MAX_TOKENS only)."""
+    batches over LOW_M_MAX_TOKENS only). With `VLLM_INKLING2_FP8_DECODE_WEIGHTS`
+    covering `fp8_scope`, batches of up to 16 rows on SM12x read an e4m3 copy
+    of `weight` (made on first use, whatever the batch)."""
+    if use_fp8_decode_weights(fp8_scope):
+        copy = fp8_decode_weight(weight)
+        if copy is not None and out is None and use_sm12x_bf16_ll_gemm(x, weight):
+            return sm12x_bf16_ll_gemm(x, copy[0], weight_scale=copy[1])
     if out is not None:
         assert x.shape[0] > LOW_M_MAX_TOKENS
         return torch.mm(x, weight.t(), out=out)

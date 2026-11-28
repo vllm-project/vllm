@@ -71,7 +71,13 @@ from .moe import Inkling2MoE, QuantFormat
 from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
 from .ops.attn_res import attn_res
-from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
+from .ops.linear import use_fp8_decode_weights
+from .ops.ll_gemm_sm120 import (
+    fp8_decode_weight,
+    refresh_fp8_decode_weights,
+    sm12x_bf16_ll_gemm,
+    use_sm12x_bf16_ll_gemm,
+)
 from .ops.norm import rms_norm
 from .ops.seq_parallel import SeqParallel
 from .sconv import ATTN_STREAM, MLP_STREAM, Inkling2ShortConv, conv_metadata
@@ -95,6 +101,17 @@ class Inkling2LogitsProcessor(LogitsProcessor):
             )
             and use_sm12x_bf16_ll_gemm(hidden_states, lm_head.weight, embedding_bias)
         ):
+            copy = None
+            if use_fp8_decode_weights("target"):
+                copy = fp8_decode_weight(lm_head.weight)
+            if copy is not None:
+                return sm12x_bf16_ll_gemm(
+                    hidden_states,
+                    copy[0],
+                    embedding_bias,
+                    out_dtype=torch.float32,
+                    weight_scale=copy[1],
+                )
             return sm12x_bf16_ll_gemm(
                 hidden_states, lm_head.weight, embedding_bias, out_dtype=torch.float32
             )
@@ -751,6 +768,9 @@ class Inkling2ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def process_weights_after_loading(self) -> None:
+        refresh_fp8_decode_weights(self)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())
