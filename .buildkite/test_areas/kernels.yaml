@@ -263,6 +263,7 @@ steps:
       - tests/models/test_deepseek_v4_aiter_mega_moe.py
       - vllm/models/deepseek_v4/amd/
       - vllm/models/deepseek_v4/common/
+      - vllm/models/deepseek_v41/amd/
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/layers/activation.py
       - vllm/model_executor/layers/linear.py

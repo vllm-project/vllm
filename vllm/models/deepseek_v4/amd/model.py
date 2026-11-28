@@ -39,6 +39,9 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -646,6 +649,9 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 class DeepseekV4MoE(nn.Module):
     # None: use the padding vLLM added.
     experts_intermediate_pad: int | None = None
+    # Gate in the AITER FlyDSL router's layout when that router serves this
+    # layer (VLLM_ROCM_USE_AITER_FLYDSL_ROUTER); set after loading.
+    flydsl_router_gate: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -745,6 +751,8 @@ class DeepseekV4MoE(nn.Module):
             )
 
         self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        mm_config = vllm_config.model_config.multimodal_config
+        self.text_only = mm_config is None or mm_config.language_model_only
         fuse_mega_moe_shared_expert = (
             self.use_mega_moe
             and config.n_shared_experts == 1
@@ -891,9 +899,43 @@ class DeepseekV4MoE(nn.Module):
         )
         return routed + shared
 
+    def process_weights_after_loading(self) -> None:
+        if not self.use_mega_moe or not rocm_aiter_ops.is_flydsl_router_enabled():
+            return
+        gate = self.gate
+        if (
+            self.scoring_func != "sqrtsoftplus"
+            or not self.renormalize
+            or gate.tid2eid is not None
+            or gate.e_score_correction_bias is None
+            # The kernel has no bias_vl term. Without image inputs, bias_vl
+            # only routes image-placeholder ids sent as text; this router
+            # gives those tokens the text bias instead.
+            or (gate.bias_vl is not None and not self.text_only)
+        ):
+            return
+        refill_derived(
+            self,
+            "flydsl_router_gate",
+            rocm_aiter_ops.prepare_flydsl_router(
+                gate.weight, gate.e_score_correction_bias, self.n_activated_experts
+            ),
+        )
+
     def _forward_mega_moe_routed(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
     ) -> torch.Tensor:
+        if self.flydsl_router_gate is not None:
+            # Declines above its decode row range; the GEMM + top-k runs then.
+            routed = rocm_aiter_ops.flydsl_router_topk(
+                hidden_states,
+                self.flydsl_router_gate,
+                self.gate.e_score_correction_bias,
+                self.routed_scaling_factor,
+                get_moe_padding_mask(hidden_states.shape[0]),
+            )
+            if routed is not None:
+                return self.experts(hidden_states, *routed)
         router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
