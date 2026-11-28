@@ -363,6 +363,7 @@ def _norm_residual_norm_fwd_kernel(
     stream_ptr,
     new_stream_ptr,
     out_ptr,
+    scale_ptr,
     post_w_ptr,
     pre_w_ptr,
     alpha_ptr,
@@ -380,6 +381,8 @@ def _norm_residual_norm_fwd_kernel(
     PRE_INPUT_SCALE: tl.constexpr,
     GATE_STREAM: tl.constexpr,
     PER_CHANNEL: tl.constexpr,
+    FP8_OUT: tl.constexpr,
+    FP8_MAX: tl.constexpr,
     bT: tl.constexpr,
     bD: tl.constexpr,
 ):
@@ -433,6 +436,10 @@ def _norm_residual_norm_fwd_kernel(
     if PRE_HAS_WEIGHT and not PRE_INPUT_SCALE:
         z = z * pre_w[None, :]
 
+    if FP8_OUT:
+        s = tl.maximum(tl.max(tl.abs(z), axis=1), 1e-12) / FP8_MAX
+        tl.store(scale_ptr + t, s, mask=tm)
+        z = z / s[:, None]
     tl.store(out_ptr + idx, z.to(out_ptr.dtype.element_ty), mask=mask)
 
 
@@ -467,8 +474,12 @@ def fused_norm_residual_norm_fwd(
     post_input_scale: bool = False,
     pre_input_scale: bool = False,
     out_dtype: torch.dtype | None = None,
+    fp8_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """A whole residual boundary in one kernel.
+
+    With `fp8_scale` (`[T]` fp32), `out_dtype` must be FP8: each output row is
+    divided by its scale `max|row| / fp8_max`, which is written to `fp8_scale`.
 
     Computes, in fp32::
 
@@ -519,6 +530,11 @@ def fused_norm_residual_norm_fwd(
 
     out = torch.empty_like(branch, dtype=out_dtype)
     new_stream = torch.empty_like(stream)
+    if fp8_scale is not None:
+        assert out.dtype.itemsize == 1 and fp8_scale.shape == (T,), (
+            f"fp8_scale needs an FP8 out_dtype and shape [{T}], got "
+            f"{out.dtype} and {tuple(fp8_scale.shape)}"
+        )
 
     bD = triton.next_power_of_2(D)
     bT = max(1, _BOUNDARY_TILE_ELEMS // bD)
@@ -536,6 +552,7 @@ def fused_norm_residual_norm_fwd(
         new_stream,
         out,
         # Unused pointers must be valid; constexprs keep them undereferenced.
+        fp8_scale if fp8_scale is not None else beta,
         post_weight if post_weight is not None else branch,
         pre_weight if pre_weight is not None else branch,
         alpha if gate_stream else beta,
@@ -553,6 +570,8 @@ def fused_norm_residual_norm_fwd(
         PRE_INPUT_SCALE=pre_input_scale,
         GATE_STREAM=gate_stream,
         PER_CHANNEL=per_channel,
+        FP8_OUT=fp8_scale is not None,
+        FP8_MAX=torch.finfo(out.dtype).max if fp8_scale is not None else 1.0,
         bT=bT,
         bD=bD,
         num_warps=num_warps,

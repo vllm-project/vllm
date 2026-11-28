@@ -25,6 +25,7 @@ def token_shard_round_trip(env: dict[str, str], world_size: int, num_tokens: int
     with set_current_vllm_config(VllmConfig()):
         ensure_model_parallel_initialized(world_size, 1)
     from vllm.models.muse_spark.amd.model import TokenShard
+    from vllm.models.muse_spark.amd.ops.fp8_rows import quant_rows
 
     rank = get_tensor_model_parallel_rank()
     full = torch.arange(num_tokens * 64, device="cuda") % 61
@@ -36,6 +37,12 @@ def token_shard_round_trip(env: dict[str, str], world_size: int, num_tokens: int
     torch.testing.assert_close(local[: owned.shape[0]], owned, atol=0, rtol=0)
     assert not local[owned.shape[0] :].any()
     torch.testing.assert_close(shard.gather(local), full, atol=0, rtol=0)
+    # Row quantization is per row, so gathering each rank's FP8 rows equals
+    # quantizing the whole batch.
+    q, scales = shard.gather_fp8(*quant_rows(local))
+    q_ref, scales_ref = quant_rows(full)
+    assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8))
+    torch.testing.assert_close(scales, scales_ref, atol=0, rtol=0)
     summed = shard.reduce_scatter(full * (rank + 1))
     expected = shard.local(full * sum(range(1, world_size + 1)))
     torch.testing.assert_close(summed, expected)
