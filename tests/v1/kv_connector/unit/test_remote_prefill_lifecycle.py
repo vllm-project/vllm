@@ -984,6 +984,212 @@ def test_async_loads_both_admitted_when_pool_fits():
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+def _run_until_finished(scheduler, reqs, max_steps: int) -> int:
+    """Drive `scheduler` like an engine loop until every request finishes.
+
+    Each request's async load completes one step after it starts; a prefill
+    samples a token only on its last chunk. Returns the number of steps that
+    scheduled no tokens and started or finished no load, i.e. steps that no
+    external event could unblock.
+    """
+    loaded: set[str] = set()
+
+    def started_loads() -> set[str]:
+        started = {
+            req.request_id
+            for req in reqs
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        }
+        started -= loaded
+        loaded.update(started)
+        return started
+
+    num_stalled_steps = 0
+    loading = started_loads()
+    for _ in range(max_steps):
+        if all(req.is_finished() for req in reqs):
+            break
+        scheduler_output = scheduler.schedule()
+        req_ids = list(scheduler_output.num_scheduled_tokens)
+        started = started_loads()
+        if not req_ids and not loading and not started:
+            num_stalled_steps += 1
+        sampled_token_ids = []
+        for req_id in req_ids:
+            req = scheduler.requests[req_id]
+            prefill_done = req.num_computed_tokens >= req.num_tokens
+            sampled_token_ids.append([0] if prefill_done else [])
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            sampled_token_ids=sampled_token_ids,
+            kv_connector_output=(
+                KVConnectorOutput(finished_recving=loading) if loading else None
+            ),
+        )
+        loading = started
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+    return num_stalled_steps
+
+
+def test_async_load_reserves_sliding_window_blocks_for_inflight():
+    """A parked load's reservation must count the sliding-window blocks its
+    remaining prefill chunks need.
+
+    After a long external load, the sliding-window group holds only the
+    window's blocks behind null placeholders. Comparing the admission cap with
+    that null-padded length reserved nothing for the group, so a second load
+    was admitted into blocks the first one needs. Once promoted, the head's
+    capped admission check passed but its first chunk could not be allocated;
+    with nothing running, no block is ever freed (livelock).
+    """
+    BLOCK_SIZE = 16
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_num_batched_tokens=BLOCK_SIZE * 16
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=160,
+        kv_cache_config=make_kv_cache_config(
+            BLOCK_SIZE, swa_enabled=True, sw_size=BLOCK_SIZE * 2, num_blocks=160
+        ),
+    )
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=BLOCK_SIZE,
+            num_tokens=BLOCK_SIZE * 80,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i in (1, 2, 3)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(BLOCK_SIZE * 64, True),
+    ):
+        scheduler_output = scheduler.schedule()
+        # Full attention needs 16 more blocks; the sliding-window group needs
+        # one chunk's worth (16 blocks) on top of the 2 window blocks it holds.
+        assert scheduler._parked_reservations[reqs[0]] == 32
+        # 66 blocks per load: the second one would eat into that reservation.
+        assert [req.status for req in reqs] == [
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            RequestStatus.WAITING,
+            RequestStatus.WAITING,
+        ]
+        scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+        num_stalled_steps = _run_until_finished(scheduler, reqs, max_steps=30)
+
+    assert num_stalled_steps == 0
+    assert all(req.is_finished() for req in reqs)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    assert_scheduler_empty(scheduler)
+
+
+def test_parked_reservation_counts_prefix_blocks_about_to_be_shared():
+    """A later load that shares a parked request's exclusive block must not
+    be admitted against the stale, smaller reservation.
+
+    Sharing raises ``ref_cnt`` from 1 to 2 without changing the parked
+    request's block table, so ``cap - exclusive`` grows. The admission check
+    has to include that overlap before the touch, and the cache has to match
+    the post-touch estimate afterwards.
+    """
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size, max_num_batched_tokens=block_size * 4
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=400,
+        kv_cache_config=make_kv_cache_config(
+            block_size, swa_enabled=True, sw_size=block_size * 2, num_blocks=400
+        ),
+    )
+    prefix = block_size * 2
+    warmup = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=prefix,
+        common_prefix_len=prefix,
+        max_tokens=1,
+    )
+    scheduler.add_request(warmup)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([warmup], use_eos=True)
+    )
+    assert warmup.is_finished()
+
+    def matched(request, num_computed_tokens, *_args, **_kwargs):
+        if not (request.kv_transfer_params or {}).get("do_remote_prefill"):
+            return (0, False)
+        external = request.num_tokens - num_computed_tokens
+        return (external, True) if external > 0 else (0, False)
+
+    req_a = create_request(
+        request_id=2,
+        block_size=block_size,
+        num_tokens=prefix + block_size,
+        common_prefix_len=prefix,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=3,
+        block_size=block_size,
+        num_tokens=prefix + block_size,
+        common_prefix_len=prefix,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    with patch.object(
+        scheduler.connector, "get_num_new_matched_tokens", side_effect=matched
+    ):
+        scheduler.add_request(req_a)
+        scheduler.schedule()
+        assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        before = scheduler._parked_reservations[req_a]
+
+        scheduler.add_request(req_b)
+        hits, num_local, _, _ = scheduler._get_local_prefix_cache_hit(req_b)
+        assert num_local >= prefix
+        extra = (
+            scheduler.kv_cache_manager.coordinator.extra_reservation_for_shared_blocks(
+                (req_a.request_id,), hits.blocks
+            )
+        )
+        assert extra >= 1
+
+        reserved: list[int] = []
+        real_allocate = scheduler.kv_cache_manager.allocate_slots
+
+        def spy_allocate(*args, **kwargs):
+            reserved.append(kwargs.get("reserved_blocks", 0))
+            return real_allocate(*args, **kwargs)
+
+        with patch.object(
+            scheduler.kv_cache_manager, "allocate_slots", side_effect=spy_allocate
+        ):
+            scheduler.schedule()
+
+    assert reserved
+    assert max(reserved) >= before + extra
+    if req_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+        # The touch has landed, so the cache must match the live estimate
+        # and the blocks left free must still cover it.
+        assert scheduler._parked_reservations[req_a] == (
+            scheduler._request_remaining_blocks(req_a)
+        )
+        free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+        assert free >= scheduler._request_remaining_blocks(req_a)
+
+
 @pytest.mark.parametrize(
     ("swa_enabled", "block_size", "num_spec_tokens", "num_blocks"),
     [(False, 16, 3, 8), (True, 16, 3, 17), (True, 64, 31, 40)],

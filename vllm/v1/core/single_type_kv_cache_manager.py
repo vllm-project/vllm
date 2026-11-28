@@ -284,6 +284,37 @@ class SingleTypeKVCacheManager(ABC):
         """Return a reservation, or None to use the allocation-based admission check."""
         return None
 
+    def num_exclusive_suffix_blocks_shared(
+        self, request_id: str, shared_block_ids: set[int]
+    ) -> int:
+        """Exclusive live-suffix blocks of `request_id` that `shared_block_ids` will touch.
+
+        These are the blocks the admission cap treats as recyclable
+        (`ref_cnt == 1` up to the first null). A later prefix hit raises
+        `ref_cnt` without changing the block table, so each one increases the
+        remaining reservation by one. Managers that do not use that accounting
+        return 0.
+        """
+        if (
+            not shared_block_ids
+            or self.max_admission_blocks_per_request is None
+            or type(self).get_num_blocks_to_allocate
+            is not SingleTypeKVCacheManager.get_num_blocks_to_allocate
+            or type(self).get_num_blocks_to_reserve
+            is not SingleTypeKVCacheManager.get_num_blocks_to_reserve
+        ):
+            return 0
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks:
+            return 0
+        num_shared = 0
+        for block in reversed(blocks):
+            if block.is_null:
+                break
+            if block.ref_cnt == 1 and id(block) in shared_block_ids:
+                num_shared += 1
+        return num_shared
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -323,15 +354,32 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
+        # req_to_blocks is positional: a skipped external-load prefix is null
+        # padding, so len() is not the number of blocks this request can recycle.
+        blocks = self.req_to_blocks.get(request_id)
+        if (
+            apply_admission_cap
+            and self.max_admission_blocks_per_request is not None
+            and blocks
+        ):
+            # Live blocks are a suffix. The skipped prefix is null, so stop
+            # at the first null instead of scanning a long external-load prefix
+            # on every admission.
+            held = 0
+            for block in reversed(blocks):
+                if block.is_null:
+                    break
+                held += block.ref_cnt == 1
+            uncapped = self.get_num_blocks_to_allocate(
+                request_id, num_tokens, new_computed_blocks,
+                total_computed_tokens, num_local_computed_tokens,
+                num_tokens_main_model, apply_admission_cap=False,
+                prefill_end=prefill_end,
+            )
+            return min(
+                uncapped, max(0, self.max_admission_blocks_per_request - held)
+            )
         if apply_admission_cap and self.max_admission_blocks_per_request is not None:
-            # Recycling-aware specs (SWA, chunked-local) cap the per-request
-            # reservation here so admission matches the startup pool sizer
-            # (`max_admission_blocks`). `remove_skipped_blocks` runs from
-            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
-            # so per-request peak real-held blocks <= this cap, which keeps
-            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
-            # Drift between the two would re-introduce the deadlock from
-            # issue #39734 or, worse, mid-prefill OOM.
             num_required_blocks = min(
                 num_required_blocks, self.max_admission_blocks_per_request
             )
