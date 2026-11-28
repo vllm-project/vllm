@@ -17,6 +17,10 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_ptr_range,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -40,9 +44,12 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
 from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _sparse_attn_decode_bf16_partial,
+    _sparse_attn_decode_bf16_reduce,
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
+    rocm_sparse_decode_bf16_split_counts,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -259,6 +266,16 @@ def _use_rocm_sparse_triton(
         not kv_cache_dtype.startswith("fp8")
         and head_size == kv_lora_rank
         and (num_prefills > 0 or num_decodes > 0)
+    )
+
+
+def _warmup_tensor(tensor: torch.Tensor) -> TritonWarmupTensor:
+    return TritonWarmupTensor(
+        tensor.dtype,
+        aligned=tensor.data_ptr() % 16 == 0,
+        shape=tuple(tensor.shape),
+        strides=tuple(tensor.stride()),
+        ptr_range_bytes=triton_ptr_range(tensor),
     )
 
 
@@ -1121,6 +1138,13 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+        # Storage of the metadata builder's paged_kv_indices, which the split-K
+        # decode reads.
+        self.paged_kv_indices_bytes = (
+            max_tokens
+            * vllm_config.model_config.hf_text_config.index_topk
+            * torch.int32.itemsize
+        )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
         rank = self.kv_lora_rank
         if kv_cache_dtype == "mxfp4_mla" and (rank < 128 or rank & (rank - 1)):
@@ -1206,6 +1230,49 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             "elements"
         )
         store_mxfp4_mla(kv_c_normed, slot_mapping.flatten(), kv_cache)
+
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        """Register the split-K decode kernels for a bound KV cache.
+
+        Mirrors `_forward_mla`'s split-K launch for an all-decode batch at every
+        count `rocm_sparse_decode_bf16_num_splits` can select: the padded query
+        buffer, the flat rows of `kv_cache` and the metadata builder's
+        paged_kv_indices. ROCm also specializes a pointer on whether its storage
+        fits in 2 GB, so the query and the indices keep their storage size; the
+        KV rows are warmed in both classes, as the KV cache can be re-bound.
+        """
+        q = AiterMLAHelper.get_mla_padded_q(self.num_heads, self.q_concat_buffer[:1])
+        if self.use_aiter_sparse_mla or not _use_rocm_sparse_triton(
+            kv_cache_dtype=kv_cache_dtype,
+            head_size=q.shape[-1],
+            kv_lora_rank=self.kv_lora_rank,
+            num_prefills=0,
+            num_decodes=1,
+            num_decode_tokens=1,
+            max_query_len=1,
+        ):
+            return
+        kv, _ = flat_kv_row_view(kv_cache, kv_cache.shape[1])
+        num_splits = tuple(rocm_sparse_decode_bf16_split_counts())
+        _sparse_attn_decode_bf16_partial.register_warmup(
+            q=_warmup_tensor(q),
+            kv=_warmup_tensor(kv),
+            indices=TritonWarmupTensor(
+                torch.int32, ptr_range_bytes=self.paged_kv_indices_bytes
+            ),
+            is_mxfp4=kv_cache_dtype == "mxfp4_mla",
+            num_splits=num_splits,
+        )
+        _sparse_attn_decode_bf16_reduce.register_warmup(
+            num_heads=q.shape[1],
+            head_dim=q.shape[2],
+            nope_head_dim=self.kv_lora_rank,
+            out_dtype=q.dtype,
+            has_attn_sink=self.sinks is not None,
+            num_splits=num_splits,
+        )
 
     def record_logical_topk_ready(self) -> None:
         # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer

@@ -388,7 +388,10 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=NUM_TOKENS, max_num_seqs=NUM_TOKENS
         ),
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(index_topk=TOPK_TOKENS),
+        ),
         speculative_config=SimpleNamespace() if speculative else None,
         attention_config=SimpleNamespace(hisparse_config=None, sparse_mla_shard_q=True),
         # One rank, so the layer takes neither the ShardQ nor the DCP path.

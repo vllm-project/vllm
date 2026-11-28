@@ -1097,6 +1097,13 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         that is otherwise reserved after profiling."""
         return
 
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        """Called with JIT warmup on, once the layer's KV cache is bound, to
+        register the decode kernels whose variants depend on that cache."""
+        return
+
     def decode_query_padded_num_heads(self, attn_metadata: T) -> int | None:
         """Head count forward_mqa pads this step's query to by repeating each
         head, so the caller may hand it the padded query directly; None when

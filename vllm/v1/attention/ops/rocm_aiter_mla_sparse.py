@@ -5,7 +5,9 @@ import importlib
 import inspect
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from importlib.util import find_spec
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +19,12 @@ from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -2679,7 +2687,10 @@ def _sparse_attn_prefill_ragged_kernel(
     )
 
 
-@triton.jit
+# `num_kv` is the row count of the KV cache view, which the extensible KV cache
+# re-binds after the JIT warmup; a specialization on its divisibility by 16
+# could then miss every warmed variant.
+@triton.jit(do_not_specialize=["num_kv"])
 def _sparse_attn_decode_ragged_bf16_partial_kernel(
     q_ptr,
     kv_ptr,
@@ -4323,6 +4334,152 @@ def rocm_sparse_decode_bf16_num_splits(
     return max(1, min(num_splits, math.ceil(sparse_len / block_k)))
 
 
+def rocm_sparse_decode_bf16_split_counts() -> range:
+    """Every count above 1 `rocm_sparse_decode_bf16_num_splits` can return.
+
+    The gfx950 heuristic caps the count at 32 and the other one searches 1..16.
+    """
+    return range(2, (32 if _ON_GFX950 else 16) + 1)
+
+
+def _sparse_attn_decode_bf16_partial_warmup_inputs(
+    *,
+    q: TritonWarmupTensor,
+    kv: TritonWarmupTensor,
+    indices: TritonWarmupTensor,
+    is_mxfp4: bool,
+    num_splits: tuple[int, ...],
+) -> dict[str, Any]:
+    # The split partials _rocm_sparse_attn_decode_ragged_bf16_triton allocates
+    # for one decode row.
+    splits: Any = WarmupChoices(*num_splits)
+    num_heads = q.shape[1]
+    # `kv` views a KV cache, whose storage can change pointer class after the
+    # warmup (see TritonWarmupTensor.ptr_range_bytes): the extensible KV cache
+    # re-binds each layer to a view of its committed blocks. Warm both classes.
+    kv_ptr_range: Any = WarmupChoices(0, 2**32)
+    return dict(
+        q=q,
+        kv=replace(kv, ptr_range_bytes=kv_ptr_range),
+        indices=indices,
+        indptr=TritonWarmupTensor(torch.int32),
+        part_m=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),
+        part_l=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),
+        part_acc=TritonWarmupTensor(
+            torch.float32, shape=(1, splits, num_heads, q.shape[2])
+        ),
+        scale=1.0,
+        is_mxfp4=is_mxfp4,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_sparse_attn_decode_ragged_bf16_partial_kernel,
+    warmup_inputs=_sparse_attn_decode_bf16_partial_warmup_inputs,
+)
+def _sparse_attn_decode_bf16_partial(
+    q, kv, indices, indptr, part_m, part_l, part_acc, scale, is_mxfp4
+) -> DispatchSpec:
+    num_queries, num_heads, head_dim = q.shape
+    num_splits = part_m.shape[1]
+    block_h = _SPARSE_DECODE_BF16_BLOCK_H
+    return (num_queries, num_splits, triton.cdiv(num_heads, block_h)), dict(
+        q_ptr=q,
+        kv_ptr=kv,
+        kv_indices_ptr=indices,
+        kv_indptr_ptr=indptr,
+        part_m_ptr=part_m,
+        part_l_ptr=part_l,
+        part_acc_ptr=part_acc,
+        q_stride_t=q.stride(0),
+        q_stride_h=q.stride(1),
+        q_stride_d=q.stride(2),
+        kv_stride_n=kv.stride(0),
+        kv_stride_d=kv.stride(1),
+        pm_stride0=part_m.stride(0),
+        pm_stride_s=part_m.stride(1),
+        pa_stride0=part_acc.stride(0),
+        pa_stride_s=part_acc.stride(1),
+        pa_stride_h=part_acc.stride(2),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_kv=kv.shape[0],
+        scale=float(scale),
+        IS_MXFP4=is_mxfp4,
+        BLOCK_H=block_h,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_K=_SPARSE_DECODE_BF16_BLOCK_K,
+        NUM_SPLITS=num_splits,
+        num_warps=4,
+    )
+
+
+def _sparse_attn_decode_bf16_reduce_warmup_inputs(
+    *,
+    num_heads: int,
+    head_dim: int,
+    nope_head_dim: int,
+    out_dtype: torch.dtype,
+    has_attn_sink: bool,
+    num_splits: tuple[int, ...],
+) -> dict[str, Any]:
+    splits: Any = WarmupChoices(*num_splits)
+    return dict(
+        part_m=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),
+        part_l=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),
+        part_acc=TritonWarmupTensor(
+            torch.float32, shape=(1, splits, num_heads, head_dim)
+        ),
+        attn_sink=TritonWarmupTensor(torch.float32, shape=(num_heads,)),
+        out=TritonWarmupTensor(out_dtype, shape=(1, num_heads, head_dim)),
+        nope_head_dim=nope_head_dim,
+        has_attn_sink=has_attn_sink,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_sparse_attn_decode_reduce_kernel,
+    warmup_inputs=_sparse_attn_decode_bf16_reduce_warmup_inputs,
+)
+def _sparse_attn_decode_bf16_reduce(
+    part_m, part_l, part_acc, attn_sink, out, nope_head_dim, has_attn_sink
+) -> DispatchSpec:
+    num_queries, num_splits, num_heads = part_m.shape
+    comb_dim = part_acc.shape[-1]
+    return (num_queries, num_heads), dict(
+        part_m_ptr=part_m,
+        part_l_ptr=part_l,
+        part_acc_ptr=part_acc,
+        attn_sink_ptr=attn_sink,
+        out_ptr=out,
+        pos_ptr=None,
+        cos_sin_ptr=None,
+        out_scale_ptr=None,
+        out_stride0=out.stride(0),
+        out_stride1=out.stride(1),
+        os_stride0=0,
+        os_stride1=out.shape[-1] // 32,
+        pm_stride0=part_m.stride(0),
+        pm_stride_s=part_m.stride(1),
+        pa_stride0=part_acc.stride(0),
+        pa_stride_s=part_acc.stride(1),
+        pa_stride_h=part_acc.stride(2),
+        cs_stride=0,
+        num_heads=num_heads,
+        HAS_ATTN_SINK=has_attn_sink,
+        ADAPTIVE_SPLITS=False,
+        COMB_DIM=comb_dim,
+        BLOCK_H=1,
+        NUM_SPLITS=num_splits,
+        SPLITS_PAD=triton.next_power_of_2(num_splits),
+        FUSE_INV_ROPE=False,
+        NOPE=nope_head_dim,
+        HALF=(comb_dim - nope_head_dim) // 2,
+        QUANT_OUT=False,
+        num_warps=4,
+    )
+
+
 def _rocm_sparse_attn_decode_ragged_bf16_triton(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -4388,85 +4545,20 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         f"expected out trailing dim {head_dim}, got {out.shape[-1]}"
     )
 
-    block_h = _SPARSE_DECODE_BF16_BLOCK_H
-    block_d = triton.next_power_of_2(head_dim)
-    block_k = _SPARSE_DECODE_BF16_BLOCK_K
-    heads_blocks = triton.cdiv(num_heads, block_h)
-    comb_dim = nope_head_dim + rope_head_dim
-
     part_m = torch.empty(
         (num_queries, num_splits, num_heads), dtype=torch.float32, device=q.device
     )
     part_l = torch.empty_like(part_m)
     part_acc = torch.empty(
-        (num_queries, num_splits, num_heads, comb_dim),
+        (num_queries, num_splits, num_heads, nope_head_dim + rope_head_dim),
         dtype=torch.float32,
         device=q.device,
     )
-
-    _sparse_attn_decode_ragged_bf16_partial_kernel[
-        (num_queries, num_splits, heads_blocks)
-    ](
-        q,
-        kv,
-        indices,
-        indptr,
-        part_m,
-        part_l,
-        part_acc,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        kv.stride(0),
-        kv.stride(1),
-        part_m.stride(0),
-        part_m.stride(1),
-        part_acc.stride(0),
-        part_acc.stride(1),
-        part_acc.stride(2),
-        num_heads,
-        head_dim,
-        kv.shape[0],
-        float(scale),
-        IS_MXFP4=is_mxfp4,
-        BLOCK_H=block_h,
-        BLOCK_D=block_d,
-        BLOCK_K=block_k,
-        NUM_SPLITS=num_splits,
-        num_warps=4,
+    _sparse_attn_decode_bf16_partial(
+        q, kv, indices, indptr, part_m, part_l, part_acc, scale, is_mxfp4
     )
-
-    _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
-        part_m,
-        part_l,
-        part_acc,
-        attn_sink,
-        out,
-        None,
-        None,
-        None,
-        out.stride(0),
-        out.stride(1),
-        0,
-        head_dim // 32,
-        part_m.stride(0),
-        part_m.stride(1),
-        part_acc.stride(0),
-        part_acc.stride(1),
-        part_acc.stride(2),
-        0,
-        num_heads,
-        HAS_ATTN_SINK=has_attn_sink,
-        ADAPTIVE_SPLITS=False,
-        COMB_DIM=comb_dim,
-        BLOCK_H=1,
-        NUM_SPLITS=num_splits,
-        SPLITS_PAD=triton.next_power_of_2(num_splits),
-        FUSE_INV_ROPE=False,
-        NOPE=nope_head_dim,
-        HALF=rope_head_dim // 2,
-        QUANT_OUT=False,
-        num_warps=4,
+    _sparse_attn_decode_bf16_reduce(
+        part_m, part_l, part_acc, attn_sink, out, nope_head_dim, has_attn_sink
     )
     return out
 
