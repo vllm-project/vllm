@@ -31,6 +31,8 @@ const OFFLOADED_PATHS: &[&str] = &[
     "/detokenize",
     "/inference/v1/generate",
     "/generative_scoring",
+    "/v1/decisions",
+    "/v1/systemone",
     // gRPC routes:
     "/vllm.Inference/Generate",
     "/vllm.Inference/GenerateStream",
@@ -128,6 +130,8 @@ mod tests {
         assert!(should_offload("/detokenize"));
         assert!(should_offload("/inference/v1/generate"));
         assert!(should_offload("/generative_scoring"));
+        assert!(should_offload("/v1/decisions"));
+        assert!(should_offload("/v1/systemone"));
         assert!(should_offload("/vllm.Inference/Generate"));
         assert!(should_offload("/vllm.Inference/GenerateStream"));
     }

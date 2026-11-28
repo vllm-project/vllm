@@ -237,7 +237,7 @@ class ZayaCCA(MambaBase, nn.Module):
             ].to(delayed_state.dtype)
         return conv_out[:-1], delayed_prev
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         # The state at a checkpoint is a copy of its last inputs.
         return 1
 

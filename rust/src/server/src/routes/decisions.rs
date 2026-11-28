@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Decisions API (`POST /v1/decisions`): the probability of each answer to
-//! questions about a text, read from the next-token logprobs of the option
-//! labels.
+//! Decisions APIs (`POST /v1/decisions` and `POST /v1/systemone`): the
+//! probability of each answer to questions about a text, read from the
+//! next-token logprobs of the option labels.
 //!
 //! Only the next-token read strategy is implemented. The Python launcher
 //! passes the strategy Python's `select_read_strategy` picks for the model
@@ -11,6 +11,7 @@
 
 mod next_token;
 mod questions;
+mod structured;
 mod types;
 
 use std::sync::Arc;
@@ -20,18 +21,20 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use indexmap::IndexMap;
 pub(crate) use next_token::NextTokenReads;
 use tracing_futures::Instrument as _;
 
 use self::next_token::{MAX_QUESTIONS, QuestionRead, ReadOptions};
 use self::questions::{Question, QuestionOption, QuestionType, argmax};
+use self::structured::{StructuredDecisionRequest, StructuredDecisionResponse};
 use self::types::{
     ChoiceProbability, DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse,
     DecisionUsage, ScoreProbability,
 };
 use crate::error::{ApiError, bail_invalid_request};
 use crate::state::AppState;
-use crate::utils::resolve_request_context;
+use crate::utils::{resolve_request_context, unix_timestamp};
 
 /// Answer every question of one request, each as its own engine request.
 pub async fn decisions(
@@ -61,11 +64,9 @@ pub async fn decisions(
         request_id,
         chat_template_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
-        // Like Python, a decision runs at the default priority on any rank.
+        // Like Python, a decision runs at the default priority.
         priority: 0,
         cache_salt: request.cache_salt.clone(),
-        data_parallel_rank: None,
-        session_id: None,
     };
     let reads = (reads.read(&state.chat, &questions, None, &request.input.0, options))
         .instrument(span)
@@ -91,8 +92,66 @@ pub async fn decisions(
     .into_response())
 }
 
-/// The read of one question: a predicate as yes or no, a choice or a score as
-/// options labeled with letters. Python's `make_read_question`.
+/// Answer the questions of one structured decision, each as its own engine
+/// request. Python's `ServingStructuredDecisions.create_decision`.
+pub async fn systemone(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Result<Json<StructuredDecisionRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(request) = request?;
+    let reads = (state.decisions()).expect("the route is registered only with a read strategy");
+    let ctx = resolve_request_context(&headers, "decision-", request.request_id.as_deref())?;
+    let lora_resolution = state.resolve_model_with_loras(request.model.as_deref()).await;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    let (ids, questions): (Vec<_>, Vec<_>) =
+        structured::parse_questions(&request.questions)?.into_iter().unzip();
+    request.check_media(state.chat.supports_multimodal())?;
+    if request.joint {
+        bail_invalid_request!(
+            "joint: this model reads each question on its own; joint reads need DiffusionGemma"
+        );
+    }
+
+    let request_id = ctx.request_id;
+    let span = tracing::info_span!("systemone", request_id = %request_id);
+    let options = ReadOptions {
+        request_id: request_id.clone(),
+        chat_template_kwargs: request.chat_template_kwargs.clone(),
+        lora_request: lora_resolution.lora_request.clone(),
+        priority: request.priority,
+        cache_salt: request.cache_salt.clone(),
+    };
+    let state_text = request.state_text();
+    let instructions = request.instructions.as_deref();
+    let reads = (reads.read(&state.chat, &questions, instructions, &state_text, options))
+        .instrument(span)
+        .await?;
+
+    let mut answers = IndexMap::new();
+    let mut diagnostics = IndexMap::new();
+    let mut usage = structured::DecisionUsage::default();
+    for ((id, question), read) in ids.into_iter().zip(&questions).zip(&reads) {
+        answers.insert(id.clone(), structured::answer(question, read));
+        diagnostics.insert(id, read.into());
+        usage.input_tokens += read.input_tokens;
+        usage.output_tokens += read.output_tokens;
+    }
+    Ok(Json(StructuredDecisionResponse {
+        id: request_id,
+        object: "structured_decision",
+        created: unix_timestamp(),
+        model: lora_resolution.response_model(),
+        answers,
+        usage,
+        diagnostics,
+        joint: (),
+    })
+    .into_response())
+}
+
+/// The read of one question, with the labels of its type: a predicate as yes or
+/// no, a choice as letters, a score as digits. Python's `make_read_question`.
 fn read_question(question: &DecisionQuestion) -> Result<Question, ApiError> {
     let (question_type, instructions, options) = match question {
         DecisionQuestion::Predicate { instructions, .. } => {
@@ -131,12 +190,16 @@ fn read_question(question: &DecisionQuestion) -> Result<Question, ApiError> {
                     description: Some(level.description.clone()),
                 })
                 .collect();
-            (QuestionType::Choice, instructions, options)
+            (QuestionType::Score, instructions, options)
         }
     };
     let limit = question_type.label_set().len();
     if options.len() > limit {
-        bail_invalid_request!("This model supports at most {limit} choices per question");
+        let kind = match question_type {
+            QuestionType::Score => "score levels",
+            _ => "choices",
+        };
+        bail_invalid_request!("This model supports at most {limit} {kind} per question");
     }
     Ok(Question {
         question_type,
@@ -219,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn predicates_read_yes_then_no_and_scores_read_letters() {
+    fn predicates_read_yes_then_no_and_scores_read_digits() {
         let predicate: DecisionQuestion =
             serde_json::from_value(json!({"type": "predicate", "instructions": "Q?"})).unwrap();
         let read = read_question(&predicate).unwrap();
@@ -233,10 +296,11 @@ mod tests {
         }))
         .unwrap();
         let read = read_question(&score).unwrap();
-        assert_eq!(read.labels(), ["A", "B"]);
+        assert_eq!(read.question_type, QuestionType::Score);
+        assert_eq!(read.labels(), ["0", "1"]);
         assert_eq!(
             read.prompt(),
-            "Question: Rate\nA: low\nB: high - very\nAnswer with the letter of one option only."
+            "Question: Rate\n0: low\n1: high - very\nAnswer with the number of one level only."
         );
     }
 
@@ -250,6 +314,17 @@ mod tests {
         let error = read_question(&question).unwrap_err();
         assert!(
             format!("{error:?}").contains("This model supports at most 26 choices per question")
+        );
+
+        let levels: Vec<_> = (0..11).map(|i| json!({"label": i.to_string()})).collect();
+        let question: DecisionQuestion = serde_json::from_value(
+            json!({"type": "score", "instructions": "Rate", "levels": levels}),
+        )
+        .unwrap();
+        let error = read_question(&question).unwrap_err();
+        assert!(
+            format!("{error:?}")
+                .contains("This model supports at most 10 score levels per question")
         );
     }
 }
