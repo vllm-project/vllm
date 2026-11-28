@@ -56,7 +56,7 @@ def _load_fp8_kv(ptr, offsets, mask, dtype: tl.constexpr, D: tl.constexpr):
     return tl.interleave(lo, hi).to(dtype)
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["SeqLens", "num_tokens", "stride_lse_h"])
 def _rel_attention_kernel(
     Q,
     K,

@@ -233,7 +233,11 @@ def test_metadata_payload_requires_ec_on_generate_not_render():
     """Render can return metadata-only items; generate needs EC params for them."""
     engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
     features = extract_mm_features(engine_input, mm_payload="metadata")
-    body = {"token_ids": [1, 2, 3], "features": features, "sampling_params": {}}
+    body: dict[str, object] = {
+        "token_ids": [1, 2, 3],
+        "features": features,
+        "sampling_params": {},
+    }
 
     rendered = RenderedGenerateRequest.model_validate(body)
     forwarded = rendered.model_dump(mode="json")

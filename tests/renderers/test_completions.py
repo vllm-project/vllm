@@ -168,25 +168,31 @@ def hf_renderer_config(tmp_path):
     ["hf", "deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
 )
 @pytest.mark.parametrize(
-    ("truncation_side", "expected"),
-    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+    ("truncation_side", "limit", "expected"),
+    [
+        ("left", 3, "<bos> Hello world"),
+        ("right", 3, "<bos> Hello"),
+        (None, 3, "<bos> Hello"),
+        # Fits exactly: not truncated, so the double space is not decoded away.
+        (None, 4, "<bos>  Hello world"),
+    ],
 )
 async def test_native_hf_renderer_truncated_echo(
-    hf_renderer_config, renderer_mode, truncation_side, expected
+    hf_renderer_config, renderer_mode, truncation_side, limit, expected
 ):
     config, tokenizer = hf_renderer_config
     renderer = RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
-    prompt = "<bos> Hello world"
+    prompt = "<bos>  Hello world"
     params = TokenizeParams(
         max_total_tokens=32,
-        truncate_prompt_tokens=3,
+        truncate_prompt_tokens=limit,
         truncation_side=truncation_side,
         needs_detokenization=True,
     )
     try:
         (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
         (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
-        section = slice(-3, None) if truncation_side == "left" else slice(0, 3)
+        section = slice(-limit, None) if truncation_side == "left" else slice(0, limit)
         for result in (sync, asynchronous):
             assert result["prompt"] == expected
             assert result["prompt_token_ids"] == tokenizer.encode(prompt)[section]
