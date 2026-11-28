@@ -195,6 +195,24 @@ def xpu_sample(
     return sampled, logits_to_return
 
 
+def _single_row_topp_prefers_sort(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> bool:
+    """Whether a standalone top-p mask should take the sort path on this GPU.
+
+    The split-row top-p pipeline is launch-bound at batch size 1: its seven
+    kernel launches cost more than one sort of the single row. On a V100 with
+    a 152k vocab and p=0.95 it takes 304us at batch 1 versus 232us for the
+    sort path, while from batch 2 the pipeline already wins (289us vs 592us).
+    """
+    if k is not None or p is None or logits.shape[0] != 1:
+        return False
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability < DeviceCapability(8, 0)
+
+
 def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -210,6 +228,8 @@ def apply_top_k_top_p(
         return logits
 
     if HAS_TRITON:
+        if _single_row_topp_prefers_sort(logits, k, p):
+            return apply_top_k_top_p_pytorch(logits, k, p)
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )
