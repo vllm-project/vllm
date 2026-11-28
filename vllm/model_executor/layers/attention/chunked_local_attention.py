@@ -8,6 +8,7 @@ from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -48,6 +49,18 @@ def create_chunked_local_attention_backend(
             # Explicit override in case the underlying builder specialized this getter.
             # @override omitted only because of mypy limitation due to type variable.
             return AttentionCGSupport.NEVER
+
+        @classmethod
+        def get_max_num_reqs(
+            cls: type["AttentionMetadataBuilder"],
+            vllm_config: VllmConfig,
+        ) -> int:
+            # build() passes one request per virtual batch. A request's new
+            # tokens span their full chunks plus at most two partial ones.
+            scheduler_config = vllm_config.scheduler_config
+            return 2 * scheduler_config.max_num_seqs + cdiv(
+                scheduler_config.max_num_batched_tokens, attention_chunk_size
+            )
 
         def build(
             self,

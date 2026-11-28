@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.config import SchedulerConfig
+from vllm.model_executor.layers.attention.chunked_local_attention import (
+    create_chunked_local_attention_backend,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
 
 
@@ -203,3 +210,91 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     print(f"Actual block table:\n{result.block_table_tensor}")
 
     torch.testing.assert_close(result.block_table_tensor, expected_block_table_tensor)
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens",
+    [
+        # 255 decodes and a 16,129-token prefill chunk that starts at 4,096.
+        ([1] * 255 + [16129], [3000] * 255 + [4096 + 16129]),
+        # Every request starts one token before a chunk boundary.
+        ([2] * 255 + [15874], [8193] * 255 + [8191 + 15874]),
+    ],
+    ids=["decodes-and-prefill", "all-straddle"],
+)
+def test_chunked_local_builder_holds_virtual_batches(query_lens, seq_lens):
+    """The underlying builder gets one request per virtual batch, so its
+    request capacity must cover the split of any batch the scheduler forms."""
+    attn_chunk_size, block_size = 8192, 64
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=256,
+        max_num_batched_tokens=16384,
+        max_model_len=131072,
+        is_encoder_decoder=False,
+    )
+    assert len(query_lens) <= scheduler_config.max_num_seqs
+    assert sum(query_lens) <= scheduler_config.max_num_batched_tokens
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size,
+        torch.device("cpu"),
+    )
+    virtual, _ = make_local_attention_virtual_batches(
+        attn_chunk_size, common_attn_metadata, block_size
+    )
+    assert virtual.num_reqs > scheduler_config.max_num_seqs
+
+    builder_cls = create_chunked_local_attention_backend(
+        TritonAttentionBackend, attn_chunk_size
+    ).get_builder_cls()
+    vllm_config = SimpleNamespace(scheduler_config=scheduler_config)
+    assert virtual.num_reqs <= builder_cls.get_max_num_reqs(vllm_config)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_flashinfer(),
+    reason="Requires FlashInfer on CUDA",
+)
+def test_flashinfer_chunked_local_prefill_beyond_max_num_seqs(vllm_runner, tmp_path):
+    """A prompt spanning several chunks splits into more virtual batches than
+    max_num_seqs, and FlashInfer's native prefill must still serve it."""
+    from transformers import Llama4TextConfig
+
+    from vllm import SamplingParams, TokensPrompt
+
+    Llama4TextConfig(
+        architectures=["Llama4ForCausalLM"],
+        vocab_size=512,
+        hidden_size=128,
+        intermediate_size=256,
+        intermediate_size_mlp=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        max_position_embeddings=256,
+        attention_chunk_size=64,
+        no_rope_layers=[1, 0],
+        interleave_moe_layer_step=100,
+        num_local_experts=2,
+        use_qk_norm=False,
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        attention_config={"backend": "FLASHINFER", "use_trtllm_attention": False},
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=1,
+        block_size=16,
+        kv_cache_memory_bytes=16 << 20,
+    ) as runner:
+        prompt = TokensPrompt(prompt_token_ids=[3 + i % 500 for i in range(200)])
+        params = SamplingParams(
+            temperature=0, max_tokens=4, ignore_eos=True, detokenize=False
+        )
+        output = runner.get_llm().generate(prompt, params, use_tqdm=False)[0]
+    assert len(output.outputs[0].token_ids) == 4

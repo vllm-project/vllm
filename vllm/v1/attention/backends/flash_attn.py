@@ -851,7 +851,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
             # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671
             max_batch_size = max(
-                vllm_config.scheduler_config.max_num_seqs,
+                self.get_max_num_reqs(vllm_config),
                 self.max_cudagraph_size or 0,
             )
             self.scheduler_metadata = torch.zeros(
