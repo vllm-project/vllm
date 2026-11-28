@@ -30,6 +30,7 @@ from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     get_paged_mqa_page_sizes,
     has_deep_gemm,
+    is_deep_gemm_supported,
     native_next_n_supported,
 )
 from vllm.utils.math_utils import round_down
@@ -1876,9 +1877,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
+            # DeepGEMM schedule metadata is only needed when DeepGEMM runs paged
+            # MQA logits; non-DeepGEMM CUDA GPUs (e.g. SM80) use the Triton fallback.
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            if (
+                current_platform.is_cuda()
+                and has_deep_gemm()
+                and is_deep_gemm_supported()
+            ):
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,
@@ -1961,7 +1967,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode.seq_lens.view(-1).copy_(metadata.seq_lens)
         decode.decode_lens.fill_(1)
 
-        if current_platform.is_cuda() and has_deep_gemm():
+        if current_platform.is_cuda() and has_deep_gemm() and is_deep_gemm_supported():
             schedule_metadata = get_paged_mqa_logits_metadata(
                 decode.seq_lens,
                 self.kv_cache_spec.num_states,
