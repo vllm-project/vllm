@@ -255,6 +255,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # One stage per PP rank of the remote; a PP=1 remote is a single stage.
         stages = self._remote_stages[engine_id]
         num_groups = len(meta.local_block_ids)
+        if any(
+            stage.pairs.remote_group_for_local is not None for stage in stages.values()
+        ):
+            pairs = self._single_remote_stage(engine_id).pairs
+            assert pairs.remote_group_for_local is not None
+            meta.remote.block_ids = tuple(
+                meta.remote.block_ids[group] for group in pairs.remote_group_for_local
+            )
 
         def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
             return [
@@ -269,7 +277,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif not all(stage.pairs.groups_match for stage in stages.values()):
+        elif not all(
+            stage.pairs.groups_match or stage.pairs.remote_group_for_local is not None
+            for stage in stages.values()
+        ):
             # The two sides put some layer in different cache groups: read each
             # region at its own blocks. PP remotes must match cache groups.
             stage = self._single_remote_stage(engine_id)

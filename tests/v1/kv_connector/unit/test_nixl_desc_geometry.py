@@ -17,6 +17,9 @@ worker completes or expires, and D-side retention while sibling READs drain.
 import contextlib
 import dataclasses
 import math
+import os
+import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from threading import Event, Lock
@@ -89,6 +92,7 @@ class _RecordingNixl:
 
     def __init__(self, *args, **kwargs):
         self.dlists: dict[int, np.ndarray] = {}
+        self.memory_types: dict[int, str | None] = {}
         self.xfers: list[tuple] = []
         self.registered: list[tuple[list[tuple], object]] = []
         self._next_handle = 1
@@ -113,6 +117,7 @@ class _RecordingNixl:
         self._next_handle += 1
         # Store per-block (addr, len, dev) rows so desc ids index directly.
         self.dlists[handle] = expand_strided_descs(np.asarray(descs, dtype=np.uint64))
+        self.memory_types[handle] = mem_type
         return handle
 
     def add_remote_agent(self, metadata):
@@ -1901,6 +1906,211 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 
     _assert_local_writes_within(worker, _owned_byte_ranges(fixture, local_ids))
     assert worker.get_transfer_results().failed_recving == set()
+
+
+@pytest.fixture
+def qsa_nixl_workers(monkeypatch, dist_init):
+    """Real QSA-shaped cache plans and workers, with an external NIXL recorder."""
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms import current_platform
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    monkeypatch.setattr(bw, "NixlWrapper", _RecordingNixl)
+
+    def make(hisparse, device="cpu", split_indexers=False):
+        main = AttentionSpec(
+            block_size=32, num_kv_heads=1, head_size=8, dtype=torch.float16
+        )
+        indexer = MLAAttentionSpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float16,
+            tokens_per_state=2,
+        )
+        ring = AttentionSpec(
+            block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16
+        )
+        gdn = MambaSpec(
+            block_size=32,
+            shapes=((8, 3), (1, 4, 4)),
+            dtypes=(torch.float16, torch.float32),
+            page_size_padded=1024,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        )
+        ple = MambaSpec(
+            block_size=32,
+            shapes=((6, 3),),
+            dtypes=(torch.float16,),
+            page_size_padded=1024,
+            mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+            tp_replicated=True,
+        )
+        main_specs = {"main.0": main, "main.1": main}
+        index_specs = {"indexer.0": indexer, "indexer.1": indexer}
+        if hisparse:
+            groups = [
+                make_kv_cache_group([name], main, host_resident=True)
+                for name in main_specs
+            ]
+            # Resident/hot groups do not appear in transfer-group numbering.
+            groups.insert(
+                1, make_kv_cache_group(["resident"], main, enable_kv_transfer=False)
+            )
+            groups.append(make_kv_cache_group_from_specs(index_specs))
+        else:
+            if split_indexers:
+                groups = [
+                    make_kv_cache_group_from_specs(main_specs | {"indexer.0": indexer}),
+                    make_kv_cache_group(["indexer.1"], indexer),
+                ]
+            else:
+                groups = [make_kv_cache_group_from_specs(main_specs | index_specs)]
+        groups.extend(
+            [
+                make_kv_cache_group(["ring"], ring, CircularBufferManager),
+                make_kv_cache_group(["gdn"], gdn),
+                make_kv_cache_group(["ple"], ple),
+            ]
+        )
+        caches, tensors = {}, []
+        for group in groups:
+            if not group.enable_kv_transfer:
+                continue
+            for name, spec in group.kv_cache_specs.items():
+                count = 6 if group.host_resident else 2
+                caches[name] = torch.zeros(
+                    (count, spec.page_size_bytes),
+                    dtype=torch.uint8,
+                    device="cpu" if group.host_resident else device,
+                )
+                tensors.append(
+                    KVCacheTensor(
+                        size=caches[name].nbytes,
+                        layers=[name],
+                        block_stride=spec.page_size_bytes,
+                        layer_stride=caches[name].nbytes,
+                        host_resident=group.host_resident,
+                    )
+                )
+        cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=groups,
+            hisparse_host_num_blocks=6 if hisparse else None,
+        )
+        config = create_vllm_config(block_size=32)
+        config.cache_config.kv_cache_layout = "BLNHC"
+        config.kv_transfer_config.kv_buffer_device = current_platform.device_type
+        with set_current_vllm_config(config):
+            worker = NixlPullConnectorWorker(
+                config, "decoder" if hisparse else "producer", cache_config
+            )
+            cleanup.callback(worker.shutdown)
+            worker.register_kv_caches(caches)
+        return worker
+
+    with contextlib.ExitStack() as cleanup:
+        if current_platform.is_cpu() and sys.platform == "linux":
+            # CPU workers reserve NUMA cores; do not constrain later tests.
+            cleanup.callback(os.sched_setaffinity, 0, os.sched_getaffinity(0))
+        yield make
+
+
+@pytest.mark.cpu_test
+def test_qsa_hisparse_registration_preserves_host_capacity(qsa_nixl_workers):
+    worker = qsa_nixl_workers(True)
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    capacities = dict(zip(metadata.region_names, metadata.region_num_blocks))
+    assert capacities == {
+        "main.0": 6,
+        "main.1": 6,
+        "indexer.0": 2,
+        "indexer.1": 2,
+        "ring": 2,
+        "gdn": 2,
+        "ple": 2,
+    }
+
+
+@pytest.mark.cpu_test
+def test_qsa_hisparse_rejects_ambiguous_remote_group(qsa_nixl_workers):
+    producer = qsa_nixl_workers(False, split_indexers=True)
+    decoder = qsa_nixl_workers(True)
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    with pytest.raises(NotImplementedError, match="cache groups"):
+        decoder.add_remote_agent(metadata)
+
+
+@pytest.mark.parametrize(
+    "device", [pytest.param("cpu", marks=pytest.mark.cpu_test), "cuda"]
+)
+def test_qsa_hisparse_pull_addresses_match_each_layer(
+    qsa_nixl_workers, monkeypatch, device
+):
+    """Split host groups must read P's main/indexer group and preserve GPU state."""
+    producer = qsa_nixl_workers(False, device)
+    decoder = qsa_nixl_workers(True, device)
+    # Fake only the peer's transport: the real handshake and READ path run.
+    socket = MagicMock()
+    socket.recv_multipart.side_effect = lambda: [
+        msgspec.msgpack.encode(producer.xfer_handshake_metadata),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
+    monkeypatch.setattr(bw, "zmq_ctx", lambda *_: contextlib.nullcontext(socket))
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        "request",
+        ([5], [4], [0], [1], [0], [1]),
+        {
+            "remote_block_ids": ([1], [0], [1], [0]),
+            "remote_engine_id": "producer",
+            "remote_request_id": "prefill-request",
+            "remote_host": "unused",
+            "remote_port": 1234,
+        },
+        awaiting_kvs=True,
+    )
+    decoder.start_load_kv(metadata)
+    deadline = time.monotonic() + 5
+    while not decoder.nixl_wrapper.xfers:
+        decoder.start_load_kv(NixlConnectorMetadata())
+        if not decoder.nixl_wrapper.xfers:
+            _, received = decoder.get_finished()
+            assert not received, "The request completed before posting its READ"
+        assert time.monotonic() < deadline, "The handshake did not post a READ"
+
+    actual: list[tuple[int, int]] = []
+    nixl = decoder.nixl_wrapper
+    for _, local_handle, local_ids, remote_handle, remote_ids in nixl.xfers:
+        for local_id, remote_id in zip(local_ids, remote_ids, strict=True):
+            local, length, _ = map(int, nixl.dlists[local_handle][local_id])
+            remote, remote_length, _ = map(int, nixl.dlists[remote_handle][remote_id])
+            assert length == remote_length
+            actual.extend((local + offset, remote + offset) for offset in range(length))
+    # Independently specified request-owned pages; GDN uses 48 B conv + 64 B SSM.
+    pages = {
+        "main.0": (5, 1, 1024),
+        "main.1": (4, 1, 1024),
+        "indexer.0": (0, 1, 512),
+        "indexer.1": (0, 1, 512),
+        "ring": (1, 0, 64),
+        "gdn": (0, 1, 112),
+        "ple": (1, 0, 1024),
+    }
+    expected: set[tuple[int, int]] = set()
+    for name, (local_block, remote_block, length) in pages.items():
+        local = decoder.device_kv_caches[name][local_block].data_ptr()
+        remote = producer.device_kv_caches[name][remote_block].data_ptr()
+        expected.update((local + offset, remote + offset) for offset in range(length))
+    assert set(actual) == expected
+    assert len(actual) == len(expected)
+    if device == "cuda":
+        assert {nixl.memory_types[xfer[1]] for xfer in nixl.xfers} == {"DRAM", "VRAM"}
 
 
 def _make_csa_linear_ple_worker(
