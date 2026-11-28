@@ -649,6 +649,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
+    _custom_tool_grammar_enforced: bool = PrivateAttr(default=False)
+    """Whether a native custom-tool grammar was applied by the parser."""
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
     def resolve_reasoning_ended(

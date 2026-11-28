@@ -21,6 +21,7 @@ from xgrammar.openai_tool_call_schema import (
 from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
+    GrammarFormat,
     JSONSchemaFormat,
     OptionalFormat,
     OrFormat,
@@ -38,11 +39,15 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import (
+    compile_custom_tool_grammar,
     custom_tool_parameters,
+    custom_tools_with_grammar,
     get_function_tools,
     require_function_tools,
+    warn_custom_tool_grammar_fallback,
 )
 
 ToolChoice: TypeAlias = (
@@ -88,6 +93,7 @@ VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
+CUSTOM_TOOL_GRAMMAR_MODELS = frozenset({"deepseek_v4", "deepseek_v4_1"})
 
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS: set[str] = set()
@@ -209,6 +215,10 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    grammar_tools = custom_tools_with_grammar(tools)
+    if grammar_tools and model not in CUSTOM_TOOL_GRAMMAR_MODELS:
+        warn_custom_tool_grammar_fallback(tools)
+
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
         return None
@@ -242,12 +252,84 @@ def get_model_structural_tag(
             f"tokens and cannot apply token_suffix={token_suffix!r}"
         )
 
-    return get_xgrammar_model_structural_tag(
+    tag = get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+    if grammar_tools and model in CUSTOM_TOOL_GRAMMAR_MODELS:
+        selected_tools, _, _ = normalize_tool_choice(dumped_tools, dumped_tool_choice)
+        selected_grammar_tools = {
+            tool.function.name: grammar_tools[tool.function.name]
+            for tool in selected_tools
+            if tool.function.name in grammar_tools
+        }
+        if selected_grammar_tools:
+            # Raw payloads may contain envelope-looking text, so one call avoids
+            # ambiguous list separators while the grammar owns the payload.
+            limit_to_single_tool_call(tag)
+            constrain_deepseek_custom_tool_inputs(
+                tag, selected_grammar_tools, model=model
+            )
+    return tag
+
+
+def constrain_deepseek_custom_tool_inputs(
+    tag: StructuralTag, tools: dict[str, CustomTool], *, model: str
+) -> None:
+    """Replace JSON shims with raw-grammar DeepSeek parameter envelopes."""
+    if model == "deepseek_v4":
+        from vllm.parser.deepseek_v4 import (
+            DSML_INVOKE_NAME_END,
+            DSML_INVOKE_PREFIX,
+            DSML_PARAM_CLOSE,
+            DSML_PARAM_START,
+        )
+    else:
+        from vllm.parser.deepseek_v4 import DSML_INVOKE_NAME_END
+        from vllm.parser.deepseek_v41 import (
+            DSML_INVOKE_PREFIX,
+            DSML_PARAM_CLOSE,
+            DSML_PARAM_START,
+        )
+
+    pending = {
+        f"{DSML_INVOKE_PREFIX}{name}{DSML_INVOKE_NAME_END}\n": tool
+        for name, tool in tools.items()
+    }
+    matched: set[str] = set()
+
+    def visit(node: object) -> None:
+        if isinstance(node, TagFormat):
+            tool = pending.get(node.begin)
+            if tool is not None:
+                matched.add(node.begin)
+                assert tool.format is not None and tool.format.type == "grammar"
+                grammar = compile_custom_tool_grammar(
+                    tool.format.syntax, tool.format.definition
+                ).grammar
+                node.content = TagFormat(
+                    begin=f'{DSML_PARAM_START} name="input" string="true">',
+                    content=GrammarFormat(grammar=str(grammar)),
+                    end=f"{DSML_PARAM_CLOSE}\n",
+                )
+                return
+        if isinstance(node, BaseModel):
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for element in node:
+                visit(element)
+
+    visit(tag.format)
+    if matched:
+        object.__setattr__(tag, "_custom_tool_grammar_enforced", True)
+    if set(pending) - matched:
+        raise VLLMValidationError(
+            "Cannot constrain custom tool grammars in this DeepSeek format.",
+            parameter="tools",
+        )
 
 
 _TOOL_CALL_LIST_FORMATS = (

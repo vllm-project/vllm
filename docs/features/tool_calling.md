@@ -126,6 +126,18 @@ When a structural tag applies, each tool's declared parameter schema is enforced
 
 For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
+### Custom Tool Input Grammars
+
+Responses API custom tools may declare a `format` with `type: "grammar"` and either Lark or regex syntax. vLLM validates the definition and rejects malformed grammars with HTTP 400. A valid grammar is included in the function shim description, and the tool is marked strict so the call envelope is constrained when structural tags are available.
+
+Native grammars constrain the custom tool's raw input during sampling. When the selected parser or structured-output configuration cannot enforce the grammar, vLLM falls back to best-effort free-form generation and logs a warning; the grammar is guidance in that mode and is not enforced by the sampler.
+DeepSeek V4 and V4.1 parsers support native Lark and regex constraints for custom tool input.
+
+DeepSeek native grammar mode requires `--enable-auto-tool-choice`, `--tool-call-parser deepseek_v4` or `deepseek_v41`, and `VLLM_ENFORCE_STRICT_TOOL_CALLING` left enabled. A generated custom tool input that does not complete its grammar is reported as a generation error.
+Requests that include a native grammar tool are limited to one tool call per response, even when `parallel_tool_calls` is enabled.
+DeepSeek streaming buffers a tool call from its first tool-call marker until the stream ends when the request contains a grammar custom tool; this also applies to other tool calls in the same request.
+If generation ends before the custom grammar input is complete, no tool call is emitted.
+
 ### Strict Mode
 
 Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.

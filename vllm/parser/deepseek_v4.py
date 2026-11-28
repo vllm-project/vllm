@@ -21,24 +21,40 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
+from openai.types.responses import CustomTool
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.parser.engine.events import EventType
-from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine import ParserEngine, ToolCallSlot
 from vllm.parser.engine.parser_engine_config import (
     ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import (
+    custom_tools_with_grammar,
+    find_tool_properties,
+    partial_tag_overlap,
+    validate_custom_tool_input,
+)
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
-
 _DSML = "｜DSML｜"
 
 DSML_THINK_START = "<think>"
@@ -346,6 +362,53 @@ class DeepSeekV4Parser(ParserEngine):
             **kwargs,
         )
         self._arg_converter = self._convert_args
+        self._custom_grammar_tools = custom_tools_with_grammar(tools)
+        self._custom_grammar_chunks: list[str] = []
+        self._custom_grammar_validate_input = False
+        self._custom_grammar_probe = ""
+        self._custom_grammar_request: (
+            ChatCompletionRequest | ResponsesRequest | None
+        ) = None
+
+    def _tool_start_literals(self) -> tuple[str, ...]:
+        starts = self.parser_engine_config.terminals["TOOL_START"]
+        return (starts,) if isinstance(starts, str) else tuple(starts)
+
+    def _custom_grammar_call_pattern(self) -> re.Pattern:
+        starts = sorted(self._tool_start_literals(), key=len, reverse=True)
+        invoke_prefix = self.parser_engine_config.terminal_literal("INVOKE_PREFIX")
+        name_end = self.parser_engine_config.terminal_literal("INVOKE_NAME_END")
+        assert invoke_prefix is not None and name_end is not None
+        return re.compile(
+            rf"(?:{'|'.join(re.escape(start) for start in starts)})\s*"
+            rf"{re.escape(invoke_prefix)}(?P<name>[^\"\n]+)"
+            rf"{re.escape(name_end)}\s*"
+        )
+
+    def _custom_grammar_envelope(self) -> tuple[str, str]:
+        param_start = self.parser_engine_config.terminal_literal("PARAM_START")
+        param_close = self.parser_engine_config.terminal_literal("PARAM_CLOSE")
+        invoke_end = self.parser_engine_config.terminal_literal("INVOKE_END")
+        tool_end = self.parser_engine_config.terminal_literal("TOOL_END")
+        assert None not in (param_start, param_close, invoke_end, tool_end)
+        return (
+            f'{param_start} name="input" string="true">',
+            f"{param_close}\n{invoke_end}\n{tool_end}",
+        )
+
+    def _split_custom_grammar_call(
+        self, text: str
+    ) -> tuple[re.Match, CustomTool, str, str | None] | None:
+        match = self._custom_grammar_call_pattern().search(text)
+        if match is None or match["name"] not in self._custom_grammar_tools:
+            return None
+        tool = self._custom_grammar_tools[match["name"]]
+        body = text[match.end() :]
+        param_begin, envelope_end = self._custom_grammar_envelope()
+        if not body.startswith(param_begin) or not body.endswith(envelope_end):
+            return match, tool, text[: match.start()], None
+        payload = body[len(param_begin) : -len(envelope_end)]
+        return match, tool, text[: match.start()], payload
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         converter = self.parser_engine_config.arg_converter
@@ -355,3 +418,206 @@ class DeepSeekV4Parser(ParserEngine):
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
         return _unwrap_wrapper_args(result, self._tools, func_name)
+
+    def _check_skip_tool_parsing(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> None:
+        super()._check_skip_tool_parsing(request)
+        self._custom_grammar_validate_input = bool(
+            getattr(request, "_custom_tool_grammar_enforced", False)
+        )
+
+    def _reset(self, initial_state: ParserState | None = None) -> None:
+        super()._reset(initial_state=initial_state)
+        self._custom_grammar_chunks.clear()
+        self._custom_grammar_probe = ""
+
+    def _single_pass_parse(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+        if (
+            not self._custom_grammar_tools
+            or self.skip_tool_parsing
+            or self._suppress_tool_calls
+            or not self._custom_grammar_validate_input
+        ):
+            return super()._single_pass_parse(text, token_ids, initial_state)
+
+        split = self._split_custom_grammar_call(text)
+        if split is None:
+            return super()._single_pass_parse(text, token_ids, initial_state)
+
+        _, tool, prefix, payload = split
+        self.skip_tool_parsing = True
+        try:
+            reasoning, content, plain = super()._single_pass_parse(
+                prefix, [], initial_state
+            )
+        finally:
+            self.skip_tool_parsing = False
+
+        if payload is None:
+            return (
+                reasoning,
+                content or plain.content,
+                ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=content or plain.content,
+                ),
+            )
+        if self._custom_grammar_validate_input:
+            validate_custom_tool_input(tool, payload)
+
+        slot = ToolCallSlot()
+        slot.name = tool.name
+        self._ensure_tool_id(slot, tool.name)
+        call = ToolCall(
+            id=slot.id,
+            function=FunctionCall(
+                name=tool.name,
+                arguments=json.dumps({"input": payload}, ensure_ascii=False),
+            ),
+        )
+        return (
+            reasoning,
+            content or plain.content,
+            ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=[call],
+                content=content or plain.content,
+            ),
+        )
+
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ExtractedToolCallInformation:
+        if not self._custom_grammar_tools or request.tool_choice == "none":
+            return super().extract_tool_calls(model_output, request)
+        self._check_skip_tool_parsing(request)
+        return self._single_pass_parse(model_output, [])[2]
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> DeltaMessage | None:
+        if not self._custom_grammar_tools or request.tool_choice == "none":
+            return super().extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+                request,
+            )
+        self._custom_grammar_request = request
+        self.initialize_streaming(initial_state=ParserState.CONTENT)
+        self._check_skip_tool_parsing(request)
+        if self._custom_grammar_chunks:
+            self._custom_grammar_chunks.append(delta_text)
+            return None
+
+        combined = self._custom_grammar_probe + delta_text
+        starts = self._tool_start_literals()
+        marker_positions = [
+            position for start in starts if (position := combined.find(start)) >= 0
+        ]
+        if marker_positions:
+            marker = min(marker_positions)
+            prefix = combined[:marker]
+            self._custom_grammar_probe = ""
+            self._custom_grammar_chunks.append(combined[marker:])
+            if not prefix:
+                return None
+            return super().extract_tool_calls_streaming(
+                previous_text,
+                prefix,
+                prefix,
+                previous_token_ids,
+                [],
+                [],
+                request,
+            )
+
+        overlap = max(
+            (partial_tag_overlap(combined, start) for start in starts), default=0
+        )
+        safe = combined[:-overlap] if overlap else combined
+        self._custom_grammar_probe = combined[-overlap:] if overlap else ""
+        if not safe:
+            return None
+        return super().extract_tool_calls_streaming(
+            previous_text,
+            safe,
+            safe,
+            previous_token_ids,
+            current_token_ids,
+            [],
+            request,
+        )
+
+    @staticmethod
+    def _merge_deltas(*deltas: DeltaMessage | None) -> DeltaMessage | None:
+        present = [delta for delta in deltas if delta is not None]
+        if not present:
+            return None
+        reasoning = "".join(delta.reasoning or "" for delta in present) or None
+        content = "".join(delta.content or "" for delta in present) or None
+        tool_calls = [call for delta in present for call in (delta.tool_calls or [])]
+        return DeltaMessage(
+            reasoning=reasoning,
+            content=content,
+            tool_calls=tool_calls,
+        )
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        if not self._custom_grammar_tools:
+            return super().finish_streaming()
+
+        if self._custom_grammar_chunks:
+            text = "".join(self._custom_grammar_chunks)
+            self._custom_grammar_chunks.clear()
+            reasoning, content, info = self._single_pass_parse(
+                text, [], initial_state=ParserState.CONTENT
+            )
+            calls = [
+                DeltaToolCall(
+                    index=index,
+                    id=call.id,
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name=call.function.name,
+                        arguments=call.function.arguments,
+                    ),
+                )
+                for index, call in enumerate(info.tool_calls)
+            ]
+            if not reasoning and not content and not calls:
+                return None
+            return DeltaMessage(
+                reasoning=reasoning,
+                content=content,
+                tool_calls=calls or None,
+            )
+
+        if self._custom_grammar_probe:
+            probe, self._custom_grammar_probe = self._custom_grammar_probe, ""
+            request = self._custom_grammar_request
+            assert request is not None
+            prefix_delta = super().extract_tool_calls_streaming(
+                "", probe, probe, [], [], [], request
+            )
+            return self._merge_deltas(prefix_delta, super().finish_streaming())
+        return super().finish_streaming()

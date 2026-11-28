@@ -612,6 +612,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser's adjust_request."""
+    _custom_tool_grammar_enforced: bool = PrivateAttr(default=False)
+    """Whether a native custom-tool grammar was applied by the parser."""
 
     _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
         default=None
@@ -913,7 +915,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_custom_tool_format(cls, data):
+    def validate_custom_tool_format(cls, data):
         if not isinstance(data, dict):
             return data
         tools = data.get("tools")
@@ -932,11 +934,12 @@ class ResponsesRequest(OpenAIBaseModel):
                 and isinstance(tool_format, dict)
                 and tool_format.get("type") == "grammar"
             ):
-                raise VLLMValidationError(
-                    "Custom tools with a grammar format are not supported; "
-                    "only free-form text custom tools are accepted.",
-                    parameter="tools",
-                )
+                syntax = tool_format.get("syntax")
+                definition = tool_format.get("definition")
+                if isinstance(definition, str) and syntax in ("lark", "regex"):
+                    from vllm.tool_parsers.utils import compile_custom_tool_grammar
+
+                    compile_custom_tool_grammar(syntax, definition)
         return data
 
     @model_validator(mode="before")
