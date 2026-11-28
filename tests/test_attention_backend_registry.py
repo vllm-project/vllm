@@ -334,3 +334,121 @@ def test_register_backend_with_string_name_decorator(_enum_is_mamba):
     assert member.get_class().get_name() == "DECORATED"
     member.clear_override()
     _remove_dynamic_member(enum_cls, member)
+
+
+def _check_spawned_backends(config, mamba):
+    from vllm.config import AttentionConfig
+
+    path = _backend_path(AttentionBackendEnum)
+    assert isinstance(config, AttentionConfig)
+    member = config.backend_per_kind["full_attention"]
+    assert member is AttentionBackendEnum["SPAWN_TEST"]
+    assert member.get_class() is CustomAttentionBackend
+    assert mamba is MambaAttentionBackendEnum["SPAWN_TEST"]
+    assert mamba.get_class() is StringDecoratorMambaBackend
+    # Worker plugins register again after multiprocessing reads its arguments.
+    with pytest.raises(ValueError, match="already exists"):
+        register_backend("SPAWN_TEST", "other.Backend")
+    with pytest.raises(ValueError, match="Conflicting"):
+        register_backend("SPAWN_TEST", is_mamba=True)(CustomMambaAttentionBackend)
+    register_backend("SPAWN_TEST", path)
+    register_backend("SPAWN_TEST", is_mamba=True)(StringDecoratorMambaBackend)
+    with pytest.raises(ValueError, match="already exists"):
+        register_backend("SPAWN_TEST", path)
+    assert mamba.get_class() is StringDecoratorMambaBackend
+
+
+def test_spawn_with_dynamic_backend_config():
+    import multiprocessing
+
+    from vllm.config import AttentionConfig
+
+    register_backend("SPAWN_TEST", _backend_path(AttentionBackendEnum))
+    register_backend("SPAWN_TEST", is_mamba=True)(StringDecoratorMambaBackend)
+    try:
+        config = AttentionConfig(backend_per_kind={"full_attention": "SPAWN_TEST"})
+        proc = multiprocessing.get_context("spawn").Process(
+            target=_check_spawned_backends,
+            args=(config, MambaAttentionBackendEnum["SPAWN_TEST"]),
+        )
+        proc.start()
+        try:
+            proc.join(timeout=90)
+            assert proc.exitcode == 0
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+    finally:
+        for enum_cls in (AttentionBackendEnum, MambaAttentionBackendEnum):
+            member = enum_cls["SPAWN_TEST"]
+            member.clear_override()
+            _remove_dynamic_member(enum_cls, member)
+
+
+def test_spawn_with_entrypoint_backend():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).parent / "standalone_tests" / "spawn_attention_backend.py"
+    subprocess.run([sys.executable, str(script)], check=True, timeout=90)
+
+
+def test_unpickle_with_conflicting_local_backend():
+    import pickle
+
+    path = _backend_path(AttentionBackendEnum)
+    register_backend("SPAWN_OVERRIDE", path)
+    member = AttentionBackendEnum["SPAWN_OVERRIDE"]
+    try:
+        register_backend(member, "other.Backend")
+        payload = pickle.dumps(member)
+        member.clear_override()
+        with pytest.raises(ValueError, match="Conflicting registration"):
+            pickle.loads(payload)
+    finally:
+        member.clear_override()
+        _remove_dynamic_member(AttentionBackendEnum, member)
+
+
+def test_generate_with_spawned_named_backend(monkeypatch, tmp_path):
+    from vllm import LLM, SamplingParams
+    from vllm.platforms import current_platform
+
+    # Give the native implementation an importable path unique to the plugin.
+    native = (
+        AttentionBackendEnum.CPU_ATTN
+        if current_platform.is_cpu()
+        else AttentionBackendEnum.TRITON_ATTN
+    )
+    module, cls = native.get_path().rsplit(".", 1)
+    (tmp_path / "spawn_backend.py").write_text(
+        f"from {module} import {cls} as Backend\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    register_backend("SPAWN_GENERATE", "spawn_backend.Backend")
+    try:
+        llm = LLM(
+            model="HuggingFaceTB/SmolLM2-135M",
+            attention_config={"backend_per_kind": {"full_attention": "SPAWN_GENERATE"}},
+            max_model_len=256,
+            max_num_seqs=1,
+            enforce_eager=True,
+            kv_cache_memory_bytes=32 * 1024**2,
+        )
+        try:
+            params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+            (result,) = llm.generate(["The capital of France is"], params)
+            (completion,) = result.outputs
+            assert completion.finish_reason == "length"
+            assert len(completion.token_ids) == 4
+            assert completion.text.strip()
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+    finally:
+        member = AttentionBackendEnum["SPAWN_GENERATE"]
+        member.clear_override()
+        _remove_dynamic_member(AttentionBackendEnum, member)

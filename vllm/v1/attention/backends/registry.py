@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention backend registry."""
 
+import sys
 from collections.abc import Callable
 from enum import Enum, EnumMeta
 from typing import TYPE_CHECKING, cast
@@ -31,7 +32,17 @@ class _AttentionBackendEnumMeta(EnumMeta):
             ) from None
 
 
-class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
+class _BackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
+    def __reduce_ex__(self, protocol):
+        enum_cls = type(self)
+        if self.name in _BUILTIN_NAMES[enum_cls]:
+            return getattr, (enum_cls, self.name)
+        assert isinstance(self, (AttentionBackendEnum, MambaAttentionBackendEnum))
+        override = self.get_path() if self.is_overridden() else None
+        return _restore_backend, (enum_cls, self.name, self.value, override)
+
+
+class AttentionBackendEnum(_BackendEnum):
     """Enumeration of all supported attention backends.
 
     The enum value is the default class path, but this can be overridden
@@ -257,7 +268,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         _ATTN_OVERRIDES.pop(self, None)
 
 
-class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
+class MambaAttentionBackendEnum(_BackendEnum):
     """Enumeration of all supported mamba attention backends.
 
     The enum value is the default class path, but this can be overridden
@@ -357,6 +368,45 @@ _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
 _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 
+_BUILTIN_NAMES = {
+    cls: frozenset(cls.__members__)
+    for cls in (AttentionBackendEnum, MambaAttentionBackendEnum)
+}
+
+
+def _same_backend_path(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    # spawn re-executes the entry script as __mp_main__ and aliases it to __main__.
+    left_module, _, left_name = left.partition(".")
+    right_module, _, right_name = right.partition(".")
+    return (
+        bool(left_name)
+        and left_name == right_name
+        and {left_module, right_module} == {"__main__", "__mp_main__"}
+        and sys.modules.get("__mp_main__") is sys.modules["__main__"]
+    )
+
+
+def _restore_backend(enum_cls, name: str, value: str, override: str | None):
+    member = enum_cls.__members__.get(name)
+    if member is None:
+        member = enum_cls.register(name, value)
+        if override is not None:
+            register_backend(
+                member, override, is_mamba=enum_cls is MambaAttentionBackendEnum
+            )
+        # Worker plugins run after spawn has unpickled the process arguments.
+        member._awaiting_plugin_registration = True
+    else:
+        path = member.get_path() if member.is_overridden() else member.value
+        if not _same_backend_path(member.value, value) or not _same_backend_path(
+            path, override or value
+        ):
+            raise ValueError(f"Conflicting registration for {enum_cls.__name__}.{name}")
+    return member
+
+
 def register_backend(
     backend: AttentionBackendEnum | MambaAttentionBackendEnum | str,
     class_path: str | None = None,
@@ -408,25 +458,42 @@ def register_backend(
         )
 
     """
-    # Handle dynamic enum creation for string backend names
+    restored = None
     if isinstance(backend, str):
-        if is_mamba:
-            backend = MambaAttentionBackendEnum.register(backend, class_path or "")
+        enum_cls = MambaAttentionBackendEnum if is_mamba else AttentionBackendEnum
+        member = enum_cls.__members__.get(backend)
+        if (
+            member is not None
+            and getattr(member, "_awaiting_plugin_registration", False)
+            and _same_backend_path(member.value, class_path or "")
+        ):
+            restored = backend = member
         else:
-            backend = AttentionBackendEnum.register(backend, class_path or "")
+            backend = enum_cls.register(backend, class_path or "")
 
-    def decorator(cls: type) -> type:
+    def bind(path: str) -> None:
+        if restored is not None:
+            if not getattr(restored, "_awaiting_plugin_registration", False) or (
+                not class_path
+                and restored.is_overridden()
+                and not _same_backend_path(restored.get_path(), path)
+            ):
+                raise ValueError(f"Conflicting registration for {restored}")
+            delattr(restored, "_awaiting_plugin_registration")
+            if restored.is_overridden():
+                return
+
         if is_mamba:
-            _MAMBA_ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
+            _MAMBA_ATTN_OVERRIDES[backend] = path  # type: ignore[index]
         else:
-            _ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
-        return cls
+            _ATTN_OVERRIDES[backend] = path  # type: ignore[index]
 
     if class_path is not None:
-        if is_mamba:
-            _MAMBA_ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
-        else:
-            _ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
+        bind(class_path)
         return lambda x: x
+
+    def decorator(cls: type) -> type:
+        bind(f"{cls.__module__}.{cls.__qualname__}")
+        return cls
 
     return decorator
