@@ -21,14 +21,6 @@ def init_entrypoints_middleware(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
 ):
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=args.allowed_origins,
-        allow_credentials=args.allow_credentials,
-        allow_methods=args.allowed_methods,
-        allow_headers=args.allowed_headers,
-    )
-
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from .authenticate import AuthenticationMiddleware
@@ -39,6 +31,24 @@ def init_entrypoints_middleware(
         from .x_request_id import XRequestIdMiddleware
 
         app.add_middleware(XRequestIdMiddleware)
+
+    if envs.VLLM_GUARD_ENABLED:
+        from .guard import init_guard_middleware
+
+        init_guard_middleware(app)
+
+    # CORS is added after the guard so it nests OUTSIDE it (last-added is
+    # outermost): guard-generated 403/429 responses leave with CORS headers
+    # instead of opaque network failures for cross-origin clients. The guard
+    # still sits outside the authentication middleware, so blocked requests
+    # never reach token validation.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=args.allowed_origins,
+        allow_credentials=args.allow_credentials,
+        allow_methods=args.allowed_methods,
+        allow_headers=args.allowed_headers,
+    )
 
     if "generate" in supported_tasks:
         # Add scaling middleware to check for scaling state
