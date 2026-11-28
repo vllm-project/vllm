@@ -216,12 +216,21 @@ requires every reader's done flag before reusing a slot.
 A zero-copy view over shared memory the reader process has never touched makes
 the subsequent `cudaMemcpyAsync` pay **first-touch page faults on ~50k pages plus
 pageable-copy staging** — the same tax the current oob path pays on its pageable
-ZMQ frame. Fix: each reader lazily `cudaHostRegister`s the whole arena mapping
-once (~1 s, first use), after which every H2D from the arena is a **pinned-memory
-DMA** (~10 ms for 192 MB). Processes without a CUDA context skip registration
-silently. (Because the arena mapping is stable and reused, this one-time pin
-amortizes across all future images — an option the transient per-message ZMQ
-frame does not have.)
+ZMQ frame. Each reader lazily `cudaHostRegister`s the used prefix of each slot,
+rounded up to 8 MiB up to the slot capacity. The writer prefers the smallest
+free slot whose high-water size already fits the tensor (or the largest
+already-used free slot when growth is required), so low concurrency and
+occasional large inputs stay concentrated in a small number of slots instead of
+pinning every slot. Slot reuse requires every reader to release its previous
+tensor and complete H2D, so growth can safely replace the registration.
+Transfers within the registered prefix reuse pinned-memory DMA.
+
+Prefixes retain their high-water size until arena destruction. This avoids
+faulting in the entire default 2 GiB arena on first use while bounding wasted
+zero-page pinning. Registration failures clear the pending runtime error and
+demote smaller prefixes so transfers remain zero-copy pageable; only a failed
+unregistration falls back to an owned copy (and releases the slot immediately)
+to avoid H2D spanning registered and unregistered memory.
 
 ## 3. Configuration
 
