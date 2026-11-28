@@ -4,23 +4,25 @@
 // Host-side launcher of the SWMMAC skinny GEMM; kernels in skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
 
-torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
-                         const std::optional<at::Tensor>& in_bias,
-                         const int64_t logical_M, const int64_t CuCount) {
-  TORCH_CHECK(on_gfx120x(), "swmmacGEMM is only supported on GFX120x");
-  TORCH_CHECK(in_a.is_cuda() && in_b.is_cuda(),
-              "swmmacGEMM inputs must be CUDA tensors");
-  TORCH_CHECK(in_b.scalar_type() == torch::kFloat16 ||
-                  in_b.scalar_type() == torch::kBFloat16,
-              "B must be FP16 or BF16");
-  TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
-              "A and B must use the same dtype");
-  TORCH_CHECK(in_b.dim() == 2, "B must be a 2D tensor");
-  TORCH_CHECK(in_a.dim() == 2, "A must be a 2D tensor");
-  TORCH_CHECK(in_a.device() == in_b.device(),
-              "A and B must be on the same device");
-  TORCH_CHECK(in_a.is_contiguous(), "A must be contiguous");
-  TORCH_CHECK(in_b.is_contiguous(), "B must be contiguous");
+torch::stable::Tensor swmmacGEMM(
+    const torch::stable::Tensor& in_a, const torch::stable::Tensor& in_b,
+    const std::optional<torch::stable::Tensor>& in_bias,
+    const int64_t logical_M, const int64_t CuCount) {
+  STD_TORCH_CHECK(on_gfx120x(), "swmmacGEMM is only supported on GFX120x");
+  STD_TORCH_CHECK(in_a.is_cuda() && in_b.is_cuda(),
+                  "swmmacGEMM inputs must be CUDA tensors");
+  STD_TORCH_CHECK(
+      in_b.scalar_type() == torch::headeronly::ScalarType::Half ||
+          in_b.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "B must be FP16 or BF16");
+  STD_TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
+                  "A and B must use the same dtype");
+  STD_TORCH_CHECK(in_b.dim() == 2, "B must be a 2D tensor");
+  STD_TORCH_CHECK(in_a.dim() == 2, "A must be a 2D tensor");
+  STD_TORCH_CHECK(in_a.device() == in_b.device(),
+                  "A and B must be on the same device");
+  STD_TORCH_CHECK(in_a.is_contiguous(), "A must be contiguous");
+  STD_TORCH_CHECK(in_b.is_contiguous(), "B must be contiguous");
 
   constexpr int tile_columns = 16;
   constexpr int m_tiles_per_wave = 1;
@@ -36,23 +38,24 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   const int N = static_cast<int>(in_a.size(0));
   const int A_stride = static_cast<int>(in_a.stride(0));
 
-  TORCH_CHECK(logical_M == M, "logical_M must match the row count of raw B");
-  TORCH_CHECK(N >= 5 && N <= 8, "swmmacGEMM supports N in [5, 8]");
-  TORCH_CHECK(in_a.size(1) == K, "A and B inner dimensions (K) must match");
-  TORCH_CHECK(K % k_per_instruction == 0, "K must be divisible by ",
-              k_per_instruction);
+  STD_TORCH_CHECK(logical_M == M,
+                  "logical_M must match the row count of raw B");
+  STD_TORCH_CHECK(N >= 5 && N <= 8, "swmmacGEMM supports N in [5, 8]");
+  STD_TORCH_CHECK(in_a.size(1) == K, "A and B inner dimensions (K) must match");
+  STD_TORCH_CHECK(K % k_per_instruction == 0, "K must be divisible by ",
+                  k_per_instruction);
 
   const bool has_bias = in_bias.has_value() && in_bias->numel() > 0;
 
   if (has_bias) {
-    TORCH_CHECK(in_bias->is_cuda(), "bias must be a CUDA tensor");
-    TORCH_CHECK(in_bias->device() == in_a.device(),
-                "bias and A must be on the same device");
-    TORCH_CHECK(in_bias->scalar_type() == in_a.scalar_type(),
-                "bias and A must use the same dtype");
-    TORCH_CHECK(in_bias->is_contiguous(), "bias must be contiguous");
-    TORCH_CHECK(in_bias->dim() == 1 || in_bias->dim() == 2,
-                "bias must be a 1D or 2D tensor");
+    STD_TORCH_CHECK(in_bias->is_cuda(), "bias must be a CUDA tensor");
+    STD_TORCH_CHECK(in_bias->device() == in_a.device(),
+                    "bias and A must be on the same device");
+    STD_TORCH_CHECK(in_bias->scalar_type() == in_a.scalar_type(),
+                    "bias and A must use the same dtype");
+    STD_TORCH_CHECK(in_bias->is_contiguous(), "bias must be contiguous");
+    STD_TORCH_CHECK(in_bias->dim() == 1 || in_bias->dim() == 2,
+                    "bias must be a 1D or 2D tensor");
   }
 
   // Bias may be scalar, per-column, per-row, or full [N, M]. Bx is the
@@ -66,11 +69,11 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   const int By =
       !has_bias || in_bias->dim() == 1 ? 1 : static_cast<int>(in_bias->size(0));
 
-  TORCH_CHECK((Bx == 1 || Bx == M) && (By == 1 || By == N),
-              "bias must be broadcastable to the [N, M] output");
+  STD_TORCH_CHECK((Bx == 1 || Bx == M) && (By == 1 || By == N),
+                  "bias must be broadcastable to the [N, M] output");
 
-  auto out_c = torch::empty(
-      {N, M}, torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
+  auto out_c = torch::stable::empty({N, M}, in_a.scalar_type(), std::nullopt,
+                                    in_a.device());
 
   const auto ceil_div = [](const int value, const int divisor) {
     return (value + divisor - 1) / divisor;
@@ -91,8 +94,9 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   const bool splitk_is_profitable = total_num_kblocks >= 64;
   const bool use_splitk = regular_is_underfilled && splitk_is_profitable;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      in_a.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(in_a.get_device_index());
 
 #define VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, _ALIGNED)                    \
   swmmacGemmRegular<fptype, _N, _HAS_BIAS, load_group, _ALIGNED, tile_columns, \
@@ -109,24 +113,24 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
     }                                                   \
   } while (0)
 
-#define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS) \
-  do {                                               \
-    switch (N) {                                     \
-      case 5:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);  \
-        break;                                       \
-      case 6:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);  \
-        break;                                       \
-      case 7:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);  \
-        break;                                       \
-      case 8:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);  \
-        break;                                       \
-      default:                                       \
-        TORCH_CHECK(false, "unsupported N: ", N);    \
-    }                                                \
+#define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS)  \
+  do {                                                \
+    switch (N) {                                      \
+      case 5:                                         \
+        VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);   \
+        break;                                        \
+      case 6:                                         \
+        VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);   \
+        break;                                        \
+      case 7:                                         \
+        VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);   \
+        break;                                        \
+      case 8:                                         \
+        VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);   \
+        break;                                        \
+      default:                                        \
+        STD_TORCH_CHECK(false, "unsupported N: ", N); \
+    }                                                 \
   } while (0)
 
 #define VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, _ALIGNED)                     \
@@ -145,37 +149,37 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
     }                                                  \
   } while (0)
 
-#define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS) \
-  do {                                              \
-    switch (N) {                                    \
-      case 5:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);  \
-        break;                                      \
-      case 6:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);  \
-        break;                                      \
-      case 7:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);  \
-        break;                                      \
-      case 8:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);  \
-        break;                                      \
-      default:                                      \
-        TORCH_CHECK(false, "unsupported N: ", N);   \
-    }                                               \
+#define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS)   \
+  do {                                                \
+    switch (N) {                                      \
+      case 5:                                         \
+        VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);    \
+        break;                                        \
+      case 6:                                         \
+        VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);    \
+        break;                                        \
+      case 7:                                         \
+        VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);    \
+        break;                                        \
+      case 8:                                         \
+        VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);    \
+        break;                                        \
+      default:                                        \
+        STD_TORCH_CHECK(false, "unsupported N: ", N); \
+    }                                                 \
   } while (0)
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "swmmacGEMM", [&] {
+  VLLM_STABLE_DISPATCH_HALF_TYPES(in_a.scalar_type(), "swmmacGEMM", [&] {
     using fptype = typename scalar<scalar_t>::type;
 
-    const auto* B = reinterpret_cast<const fptype*>(in_b.data_ptr());
-    const auto* A = reinterpret_cast<const fptype*>(in_a.data_ptr());
+    const auto* B = reinterpret_cast<const fptype*>(in_b.const_data_ptr());
+    const auto* A = reinterpret_cast<const fptype*>(in_a.const_data_ptr());
 
     const auto* BIAS =
-        has_bias ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+        has_bias ? reinterpret_cast<const fptype*>(in_bias->const_data_ptr())
                  : nullptr;
 
-    auto* C = reinterpret_cast<fptype*>(out_c.data_ptr());
+    auto* C = reinterpret_cast<fptype*>(out_c.mutable_data_ptr());
 
     if (!use_splitk) {
       const int grid_x =

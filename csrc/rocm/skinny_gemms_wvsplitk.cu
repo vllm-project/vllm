@@ -8,9 +8,10 @@
 
 #include "skinny_gemms.cuh"
 
-torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const std::optional<at::Tensor>& in_bias,
-                       const int64_t CuCount) {
+torch::stable::Tensor wvSplitK(
+    const torch::stable::Tensor& in_a, const torch::stable::Tensor& in_b,
+    const std::optional<torch::stable::Tensor>& in_bias,
+    const int64_t CuCount) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
@@ -25,19 +26,23 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
-  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
-              in_a.dtype() == torch::kBFloat16);
+  STD_TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
+                  "in_a and in_b must have the same dtype, got ",
+                  in_a.scalar_type(), " and ", in_b.scalar_type());
+  STD_TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
+  STD_TORCH_CHECK(
+      in_a.scalar_type() == torch::headeronly::ScalarType::Half ||
+          in_a.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "only float16 and bfloat16 are supported, got ", in_a.scalar_type());
 
-  auto out_c = torch::empty(
-      {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  auto out_c = torch::stable::empty({N_in, M_in}, in_b.scalar_type(),
+                                    std::nullopt, in_b.device());
 
   dim3 grid(CuCount);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      in_a.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(in_a.get_device_index());
   const int max_lds_len = get_lds_size() / 2;
 
 // WVSPLITK_CFG_AC arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N, A_CHUNK).
@@ -126,15 +131,15 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
     }                                                           \
   }
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
+  VLLM_STABLE_DISPATCH_HALF_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
     using fptype = typename scalar<scalar_t>::type;
-    fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
-    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    const fptype* af4 = reinterpret_cast<const fptype*>(in_a.const_data_ptr());
+    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.const_data_ptr());
     const fptype* biasf4 =
         (in_bias.has_value() && in_bias->numel() > 0)
-            ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+            ? reinterpret_cast<const fptype*>(in_bias->const_data_ptr())
             : nullptr;
-    fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
+    fptype* c = reinterpret_cast<fptype*>(out_c.mutable_data_ptr());
 
     // first shoot for biggest tile-size that keeps all simd busy,
     // then cut the active waves to balance their distribution...

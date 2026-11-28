@@ -5,15 +5,15 @@
 // per N_in (see skinny_gemms_int4_n<n>.cu); this unit only dispatches, so it
 // includes the declaration header rather than the kernel header.
 #include "skinny_gemms_int4.h"
-// ops.h carries the public declaration of wvSplitK_int4_g(), so the defining
-// translation unit also sees it (matches attention_dispatch.cu); a mismatch
-// with VLLM_SKINNY_INT4_SIG would otherwise only show up as a link error.
-#include "ops.h"
+// ops_stable.h carries the public declaration of wvSplitK_int4_g(), so the
+// defining translation unit also sees it; a mismatch with
+// VLLM_SKINNY_INT4_SIG would otherwise only show up as a link error.
+#include "ops_stable.h"
 
 #include <stdexcept>
 #include <string>
 
-torch::Tensor wvSplitK_int4_g(VLLM_SKINNY_INT4_SIG) {
+torch::stable::Tensor wvSplitK_int4_g(VLLM_SKINNY_INT4_SIG) {
   switch (in_b.size(0)) {
     case 1:
       return wvSplitK_int4_g_impl<1>(in_a, in_b, in_scale, in_zero_points,

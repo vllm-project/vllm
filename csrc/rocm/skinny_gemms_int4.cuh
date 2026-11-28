@@ -1,19 +1,24 @@
 #pragma once
 
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
 #include <algorithm>
+#include <string>
 #include <type_traits>
 #include <utility>  // std::in_range
 
 #include "core/cuda_compat.h"
+#include "../dispatch_utils.h"
 #include "skinny_gemms_int4.h"
+#include "torch_utils.h"
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
 #if defined(__GFX11__) || defined(__GFX12__)
@@ -46,7 +51,7 @@ static constexpr int kInt4NarrowMaxN = 5;
 // did when this was a single translation unit.
 inline bool on_gfx115x_int4() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     return std::string(dprops->gcnArchName).find("gfx115") != std::string::npos;
   }();
   return result;
@@ -55,7 +60,7 @@ inline bool on_gfx115x_int4() {
 // Callers check it before on_gfx115x_int4(), which matches gfx1151 too.
 inline bool on_gfx1151_int4() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     return std::string(dprops->gcnArchName).find("gfx1151") !=
            std::string::npos;
   }();
@@ -928,12 +933,12 @@ static int mindiv_int4(int N, int div1, int div2) {
 // group_size: 32, 64, or 128
 
 template <int N>
-torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
+torch::stable::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   auto M_in = in_a.size(0);
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
   // Internal tripwire: the API unit derives N from the same in_b.size(0).
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(N_in == N);
+  STD_TORCH_CHECK(N_in == N, "N_in=", N_in, " dispatched to N=", N);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -943,88 +948,95 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
                    ? in_bias->size(0)
                    : 1;
 
+  const int64_t weight_elem_bytes = static_cast<int64_t>(in_a.element_size());
   const int64_t expected_weight_bytes = M_in * K_in / 2;
-  const int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
-  const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
-  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "Weight row stride (",
-              b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,
-              " bytes per row");
-  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "Weight row stride (",
-              b_row_stride_bytes, " bytes) exceeds int range");
+  const int64_t actual_weight_bytes = in_a.numel() * weight_elem_bytes;
+  STD_TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
+                  "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_a.stride(0) * weight_elem_bytes;
+  STD_TORCH_CHECK(
+      b_row_stride_bytes >= K_in / 2, "Weight row stride (", b_row_stride_bytes,
+      " bytes) must hold at least K/2=", K_in / 2, " bytes per row");
+  STD_TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "Weight row stride (",
+                  b_row_stride_bytes, " bytes) exceeds int range");
   const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
-  TORCH_CHECK(
-      in_b.dtype() == torch::kFloat16 || in_b.dtype() == torch::kBFloat16,
+  STD_TORCH_CHECK(
+      in_b.scalar_type() == torch::headeronly::ScalarType::Half ||
+          in_b.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "Activation must be float16 or bfloat16");
-  TORCH_CHECK(in_scale.dtype() == in_b.dtype(),
-              "Scale dtype must match activation dtype");
-  TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
-              "group_size must be 32, 64, or 128, got ", group_size);
-  TORCH_CHECK(K_in % group_size == 0,
-              "K must be divisible by group_size=", group_size);
+  STD_TORCH_CHECK(in_scale.scalar_type() == in_b.scalar_type(),
+                  "Scale dtype must match activation dtype");
+  STD_TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
+                  "group_size must be 32, 64, or 128, got ", group_size);
+  STD_TORCH_CHECK(K_in % group_size == 0,
+                  "K must be divisible by group_size=", group_size);
   int64_t num_groups = K_in / group_size;
-  TORCH_CHECK(in_scale.dim() == 2,
-              "Scale must be 2D [M, K/group_size], got shape ",
-              in_scale.sizes());
-  TORCH_CHECK(in_scale.size(0) == M_in && in_scale.size(1) == num_groups,
-              "Scale must be [M, K/group_size] = [", M_in, ", ", num_groups,
-              "] but got [", in_scale.size(0), ", ", in_scale.size(1), "]");
+  STD_TORCH_CHECK(in_scale.dim() == 2,
+                  "Scale must be 2D [M, K/group_size], got a ", in_scale.dim(),
+                  "D tensor");
+  STD_TORCH_CHECK(in_scale.size(0) == M_in && in_scale.size(1) == num_groups,
+                  "Scale must be [M, K/group_size] = [", M_in, ", ", num_groups,
+                  "] but got [", in_scale.size(0), ", ", in_scale.size(1), "]");
   // Scale and zero-point rows are indexed by their own stride, so the caller
   // may pad them past K / group_size. Only dim 0 may be padded; dim 1 must
   // stay contiguous because the kernel reads consecutive groups.
   const int64_t group_stride = in_scale.stride(0);
-  TORCH_CHECK(in_scale.stride(1) == 1, "Scale must be contiguous in dim 1");
-  TORCH_CHECK(group_stride >= num_groups,
-              "Scale row stride must be at least K/group_size=", num_groups,
-              ", got ", group_stride);
-  TORCH_CHECK(std::in_range<int>(group_stride),
-              "Scale row stride overflows int");
+  STD_TORCH_CHECK(in_scale.stride(1) == 1, "Scale must be contiguous in dim 1");
+  STD_TORCH_CHECK(group_stride >= num_groups,
+                  "Scale row stride must be at least K/group_size=", num_groups,
+                  ", got ", group_stride);
+  STD_TORCH_CHECK(std::in_range<int>(group_stride),
+                  "Scale row stride overflows int");
   const int group_stride_i32 = static_cast<int>(group_stride);
   if (in_zero_points.has_value()) {
     // The kernel reads the words as uint32, so either signedness is accepted.
-    TORCH_CHECK(in_zero_points->dtype() == at::kInt ||
-                    in_zero_points->dtype() == at::kUInt32,
-                "Zero points must be int32 or uint32 (packed 8x uint4 along "
-                "dim 0), got ",
-                in_zero_points->dtype());
-    TORCH_CHECK(in_zero_points->dim() == 2,
-                "Zero points must be 2D [M/8, K/group_size], got shape ",
-                in_zero_points->sizes());
-    TORCH_CHECK(M_in % 8 == 0,
-                "M must be divisible by 8 for packed zero points, got ", M_in);
-    TORCH_CHECK(in_zero_points->stride(1) == 1,
-                "Zero points must be contiguous in dim 1");
-    TORCH_CHECK(in_zero_points->stride(0) == group_stride,
-                "Zero points must share the scale row stride ", group_stride,
-                ", got ", in_zero_points->stride(0));
-    TORCH_CHECK(in_zero_points->size(0) == M_in / 8 &&
-                    in_zero_points->size(1) == num_groups,
-                "Zero points must be [M/8, K/group_size] = [", M_in / 8, ", ",
-                num_groups, "] but got [", in_zero_points->size(0), ", ",
-                in_zero_points->size(1), "]");
+    STD_TORCH_CHECK(
+        in_zero_points->scalar_type() == torch::headeronly::ScalarType::Int ||
+            in_zero_points->scalar_type() ==
+                torch::headeronly::ScalarType::UInt32,
+        "Zero points must be int32 or uint32 (packed 8x uint4 along "
+        "dim 0), got ",
+        in_zero_points->scalar_type());
+    STD_TORCH_CHECK(in_zero_points->dim() == 2,
+                    "Zero points must be 2D [M/8, K/group_size], got a ",
+                    in_zero_points->dim(), "D tensor");
+    STD_TORCH_CHECK(M_in % 8 == 0,
+                    "M must be divisible by 8 for packed zero points, got ",
+                    M_in);
+    STD_TORCH_CHECK(in_zero_points->stride(1) == 1,
+                    "Zero points must be contiguous in dim 1");
+    STD_TORCH_CHECK(in_zero_points->stride(0) == group_stride,
+                    "Zero points must share the scale row stride ",
+                    group_stride, ", got ", in_zero_points->stride(0));
+    STD_TORCH_CHECK(in_zero_points->size(0) == M_in / 8 &&
+                        in_zero_points->size(1) == num_groups,
+                    "Zero points must be [M/8, K/group_size] = [", M_in / 8,
+                    ", ", num_groups, "] but got [", in_zero_points->size(0),
+                    ", ", in_zero_points->size(1), "]");
   }
-  TORCH_CHECK(K_in % kInt4KAlign == 0, "K must be divisible by ", kInt4KAlign);
+  STD_TORCH_CHECK(K_in % kInt4KAlign == 0, "K must be divisible by ",
+                  kInt4KAlign);
 
   // Every kernel indexes A linearly, which a non-contiguous activation would
   // break.
-  TORCH_CHECK(in_b.is_contiguous(), "Activation must be contiguous");
+  STD_TORCH_CHECK(in_b.is_contiguous(), "Activation must be contiguous");
 
   const int max_lds_len = get_lds_size_int4() / 2;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      in_a.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(in_a.get_device_index());
 
-  TORCH_CHECK(N_in <= kInt4NarrowMaxN || on_gfx1151_int4(), "N_in=", N_in,
-              " is only supported on gfx1151");
+  STD_TORCH_CHECK(N_in <= kInt4NarrowMaxN || on_gfx1151_int4(), "N_in=", N_in,
+                  " is only supported on gfx1151");
   // gfx115x walks K in LDS-sized chunks, so K * N is unbounded there. Elsewhere
   // only the medium kernel serves shapes past LDS, and within 1.2x of it.
-  TORCH_CHECK(on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
-              "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
+  STD_TORCH_CHECK(
+      on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
+      "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
 
-  auto out_c = torch::empty(
-      {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  auto out_c = torch::stable::empty({N_in, M_in}, in_b.scalar_type(),
+                                    std::nullopt, in_b.device());
 
   dim3 grid(CuCount);
 
@@ -1266,28 +1278,28 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
     }                                                     \
   }
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      in_b.scalar_type(), "wvSplitK_int4_g", [&] {
-        using fptype = typename scalar<scalar_t>::type;
-        const uint8_t* wptr = reinterpret_cast<const uint8_t*>(in_a.data_ptr());
-        const fptype* aptr = reinterpret_cast<const fptype*>(in_b.data_ptr());
-        const fptype* sptr =
-            reinterpret_cast<const fptype*>(in_scale.data_ptr());
-        const uint32_t* zpptr =
-            in_zero_points.has_value()
-                ? reinterpret_cast<const uint32_t*>(in_zero_points->data_ptr())
-                : nullptr;
-        const fptype* biasptr =
-            (in_bias.has_value() && in_bias->numel() > 0)
-                ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
-                : nullptr;
-        fptype* cptr = reinterpret_cast<fptype*>(out_c.data_ptr());
+  VLLM_STABLE_DISPATCH_HALF_TYPES(in_b.scalar_type(), "wvSplitK_int4_g", [&] {
+    using fptype = typename scalar<scalar_t>::type;
+    const uint8_t* wptr =
+        reinterpret_cast<const uint8_t*>(in_a.const_data_ptr());
+    const fptype* aptr = reinterpret_cast<const fptype*>(in_b.const_data_ptr());
+    const fptype* sptr =
+        reinterpret_cast<const fptype*>(in_scale.const_data_ptr());
+    const uint32_t* zpptr = in_zero_points.has_value()
+                                ? reinterpret_cast<const uint32_t*>(
+                                      in_zero_points->const_data_ptr())
+                                : nullptr;
+    const fptype* biasptr =
+        (in_bias.has_value() && in_bias->numel() > 0)
+            ? reinterpret_cast<const fptype*>(in_bias->const_data_ptr())
+            : nullptr;
+    fptype* cptr = reinterpret_cast<fptype*>(out_c.mutable_data_ptr());
 
-        if (in_zero_points.has_value())
-          WVSPLIT_INT4G_DISPATCH(true)
-        else
-          WVSPLIT_INT4G_DISPATCH(false)
-      });
+    if (in_zero_points.has_value())
+      WVSPLIT_INT4G_DISPATCH(true)
+    else
+      WVSPLIT_INT4G_DISPATCH(false)
+  });
 
 #undef WVSPLITK_INT4G_LAUNCH_W_AC
 #undef WVSPLITK_INT4G_W_AC
