@@ -435,6 +435,9 @@ class RustFrontendProcessManager:
             if value == math.inf:
                 value = sys.float_info.max
             args_dict[key] = value
+        # uvicorn reads it as given, so an empty value trusts no proxy.
+        if (forwarded_allow_ips := os.environ.get("FORWARDED_ALLOW_IPS")) is not None:
+            args_dict["forwarded_allow_ips"] = forwarded_allow_ips
 
         # `--log-level` and `--logging-config` default to
         # argparse.SUPPRESS, so get_non_default_args() never sees them;

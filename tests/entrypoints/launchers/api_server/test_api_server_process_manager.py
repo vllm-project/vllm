@@ -849,6 +849,13 @@ def test_rust_frontend_receives_resolved_logging_config(
             {"VLLM_API_KEY": "env-key", "VLLM_MAX_TOKENIZE_TOKENS": "4096"},
             {"api_key": ["cli-key"], "max_tokenize_tokens": 10},
         ),
+        # uvicorn's setting, passed as given: an empty value trusts no proxy.
+        (
+            [],
+            {"FORWARDED_ALLOW_IPS": "10.0.0.0/8"},
+            {"forwarded_allow_ips": "10.0.0.0/8"},
+        ),
+        ([], {"FORWARDED_ALLOW_IPS": ""}, {"forwarded_allow_ips": ""}),
     ],
 )
 def test_rust_frontend_receives_resolved_env_settings(
@@ -862,7 +869,7 @@ def test_rust_frontend_receives_resolved_env_settings(
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import _RUST_FRONTEND_ENV_ARGS, RustFrontendProcessManager
 
-    for name in _RUST_FRONTEND_ENV_ARGS.values():
+    for name in [*_RUST_FRONTEND_ENV_ARGS.values(), "FORWARDED_ALLOW_IPS"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -907,7 +914,9 @@ def test_rust_frontend_receives_resolved_env_settings(
     [cmd] = popen_calls
     args_json = json.loads(cmd[cmd.index("--args-json") + 1])
     forwarded = {
-        key: args_json[key] for key in _RUST_FRONTEND_ENV_ARGS if key in args_json
+        key: args_json[key]
+        for key in [*_RUST_FRONTEND_ENV_ARGS, "forwarded_allow_ips"]
+        if key in args_json
     }
     assert forwarded == expected
 

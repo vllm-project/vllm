@@ -26,6 +26,7 @@ use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
 use crate::fingerprint::FingerprintMode;
+use crate::forwarded::TrustedProxies;
 use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -179,6 +180,9 @@ pub struct AccessLogConfig {
     /// Request paths whose responses are not logged, matched exactly against
     /// the path without its query string (`--disable-access-log-for-endpoints`).
     pub excluded_paths: Vec<String>,
+    /// Proxies whose `X-Forwarded-For` gives the logged client
+    /// (`FORWARDED_ALLOW_IPS`).
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl Default for AccessLogConfig {
@@ -186,6 +190,7 @@ impl Default for AccessLogConfig {
         Self {
             enabled: true,
             excluded_paths: Vec::new(),
+            trusted_proxies: TrustedProxies::parse(TrustedProxies::DEFAULT),
         }
     }
 }
