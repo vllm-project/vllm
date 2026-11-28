@@ -14,6 +14,8 @@ from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
+    _pad_query_heads,
+    trtllm_gen_query_heads,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -221,9 +223,19 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         topk_indices_physical: torch.Tensor,
     ) -> torch.Tensor:
         num_actual_toks = q.shape[0]
+        # The kernels are instantiated for a few query head counts only. A count
+        # in between (e.g. 3 heads per rank for a 96-head model under TP32) has no
+        # kernel, which surfaces at KV-cache init as "SM120 sparse-MLA has no
+        # decode kernel for this shape" and pins --max-num-batched-tokens to the
+        # 64-token decode budget. Zero-pad the query heads and drop the padded
+        # outputs below.
+        num_heads = q.shape[1]
+        kernel_heads = trtllm_gen_query_heads(num_heads)
+        if kernel_heads != num_heads:
+            q = _pad_query_heads(q, kernel_heads)
 
         output = q.new_empty(
-            (num_actual_toks, self.num_heads, self.kv_lora_rank),
+            (num_actual_toks, kernel_heads, self.kv_lora_rank),
             dtype=q.dtype,
         )
 
@@ -251,4 +263,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             sparse_mla_top_k=sparse_capacity,
             kv_scale_format=self.kv_scale_format,
         )
-        return out.squeeze(1)
+        out = out.squeeze(1)
+        if kernel_heads != num_heads:
+            out = out[:, :num_heads]
+        return out

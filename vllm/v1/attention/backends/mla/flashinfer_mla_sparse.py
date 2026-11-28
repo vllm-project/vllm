@@ -396,11 +396,26 @@ _TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 _DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
 
 
+_TRTLLM_GEN_MLA_QUERY_HEADS = (8, 16, 32, 64, 128)
+
+
 def trtllm_gen_query_heads(num_heads: int) -> int:
-    """Query heads the trtllm-gen MLA decode runs: it takes no head count strictly
-    between 64 and 128 (e.g. 96 gathered under DCP8 at 12 heads per rank), so
-    those are zero-padded to 128."""
-    return 128 if 64 < num_heads < 128 else num_heads
+    """Query heads the trtllm-gen MLA decode runs.
+
+    The kernel is instantiated for a fixed set of query head counts only, so any
+    other count must be zero-padded up to the next instantiated width. Known
+    cases: 96 heads gathered under DCP8 (12 heads per rank) pads to 128, and a
+    96-head model under plain TP (3 heads per rank at TP32) pads to 8. Leaving
+    the count unchanged selects no kernel at all, which surfaces at KV-cache
+    init as "SM120 sparse-MLA has no decode kernel for this shape" and pins
+    --max-num-batched-tokens to the 64-token decode budget.
+    """
+    if num_heads > 128:
+        return num_heads
+    for width in _TRTLLM_GEN_MLA_QUERY_HEADS:
+        if num_heads <= width:
+            return width
+    return num_heads
 
 
 def compute_trtllm_sparse_mla_workspace_bytes(
