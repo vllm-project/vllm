@@ -397,6 +397,88 @@ class TestTurboQuantWorkspaceReservation:
             ),
         ]
 
+    @pytest.mark.parametrize(
+        "mode,cuda,tiered,grouped",
+        [
+            ("TURBOQUANT_K8V4", True, True, False),  # FP8 keys: per-head
+            ("TURBOQUANT_4BIT_NC", True, True, True),  # MSE keys: grouped
+            ("TURBOQUANT_4BIT_NC", False, False, False),  # ROCm (FlyDSL), others
+            ("ULTRAQUANT_4BIT", True, False, False),  # has its own decode
+        ],
+    )
+    def test_decode_workspace_covers_split_tiers(
+        self, monkeypatch, mode, cuda, tiered, grouped
+    ):
+        """mid_o is reserved for the largest batch x splits product decode can
+        request. Only TurboQuant's Triton decode on CUDA tiers the splits."""
+        from dataclasses import replace
+
+        from vllm.v1.attention.backends import turboquant_attn as ta
+        from vllm.v1.kv_cache_interface import KVQuantMode
+
+        calls = []
+        manager = SimpleNamespace(get_simultaneous=lambda *a: calls.append(a))
+        monkeypatch.setattr(ta, "current_workspace_manager", lambda: manager)
+        monkeypatch.setattr(ta, "is_workspace_manager_initialized", lambda: True)
+        monkeypatch.setattr(
+            ta, "current_platform", SimpleNamespace(is_cuda=lambda: cuda)
+        )
+        spec = replace(self._fake_kv_cache_spec(), kv_quant_mode=KVQuantMode[mode])
+        factors = ta._decode_split_factors(spec.kv_quant_mode.is_turboquant, grouped)
+        assert bool(factors) == tiered
+        for max_seqs in (8, 64):
+            calls.clear()
+            cfg = self._fake_vllm_config(max_num_seqs=max_seqs)
+            ta.TurboQuantMetadataBuilder(spec, ["l0"], cfg, "cuda")
+            rows = [b * ta._decode_kv_splits(b, 4, factors) for b in range(1, 65)]
+            assert ta._max_decode_split_rows(max_seqs, 4, factors) == max(
+                rows[:max_seqs]
+            )
+            mid_o = (max(rows[:max_seqs]), 8, 1) if tiered else (max_seqs, 8, 4)
+            assert calls[0][0] == ((*mid_o, 129), torch.float32)
+
+    @pytest.mark.parametrize(
+        "mode,head_size,num_kv_heads,grouped",
+        [
+            ("TURBOQUANT_4BIT_NC", 128, 4, True),
+            ("TURBOQUANT_3BIT_NC", 256, 2, True),
+            ("TURBOQUANT_4BIT_NC", 64, 4, False),  # untuned head sizes
+            ("TURBOQUANT_4BIT_NC", 96, 4, False),
+            ("TURBOQUANT_4BIT_NC", 512, 4, False),
+            ("TURBOQUANT_K3V4_NC", 128, 8, False),  # group size 1
+            ("TURBOQUANT_K8V4", 128, 4, False),  # FP8 keys
+        ],
+    )
+    def test_grouped_decode_selection(
+        self, monkeypatch, mode, head_size, num_kv_heads, grouped
+    ):
+        """The grouped MSE-key kernel runs for MSE keys with GQA at head size 128
+        or 256, and the workspace is sized for its split tiers."""
+        from dataclasses import replace
+
+        from vllm.v1.attention.backends import turboquant_attn as ta
+        from vllm.v1.kv_cache_interface import KVQuantMode
+
+        if not torch.cuda.is_available():
+            pytest.skip("the grouped MSE-key kernel is CUDA-only")
+        fp8, group = mode == "TURBOQUANT_K8V4", 8 // num_kv_heads
+        assert ta._use_mse_gqa(fp8, group, head_size) == grouped
+        calls = []
+        manager = SimpleNamespace(get_simultaneous=lambda *a: calls.append(a))
+        monkeypatch.setattr(ta, "current_workspace_manager", lambda: manager)
+        monkeypatch.setattr(ta, "is_workspace_manager_initialized", lambda: True)
+        spec = replace(
+            self._fake_kv_cache_spec(),
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            kv_quant_mode=KVQuantMode[mode],
+        )
+        cfg = self._fake_vllm_config(max_num_seqs=4)
+        ta.TurboQuantMetadataBuilder(spec, ["l0"], cfg, "cuda")
+        tiers = ta._GQA_DECODE_SPLIT_FACTORS if grouped else ta._DECODE_SPLIT_FACTORS
+        rows = ta._max_decode_split_rows(4, 4, tiers)
+        assert calls[0][0] == ((rows, 8, 1, head_size + 1), torch.float32)
+
     def test_metadata_builder_skips_continuation_prefill_when_disabled(
         self, monkeypatch
     ):
@@ -782,3 +864,230 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+# ============================================================================
+# Decode: parallel split reduction (stage 2) and KV split tiers
+# ============================================================================
+
+
+def _tq_cache(preset, D, Hk, n, PiT, centroids, bs=16):
+    """Store n random K/V tokens on shuffled pages of a larger pool, in vLLM's
+    physical layout. Returns the cache and the block table row."""
+    from vllm.v1.attention.ops.triton_turboquant_store import (
+        triton_turboquant_store,
+    )
+
+    cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=D)
+    c = centroids.sort()[0]
+    g = torch.Generator(device="cuda").manual_seed(0)
+    k, v = torch.randn(2, n, Hk, D, device="cuda", generator=g).bfloat16()
+    pages = -(-n // bs)
+    blocks = torch.randperm(pages + 3, device="cuda", generator=g)[:pages].int()
+    cache = torch.zeros(pages + 3, Hk, bs, cfg.slot_size_aligned, dtype=torch.uint8)
+    cache = cache.cuda().transpose(1, 2)  # vLLM's physical layout
+    pos = torch.arange(n, device="cuda")
+    slots = (blocks[pos // bs] * bs + pos % bs).int()
+    tq = (cfg.key_mse_bits, cfg.key_packed_size, cfg.effective_value_quant_bits)
+    mid = (c[:-1] + c[1:]) / 2
+    triton_turboquant_store(k, v, cache, slots, PiT, mid, *tq, key_fp8=cfg.key_fp8)
+    return cache, blocks
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestDecodeSplits:
+    @pytest.mark.parametrize("splits", [1, 7, 256])
+    def test_stage2_matches_lse_merge(self, splits):
+        """Rows shorter than the split count leave some splits unwritten."""
+        from vllm.v1.attention.ops.triton_turboquant_decode import _tq_decode_stage2
+
+        seq_lens = torch.tensor([400, 1, 37], device="cuda", dtype=torch.int32)
+        mid_o = torch.randn(3, 8, splits, 129, device="cuda")
+        out, lse = torch.empty(3, 8, 128, device="cuda"), torch.empty(3, 8).cuda()
+        args = (mid_o, out, lse, seq_lens, *mid_o.stride()[:3], *out.stride()[:2], 8)
+        block_s = min(next_power_of_2(splits), 128)
+        kw = dict(NUM_KV_SPLITS=splits, HEAD_DIM=128, BLOCK_S=block_s, BLOCK_DC=32)
+        _tq_decode_stage2[(3, 8, 4)](*args, **kw)
+        for b, L in enumerate(seq_lens.tolist()):
+            m = mid_o[b, :, : sum(s * -(-L // splits) < L for s in range(splits))]
+            ref = (m[..., 128].softmax(-1)[..., None] * m[..., :128]).sum(1)
+            torch.testing.assert_close(out[b], ref)
+            torch.testing.assert_close(lse[b], m[..., 128].logsumexp(-1))
+
+    @pytest.mark.parametrize(
+        "preset,D,cases",
+        [
+            ("turboquant_k8v4", 128, ((1, 128), (16, 128), (17, 64), (33, 32))),
+            # grouped MSE-key path: its own tiers
+            ("turboquant_4bit_nc", 256, ((1, 128), (4, 128), (5, 64), (17, 32))),
+        ],
+    )
+    def test_decode_attention_split_tiers(self, monkeypatch, preset, D, cases):
+        """_decode_attention picks the split count from the batch size, and the
+        result matches the same kernel at the base split count."""
+        from vllm.v1.attention.backends import turboquant_attn as ta
+
+        cfg = TestTurboQuantWorkspaceReservation._fake_vllm_config()
+        cfg.attention_config.tq_max_kv_splits_for_cuda_graph = 32
+        monkeypatch.setattr(ta, "get_current_vllm_config", lambda: cfg)
+        impl = ta.TurboQuantAttentionImpl(
+            8, D, D**-0.5, num_kv_heads=2, kv_cache_dtype=preset
+        )
+        layer = torch.nn.Module()
+        impl._ensure_on_device(layer, torch.device("cuda"))
+        H, cents = layer._tq_Pi, layer._tq_centroids
+        cache, blocks = _tq_cache(preset, D, 2, 309, H, cents)
+        calls, real = [], ta.triton_turboquant_decode_attention
+        spy = lambda **kw: calls.append(kw) or real(**kw)  # noqa: E731
+        monkeypatch.setattr(ta, "triton_turboquant_decode_attention", spy)
+        torch.manual_seed(0)
+        no_bufs = dict(mid_o_buf=None, output_buf=None, lse_buf=None, buf_holder=None)
+        for B, splits in cases:
+            q = torch.randn(B, 8, D, device="cuda").bfloat16()
+            sl = torch.randint(1, 310, (B,), device="cuda", dtype=torch.int32)
+            md = SimpleNamespace(block_table=blocks[None].expand(B, -1), seq_lens=sl)
+            out = impl._decode_attention(q, cache, md, H, cents, H, layer).clone()
+            assert calls[-1]["max_num_kv_splits"] == splits
+            ref = real(**{**calls[-1], **no_bufs, "max_num_kv_splits": 32})
+            torch.testing.assert_close(out, ref, atol=1e-3, rtol=2**-7)
+
+
+# ============================================================================
+# Decode: grouped MSE-key stage 1 with in-kernel query rotation
+# ============================================================================
+
+
+def _mse_cache(preset, D, Hk, n, centroids=None):
+    cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=D)
+    H = _build_hadamard(D, "cuda")
+    if centroids is None:
+        centroids = solve_lloyd_max(D, cfg.centroid_bits)[0].float().cuda()
+    return (cfg, *_tq_cache(preset, D, Hk, n, H, centroids), H, centroids)
+
+
+def _tq_reference(cfg, cache, blocks, H, centroids, q, seq_lens, scale=None):
+    """fp32 attention over the MSE-key cache dequantized in PyTorch."""
+    D, Hk, bs = q.shape[-1], cache.shape[2], cache.shape[1]
+    ar = lambda n: torch.arange(n, device="cuda")  # noqa: E731
+    f16 = lambda raw: raw.contiguous().view(torch.float16).float()  # noqa: E731
+
+    def codes(raw, bits):  # LSB-first packed codes -> [.., D]
+        b = ((raw.long()[..., None] >> ar(8)) & 1).flatten(-2)[..., : D * bits]
+        return (b.view(*raw.shape[:-1], D, bits) << ar(bits)).sum(-1)
+
+    pos = ar(int(seq_lens.max()))
+    slot = cache[blocks[pos // bs].long(), pos % bs]  # [n, Hk, slot]
+    kbits, vbits = cfg.key_mse_bits, cfg.effective_value_quant_bits
+    kb, vb = math.ceil(D * kbits / 8), math.ceil(D * vbits / 8)
+    c = centroids[codes(slot[..., :kb], kbits)]
+    K = c / c.norm(dim=-1, keepdim=True) * f16(slot[..., kb : kb + 2])
+    v = slot[..., cfg.key_packed_size :]
+    V = codes(v[..., :vb], vbits) * f16(v[..., vb : vb + 2])
+    V = V + f16(v[..., vb + 2 : vb + 4])
+    out, lse = torch.zeros(q.shape, device="cuda"), torch.zeros(q.shape[:2]).cuda()
+    for b, L in enumerate(seq_lens.tolist()):
+        qb = (q[b].float() @ H).view(Hk, -1, D)
+        sc = torch.einsum("hgd,nhd->hgn", qb, K[:L]) * (scale or D**-0.5)
+        out[b] = torch.einsum("hgn,nhd->hgd", sc.softmax(-1), V[:L]).flatten(0, 1)
+        lse[b] = sc.logsumexp(-1).flatten()
+    return out, lse
+
+
+def _tq_decode(cfg, cache, blocks, H, cents, q, seq_lens, splits, scale=None, pi=True):
+    from vllm.v1.attention.ops.triton_turboquant_decode import (
+        triton_turboquant_decode_attention,
+    )
+
+    bt, lse = blocks[None].expand(q.shape[0], -1), torch.empty(q.shape[:2]).cuda()
+    tq = (cfg.key_mse_bits, cfg.key_packed_size, cfg.effective_value_quant_bits)
+    args = (q, cache, bt, seq_lens, H, cents, scale or q.shape[-1] ** -0.5, *tq)
+    kw = dict(norm_correction=True, lse_buf=lse, max_num_kv_splits=splits)
+    out = triton_turboquant_decode_attention(*args, **kw, pi_is_hadamard=pi)
+    return out.float(), lse
+
+
+def _assert_close_to_ref(out, ref):
+    # Measured on H200 over 4 presets x D 128/256 x B 1-32 x ctx 4K-128K: max
+    # 7.8e-3 like the fp32 per-head kernel; rtol covers bf16 output rounding.
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=2**-8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestGroupedDecode:
+    @pytest.mark.parametrize("preset", [p for p in ALL_PRESETS if "k8" not in p])
+    @pytest.mark.parametrize("D,Hq,Hk", [(128, 8, 2), (256, 12, 2)])
+    @pytest.mark.parametrize("splits", [1, 128])
+    def test_matches_fp32_reference(self, preset, D, Hq, Hk, splits):
+        """Grouped MSE-key stage 1 (fp16 dots, in-kernel Hadamard rotation) +
+        stage 2 vs fp32. Rows: tiles crossing pages, empty, 1 token, partial."""
+        torch.manual_seed(0)
+        args = _mse_cache(preset, D, Hk, 700)
+        q = torch.randn(4, Hq, D, device="cuda").bfloat16()
+        seq_lens = torch.tensor([700, 0, 1, 333], device="cuda", dtype=torch.int32)
+        out, lse = _tq_decode(*args, q, seq_lens, splits)
+        ref_out, ref_lse = _tq_reference(*args, q, seq_lens)
+        assert (out[1] == 0).all()
+        rows = [0, 2, 3]
+        _assert_close_to_ref(out[rows], ref_out[rows])
+        _assert_close_to_ref(lse[rows], ref_lse[rows])
+        err, ref = (out - ref_out)[rows].abs().mean(), ref_out[rows].abs().mean()
+        assert err <= 5e-4 + 2**-8 * ref  # bf16 output rounding grows with |out|
+
+    @pytest.mark.parametrize("pi_is_hadamard", [True, False])
+    @pytest.mark.parametrize("mag", [3e4, 1e30])
+    def test_large_queries_do_not_overflow_fp16(self, pi_is_hadamard, mag):
+        """|q_rot| beyond fp16. (a) every head scaled by mag, with a matching
+        attention scale so logits stay ~N(0, 1); (b) one large head per group
+        next to normal heads, which must keep their precision."""
+        torch.manual_seed(0)
+        args = _mse_cache("turboquant_4bit_nc", 256, 2, 300)
+        seq_lens = torch.tensor([300], device="cuda", dtype=torch.int32)
+        q0 = torch.randn(1, 8, 256, device="cuda")
+        mixed = q0.clone()
+        mixed[:, ::4] *= mag  # head 0 of each group of 4
+        for q, scale in ((q0 * mag, 1 / (16 * mag)), (mixed, None)):
+            q = q.bfloat16()
+            out, lse = _tq_decode(*args, q, seq_lens, 8, scale, pi_is_hadamard)
+            ref_out, ref_lse = _tq_reference(*args, q, seq_lens, scale)
+            assert torch.isfinite(out).all() and torch.isfinite(lse).all()
+            torch.testing.assert_close(lse, ref_lse, atol=1e-2, rtol=1e-3)
+            normal = slice(None) if scale else [1, 2, 3, 5, 6, 7]
+            _assert_close_to_ref(out[:, normal], ref_out[:, normal])
+
+    def test_decode_attention_tiers_and_continuation_rows(self, monkeypatch):
+        """_decode_attention picks the grouped split tier from the batch size; a
+        short continuation chunk in _prefill_attention runs every causal row
+        through the decode kernel. Both forward pi_is_hadamard."""
+        from vllm.v1.attention.backends import turboquant_attn as ta
+
+        cfg = TestTurboQuantWorkspaceReservation._fake_vllm_config()
+        cfg.attention_config.tq_max_kv_splits_for_cuda_graph = 32
+        monkeypatch.setattr(ta, "get_current_vllm_config", lambda: cfg)
+        preset = "turboquant_k3v4_nc"
+        impl = ta.TurboQuantAttentionImpl(
+            8, 128, 128**-0.5, num_kv_heads=2, kv_cache_dtype=preset
+        )
+        layer = torch.nn.Module()
+        impl._ensure_on_device(layer, torch.device("cuda"))
+        calls, real = [], ta.triton_turboquant_decode_attention
+        spy = lambda **kw: calls.append(kw) or real(**kw)  # noqa: E731
+        monkeypatch.setattr(ta, "triton_turboquant_decode_attention", spy)
+        torch.manual_seed(0)
+        args = _mse_cache(preset, 128, 2, 309, centroids=layer._tq_centroids)
+        _, cache, blocks, H, cents = args
+        for B, tier in ((1, 128), (5, 64), (17, 32)):
+            q = torch.randn(B, 8, 128, device="cuda").bfloat16()
+            sl = torch.randint(1, 310, (B,), device="cuda", dtype=torch.int32)
+            md = SimpleNamespace(block_table=blocks[None].expand(B, -1), seq_lens=sl)
+            out = impl._decode_attention(q, cache, md, H, cents, H, layer)
+            assert calls[-1]["max_num_kv_splits"] == tier
+            _assert_close_to_ref(out.float(), _tq_reference(*args, q, sl)[0])
+        q, kv = torch.randn(9, 8, 128).cuda().bfloat16(), torch.zeros(9, 2, 128).cuda()
+        qsl, sl = torch.tensor([0, 9], dtype=torch.int32), torch.tensor([309])
+        md = SimpleNamespace(max_query_len=9, max_seq_len=309, block_table=blocks[None])
+        md.query_start_loc, md.query_start_loc_cpu = qsl.cuda(), qsl
+        md.seq_lens, md.seq_lens_cpu = sl.int().cuda(), sl
+        out = impl._prefill_attention(q, kv, kv, cache, md, H, cents, H, layer)
+        assert all(c.get("pi_is_hadamard") for c in calls)
+        sl = torch.arange(301, 310, device="cuda", dtype=torch.int32)  # causal rows
+        _assert_close_to_ref(out.float(), _tq_reference(*args, q, sl)[0])
