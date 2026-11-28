@@ -36,6 +36,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -279,10 +280,24 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
         )
 
 
+class _UE8M0CutlassKernel(CutlassFp8BlockScaledMMKernel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.quant_fp8 = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, 128),
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=True,
+            column_major_scales=True,
+        )
+
+
 class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
     """Test model for MLA Attention + per-group FP8 (block quant) fusion."""
 
     quant_key = kFp8Dynamic128Sym
+    kernel_type = CutlassFp8BlockScaledMMKernel
+    use_ue8m0 = False
     quant_config = Fp8Config(
         weight_block_size=[128, 128],
     )
@@ -309,7 +324,7 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
             weight_quant_key=weight_quant_key,
             input_dtype=self.dtype,
             device=device,
-            force_kernel=CutlassFp8BlockScaledMMKernel,
+            force_kernel=self.kernel_type,
         )
 
         w = kwargs.get("w")
@@ -337,6 +352,13 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
             output_shape=(q.shape[0], self.output_dim),
         )
         return self.block_fp8_linear(attn_output)
+
+
+class TestMLAAttentionUE8M0GroupQuantPatternModel(
+    TestMLAAttentionFp8GroupQuantPatternModel
+):
+    kernel_type = _UE8M0CutlassKernel
+    use_ue8m0 = True
 
 
 def is_nvfp4_supported():
@@ -372,6 +394,10 @@ if current_platform.is_cuda():
             TestMLAAttentionNvfp4QuantPatternModel,
         )
     ]
+    if current_platform.is_device_capability(90):
+        PATTERN_TEST_MODELS_MLA_GROUP_FP8.append(
+            ("deepseek-ai/DeepSeek-V3", TestMLAAttentionUE8M0GroupQuantPatternModel)
+        )
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
     BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
 elif current_platform.is_rocm():
@@ -568,6 +594,8 @@ def test_mla_attention_quant_pattern(
         quant_op = torch.ops.aten.reciprocal
     elif aiter_quant or rocm_aiter_ops.is_linear_fp8_enabled():
         quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+    elif getattr(model_class, "use_ue8m0", False):
+        quant_op = torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row.default
     else:
         quant_op = QUANT_OPS[quant_key]
     test_backend.check_before_ops(

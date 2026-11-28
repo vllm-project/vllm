@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
@@ -539,3 +540,235 @@ def test_per_token_group_quant_int8_register_matches_smem(shape, dtype: torch.dt
 
     assert torch.equal(reg_q, smem_q)
     assert torch.equal(reg_s, smem_s)
+
+
+# SM90 UE8M0 row quantization: native byte and scale contract.
+_ROW_GROUP_SIZE = 128
+_ROW_EPS = 1e-10
+_ROW_FP8_DTYPE = torch.float8_e4m3fn
+_requires_sm90_row_quant = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="SM90 UE8M0 row quantization",
+)
+
+
+def _row_alloc_scales(T, H, layout, device, group_size=_ROW_GROUP_SIZE):
+    sf_k = H // group_size
+    if layout == "row":
+        return torch.empty((T, sf_k), device=device, dtype=torch.float32)
+    if layout == "col":
+        return torch.empty((sf_k, T), device=device, dtype=torch.float32).permute(
+            -1, -2
+        )
+    m = fp8_utils.get_tma_aligned_size(T, 4)
+    return torch.empty_strided((T, sf_k), (1, m), device=device, dtype=torch.float32)
+
+
+def _row_run(
+    x, layout, use_row_kernel, use_ue8m0=False, group_size=_ROW_GROUP_SIZE, out_q=None
+):
+    if use_row_kernel:
+        return fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size,
+            column_major_scales=layout != "row",
+            tma_aligned_scales=layout == "tma",
+            out_q=out_q,
+            use_ue8m0=use_ue8m0,
+        )
+    fp8_min, fp8_max = torch.finfo(_ROW_FP8_DTYPE).min, torch.finfo(_ROW_FP8_DTYPE).max
+    T, H = x.shape
+    x_q = torch.empty_like(x, dtype=_ROW_FP8_DTYPE)
+    x_s = _row_alloc_scales(T, H, layout, x.device, group_size)
+    torch.ops._C.per_token_group_fp8_quant(
+        x,
+        x_q,
+        x_s,
+        group_size,
+        _ROW_EPS,
+        fp8_min,
+        fp8_max,
+        use_ue8m0,
+        layout != "row",
+        layout == "tma",
+    )
+    return x_q, x_s
+
+
+def _row_assert_bits_equal(actual, expected):
+    q, s = actual
+    q_ref, s_ref = expected
+    assert q.shape == q_ref.shape and q.dtype == q_ref.dtype
+    assert s.shape == s_ref.shape and s.stride() == s_ref.stride()
+    assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8))
+    assert torch.equal(
+        s.contiguous().view(torch.int32), s_ref.contiguous().view(torch.int32)
+    )
+
+
+def _row_add_edge_groups(x):
+    fixtures = torch.zeros((16, _ROW_GROUP_SIZE), device=x.device, dtype=x.dtype)
+    fixtures[1] = -0.0
+    fixtures[2] = torch.finfo(x.dtype).tiny / 2
+    fixtures[3] = torch.finfo(x.dtype).max
+    fixtures[4] = -torch.finfo(x.dtype).max
+    fixtures[5] = float("nan")
+    fixtures[6] = float("inf")
+    fixtures[7] = -float("inf")
+    fixtures[8] = torch.linspace(
+        -448, 448, _ROW_GROUP_SIZE, device=x.device, dtype=x.dtype
+    )
+    fixtures[9] = fixtures[8] * (2**-20)
+    fixtures[10] = fixtures[8] * (2**20)
+    fixtures[11:13] = fixtures[8]
+    fixtures[11, 0] = float("nan")
+    fixtures[12, 0] = float("inf")
+    for i, value in enumerate((446.0, 448.0, 450.0), 13):
+        fixtures[i] = fixtures[8]
+        fixtures[i, -1] = value
+    x[:16] = fixtures.repeat(1, x.shape[1] // _ROW_GROUP_SIZE)
+
+
+@pytest.mark.parametrize("T", [2047, 2048, 3187])
+@pytest.mark.parametrize(
+    "H,layout", [(5120, "row"), (6144, "col"), (17408, "tma"), (32768, "col")]
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@torch.inference_mode()
+@_requires_sm90_row_quant
+def test_padded_widths_preserve_cuda_bits(T, H, layout, dtype, use_ue8m0):
+    """Masking and scale rounding agree at the dispatch boundary and odd M."""
+    torch.manual_seed(0)
+    x = torch.randn(T, H, device="cuda", dtype=dtype)
+    _row_add_edge_groups(x)
+    _row_assert_bits_equal(
+        _row_run(x, layout, True, use_ue8m0), _row_run(x, layout, False, use_ue8m0)
+    )
+
+
+@torch.inference_mode()
+@_requires_sm90_row_quant
+def test_offset_views_preserve_outputs_and_guard_bytes():
+    """Contiguous views need not have aligned storage offsets or own storage."""
+    T, H = 2048, 6144
+    storage = torch.randn(T * H + 2, device="cuda", dtype=torch.bfloat16)
+    x = storage[1:-1].view(T, H)
+    out_storage = torch.full((T * H + 2,), 0x55, device="cuda", dtype=torch.uint8)
+    out_q = out_storage[1:-1].view(_ROW_FP8_DTYPE).view(T, H)
+    result = _row_run(x, "col", True, True, out_q=out_q)
+    assert result[0].data_ptr() == out_q.data_ptr()
+    _row_assert_bits_equal(result, _row_run(x, "col", False, True))
+    assert out_storage[0].item() == out_storage[-1].item() == 0x55
+
+
+@pytest.mark.parametrize(
+    "H,group_size,dtype,use_ue8m0",
+    [
+        (4096, 64, torch.float16, False),
+        (5120, 64, torch.bfloat16, True),
+        (33024, 128, torch.bfloat16, True),
+        (5120, 128, torch.float32, True),
+    ],
+)
+@torch.inference_mode()
+@_requires_sm90_row_quant
+def test_other_group_sizes_and_fallbacks_match_cuda(H, group_size, dtype, use_ue8m0):
+    x = torch.randn(2048, H, device="cuda", dtype=dtype)
+    _row_assert_bits_equal(
+        _row_run(x, "col", True, use_ue8m0, group_size),
+        _row_run(x, "col", False, use_ue8m0, group_size),
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="new padded path is SM90",
+)
+@torch.inference_mode()
+@_requires_sm90_row_quant
+def test_ue8m0_dispatch_boundary_launches_row_kernel():
+    """Output equality alone must not let an accidental all-CUDA fallback pass."""
+    for T in (2047, 2048):
+        x = torch.randn(T, 5120, device="cuda", dtype=torch.bfloat16)
+        _row_run(x, "col", True, True)
+        torch.accelerator.synchronize()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA]
+        ) as prof:
+            _row_run(x, "col", True, True)
+            torch.accelerator.synchronize()
+        names = [event.name for event in prof.events()]
+        assert any(
+            "_per_token_group_quant_fp8_ue8m0_row" in name for name in names
+        ) == (T == 2048)
+        assert any("per_token_group_quant_8bit" in name for name in names) == (
+            T == 2047
+        )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    "backend_name,tma_aligned_scales",
+    [("inductor", False), ("inductor", True), ("eager", False)],
+)
+@_requires_sm90_row_quant
+def test_fullgraph_dynamic_rows_cross_dispatch_boundary(
+    backend_name, tma_aligned_scales
+):
+    from torch._dynamo.testing import EagerAndRecordGraphs
+
+    backend = EagerAndRecordGraphs() if backend_name == "eager" else backend_name
+
+    def quant(x):
+        return fp8_utils.per_token_group_quant_fp8(
+            x,
+            _ROW_GROUP_SIZE,
+            column_major_scales=True,
+            tma_aligned_scales=tma_aligned_scales,
+            use_ue8m0=True,
+        )
+
+    compiled = torch.compile(quant, backend=backend, fullgraph=True, dynamic=True)
+    for T in (2047, 2048, 3187):
+        x = torch.randn(T, 6144, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(x, 0)
+        layout = "tma" if tma_aligned_scales else "col"
+        _row_assert_bits_equal(compiled(x), _row_run(x, layout, False, True))
+    # Check Dynamo graph reuse separately from Inductor's compilation retries.
+    if isinstance(backend, EagerAndRecordGraphs):
+        assert len(backend.graphs) == 1
+        op = torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row
+        assert (
+            sum(
+                node.op == "call_function" and node.target in (op, op.default)
+                for node in backend.graphs[0].graph.nodes
+            )
+            == 1
+        )
+
+
+@_requires_sm90_row_quant
+def test_ue8m0_row_opcheck():
+    """Fusion's native keyword arguments and output mutations remain valid."""
+    torch.manual_seed(0)
+    x = torch.randn(2048, 5120, device="cuda", dtype=torch.bfloat16)
+    x_q = torch.empty_like(x, dtype=_ROW_FP8_DTYPE)
+    x_s = _row_alloc_scales(x.shape[0], x.shape[1], "col", x.device)
+    fp8_min, fp8_max = torch.finfo(_ROW_FP8_DTYPE).min, torch.finfo(_ROW_FP8_DTYPE).max
+    opcheck(
+        torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row,
+        (),
+        dict(
+            input=x,
+            output_q=x_q,
+            output_s=x_s,
+            group_size=_ROW_GROUP_SIZE,
+            eps=_ROW_EPS,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            scale_ue8m0=True,
+            dummy_is_scale_transposed=True,
+            dummy_is_tma_aligned=False,
+        ),
+    )
