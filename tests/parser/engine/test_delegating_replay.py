@@ -91,6 +91,9 @@ def _discover_pairings() -> list[_PairingInfo]:
             # It is covered by tests/parser/mistral/ instead.
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
+        if cfg.name in ("hermes", "longcat"):
+            # Dedicated coverage lives in tests/tool_parsers/.
+            continue
         if cfg.name == "llama_json":
             # Llama JSON has no TOOL_END terminal; dedicated coverage lives
             # in test_llama_json.py.
