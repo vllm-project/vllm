@@ -28,7 +28,7 @@ from torch import nn
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.utils import getattr_iter
 from vllm.distributed import (
     get_pp_group,
@@ -703,6 +703,7 @@ class Gemma4DecoderLayer(nn.Module):
             intermediate_size = getattr_iter(config, names)
             if intermediate_size is None:
                 raise ValueError("Gemma4 MoE requires an expert intermediate size")
+            parallel_config = get_current_vllm_config().parallel_config
             self.experts = FusedMoEFactory(
                 num_experts=config.num_experts,
                 top_k=config.top_k_experts,
@@ -713,6 +714,8 @@ class Gemma4DecoderLayer(nn.Module):
                 prefix=f"{prefix}.experts",
                 custom_routing_function=self.router.routing_function,
                 activation="gelu_tanh",
+                enable_eplb=parallel_config.enable_eplb,
+                num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,
             )
             self.post_feedforward_layernorm_1 = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
@@ -1539,14 +1542,17 @@ class Gemma4ForCausalLM(
         self.num_moe_layers = len(self.moe_layers)
 
         num_experts = config.num_experts if self.num_moe_layers else 0
+        moe_config = self.moe_layers[0].moe_config if self.moe_layers else None
         self.num_logical_experts = num_experts
-        self.num_physical_experts = num_experts
-        self.num_local_physical_experts = num_experts
+        self.num_physical_experts = moe_config.num_experts if moe_config else 0
+        self.num_local_physical_experts = (
+            moe_config.num_local_experts if moe_config else 0
+        )
         self.num_routed_experts = num_experts
 
         self.num_expert_groups = 1
         self.num_shared_experts = 0
-        self.num_redundant_experts = 0
+        self.num_redundant_experts = self.num_physical_experts - num_experts
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
