@@ -43,6 +43,8 @@ from vllm.renderers.hf import (
     _expand_prompt_embeds_placeholders,
     _filter_prompt_embeds_by_template,
 )
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.utils.sparse_utils import TensorDecodeBudget
 
 # Cover distinct tokenizer families:
 #   GPT2TokenizerFast  (BPE, OpenAI-style)
@@ -120,6 +122,21 @@ def test_prompt_embeds_keys_registered():
     assert "prompt_embeds" in MODALITY_PLACEHOLDERS_MAP
     assert MODALITY_PLACEHOLDERS_MAP["prompt_embeds"] == "<##PROMPT_EMBEDS##>"
     assert "prompt_embeds" in MM_PARSER_MAP
+
+
+def test_prompt_embeds_decode_budget_is_shared(monkeypatch):
+    tensor = torch.ones(2, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
+    per_tensor_bytes = tensor.numel() * tensor.element_size()
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_MAX_EMBED_DECODE_BYTES", per_tensor_bytes
+    )
+    budget = TensorDecodeBudget()
+
+    safe_load_prompt_embeds(_make_mock_model_config(), _encode_tensor(tensor), budget)
+    with pytest.raises(VLLMValidationError, match="request limit"):
+        safe_load_prompt_embeds(
+            _make_mock_model_config(), _encode_tensor(tensor), budget
+        )
 
 
 def test_ensure_placeholder_token_is_single_token_and_idempotent(tokenizer):
