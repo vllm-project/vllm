@@ -302,7 +302,7 @@ pub trait ToolParser: Send {
 
 /// The tool choice with an optional call made obligatory, or `None` when the
 /// choice forbids or already obliges a call.
-fn call_required(tool_choice: &ToolChoice) -> Option<ToolChoice> {
+pub(crate) fn call_required(tool_choice: &ToolChoice) -> Option<ToolChoice> {
     let mut required = tool_choice.clone();
     match &mut required {
         ToolChoice::Value(value @ ToolChoiceValue::Auto) => *value = ToolChoiceValue::Required,
@@ -319,7 +319,7 @@ fn call_required(tool_choice: &ToolChoice) -> Option<ToolChoice> {
 
 /// Warn that a request's answer constraint is ignored because its tool
 /// choice obliges a call, as the Python frontend does.
-fn warn_answer_ignored_once() {
+pub(crate) fn warn_answer_ignored_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         warn!("structured outputs are ignored because tool_choice forces a tool call");
