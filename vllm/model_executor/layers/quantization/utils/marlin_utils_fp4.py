@@ -412,6 +412,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     e = layer.moe_config.num_local_experts
     k = layer.moe_config.hidden_dim
     n = layer.moe_config.intermediate_size_per_partition
+    w13_num_shards = layer.moe_config.w13_num_shards
 
     param_dtype = layer.params_dtype
 
@@ -420,7 +421,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     for name in ["w13_weight", "w2_weight"]:
         weight = getattr(layer, name)
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = n * w13_num_shards, k
         else:
             size_n, size_k = k, n
 
@@ -441,7 +442,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = n * w13_num_shards, k
         else:
             size_n, size_k = k, n
 
@@ -519,10 +520,11 @@ def prepare_moe_mxfp4_layer_for_marlin(
     group_size = 32  # MXFP4 block size
 
     # Derive dimensions from actual weight shapes to handle rounded/padded
-    # sizes correctly (e.g., Mxfp4MoEMethod rounds up hidden_dim).
-    # w13 shape: (E, 2*N, K//2)
+    # sizes correctly (e.g., Mxfp4MoEMethod rounds up hidden_dim). The number
+    # of w13 shards depends on whether the activation is gated.
     e = w13.shape[0]
-    n = w13.shape[1] // 2  # intermediate_size_per_partition
+    w13_num_shards = layer.moe_config.w13_num_shards
+    n = w13.shape[1] // w13_num_shards  # intermediate_size_per_partition
     k = w13.shape[2] * 2  # hidden_size
 
     param_dtype = layer.params_dtype
@@ -530,7 +532,7 @@ def prepare_moe_mxfp4_layer_for_marlin(
     # WEIGHT: Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = n * w13_num_shards, k
         else:
             size_n, size_k = k, n
 
@@ -548,7 +550,7 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = n * w13_num_shards, k
         else:
             size_n, size_k = k, n
 
