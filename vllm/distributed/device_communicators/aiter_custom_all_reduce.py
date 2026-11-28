@@ -8,6 +8,8 @@ the fused allreduce+RMSNorm path share a single AITER instance with its IPC buff
 
 """
 
+import os
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -16,13 +18,53 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _default_max_size() -> int:
+    """IPC buffer size (bytes) for AITER's CustomAllreduce.
+
+    Historically hardcoded to 8192*1024*8*2 == 128 MiB (effective_max_size()
+    64 MiB). For models with large hidden_size / max_num_batched_tokens, a
+    full prefill chunk can exceed this cap, falling outside the
+    should_custom_ar runtime guard -- the allreduce falls back to RCCL
+    instead of the faster custom IPC path on exactly the chunks that
+    dominate prefill time.
+
+    AITER's own CustomAllreduce default is 1 GiB, so 128 MiB was a
+    conservative vLLM-side choice, not a hardware limit. Override in MiB via
+    VLLM_ROCM_AITER_CUSTOM_AR_MAX_SIZE_MB. Size it as:
+        required_MB = (max_num_batched_tokens * hidden_size * 2) / (1024*1024)
+    then round up generously, since effective_max_size() is MAX_SIZE // 2.
+    """
+    override = os.getenv("VLLM_ROCM_AITER_CUSTOM_AR_MAX_SIZE_MB")
+    if override:
+        try:
+            mb = int(override)
+            if mb > 0:
+                return mb * 1024 * 1024
+            logger.warning(
+                "Ignoring non-positive VLLM_ROCM_AITER_CUSTOM_AR_MAX_SIZE_MB=%s",
+                override,
+            )
+        except ValueError:
+            logger.warning(
+                "Ignoring malformed VLLM_ROCM_AITER_CUSTOM_AR_MAX_SIZE_MB=%s",
+                override,
+            )
+    return 8192 * 1024 * 8 * 2
+
+
 class AiterCustomAllreduce:
     # Default IPC buffer size for AITER's CustomAllreduce.
-    MAX_SIZE: int = 8192 * 1024 * 8 * 2
+    MAX_SIZE: int = _default_max_size()
 
     @classmethod
     def effective_max_size(cls) -> int:
-        """Max input byte size eligible for AITER custom allreduce."""
+        """Max input byte size eligible for AITER custom allreduce.
+
+        Must stay in lockstep with AITER's own admission check (inp_size <=
+        max_size // 2); otherwise vLLM may compile a fused variant for token
+        counts the runtime guard then rejects, silently falling back to an
+        unfused allreduce + RMSNorm pair.
+        """
         return cls.MAX_SIZE // 2
 
     def __init__(
