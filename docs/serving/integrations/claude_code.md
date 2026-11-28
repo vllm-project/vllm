@@ -82,3 +82,11 @@ If the model responds correctly, your setup is working. You can now use Claude C
 **`max_tokens: 0` is rejected**: Anthropic's API accepts `max_tokens: 0` to populate the prompt cache without generating output. A client or gateway sending `max_tokens: 0` to `/v1/messages` gets a 400 ("max_tokens=0 (prompt-cache pre-warming) is not supported"), because vLLM samples at least one token per request. Warm the cache with `max_tokens: 1` instead.
 
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+
+### Tool result content
+
+The Messages API accepts strings or lists of `text`, `image`, and `tool_reference`
+blocks in `tool_result.content`. Nested block types that the adapter cannot
+represent, including `document` and `video`, return a bad-request error instead
+of being silently removed. Convert unsupported tool output to supported text or
+image blocks before sending it.
