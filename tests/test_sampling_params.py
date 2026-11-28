@@ -69,7 +69,25 @@ def test_diffusion_accepts_request_temperature(temperature: float):
 def test_diffusion_accepts_top_k_top_p():
     _admit(SamplingParams(top_p=0.9, top_k=10))
 
+@pytest.mark.parametrize("bad_top_k", ["50", None, [5], {}])
+def test_top_k_rejects_non_integer_types_with_a_clear_message(bad_top_k):
+    """_verify_args() must type-check top_k *before* range-checking it.
 
+    top_k < -1 assumes top_k is numeric and comparable with an int; for a
+    non-comparable type (str, None, a list, a dict, ...) that comparison
+    itself raises a raw, unhelpful TypeError instead of the intended
+    VLLMValidationError -- unless the isinstance check runs first.
+    """
+    with pytest.raises(VLLMValidationError, match="top_k must be an integer"):
+        SamplingParams(top_k=bad_top_k)
+
+
+def test_top_k_still_rejects_out_of_range_ints():
+    """Guards that reordering the type-check ahead of the range-check
+    didn't disturb the range-check itself for genuinely invalid ints."""
+    with pytest.raises(VLLMValidationError, match="got -2"):
+        SamplingParams(top_k=-2)
+        
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
