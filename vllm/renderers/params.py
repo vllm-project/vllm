@@ -211,6 +211,9 @@ class TokenizeParams:
     only for Fast (Rust-backed) tokenizers with text input and no multimodal
     data; otherwise silently ignored."""
 
+    retain_token_offsets: bool = False
+    """Retain source offsets internally for non-ASCII completion echoes."""
+
     needs_detokenization: bool = False
     """
     Whether the tokenized prompt needs to contain the original text.

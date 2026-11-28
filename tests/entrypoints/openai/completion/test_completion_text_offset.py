@@ -5,6 +5,8 @@ import asyncio
 import json
 import threading
 from cProfile import Profile
+from dataclasses import replace
+from typing import cast
 
 import pytest
 from tokenizers import (
@@ -26,7 +28,7 @@ from vllm.entrypoints.openai.completion.serving import (
     _get_prompt_text_offsets,
     _get_prompt_text_offsets_async,
 )
-from vllm.inputs import tokens_input
+from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
@@ -125,6 +127,44 @@ def test_echo_offsets_reuse_source_before_singleton_decodes(
         for entry in profile.getstats()
         if isinstance(entry.code, str) and "'decode_batch'" in entry.code
     ) == int(not reuse_source)
+
+
+@pytest.mark.parametrize(
+    "text,options,retain",
+    [
+        ("É x", {"echo": True, "logprobs": 0}, True),
+        ("É", {"echo": True}, False),
+        ("É", {"logprobs": 0}, False),
+        ("É", {"echo": True, "logprobs": 0, "return_token_ids": True}, False),
+        ("É", {"echo": True, "logprobs": 0, "return_tokens_as_token_ids": True}, False),
+        ("x", {"echo": True, "logprobs": 0}, False),
+    ],
+    ids=["normalized", "no-logprobs", "no-echo", "token-ids", "placeholders", "ascii"],
+)
+def test_echo_tokenization_retains_source_offsets(tmp_path, text, options, retain):
+    OPTConfig(vocab_size=5).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), dtype="float32", max_model_len=32)
+    )
+    tokenizer = get_cached_tokenizer(_normalized_tokenizer())
+    renderer = HfRenderer(config, tokenizer)
+    request = CompletionRequest(
+        model="m", prompt=text, add_special_tokens=False, **options
+    )
+    try:
+        params = request.build_tok_params(config.model_config)
+        reference = renderer.tokenize_prompt(
+            {"prompt": text}, replace(params, retain_token_offsets=False)
+        )
+        prompt = cast(TokensPrompt, renderer.tokenize_prompt({"prompt": text}, params))
+        assert {
+            key: value for key, value in prompt.items() if key != "prompt_token_offsets"
+        } == reference
+        assert ("prompt_token_offsets" in prompt) == retain
+        if retain:
+            assert prompt["prompt_token_offsets"] == [(0, 1), (2, 3)]
+    finally:
+        renderer.shutdown()
 
 
 @pytest.mark.parametrize("wordpiece", [False, True])

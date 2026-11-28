@@ -842,16 +842,18 @@ async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
 
 
 @pytest.mark.asyncio
-async def test_completion_render_emits_token_offsets(client):
-    """With return_token_offsets, /v1/completions/render returns per-token
-    (start, end) char offsets aligned with token_ids."""
-    prompt = "Hello, world."
+@pytest.mark.parametrize("return_token_offsets", [False, True])
+async def test_completion_render_emits_token_offsets(client, return_token_offsets):
+    """Echo source offsets are exposed only when explicitly requested."""
+    prompt = "É world."
     response = await client.post(
         "/v1/completions/render",
         json={
             "model": MODEL_NAME,
             "prompt": prompt,
-            "return_token_offsets": True,
+            "echo": True,
+            "logprobs": 0,
+            "return_token_offsets": return_token_offsets,
         },
     )
 
@@ -859,6 +861,9 @@ async def test_completion_render_emits_token_offsets(client):
     data = response.json()
     assert isinstance(data, list)
     offsets = data[0]["token_offsets"]
+    if not return_token_offsets:
+        assert offsets is None
+        return
     assert offsets is not None
     assert len(offsets) == len(data[0]["token_ids"])
     for start, end in offsets:

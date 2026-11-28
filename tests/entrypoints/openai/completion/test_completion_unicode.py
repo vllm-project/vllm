@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
-from tokenizers import Tokenizer, decoders, processors
+from tokenizers import Tokenizer, decoders, normalizers, processors
 from transformers import TokenizersBackend
 
 from tests.utils import RemoteOpenAIServer
@@ -95,6 +95,39 @@ def unicode_trimmed_server_args(tmp_path_factory):
 @pytest.fixture(scope="module")
 def unicode_unknown_trimmed_server_args(tmp_path_factory):
     return _unicode_trimmed_server_args(tmp_path_factory, replace=True)
+
+
+@pytest.fixture(scope="module")
+def unicode_accent_server_args(tmp_path_factory):
+    tokenizer = cast(TokenizersBackend, get_tokenizer("facebook/opt-125m"))
+    backend = Tokenizer.from_str(tokenizer.backend_tokenizer.to_str())
+    backend.normalizer = normalizers.StripAccents()
+    backend.post_processor = processors.ByteLevel(trim_offsets=True)
+    path = tmp_path_factory.mktemp("unicode-accent-tokenizer")
+    TokenizersBackend(tokenizer_object=backend).save_pretrained(path)
+    return [*UNICODE_SERVER_ARGS, "--tokenizer", str(path)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [("facebook/opt-125m", "unicode_accent_server_args")],
+    indirect=True,
+    scope="module",
+)
+@pytest.mark.parametrize("stream", [False, True])
+async def test_echo_generation_boundary_without_prompt_alignment(client, stream):
+    model = (await client.models.list()).data[0].id
+    prompt = "e\u0301 x"
+    reference, text, offsets, tokens = await _get_echo_logprobs(
+        client, model, prompt, stream, 3, {"add_special_tokens": False}
+    )
+    count = len(reference.prompt_token_ids)
+    assert "".join(tokens[:count]) != prompt
+    assert text == prompt + reference.text
+    assert offsets[count:] == [
+        len(prompt) + offset for offset in reference.logprobs.text_offset
+    ]
 
 
 @pytest.mark.asyncio

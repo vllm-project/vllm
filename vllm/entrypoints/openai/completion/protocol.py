@@ -314,6 +314,12 @@ class CompletionRequest(OpenAIBaseModel):
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_tokens",
             return_token_offsets=bool(self.return_token_offsets),
+            retain_token_offsets=bool(
+                self.echo
+                and self.logprobs is not None
+                and not self.return_token_ids
+                and self.return_tokens_as_token_ids is not True
+            ),
         )
 
     # Default sampling parameters for completion requests

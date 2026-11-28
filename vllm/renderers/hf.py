@@ -1142,12 +1142,15 @@ class BaseHfRenderer(BaseRenderer[_T]):
     def _tokenize_prompt(
         self, prompt: TextPrompt, params: TokenizeParams
     ) -> TokensPrompt:
-        return tokenize_prompt(
-            self.get_tokenizer(),
-            prompt,
-            params,
-            want_offsets=self._wants_offsets(prompt, params),
-        )
+        want_offsets = self._wants_offsets(prompt, params)
+        try:
+            return tokenize_prompt(
+                self.get_tokenizer(), prompt, params, want_offsets=want_offsets
+            )
+        except NotImplementedError:
+            if not want_offsets or params.return_token_offsets:
+                raise
+            return tokenize_prompt(self.get_tokenizer(), prompt, params)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         return detokenize_prompt(self.get_tokenizer(), prompt)

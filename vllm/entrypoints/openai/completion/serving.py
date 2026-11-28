@@ -648,6 +648,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     assert request.max_tokens is not None
                     echo_offsets = None
+                    echo_boundary = None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
                         echo_token_ids = prompt_token_ids
@@ -697,6 +698,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 else self.return_tokens_as_token_ids
                             )
                         ):
+                            echo_boundary = len(echo_token_ids), len(prompt_text)
                             if (
                                 prompt_idx not in prompt_text_offsets
                                 and tokenizer is not None
@@ -757,6 +759,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                             prompt_text_offsets=echo_offsets,
+                            prompt_text_boundary=echo_boundary,
                         )
                         # Advance by the tokens just reported, not by delta_text:
                         # text held back for stop strings lags the tokens.
@@ -765,10 +768,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 logprobs.tokens[-1]
                             )
                             if (
-                                echo_offsets is not None
-                                and len(delta_token_ids) == len(echo_offsets) - 1
+                                echo_boundary is not None
+                                and len(delta_token_ids) == echo_boundary[0]
                             ):
-                                next_text_offsets[i] = echo_offsets[-1]
+                                next_text_offsets[i] = echo_boundary[1]
                     else:
                         logprobs = None
 
@@ -1003,6 +1006,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
                         prompt_text_offsets=echo_offsets,
+                        prompt_text_boundary=(
+                            (len(echo_token_ids), len(prompt_text))
+                            if request.echo
+                            and not request.return_token_ids
+                            and prompt_text is not None
+                            else None
+                        ),
                     )
                 else:
                     logprobs = None
@@ -1101,6 +1111,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
         prompt_text_offsets: list[int] | None = None,
+        prompt_text_boundary: tuple[int, int] | None = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
         out_text_offset: list[int] = []
@@ -1171,7 +1182,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     }
                 )
 
-            if prompt_text_offsets is not None and i < len(prompt_text_offsets):
+            if (
+                prompt_text_boundary is not None
+                and not should_return_as_token_id
+                and i == prompt_text_boundary[0]
+            ):
+                out_text_offset.append(initial_text_offset + prompt_text_boundary[1])
+            elif prompt_text_offsets is not None and i < len(prompt_text_offsets):
                 out_text_offset.append(initial_text_offset + prompt_text_offsets[i])
             elif len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)
