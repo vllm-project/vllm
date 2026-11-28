@@ -402,3 +402,38 @@ def test_beam_search_structured_output(
             print(f"Generated JSON: {generated!r}")
             parsed = json.loads(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)
+
+
+@pytest.mark.parametrize("later_wins", [False, True])
+def test_beam_search_bounds_finished_histories(monkeypatch, later_wins):
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    llm.model_config = Mock(max_model_len=32)
+    llm.llm_engine.input_processor.generation_config_fields = {"eos_token_id": [1, 2]}
+    llm.renderer = Mock(get_tokenizer=Mock(return_value=Mock(eos_token_id=1)))
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+
+    def render(prompts, **kwargs):
+        outputs = []
+        for prompt in prompts:
+            depth = len(prompt["prompt_token_ids"])
+            eos_score = -0.25 if later_wins and depth == 2 else -1.0
+            scores = {t: Logprob(eos_score) for t in (1, 2)}
+            scores.update({t: Logprob(-1.0) for t in (9, 10)})
+            completion = SimpleNamespace(logprobs=[scores], finish_reason="length")
+            outputs.append(SimpleNamespace(outputs=[completion]))
+        return outputs
+
+    monkeypatch.setattr(llm, "_render_and_run_requests", render)
+    production_step = llm._beam_search_step
+
+    def checked_step(**kwargs):
+        assert all(len(i.completed) <= 2 for i in kwargs["instances_batch"])
+        return production_step(**kwargs)
+
+    monkeypatch.setattr(llm, "_beam_search_step", checked_step)
+    prompts = [{"type": "token", "prompt_token_ids": [token]} for token in (3, 4)]
+    results = llm.beam_search(prompts, BeamSearchParams(beam_width=2, max_tokens=5))
+    for prompt, result in zip(prompts, results):
+        winner = prompt["prompt_token_ids"] + ([9] if later_wins else [])
+        assert [b.tokens for b in result.sequences] == [winner + [1], winner + [2]]

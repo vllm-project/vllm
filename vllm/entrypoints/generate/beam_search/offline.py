@@ -189,6 +189,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
                     )
+                    # Finished hypotheses keep their scores. Only the best
+                    # beam_width per prompt can appear in the final output.
+                    for instance in instances_batch:
+                        if len(instance.completed) > beam_width:
+                            instance.completed.sort(key=sort_beams_key, reverse=True)
+                            del instance.completed[beam_width:]
                     if should_stop:
                         break
         finally:
