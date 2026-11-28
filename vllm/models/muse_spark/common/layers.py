@@ -355,6 +355,7 @@ class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
         *,
         tp_rank: int | None = None,
         tp_size: int | None = None,
+        disable_tp: bool = False,
     ) -> None:
         self.head_size = head_size
         super().__init__(
@@ -363,6 +364,7 @@ class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
+            disable_tp=disable_tp,
             tp_rank=tp_rank,
             tp_size=tp_size,
         )

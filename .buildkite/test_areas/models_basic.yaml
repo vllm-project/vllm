@@ -88,6 +88,7 @@ steps:
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_nvidia_shared_rope.py
+  - tests/models/test_muse_spark_nvidia_replicated_attention.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
@@ -114,6 +115,7 @@ steps:
       models/deepseek_v41/nvidia/test_fused_markov.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_nvidia_shared_rope.py
+      models/test_muse_spark_nvidia_replicated_attention.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_fused_markov_sampling.py
@@ -155,6 +157,7 @@ steps:
       - tests/models/test_dsv41_mono_decode.py
       - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_muse_spark_nvidia_shared_rope.py
+      - tests/models/test_muse_spark_nvidia_replicated_attention.py
       - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
@@ -214,6 +217,7 @@ steps:
         models/test_dsv41_mono_decode.py
         models/test_muse_spark_rocm_loading.py
         models/test_muse_spark_nvidia_shared_rope.py
+        models/test_muse_spark_nvidia_replicated_attention.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_fused_markov_sampling.py
