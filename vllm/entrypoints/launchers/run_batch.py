@@ -286,8 +286,13 @@ class BatchFrontendArgs(BaseFrontendArgs):
     the file should be available via HTTP PUT."""
     output_tmp_dir: str | None = None
     """Directory for staging a URL input, a piped input, or the output before
-    it is uploaded to a URL. When unset, piped input and output are held in
-    memory and URL input is downloaded to the system temporary directory."""
+    it is uploaded to a URL. When unset, piped input is held in memory and URL
+    input is downloaded to the system temporary directory. URL output is held
+    in memory unless --keep-output-on-upload-error is set."""
+    keep_output_on_upload_error: bool = False
+    """Stage URL output on disk and retain the completed JSONL file if the
+    final upload attempt fails. Uses --output-tmp-dir or the system temporary
+    directory. The error log gives the path for manual recovery."""
     max_inflight: int | None = None
     """Maximum number of requests queued at the engine at once. Responses are
     written in input order, so up to 16 times this many finished responses may
@@ -393,9 +398,9 @@ def is_url(path_or_url: str) -> bool:
     return urlparse(path_or_url).scheme in ("http", "https")
 
 
-def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
-    """In-memory buffer, or a temporary file when a directory is given."""
-    if tmp_dir is None:
+def staging_file(tmp_dir: str | None, prefix: str, *, delete: bool = True) -> IO[str]:
+    """Stage in memory unless a directory or a persistent file is requested."""
+    if tmp_dir is None and delete:
         return StringIO()
     return tempfile.NamedTemporaryFile(
         mode="w+",
@@ -404,6 +409,7 @@ def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
         dir=tmp_dir,
         prefix=prefix,
         suffix=".jsonl",
+        delete=delete,
     )
 
 
@@ -520,7 +526,7 @@ async def upload_data(
 
 @contextlib.asynccontextmanager
 async def batch_output_writer(
-    path_or_url: str, output_tmp_dir: str | None
+    path_or_url: str, output_tmp_dir: str | None, *, keep_on_upload_error: bool = False
 ) -> AsyncGenerator[IO[str]]:
     """Yield a file that receives responses in input order.
 
@@ -534,7 +540,14 @@ async def batch_output_writer(
             yield f
         return
 
-    with staging_file(output_tmp_dir, "tmp_batch_output_") as f:
+    with (
+        contextlib.ExitStack() as cleanup,
+        staging_file(
+            output_tmp_dir, "tmp_batch_output_", delete=not keep_on_upload_error
+        ) as f,
+    ):
+        if keep_on_upload_error:
+            cleanup.callback(os.unlink, f.name)
         yield f
         f.flush()
         logger.info("Uploading outputs to %s", path_or_url)
@@ -542,7 +555,13 @@ async def batch_output_writer(
             data = f.getvalue().strip().encode("utf-8")
             await upload_data(path_or_url, data, from_file=False)
         else:
-            await upload_data(path_or_url, f.name, from_file=True)
+            try:
+                await upload_data(path_or_url, f.name, from_file=True)
+            except Exception:
+                if keep_on_upload_error:
+                    cleanup.pop_all()
+                    logger.error("Completed batch output retained at %s", f.name)
+                raise
 
 
 async def download_bytes_from_url(
@@ -1131,7 +1150,9 @@ async def run_batch(
     tracker = BatchProgressTracker()
 
     async with batch_output_writer(
-        args.output_file, args.output_tmp_dir
+        args.output_file,
+        args.output_tmp_dir,
+        keep_on_upload_error=args.keep_output_on_upload_error,
     ) as output_file:
         with tracker.pbar(total=num_requests):
             await dispatch_batch(
