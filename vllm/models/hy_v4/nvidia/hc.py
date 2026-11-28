@@ -12,7 +12,9 @@ NOTE: Each of the three steps has an optional single-kernel HPC replacement
 (`HpcIHCPre` / `HpcIHCPost` / `HpcIHCHead`). Pre and post fall back to
 in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
 `IHCBoundary` fuses a sub-block's post, the next pre and its RMSNorm into one
-CUDA op; `HYV4DecoderLayer` uses it across layers when it is available.
+CUDA op; `HYV4DecoderLayer` uses it across layers when it is available. The
+same op also runs a lone post step and the last post with the head and the
+final norm.
 """
 
 import torch
@@ -236,6 +238,9 @@ class HYV4HCHeadLayer(nn.Module):
         )
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+        self.packed_gate: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        if ops.hy_v4_ihc_boundary_supported(hc_mult, hidden_size):
+            self._pack_gate()
 
         self.reset_parameters(init_std, base_noise_std)
 
@@ -266,6 +271,60 @@ class HYV4HCHeadLayer(nn.Module):
                 self.hc_head_base.add_(
                     torch.randn_like(self.hc_head_base) * base_noise_std
                 )
+
+    def _pack_gate(self) -> None:
+        """Store the head gate as the pre rows of the boundary op's gate.
+
+        The head parameters become views of zero-padded `[2 * hc]` gate
+        tensors, so loading or reloading them in place keeps the packed gate
+        current. The post rows stay zero and their gates are discarded.
+        """
+        hc = self.hc_mult
+        weight = self.hc_head_fn.weight
+        packed = (
+            weight.new_zeros(2 * hc, weight.shape[1]),
+            self.hc_head_scale.new_zeros(2),
+            self.hc_head_base.new_zeros(2 * hc),
+        )
+        weight.data = packed[0][:hc]
+        self.hc_head_scale.data = packed[1][:1]
+        self.hc_head_base.data = packed[2][:hc]
+        self.packed_gate = packed
+
+    def fused_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_gates: torch.Tensor,
+        norm: nn.Module,
+    ) -> torch.Tensor | None:
+        """The last post step, this head and `norm` as one boundary op.
+
+        Returns None when the packed gate is unavailable or no longer backs
+        the head parameters.
+        """
+        packed = self.packed_gate
+        if packed is None or any(
+            gate.data_ptr() != param.data_ptr()
+            for gate, param in zip(
+                packed,
+                (self.hc_head_fn.weight, self.hc_head_scale, self.hc_head_base),
+            )
+        ):
+            return None
+        _, hidden, _, _ = ops.hy_v4_ihc_boundary(
+            residual.contiguous(),
+            x.contiguous(),
+            post_gates,
+            *packed,
+            norm.weight,
+            1.0,
+            self.hc_eps,
+            self.config.rms_norm_eps,
+            norm.variance_epsilon,
+            round_before_norm=True,
+        )
+        return hidden
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Merge the iHC channels into a single hidden state.
@@ -325,6 +384,9 @@ class HYV4HCLayer(nn.Module):
                 prefix=f"{prefix}.hc_pre",
             )
             self.hc_post = HYV4HCPostLayer(config)
+        self.fused_post = self.enable_ihc and ops.hy_v4_ihc_boundary_supported(
+            config.hc_mult, config.hidden_size
+        )
 
     def prepare_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Normalize the sub-block input to 3D when iHC is enabled."""
@@ -388,7 +450,24 @@ class HYV4HCLayer(nn.Module):
         if not self.enable_ihc:
             return output_with_bias + residual
         assert post_gates is not None
-        return self.hc_post(output_with_bias, residual, post_gates)
+        if not self.fused_post:
+            return self.hc_post(output_with_bias, residual, post_gates)
+        # The boundary op's residual output is the post step; its pre is unused.
+        pre = self.hc_pre
+        residual, _, _, _ = ops.hy_v4_ihc_boundary(
+            residual.contiguous(),
+            output_with_bias.contiguous(),
+            post_gates,
+            pre.hc_fn.weight,
+            pre.hc_scale,
+            pre.hc_base,
+            None,
+            pre.magnitude,
+            pre.hc_eps,
+            pre.layernorm_epsilon,
+            pre.layernorm_epsilon,
+        )
+        return residual
 
 
 class IHCBoundary(nn.Module):

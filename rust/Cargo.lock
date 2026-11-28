@@ -5906,6 +5906,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "asynk-strim-attr",
  "auto_enums",
  "axum",
@@ -5929,6 +5930,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "serde",
+ "serde-json-fmt",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
@@ -5952,7 +5954,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "validator",
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Scheduler state gauges.
+//! Scheduler state gauges and the preemption counter.
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 use serde::{Deserialize, Serialize};
 
-use crate::{EngineLabels, F64Gauge, U64Gauge};
+use crate::{EngineLabels, F64Gauge, U64Counter, U64Gauge};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct WaitingReasonLabels {
@@ -53,13 +53,14 @@ impl KvFetchReqsByStage {
     }
 }
 
-/// Scheduler state gauges.
+/// Scheduler state gauges and the preemption counter.
 pub struct SchedulerStateMetrics {
     pub running: Family<EngineLabels, U64Gauge>,
     pub waiting: Family<EngineLabels, U64Gauge>,
     pub waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
     pub kv_fetch_by_stage: Family<KvFetchStageLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
+    pub num_preemptions: Family<EngineLabels, U64Counter>,
 }
 
 impl SchedulerStateMetrics {
@@ -105,12 +106,23 @@ impl SchedulerStateMetrics {
             kv_cache_usage.clone(),
         );
 
+        // Counted by the scheduler when a request is preempted, so a request
+        // preempted and then aborted counts too; the PREEMPTED request event
+        // reaches the frontend only with the request's next output.
+        let num_preemptions = Family::default();
+        registry.register(
+            "vllm:num_preemptions",
+            "Cumulative number of preemption events.",
+            num_preemptions.clone(),
+        );
+
         Self {
             running,
             waiting,
             waiting_by_reason,
             kv_fetch_by_stage,
             kv_cache_usage,
+            num_preemptions,
         }
     }
 
@@ -137,6 +149,7 @@ impl SchedulerStateMetrics {
                 })
             }),
             kv_cache_usage: self.kv_cache_usage.get_or_create_owned(labels),
+            num_preemptions: self.num_preemptions.get_or_create_owned(labels),
         }
     }
 }
@@ -149,6 +162,7 @@ pub struct SchedulerStateHandles {
     /// One handle per `KvFetchReqsByStage::STAGES` entry.
     kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
+    num_preemptions: U64Counter,
 }
 
 impl SchedulerStateHandles {
@@ -159,6 +173,7 @@ impl SchedulerStateHandles {
         num_skipped_waiting_reqs: u64,
         num_kv_fetch_reqs_by_stage: &KvFetchReqsByStage,
         kv_cache_usage: f64,
+        num_preempted_reqs: u64,
     ) {
         self.running.set(num_running_reqs);
         self.waiting.set(num_waiting_reqs + num_skipped_waiting_reqs);
@@ -170,6 +185,7 @@ impl SchedulerStateHandles {
             handle.set(count);
         }
         self.kv_cache_usage.set(kv_cache_usage);
+        self.num_preemptions.inc_by(num_preempted_reqs);
     }
 }
 
@@ -214,6 +230,7 @@ mod tests {
                 completed_waiting: 2,
             },
             0.0,
+            0,
         );
 
         expect![[r#"

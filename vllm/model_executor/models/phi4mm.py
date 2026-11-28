@@ -163,7 +163,6 @@ class Phi4MMImageEncoder(nn.Module):
         self.use_hd_transform = True
         self.with_learnable_separator = True
         self.hd_transform_order = "sub_glb"
-        self.freeze_img_processor = False
         self.crop_size = 448
 
         # image token compression

@@ -23,14 +23,10 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
 
         if isinstance(model, dict):
             model_dict = model
-            source_text_config = None
         elif isinstance(model, PreTrainedConfig):
             model_dict = model.to_dict()
-            text_config = model.get_text_config()
-            source_text_config = text_config if text_config is not model else None
         else:
             model_dict = {}
-            source_text_config = None
 
         # Combine: model_dict first, then kwargs override
         combined = {**model_dict, **kwargs}
@@ -39,11 +35,12 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
 
         combined["architectures"] = ["ExtractHiddenStatesModel"]
 
-        # to_dict() and kwargs both flatten text_config to a plain dict;
-        # downstream get_hf_text_config() needs it as a PreTrainedConfig
-        # for attribute access. Re-insert the original object.
-        if source_text_config is not None:
-            combined["text_config"] = source_text_config
+        if isinstance(model, PreTrainedConfig):
+            text_config = model.get_text_config()
+            if text_config is not None and text_config is not model:
+                # to_dict() serializes nested configs. Restore the typed text
+                # config under its original key for get_hf_text_config().
+                combined[_find_text_config_key(model, text_config)] = text_config
 
         super().__init__(**combined)
 
@@ -63,3 +60,12 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
         # ExtractHiddenStatesConfig with default arguments is not supported
         del use_diff
         return super().to_json_string(use_diff=False)
+
+
+def _find_text_config_key(
+    model: PreTrainedConfig, text_config: PreTrainedConfig
+) -> str:
+    for key in ("text_config", "decoder", "generator", "text_encoder"):
+        if getattr(model, key, None) is text_config:
+            return key
+    return "text_config"

@@ -110,9 +110,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
-        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
-            vllm_config, layer_names
-        )
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -415,7 +413,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """Compute metadata common to both Mamba1 and Mamba2."""
+        """Compute metadata common to all Mamba-like backends."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when

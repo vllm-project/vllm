@@ -326,6 +326,115 @@ def check_logprobs_close(
                     warnings.warn(fail_msg, stacklevel=2)
 
 
+def _logprob_shift(
+    topk_0: Mapping[Any, float | Logprob],
+    topk_1: Mapping[Any, float | Logprob],
+    num_logprobs: int,
+) -> float:
+    """Mean `|logprob_0 - logprob_1|` over the union of both top-k token sets.
+
+    A token in only one side's top-k is scored as its distance above the
+    other side's lowest top-k logprob, a lower bound of its true shift.
+    """
+    top_0, top_1 = (
+        dict(
+            sorted(
+                ((tok, _logprob_value(lp)) for tok, lp in topk.items()),
+                key=lambda tok_lp: tok_lp[1],
+                reverse=True,
+            )[:num_logprobs]
+        )
+        for topk in (topk_0, topk_1)
+    )
+    floor_0, floor_1 = min(top_0.values()), min(top_1.values())
+    shifts = [
+        abs(top_0[tok] - top_1[tok])
+        if tok in top_0 and tok in top_1
+        else max(0.0, top_0[tok] - floor_1)
+        if tok in top_0
+        else max(0.0, top_1[tok] - floor_0)
+        for tok in top_0.keys() | top_1.keys()
+    ]
+    return sum(shifts) / len(shifts)
+
+
+def check_logprobs_shift(
+    *,
+    outputs_0_lst: Sequence[TokensTextLogprobs | TokensTextLogprobsPromptLogprobs],
+    outputs_1_lst: Sequence[TokensTextLogprobs | TokensTextLogprobsPromptLogprobs],
+    name_0: str,
+    name_1: str,
+    num_logprobs: int,
+    max_mean_shift: float,
+    max_shift: float,
+) -> None:
+    """Bound how far apart the logprobs of two models are on the same context.
+
+    Unlike `check_logprobs_close`, every position where both sequences share
+    their context is compared: all prompt positions (if prompt logprobs are
+    provided) and the sampled positions up to and including the first token
+    mismatch. See `_logprob_shift` for the shift at one position.
+
+    Args:
+      outputs_0_lst: First sequence to compare
+      outputs_1_lst: Second sequence to compare
+      name_0: sequence #0 name
+      name_1: sequence #1 name
+      num_logprobs: Number of top logprobs requested per position
+      max_mean_shift: Bound on the shift averaged over all positions
+      max_shift: Bound on the shift at any single position
+
+    """
+    assert len(outputs_0_lst) == len(outputs_1_lst)
+
+    shifts: list[float] = []
+    largest_shift, largest_at = -1.0, ""
+    for prompt_idx, (outputs_0, outputs_1) in enumerate(
+        zip(outputs_0_lst, outputs_1_lst)
+    ):
+        output_ids_0, _, logprobs_0, *prompt_logprobs_0 = outputs_0
+        output_ids_1, _, logprobs_1, *prompt_logprobs_1 = outputs_1
+        assert logprobs_0 is not None and logprobs_1 is not None
+        assert len(prompt_logprobs_0) == len(prompt_logprobs_1)
+
+        positions = []
+        for prompt_lps_0, prompt_lps_1 in zip(prompt_logprobs_0, prompt_logprobs_1):
+            assert prompt_lps_0 is not None and prompt_lps_1 is not None
+            assert len(prompt_lps_0) == len(prompt_lps_1)
+            positions += [
+                (f"prompt index {idx}", lps_0, lps_1)
+                for idx, (lps_0, lps_1) in enumerate(zip(prompt_lps_0, prompt_lps_1))
+                if lps_0 is not None and lps_1 is not None
+            ]
+        for idx, (output_id_0, output_id_1) in enumerate(
+            zip(output_ids_0, output_ids_1)
+        ):
+            positions.append((f"sampled index {idx}", logprobs_0[idx], logprobs_1[idx]))
+            if output_id_0 != output_id_1:
+                # The sequences diverge here, so later contexts differ.
+                break
+
+        for where, lps_0, lps_1 in positions:
+            shift = _logprob_shift(lps_0, lps_1, num_logprobs)
+            shifts.append(shift)
+            if shift > largest_shift:
+                largest_shift = shift
+                largest_at = (
+                    f"Test{prompt_idx} {where}:\n{name_0}:\t{lps_0}\n{name_1}:\t{lps_1}"
+                )
+
+    mean_shift = sum(shifts) / len(shifts)
+    summary = (
+        f"{name_1} vs {name_0} over {len(shifts)} positions: "
+        f"mean logprob shift {mean_shift:.4f} (bound {max_mean_shift}), "
+        f"largest {largest_shift:.4f} (bound {max_shift})"
+    )
+    print(summary)
+
+    assert mean_shift <= max_mean_shift, summary
+    assert largest_shift <= max_shift, f"{summary}\n{largest_at}"
+
+
 def build_model_context(
     model_id: str,
     runner: RunnerOption = "auto",
