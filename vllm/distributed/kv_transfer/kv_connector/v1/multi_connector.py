@@ -209,6 +209,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
 
+        # Keeps track of requests for which finished_recving has already been
+        # emitted to avoid duplicate notifications across multiple sub-connectors
+        # or multiple engine steps.
+        self._completed_recving: set[str] = set()
+
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
         # a single connector to load.
@@ -442,11 +447,32 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def get_transfer_results(
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
+        for req_id in finished_req_ids:
+            self._completed_recving.discard(req_id)
+
         results = KVConnectorTransferResults()
         for connector in self._connectors:
             child_results = connector.get_transfer_results(finished_req_ids)
-            results.finished_recving.update(child_results.finished_recving)
-            results.failed_recving.update(child_results.failed_recving)
+            for req_id in child_results.finished_recving:
+                if req_id not in self._completed_recving:
+                    self._completed_recving.add(req_id)
+                    results.finished_recving.add(req_id)
+                else:
+                    logger.debug(
+                        "Ignoring duplicate finished_recving for %s from %s",
+                        req_id,
+                        connector.__class__.__name__,
+                    )
+            for req_id in child_results.failed_recving:
+                if req_id not in self._completed_recving:
+                    results.failed_recving.add(req_id)
+                else:
+                    logger.debug(
+                        "Ignoring failed_recving for %s from %s as load already "
+                        "completed",
+                        req_id,
+                        connector.__class__.__name__,
+                    )
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
@@ -669,6 +695,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 
+        self._completed_recving.discard(request.request_id)
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
@@ -838,5 +865,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def reset_cache(self) -> bool:
+        self._completed_recving.clear()
         results = [c.reset_cache() is not False for c in self._connectors]
         return all(results)

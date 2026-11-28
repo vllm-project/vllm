@@ -3900,19 +3900,49 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Received late or duplicate finished_recving notification "
+                    "for untracked request %s (already finished or aborted). "
+                    "Discarding.",
+                    req_id,
+                )
+                self._aborted_kv_loads.discard(req_id)
+                continue
+
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
-            else:
-                assert RequestStatus.is_finished(req.status)
+            elif RequestStatus.is_finished(req.status):
                 self._aborted_kv_loads.discard(req_id)
-                self._free_blocks(self.requests[req_id])
+                self._free_blocks(req)
+            else:
+                logger.warning(
+                    "Received duplicate finished_recving notification for "
+                    "request %s in status %s. Ignoring.",
+                    req_id,
+                    req.status,
+                )
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Received late or duplicate finished_sending notification "
+                    "for untracked request %s. Discarding.",
+                    req_id,
+                )
+                continue
+            if not RequestStatus.is_finished(req.status):
+                logger.warning(
+                    "Received finished_sending notification for active "
+                    "request %s in status %s. Ignoring.",
+                    req_id,
+                    req.status,
+                )
+                continue
+            self._free_blocks(req)
 
     def _update_requests_with_invalid_blocks(
         self,

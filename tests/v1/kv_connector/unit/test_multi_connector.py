@@ -334,6 +334,96 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+def test_multi_connector_deduplicates_finished_recving(mc: MultiConnector):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+
+    # Step 1: Connector 0 completes loading for req-1
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"req-1"}
+    )
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults()
+
+    out1 = mc.get_transfer_results(finished_req_ids=set())
+    assert out1.finished_recving == {"req-1"}
+
+    # Step 2: Connector 1 (slower path) completes loading for req-1 later
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults()
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"req-1"}
+    )
+
+    out2 = mc.get_transfer_results(finished_req_ids=set())
+    # Should deduplicate and not re-emit req-1
+    assert out2.finished_recving == set()
+
+    # Step 3: Request finishes and retires, cleanup happens
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults()
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults()
+    mc.get_transfer_results(finished_req_ids={"req-1"})
+    assert "req-1" not in mc._completed_recving
+
+
+def test_multi_connector_ignores_failed_recving_after_successful_recving(
+    mc: MultiConnector,
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+
+    # Connector 0 succeeds
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"req-1"}
+    )
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults()
+    out1 = mc.get_transfer_results(finished_req_ids=set())
+    assert out1.finished_recving == {"req-1"}
+
+    # Connector 1 fails later for the same request
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults()
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults(
+        failed_recving={"req-1"}
+    )
+    out2 = mc.get_transfer_results(finished_req_ids=set())
+    # The request already successfully loaded its KV,
+    # so failed_recving should be suppressed.
+    assert out2.failed_recving == set()
+
+
+def test_multi_connector_waits_for_all_children_finished_sending(
+    mc: MultiConnector,
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+
+    # Simulate request with 2 async saves initiated (extra_pending = 1)
+    mc._extra_async_saves["req-1"] = 1
+
+    # Step 1: Child connector 0 finishes sending, but connector 1 is still saving.
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_sending={"req-1"}
+    )
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults()
+
+    out1 = mc.get_transfer_results(finished_req_ids={"req-1"})
+    # First child finished, but waiting for second child ->
+    # finished_sending must be empty
+    assert out1.finished_sending == set()
+    assert "req-1" not in mc._extra_async_saves
+
+    # Step 2: Child connector 1 finishes sending on the next step.
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults()
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_sending={"req-1"}
+    )
+
+    out2 = mc.get_transfer_results(finished_req_ids={"req-1"})
+    # All children have finished -> request ID must now be emitted
+    assert out2.finished_sending == {"req-1"}
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
