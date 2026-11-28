@@ -157,7 +157,7 @@ def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
 
 
 @requires_sm90
-@pytest.mark.parametrize("num_tokens", [1, 3, 5, 17, 48])
+@pytest.mark.parametrize("num_tokens", [1, 3, 5, 8, 16, 17, 32, 33, 48])
 def test_hc_down_silu_fused(num_tokens: int) -> None:
     # Compare computed columns with the unfused ll_bf16 + hc_silu reference.
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm

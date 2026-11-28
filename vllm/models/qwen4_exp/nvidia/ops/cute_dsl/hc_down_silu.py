@@ -34,6 +34,13 @@ _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
     **{m: (6, 4, 16) for m in range(33, MAX_FUSED_M + 1)},
 }
 
+# H20 plans for Qwen3.8-Flash-Next's replicated HC projection.
+_H20_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
+    **_SM100F_TUNED_SPLITK,
+    **{m: (6, 3, 16) for m in range(5, 17)},
+    **{m: (6, 2, 16) for m in range(17, 33)},
+}
+
 # FMA: (backend, M, K, threadblock_size); MMA: (backend, split_k, stages, tile_n).
 CompileKey = tuple[Literal["fma", "mma"], int, int, int]
 
@@ -48,6 +55,13 @@ class HcDownSiluGemm:
         self.hc = hc
         self.k = k
         self._prefetch_pdl_weights = prefetch_pdl_weights
+        self._splitk_plans = (
+            _H20_TUNED_SPLITK
+            if current_platform.is_device_capability(90)
+            and (rank, hc, k) == (320, 4, 10240)
+            and "H20" in current_platform.get_device_name().split()
+            else _SM100F_TUNED_SPLITK
+        )
         self._compiled: dict[CompileKey, Any] = {}
         self._warmup_m: set[int] = set()
         self._warmup_registered = False
@@ -55,7 +69,7 @@ class HcDownSiluGemm:
     def dispatch(self, m: int) -> CompileKey:
         if m <= 4 or self.k < 2048:
             return ("fma", m, self.k, 128)
-        return ("mma", *_SM100F_TUNED_SPLITK[m])
+        return ("mma", *self._splitk_plans[m])
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key in self._compiled:
