@@ -631,7 +631,7 @@ def pack_quantized_values_into_int32(
     # move dim to pack to the end
     perm = (*[i for i in range(len(w_q.shape)) if i != packed_dim], packed_dim)
     inv_perm = tuple(perm.index(i) for i in range(len(perm)))
-    w_q_perm = w_q.permute(perm)
+    w_q_perm = w_q.permute(perm).to(torch.int32)
 
     pack_factor = 32 // wtype.size_bits
     mask = (1 << wtype.size_bits) - 1
