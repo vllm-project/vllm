@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Token-sharded residual stream for Kimi-K3 prefill on ROCm.
+
+With TP, every attention / MLP output all-reduce is replaced by a
+reduce-scatter over tokens, and the (per-token) attention-residual mixing runs
+on the local token shard only; the shard is all-gathered right before each
+attention / MLP input. For attention and dense MLPs the communication volume
+is unchanged (AR = RS + AG), while attn_res traffic and the block-residual bank
+shrink by the TP size.
+
+In latent-MoE layers the router gate, latent down-projection and top-k also run
+on the token shard (their outputs are all-gathered instead of being recomputed
+on every rank), and the column-parallel up-projection tail reduce-scatters
+its output instead of all-reducing it. The extra all-gathers of the latent and
+the top-k add about 17% bytes per MoE layer at K3's sizes. An MoE whose tail is
+not token-shardable all-gathers its input and all-reduces its output in full.
+
+With `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`, the residual stream's
+reduce-scatters and all-gathers take AITER's INT4 collectives
+(`QuickAllReduce.sp_collectives`) where they serve the payload, as the TP
+all-reduces they replace take INT4 QuickReduce. The latent, the top-k and FP8
+activations keep the exact collectives.
+
+Enabled by `VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS`; see `vllm.envs`.
+"""
+
+import contextlib
+from collections.abc import Iterator
+from dataclasses import replace
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+
+import vllm.envs as envs
+from vllm.distributed import (
+    get_dp_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+
+def is_enabled() -> bool:
+    """Whether some prefill can be token-sharded: the environment asks for it
+    and TP is larger than one."""
+    return (
+        envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS > 0
+        and get_tensor_model_parallel_world_size() > 1
+    )
+
+
+def should_shard(
+    num_tokens: int,
+    has_residual: bool,
+    has_aux_layers: bool,
+    routing_observed: bool,
+) -> bool:
+    """Whether this forward runs with a token-sharded residual stream.
+
+    The residual stream is padded to a multiple of the TP size, so every eager
+    step at or above the threshold shards; otherwise the unsharded path's
+    larger activations would exceed the profiled peak. CUDA-graph capture and
+    specialized-decode steps (checked by the caller) never shard; both are far
+    smaller than the profile run.
+
+    `routing_observed` (routed-experts capture or EPLB load recording) keeps
+    it off: routing runs on each rank's token shard only, so those would see
+    just this rank's tokens.
+    """
+    return (
+        is_enabled()
+        and num_tokens >= envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS
+        and not has_residual
+        and not has_aux_layers
+        and not routing_observed
+        and get_pp_group().is_last_rank
+        and get_dp_group().world_size == 1
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+def int4_collectives() -> Any:
+    """AITER's INT4 reduce-scatter / all-gather of the TP group, or None. The
+    first call builds them and is a collective: every rank makes it, outside
+    CUDA graph capture, before the first token-sharded forward."""
+    qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+    return None if qr_comm is None else qr_comm.sp_collectives()
+
+
+def gather_tokens(shard: torch.Tensor, num_tokens: int | None = None) -> torch.Tensor:
+    """All-gather the token shards, dropping the TP padding rows if
+    `num_tokens` is given."""
+    collectives = int4_collectives()
+    out = None if collectives is None else collectives.all_gather(shard)
+    if out is None:
+        out = tensor_model_parallel_all_gather(shard, dim=0)
+    return out if num_tokens is None else out[:num_tokens]
+
+
+def gather_activation(
+    shard: torch.Tensor | QuantizedActivation, num_tokens: int | None = None
+) -> torch.Tensor | QuantizedActivation:
+    """`gather_tokens` that also accepts a per-token quantized
+    activation, gathering its data and scale and rebuilding it."""
+    if isinstance(shard, torch.Tensor):
+        return gather_tokens(shard, num_tokens)
+    key = shard.quant_key
+    assert key.scale.group_shape == GroupShape.PER_TOKEN and key.scale2 is None
+    data = gather_tokens(shard.data, num_tokens)
+    return replace(
+        shard,
+        data=data,
+        scale=gather_tokens(shard.scale, num_tokens),
+        orig_shape=torch.Size((data.size(0), *shard.orig_shape[1:])),
+    )
+
+
+def scatter_tokens(partial: torch.Tensor) -> torch.Tensor:
+    """Pad unpadded per-token partial sums back and reduce-scatter them."""
+    pad = (-partial.size(0)) % get_tensor_model_parallel_world_size()
+    if pad:
+        partial = F.pad(partial, (0, 0, 0, pad))
+    collectives = int4_collectives()
+    out = None if collectives is None else collectives.reduce_scatter(partial)
+    if out is None:
+        out = tensor_model_parallel_reduce_scatter(partial, dim=0)
+    return out
+
+
+def all_gather_routing(
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """All-gather this rank's top-k over tokens in one collective."""
+    w_bytes = topk_weights.contiguous().view(torch.uint8)
+    packed = torch.cat([w_bytes, topk_ids.contiguous().view(torch.uint8)], dim=1)
+    packed = tensor_model_parallel_all_gather(packed, dim=0)
+    nw = w_bytes.size(1)
+    return (
+        packed[:, :nw].contiguous().view(topk_weights.dtype),
+        packed[:, nw:].contiguous().view(topk_ids.dtype),
+    )
+
+
+@contextlib.contextmanager
+def pre_routed(router: Any, topk: tuple[torch.Tensor, torch.Tensor]) -> Iterator[None]:
+    """Make `router.select_experts` return `topk` for the duration. The
+    body must route exactly once, so the caller's placeholder router logits
+    are never read."""
+    calls = 0
+
+    def select_experts(*args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal calls
+        calls += 1
+        return topk
+
+    shadowed = router.__dict__.get("select_experts")
+    router.select_experts = select_experts
+    try:
+        yield
+    finally:
+        if shadowed is None:
+            del router.select_experts
+        else:
+            router.select_experts = shadowed
+    assert calls == 1, f"expected one select_experts call, got {calls}"
