@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -12,6 +13,16 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import cdiv, round_up
+
+from .qsa_mfma_scorer import (
+    MFMA_SCORER_MIN_ROWS,
+    launch_qsa_mqa_paged_mfma,
+    mfma_scorer_applies,
+)
+
+if TYPE_CHECKING:
+    from ...common.qsa import QSAPrefillLayout
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -742,11 +753,17 @@ def qsa_mqa_paged(
     num_columns: int | None = None,
     score_scale: float | None = None,
     single_row_decode: bool = False,
+    allow_mfma: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
 
     `single_row_decode` marks a batch of decode requests with one query row
     each and no prefill. Small ones are scored row by row on CDNA3 and CDNA4.
+
+    `allow_mfma` marks rows of prefill requests: such a call with at least
+    `MFMA_SCORER_MIN_ROWS` rows and a bf16 or fp16 query and cache is scored
+    by the MFMA tile kernel (`qsa_mfma_scorer.py`), which is not bitwise
+    equal to the per-row kernel.
 
     Returns:
         `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
@@ -786,6 +803,20 @@ def qsa_mqa_paged(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    if allow_mfma and mfma_scorer_applies(q, k_cache):
+        launch_qsa_mqa_paged_mfma(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            compress_ratio,
+            logits,
+            visible_blocks,
+            float(score_divisor),
+        )
         return logits, visible_blocks
     rows_profile = (
         _ROWS_KERNEL_PROFILES.get(get_cdna_version()) if single_row_decode else None
@@ -936,11 +967,21 @@ def qsa_select_paged_tokens(
     out: torch.Tensor | None = None,
     single_row_decode: bool = False,
     max_seq_len: int | None = None,
+    num_decode_tokens: int | None = None,
 ) -> torch.Tensor:
     """Score, select, and expand QSA indices without host synchronization.
 
-    `max_seq_len` bounds the scored columns to the batch's longest sequence;
-    without it every column of `page_table` is scored.
+    `max_seq_len`, a host-side bound on every `sequence_lengths` entry,
+    trims the score width to the compressed columns a row can see, as the
+    NVIDIA prefill path does: visible = min((pos + 1) // ratio,
+    seq_len // ratio) <= cdiv(max_seq_len, ratio). A captured graph keeps the
+    full width, since it replays at any length. The narrower rows also let
+    more rows share one logits workspace chunk.
+
+    `num_decode_tokens` counts the leading decode rows (the batch puts
+    decode requests first). Chunks never mix decode and prefill rows, and only
+    prefill chunks may take the MFMA scorer (`qsa_mqa_paged`'s
+    `allow_mfma`); with None every row keeps the per-row kernel.
     """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
@@ -951,9 +992,13 @@ def qsa_select_paged_tokens(
     if not rows:
         return out
 
+    prefill_start = rows if num_decode_tokens is None else num_decode_tokens
     columns = page_table.shape[1] * k_cache.shape[1]
-    if max_seq_len is not None:
-        columns = min(columns, -(-max_seq_len // compress_ratio))
+    if max_seq_len is not None and not torch.cuda.is_current_stream_capturing():
+        bounded = cdiv(max_seq_len, compress_ratio)
+        if rows - prefill_start >= MFMA_SCORER_MIN_ROWS:
+            bounded = max(64, round_up(bounded, 64))
+        columns = min(columns, bounded)
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
@@ -963,8 +1008,12 @@ def qsa_select_paged_tokens(
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
-    for row_start in range(0, rows, rows_per_chunk):
-        row_end = min(row_start + rows_per_chunk, rows)
+    chunks = [
+        (row_start, min(row_start + rows_per_chunk, end))
+        for begin, end in ((0, prefill_start), (prefill_start, rows))
+        for row_start in range(begin, end, rows_per_chunk)
+    ]
+    for row_start, row_end in chunks:
         row_slice = slice(row_start, row_end)
         logits, visible_blocks = qsa_mqa_paged(
             q[row_slice],
@@ -976,6 +1025,7 @@ def qsa_select_paged_tokens(
             compress_ratio,
             num_columns=columns,
             single_row_decode=single_row_decode,
+            allow_mfma=row_start >= prefill_start,
         )
         blocks = blocks_buffer[: row_end - row_start]
         use_cooperative_topk = (
@@ -1034,8 +1084,14 @@ def qsa_sparse_paged_attention(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
+    prefill_layout: QSAPrefillLayout | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged bf16 or fp8 K/V caches."""
+    """Run sparse GQA directly over paged bf16 or fp8 K/V caches.
+
+    `prefill_layout` (host lengths of the trailing prefilling requests) is
+    given when AITER's FlyDSL sparse prefill runs on this device; the step's
+    prefill rows may then run that op, and the rows before them run here.
+    """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA sparse attention requires a GPU and Triton")
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
@@ -1074,6 +1130,24 @@ def qsa_sparse_paged_attention(
     assert out.stride(2) == 1
     if not q.shape[0]:
         return out
+    if prefill_layout is not None:
+        from .qsa_flydsl_prefill import try_flydsl_prefill
+
+        head_rows = try_flydsl_prefill(
+            q, k_cache, v_cache, logical_indices, block_table, out, prefill_layout
+        )
+        if head_rows is not None:
+            if head_rows:
+                qsa_sparse_paged_attention(
+                    q[:head_rows],
+                    k_cache,
+                    v_cache,
+                    logical_indices[:head_rows],
+                    block_table,
+                    token_to_req[:head_rows],
+                    out[:head_rows],
+                )
+            return out
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)

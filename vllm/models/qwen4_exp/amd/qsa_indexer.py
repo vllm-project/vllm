@@ -371,6 +371,7 @@ class QSAIndexer(nn.Module):
                 metadata.num_prefills == 0 and metadata.decode_query_len == 1
             ),
             max_seq_len=metadata.max_seq_len,
+            num_decode_tokens=metadata.num_decode_tokens,
         )
 
     def forward(
