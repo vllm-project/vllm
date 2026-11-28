@@ -80,6 +80,12 @@ fn soft_nofile_limit(pid: u32) -> u64 {
         .unwrap_or_else(|| panic!("unexpected `Max open files` row: {line:?}"))
 }
 
+fn open_fd_count(pid: u32) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .expect("failed to read /proc/<pid>/fd")
+        .count()
+}
+
 /// Regression test for #68023: when `vllm-rs` starts with the typical Linux
 /// default soft `RLIMIT_NOFILE=1024` (and a higher hard limit), it must raise
 /// its soft limit like Python's `set_ulimit`, to 65535 within the hard limit,
@@ -130,4 +136,107 @@ fn render_raises_soft_nofile_above_1024_default() {
     wait_for_ready(&mut child, addr);
 
     assert_eq!(soft_nofile_limit(child.0.id()), hard_limit.min(65535));
+}
+
+#[test]
+fn grpc_accept_backs_off_at_nofile_limit() {
+    const NOFILE_LIMIT: u64 = 64;
+
+    let model_dir = tempfile::tempdir().expect("failed to create temp model dir");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        r#"{"vocab_size": 128, "eos_token_id": [7, 9]}"#,
+    )
+    .expect("failed to write config.json");
+
+    let http_probe = TcpListener::bind("127.0.0.1:0").expect("failed to bind HTTP port");
+    let http_addr = http_probe.local_addr().expect("failed to inspect HTTP port");
+    drop(http_probe);
+    let grpc_probe = TcpListener::bind("127.0.0.1:0").expect("failed to bind gRPC port");
+    let grpc_addr = grpc_probe.local_addr().expect("failed to inspect gRPC port");
+    drop(grpc_probe);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vllm-rs"));
+    cmd.args([
+        "render",
+        model_dir.path().to_str().expect("temp path is valid utf-8"),
+        "--skip-tokenizer-init",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &http_addr.port().to_string(),
+        "--grpc-port",
+        &grpc_addr.port().to_string(),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+
+    // SAFETY: `rlimit::Resource::NOFILE.set` only invokes `setrlimit(2)` with no
+    // heap allocations, so it is async-signal-safe in `pre_exec`.
+    unsafe {
+        cmd.pre_exec(|| rlimit::Resource::NOFILE.set(NOFILE_LIMIT, NOFILE_LIMIT));
+    }
+
+    let mut child = ChildGuard(cmd.spawn().expect("failed to spawn vllm-rs render"));
+    wait_for_ready(&mut child, http_addr);
+    assert_eq!(soft_nofile_limit(child.0.id()), NOFILE_LIMIT);
+    let baseline_fd_count = open_fd_count(child.0.id());
+    assert!(baseline_fd_count < NOFILE_LIMIT as usize);
+
+    let mut connections = Vec::new();
+    for _ in 0..256 {
+        if let Ok(connection) = TcpStream::connect_timeout(&grpc_addr, Duration::from_millis(100)) {
+            connections.push(connection);
+        }
+        if open_fd_count(child.0.id()) == NOFILE_LIMIT as usize {
+            break;
+        }
+    }
+    assert_eq!(
+        open_fd_count(child.0.id()),
+        NOFILE_LIMIT as usize,
+        "gRPC connections did not exhaust the server's file descriptors"
+    );
+
+    std::thread::sleep(Duration::from_millis(200));
+    drop(connections);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while open_fd_count(child.0.id()) > baseline_fd_count && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let released_fd_count = open_fd_count(child.0.id());
+    assert!(
+        released_fd_count <= baseline_fd_count,
+        "gRPC connections were not released after descriptor pressure ended"
+    );
+
+    let recovered = TcpStream::connect_timeout(&grpc_addr, Duration::from_secs(1))
+        .expect("reconnect gRPC port");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while open_fd_count(child.0.id()) <= released_fd_count && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        open_fd_count(child.0.id()) > released_fd_count,
+        "gRPC listener did not accept a connection after descriptor pressure ended"
+    );
+    drop(recovered);
+
+    child.0.kill().expect("kill vllm-rs render");
+    child.0.wait().expect("wait for vllm-rs render");
+    let mut logs = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .expect("capture vllm-rs stderr")
+        .read_to_string(&mut logs)
+        .expect("read vllm-rs stderr");
+    let accept_errors = logs.matches("accept error: Too many open files").count();
+    assert!(
+        (1..=4).contains(&accept_errors),
+        "expected backoff-limited gRPC accept errors, got {accept_errors}\n{logs}"
+    );
 }

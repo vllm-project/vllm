@@ -368,7 +368,7 @@ pub(crate) async fn serve_render_grpc(
         .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
         .add_service(health_service)
         .add_service(render_service)
-        .serve_with_incoming_shutdown(listener, stop)
+        .serve_with_incoming_shutdown(listener.into_incoming(), stop)
         .await
         .context("render gRPC server failed")
 }
