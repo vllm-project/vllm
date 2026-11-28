@@ -334,32 +334,103 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
-        """Coerce a single value according to its schema.
+    def _unwrap_nullable_schema(schema: dict) -> dict:
+        """Return the inline non-null branch of a two-branch nullable schema."""
+        if schema.keys() <= {"anyOf", "title", "description", "default", "examples"}:
+            match schema.get("anyOf"):
+                case [dict() as branch, {"type": "null"}] | [
+                    {"type": "null"},
+                    dict() as branch,
+                ] if "$ref" not in branch:
+                    return branch
+        return schema
 
-        Returns `(coerced_value, changed)`.
+    @staticmethod
+    def _typed_map_schema(schema: dict) -> dict | None:
+        """Return the object schema with typed `additionalProperties`, if supported."""
+        schema = ParserEngine._unwrap_nullable_schema(schema)
+        additional = schema.get("additionalProperties")
+        if not isinstance(additional, dict) or schema.get("patternProperties"):
+            return None
+        if "$ref" in schema or "$ref" in additional:
+            return None
+        if "type" in additional:
+            return schema
+        choices = additional.get("anyOf")
+        if (
+            isinstance(choices, list)
+            and choices
+            and all(
+                isinstance(choice, dict) and "type" in choice and "$ref" not in choice
+                for choice in choices
+            )
+        ):
+            return schema
+        return None
+
+    @staticmethod
+    def _coerce_value(
+        value: object,
+        schema: dict,
+        *,
+        preserve_strings: bool = False,
+        preserve_native_scalars: bool = False,
+    ) -> tuple[object, bool]:
+        """Coerce a value to its schema and return `(coerced_value, changed)`.
+
+        With `preserve_strings`, keep strings allowed by their schema,
+        including those in nested objects and arrays. With `preserve_native_scalars`,
+        keep JSON numbers, booleans and nulls when visiting those containers.
         """
+        if preserve_strings and ("$ref" in schema or not schema):
+            return value, False
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
+            if preserve_strings and "string" in types:
+                # A numeric-looking string can be an identifier in a typed map.
+                return value, False
             coerced = coerce_to_schema_type(value, types)
+            if isinstance(coerced, dict) and ParserEngine._typed_map_schema(schema):
+                # XML parameters can carry the entire dictionary as JSON text.
+                ParserEngine._coerce_value(
+                    coerced,
+                    schema,
+                    preserve_strings=preserve_strings,
+                    preserve_native_scalars=preserve_native_scalars,
+                )
             if coerced is not value:
                 return coerced, True
             return value, False
 
         if isinstance(value, dict):
-            nested_props = schema.get("properties")
-            if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
-                return value, changed
-            return value, False
+            map_schema = ParserEngine._typed_map_schema(schema)
+            properties = (map_schema or schema).get("properties")
+            additional = map_schema["additionalProperties"] if map_schema else None
+            return ParserEngine._coerce_dict(
+                value,
+                properties if isinstance(properties, dict) else {},
+                additional,
+                preserve_strings=preserve_strings,
+                preserve_native_scalars=preserve_native_scalars,
+            )
 
         if isinstance(value, list):
-            items_schema = schema.get("items")
+            array_schema = ParserEngine._unwrap_nullable_schema(schema)
+            if array_schema is not schema:
+                if array_schema.get("type") != "array":
+                    return value, False
+                # Recurse into nullable arrays to correct string leaves while
+                # preserving existing JSON numbers, booleans and nulls at any depth.
+                preserve_native_scalars = True
+            items_schema = array_schema.get("items")
             if isinstance(items_schema, dict):
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema
+                        item,
+                        items_schema,
+                        preserve_strings=preserve_strings,
+                        preserve_native_scalars=preserve_native_scalars,
                     )
                     if item_changed:
                         value[i] = coerced
@@ -367,6 +438,8 @@ class ParserEngine(Parser):
                 return value, changed
             return value, False
 
+        if preserve_native_scalars:
+            return value, False
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
@@ -375,14 +448,31 @@ class ParserEngine(Parser):
         return value, False
 
     @staticmethod
-    def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
-        """Coerce all values in *args* using *properties* schemas."""
+    def _coerce_dict(
+        args: dict,
+        properties: dict,
+        additional: dict | None = None,
+        *,
+        preserve_strings: bool = False,
+        preserve_native_scalars: bool = False,
+    ) -> tuple[dict, bool]:
+        """Coerce `args` in place using `additional` for keys absent from `properties`.
+
+        Those keys enable `preserve_strings` for their values and descendants.
+        """
+        if not properties and additional is None:
+            return args, False
         changed = False
         for key, value in args.items():
-            prop = properties.get(key)
+            prop = properties.get(key, additional)
             if not isinstance(prop, dict):
                 continue
-            coerced, val_changed = ParserEngine._coerce_value(value, prop)
+            coerced, val_changed = ParserEngine._coerce_value(
+                value,
+                prop,
+                preserve_strings=preserve_strings or key not in properties,
+                preserve_native_scalars=preserve_native_scalars,
+            )
             if val_changed:
                 args[key] = coerced
                 changed = True
@@ -483,8 +573,8 @@ class ParserEngine(Parser):
 
         String values are coerced via `coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
-        defines `properties` or `items`.  Without a schema, values
-        stay as strings.
+        defines `properties`, typed `additionalProperties` or `items`.
+        Without a schema, values stay as strings.
         """
         if not self._tools or not func_name:
             return args_json
