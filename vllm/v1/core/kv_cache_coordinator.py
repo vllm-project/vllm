@@ -17,9 +17,11 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     SlidingWindowManager,
     create_single_type_manager,
+    get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheSpecKind,
     get_reusable_prefix_length,
     prefix_lookup_groups,
 )
@@ -312,6 +314,34 @@ class KVCacheCoordinator(ABC):
     def get_num_cacheable_tokens(self, num_computed_tokens: int) -> int:
         """Return the prefix eligible for hashing."""
         return num_computed_tokens
+
+    def apply_retention_to_computed_blocks(
+        self,
+        request: Request,
+        computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_computed_tokens: int,
+    ) -> None:
+        """Apply hints to adopted full-attention hits, without republishing them.
+
+        This does not extend retention support to sparse or partial checkpoints.
+        Keep each group's positional layout and exclude its partial tail.
+        """
+        for group, manager, blocks in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.single_type_managers,
+            computed_blocks,
+        ):
+            if not manager.enable_caching or get_kv_cache_kind(
+                group.manager_config, group.distinct_specs
+            ) not in (KVCacheSpecKind.FULL_ATTENTION, KVCacheSpecKind.MLA_ATTENTION):
+                continue
+            num_full_blocks = min(
+                num_computed_tokens // manager.block_size, len(blocks)
+            )
+            if num_full_blocks:
+                manager.block_pool.apply_retention_to_cached_blocks(
+                    request, blocks[:num_full_blocks], manager.block_size
+                )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
