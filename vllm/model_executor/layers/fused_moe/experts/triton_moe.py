@@ -29,7 +29,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    route_major_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.silu_mul_token_quant import (
     silu_mul_token_quant,
 )
@@ -148,12 +151,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
         *,
         activation_key: QuantKey | None = None,
+        defer_finalize: bool = False,
     ):
         # Whether quantized MOE runs natively, or through
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
         self._enable_sorted_a_tma = True
         self.activation_key = activation_key
+        self.defer_finalize = defer_finalize
         super().__init__(moe_config, quant_config)
 
     @staticmethod
@@ -325,7 +330,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -402,9 +407,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
         hooked = self._uses_post_gemm2_hook(num_tokens)
-        if hooked and (apply_router_weight_on_input or self._lora_context is not None):
+        defer = (hooked or self.defer_finalize) and num_tokens > 0
+        if defer and (apply_router_weight_on_input or self._lora_context is not None):
             raise NotImplementedError(
-                "post_gemm2_hook needs unweighted GEMM2 rows; it supports neither "
+                "Deferred finalize needs unweighted GEMM2 rows; it supports neither "
                 "router weights on the input nor LoRA."
             )
 
@@ -475,7 +481,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and activation == MoEActivation.SILU
             and self.activation_config.clamp_limit is None
             and self._lora_context is None
-            and not hooked
+            and not defer
             and not self.quantization_emulation
             and is_deep_gemm_e8m0_used()
             and a2_scale is None
@@ -739,7 +745,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                not hooked
+                not defer
                 and self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
                 1,
                 down_config,
@@ -802,17 +808,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
-        if hooked:
-            self._run_post_gemm2_hook(
-                route_major_moe_output(
-                    intermediate_cache3, topk_weights, topk_ids, expert_map
-                ),
-                output,
+        if defer:
+            routed = route_major_moe_output(
+                intermediate_cache3, topk_weights, topk_ids, expert_map
             )
+            if not hooked:
+                return routed
+            self._run_post_gemm2_hook(routed, output)
         else:
             self._finalize_expert_output(
                 intermediate_cache3, output, topk_ids, expert_map
             )
+        return None
 
     def moe_sum(
         self,

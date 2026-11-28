@@ -77,7 +77,9 @@ def _embed_norm(rank, device):
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not current_platform.is_cuda()
+    or not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100 with NVLink multicast",
 )
 def test_embed_norm_matches_reference():
     run_tp4(_embed_norm)

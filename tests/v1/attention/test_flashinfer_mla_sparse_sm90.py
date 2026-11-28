@@ -15,6 +15,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+import vllm.utils.gpu_sync_debug as gsd
+
 # isort: off
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
@@ -380,7 +382,6 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     )
     state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
     state.device = torch.device("cpu")
-    state.reset_kv_indices_on_plan = False
     state.wrapper = wrapper
     state.num_heads = 4
     state.kv_dtype = kv_dtype
@@ -388,12 +389,8 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     state.qk_rope_head_dim = 64
     state.sm_scale = 576**-0.5
     state.max_tokens = 4
-    state.topk_width = TOPK
-    state.kv_indices = torch.zeros(4 * TOPK)
     state._arange_cpu = torch.arange(5, dtype=torch.int32)
-    state._qo_cpu = torch.empty(5, dtype=torch.int32)
-    state._kv_cpu = torch.empty(5, dtype=torch.int32)
-    state._lens_cpu = torch.full((4,), TOPK, dtype=torch.int32)
+    state._zero_indices_cpu = None
     state._saved_kv_end = torch.empty(0, dtype=torch.int32)
 
     state.plan(3, torch.tensor([2, 5, 7], dtype=torch.int32), None, None)
@@ -402,6 +399,7 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     (qo, kv, indices, kv_len, heads, ckv, kpe, page, causal, scale) = args
     assert qo.tolist() == [0, 1, 2, 3, 3]  # clamp: rows past 3 have no queries
     assert kv.tolist() == [0, 2, 7, 14, 14]
+    assert indices.tolist() == [0] * 14
     assert kv_len.tolist() == [2, 5, 7, 0]
     assert (heads, ckv, kpe, page, causal) == (4, HEAD, 64, 1, False)
     assert scale == 576**-0.5
@@ -410,10 +408,11 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
 
     # Replanning a smaller batch must clear the previous rows' lengths.
     state.plan(1, torch.tensor([TOPK], dtype=torch.int32), None, None)
-    assert state._kv_cpu.tolist() == [0, TOPK, TOPK, TOPK, TOPK]
+    assert wrapper.plan_args[0][1].tolist() == [0, TOPK, TOPK, TOPK, TOPK]
     assert state._lens_cpu.tolist() == [TOPK, 0, 0, 0]
+    assert kv_len.tolist() == [2, 5, 7, 0]
     state.plan(0, torch.empty(0, dtype=torch.int32), None, None)
-    assert state._kv_cpu.tolist() == [0, 0, 0, 0, 0]
+    assert wrapper.plan_args[0][1].tolist() == [0, 0, 0, 0, 0]
     assert state._lens_cpu.tolist() == [0, 0, 0, 0]
 
 
@@ -578,7 +577,7 @@ def _sm90_flashinfer_available():
 SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH = 16, 2048, 4, 2176
 
 
-def _real_state(rows, kv_dtype=torch.bfloat16, **kwargs):
+def _real_state(rows, kv_dtype=torch.bfloat16):
     return sm90_mod._SM90State(
         torch.device("cuda"),
         SM90_HEADS,
@@ -590,7 +589,6 @@ def _real_state(rows, kv_dtype=torch.bfloat16, **kwargs):
         HEAD**-0.5,
         SM90_TOPK,
         SM90_KPOOL,
-        **kwargs,
     )
 
 
@@ -699,16 +697,28 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
-def test_plan_admits_cache_smaller_than_stale_indices():
+def test_plan_admits_cache_smaller_than_stale_indices(monkeypatch):
     """The plan runs before the forward writes kv_indices, so slots left from
     a step over a large cache must not reject this step's smaller cache (the
     HiSparse staging workspace)."""
     torch.manual_seed(0)
     rows, width = 8, SM90_WIDTH
-    state = _real_state(rows, reset_kv_indices_on_plan=True)
-    state.kv_indices.fill_((1 << 16) - 1)
+    state = _real_state(rows)
     lens = torch.full((rows,), 4, dtype=torch.int32)
-    state.plan(rows, lens, None, None)
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    plan = gsd.with_gpu_sync_check(state.plan)
+    plan(rows, lens, None, None)
+    stale_page = (1 << 16) - 1
+    state.kv_indices.fill_(stale_page)
+    rows -= 1
+    plan(rows, lens[:rows], None, None)
+    backend = state.wrapper._planned_backend
+    if hasattr(
+        getattr(backend, "_cached_module", None), "plan_with_staged_workspace_bytes"
+    ):
+        assert state.kv_indices[0].item() == stale_page
     small = torch.randn(16, 1, HEAD, device="cuda", dtype=torch.bfloat16)
     slots = torch.full((rows, width), -1, dtype=torch.int32)
     slots[:, :4] = torch.randint(0, 16, (rows, 4), dtype=torch.int32)

@@ -7,9 +7,7 @@ by name, e.g. `{"moe": "1-4:per_route,8-16:grouped"}`."""
 
 from collections.abc import Mapping
 
-from .cutedsl.policy import (
-    batch_table,
-)
+from .cutedsl.policy import batch_table
 
 DEFAULT = {
     # Fused all-reduce + mHC boundary (all-reduce + norm in the draft), by
@@ -62,6 +60,115 @@ DEFAULT = {
     "dsa_attn": "1-64:cute",
     "dsa_kpool": "1-64:cute",
 }
+
+_SM90_OVERRIDES = {
+    "moe": "1-64:triton",
+    "dense_mlp": "1-8:cute",
+    "kda": "1-64:split",
+    # At four or more rows, use cuBLAS for the vocabulary shard.
+    "logits_head": "1-2:cute",
+}
+
+
+def _kda_restrictions(vllm_config) -> list[str]:
+    import torch
+
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator
+
+    cache = vllm_config.cache_config
+    dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        vllm_config.model_config.dtype,
+        cache.mamba_cache_dtype,
+        cache.mamba_ssm_cache_dtype,
+    )
+    reasons = []
+    if dtypes != (torch.bfloat16, torch.float32):
+        reasons.append(
+            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+            "state (mamba cache dtype)"
+        )
+    if cache.use_replayssm or cache.use_kda_recoverssm:
+        reasons.append("ReplaySSM / RecoverSSM (--use-replayssm)")
+    return reasons
+
+
+def unsupported_platform(vllm_config, overrides: dict[str, str]) -> list[str]:
+    from vllm.platforms import current_platform
+    from vllm.utils.import_utils import has_tilelang
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if current_platform.is_cuda():
+        if current_platform.is_device_capability_family(90):
+            reasons = []
+            if any(
+                c != "triton" for c in batch_table(overrides.get("moe", "")).values()
+            ):
+                reasons.append("Hopper MoE choices other than triton")
+            if not has_tilelang():
+                reasons.append("missing TileLang on Hopper")
+            return reasons
+        if current_platform.is_device_capability_family(100):
+            cache = vllm_config.cache_config
+            attention = vllm_config.attention_config
+            backend = attention.backend_per_kind.get("mla_attention", attention.backend)
+            checks = (
+                (
+                    cache.cache_dtype not in ("fp8", "fp8_e4m3"),
+                    "KV cache dtypes other than FP8 E4M3",
+                ),
+                (bool(cache.kv_cache_dtype_skip_layers), "mixed KV cache dtypes"),
+                (
+                    backend not in (None, AttentionBackendEnum.FLASHINFER_MLA_SPARSE),
+                    "attention backends other than FLASHINFER_MLA_SPARSE",
+                ),
+                (attention.hisparse_config is not None, "HiSparse"),
+            )
+            return [reason for failed, reason in checks if failed] + _kda_restrictions(
+                vllm_config
+            )
+    return ["this GPU (requires NVIDIA SM90 or SM100/103)"]
+
+
+def _supports_sm90_dsa(vllm_config) -> bool:
+    from vllm.utils.flashinfer import has_flashinfer_sm90_nope_mla
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
+        FlashInferMLASparseSM90Backend,
+    )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention = vllm_config.attention_config
+    cache = vllm_config.cache_config
+    backend = attention.backend_per_kind.get("mla_attention", attention.backend)
+    return (
+        backend in (None, AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90)
+        and attention.hisparse_config is None
+        and FlashInferMLASparseSM90Backend.supports_kv_cache_dtype(cache.cache_dtype)
+        and (
+            not cache.user_specified_block_size
+            or FlashInferMLASparseSM90Backend.supports_block_size(cache.block_size)
+        )
+        and has_flashinfer_sm90_nope_mla()
+    )
+
+
+def platform_policy(
+    vllm_config, overrides: dict[str, str], *, strict: bool
+) -> dict[str, str]:
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_device_capability_family(90):
+        return overrides
+    policy = _SM90_OVERRIDES | overrides
+    if not _supports_sm90_dsa(vllm_config):
+        if strict and policy.get("dsa_attn", True):
+            raise ValueError(
+                "GLM-5.3-Flash specialized Hopper DSA needs FlashInfer SM90 MLA "
+                "with compatible KV cache and HiSparse disabled"
+            )
+        policy.update((stage, "") for stage in DEFAULT if stage.startswith("dsa_"))
+    if policy["kda"] and _kda_restrictions(vllm_config):
+        policy["kda"] = ""
+    return policy
 
 
 class Policy:

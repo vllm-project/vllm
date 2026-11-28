@@ -196,29 +196,37 @@ def test_all_reduce_mhc_boundary_matches_reference():
 
 @pytest.fixture
 def hopper_model_config(tmp_path):
-    from transformers import Glm5NextTextConfig
+    from transformers import Glm5NextConfig, Glm5NextTextConfig
 
     from vllm.models.glm5next.nvidia.specialized_decode.runtime import GEOMETRY
 
-    Glm5NextTextConfig(
+    text_config = Glm5NextTextConfig(
         **GEOMETRY,
-        architectures=["Glm5NextForCausalLM"],
-        num_hidden_layers=2,
-        layer_types=["linear_attention"] * 2,
-        mlp_layer_types=["dense"] * 2,
-        intermediate_size=512,
+        num_hidden_layers=3,
+        layer_types=["linear_attention", "indexed_attention", "linear_attention"],
+        mlp_layer_types=["dense", "sparse", "sparse"],
+        num_nextn_predict_layers=1,
+        index_share_for_mtp_iteration=True,
+        indexer_rope_interleave=False,
+        mla_use_nope=True,
+        topk_method="noaux_tc",
+        intermediate_size=12288,
         vocab_size=256,
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=2,
         mhc=True,
+    )
+    Glm5NextConfig(
+        text_config=text_config,
+        architectures=["Glm5NextForCausalLM"],
         quantization_config={
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
             "weight_block_size": [128, 128],
             "modules_to_not_convert": [
                 f"model.layers.{layer}.self_attn.{name}"
-                for layer in range(2)
+                for layer in (0, 2)
                 for name in (
                     "q_proj",
                     "in_proj_qkvbfg_a",
@@ -242,20 +250,24 @@ def hopper_model_config(tmp_path):
     or not current_platform.is_device_capability_family(90),
     reason="Hopper defaults",
 )
-@pytest.mark.parametrize("mode", ["auto", "stock", "eager", "unsupported_policy"])
-def test_hopper_default_uses_only_boundaries_with_stock_kv(hopper_model_config, mode):
-    """Stock BF16 KV must permit fusion, without enabling Blackwell stages."""
+@pytest.mark.parametrize(
+    "mode",
+    ["auto", "stock", "eager", "unsupported_policy", "other_attention", "bf16_ssm"],
+)
+def test_hopper_default_dispatch(hopper_model_config, mode):
+    """Enable the Hopper stages with stock KV and retain stage-specific fallbacks."""
     from vllm.engine.arg_utils import EngineArgs
     from vllm.models.glm5next.nvidia.specialized_decode.policy import Policy
     from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
         specialized_decode_config,
     )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     extra = {}
     if mode == "stock":
         extra["decode_backend"] = "stock"
     if mode == "unsupported_policy":
-        extra["policy"] = {"kda": "1-64:split"}
+        extra["policy"] = {"moe": "1:per_route"}
     config = EngineArgs(
         model=hopper_model_config,
         skip_tokenizer_init=True,
@@ -265,24 +277,42 @@ def test_hopper_default_uses_only_boundaries_with_stock_kv(hopper_model_config, 
         max_model_len=128,
         max_num_seqs=4,
         enforce_eager=mode == "eager",
+        attention_backend=(
+            AttentionBackendEnum.FLASHMLA_SPARSE if mode == "other_attention" else None
+        ),
+        mamba_ssm_cache_dtype="bfloat16" if mode == "bf16_ssm" else "auto",
         additional_config=extra,
     ).create_engine_config()
     decode = specialized_decode_config(config)
-    if mode != "auto":
+    if mode in ("stock", "eager", "unsupported_policy"):
         assert decode is None
         return
-    assert decode is not None and decode.boundary_only
+    assert decode is not None
     assert config.cache_config.cache_dtype == "auto"
     policy = Policy(dict(decode.policy))
     assert policy("boundary", 1) == 1
     assert policy("boundary", 64) == 5
-    assert all(
-        not table for stage, table in policy.tables.items() if stage != "boundary"
-    )
+    assert policy("moe", 1) == "triton"
+    assert policy("dense_mlp", 1) == "cute"
+    assert policy("logits_gather", 1) == "nvlink"
+    assert policy.enabled("kda") == (mode != "bf16_ssm")
+    assert policy.enabled("dsa_attn") == (mode != "other_attention")
+    assert policy.enabled("dsa_kpool") == (mode != "other_attention")
+    if mode == "auto":
+        config.additional_config = {"decode_backend": "latency_specialized"}
+        assert decode == specialized_decode_config(config)
 
 
-def _specialized_decode_enabled(model):
-    return model.specialized_decode is not None
+def _specialized_decode_stages(worker):
+    runner = worker.model_runner
+    decode = runner.model.specialized_decode
+    target = bool(decode and decode.kda and decode.dense and decode.moe)
+    speculator = runner.speculator
+    if speculator is None:
+        return target, None
+    assert speculator.share_mtp_topk_indices
+    draft = speculator.model.model.specialized_decode
+    return target, bool(draft and draft.ar_norm)
 
 
 @pytest.mark.distributed(num_gpus=4)
@@ -292,17 +322,22 @@ def _specialized_decode_enabled(model):
     or torch.accelerator.device_count() < TP,
     reason="Requires four Hopper GPUs with NVLink multicast",
 )
+@pytest.mark.parametrize("mtp", [False, True], ids=["decode", "mtp5-long"])
 def test_hopper_default_preserves_generation(
-    vllm_runner, hopper_model_config, enable_pickle
+    vllm_runner, hopper_model_config, enable_pickle, mtp
 ):
-    """Exercise default dispatch and graph replay through LLM.generate."""
+    """Exercise Hopper dispatch and graph replay through LLM.generate."""
     from tests.models.utils import check_logprobs_close
     from vllm import SamplingParams
 
     sampling = SamplingParams(
         temperature=0, max_tokens=8, ignore_eos=True, logprobs=5, detokenize=False
     )
-    prompts = [{"prompt_token_ids": [11, 17, 23]}, {"prompt_token_ids": [29, 31]}]
+    # Exercise kpool remap beyond the point where it can select every pool.
+    prompt = [11, 17, 23] * (686 if mtp else 1)
+    prompts = [{"prompt_token_ids": prompt}, {"prompt_token_ids": [29, 31]}]
+    spec = {"method": "mtp", "num_speculative_tokens": 5} if mtp else None
+    capture_sizes = [1, 2, 4, 6, 12, 24] if mtp else [1, 2, 4]
     outputs = []
     for backend in ("stock", "auto"):
         with vllm_runner(
@@ -310,19 +345,22 @@ def test_hopper_default_preserves_generation(
             load_format="dummy",
             skip_tokenizer_init=True,
             tensor_parallel_size=TP,
+            block_size=64,
             dtype="bfloat16",
-            max_model_len=128,
+            max_model_len=2304 if mtp else 128,
             max_num_seqs=4,
-            max_num_batched_tokens=128,
+            max_num_batched_tokens=512 if mtp else 128,
             gpu_memory_utilization=0.1,
             enable_chunked_prefill=True,
             enable_prefix_caching=False,
-            compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+            compilation_config={"cudagraph_capture_sizes": capture_sizes},
+            speculative_config=spec,
             additional_config={"decode_backend": backend},
             seed=256,
         ) as runner:
-            enabled = runner.apply_model(_specialized_decode_enabled)
-            assert enabled == [backend == "auto"] * TP
+            enabled = backend == "auto"
+            expected = (enabled, enabled if mtp else None)
+            assert runner.collective_rpc(_specialized_decode_stages) == [expected] * TP
             outputs.append(
                 runner.generate_w_logprobs(prompts, sampling, use_tqdm=False)
             )

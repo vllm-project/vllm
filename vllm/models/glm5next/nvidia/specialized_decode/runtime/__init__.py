@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash specialized decode: a decode executor over the stock backbone for
-Blackwell TP4 and fused mHC boundaries on Hopper TP4, enabled by default;
-`decode_backend=stock` disables it.
+"""GLM-5.3-Flash specialized decode.
+
+Supported Blackwell and Hopper deployments use specialized decode by default.
+`decode_backend=stock` disables specialized decode.
 """
 
 from dataclasses import dataclass
@@ -16,9 +17,6 @@ class DecodeConfig:
     capture_sizes: tuple[int, ...]
     # Overrides of the per-token-count dispatch (see ``policy.DEFAULT``).
     policy: tuple[tuple[str, str], ...] = ()
-    boundary_only: bool = (
-        False  # TODO(wentao): refactor this after fully support in hopper
-    )
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -33,21 +31,21 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         raise ValueError(
             "Supported decode_backend values are auto/stock/latency_specialized"
         )
-    reasons = unsupported(vllm_config)
+    from ..policy import platform_policy, unsupported_platform
+
+    policy = dict(extra.get("policy", {}))
+    reasons = _unsupported_deployment(vllm_config) + unsupported_platform(
+        vllm_config, policy
+    )
     if reasons:
         if backend == "auto":
             return None
         raise ValueError(
             "GLM-5.3-Flash specialized decode does not support " + "; ".join(reasons)
         )
-    from vllm.platforms import current_platform
-
-    from ..policy import DEFAULT
-
-    boundary_only = current_platform.is_device_capability_family(90)
-    policy = dict(extra.get("policy", {}))
-    if boundary_only:
-        policy = {stage: "" for stage in DEFAULT if stage != "boundary"} | policy
+    policy = platform_policy(
+        vllm_config, policy, strict=backend == "latency_specialized"
+    )
     spec = vllm_config.speculative_config
     return DecodeConfig(
         max_context=vllm_config.model_config.max_model_len,
@@ -56,19 +54,6 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             vllm_config.compilation_config.cudagraph_capture_sizes or ()
         ),
         policy=tuple(policy.items()),
-        boundary_only=boundary_only,
-    )
-
-
-def kda_dtypes(vllm_config):
-    """(conv, recurrent) KDA state dtypes the deployment's cache config selects."""
-    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator
-
-    cache = vllm_config.cache_config
-    return MambaStateDtypeCalculator.kda_state_dtype(
-        vllm_config.model_config.dtype,
-        cache.mamba_cache_dtype,
-        cache.mamba_ssm_cache_dtype,
     )
 
 
@@ -97,26 +82,17 @@ GEOMETRY = {
 }
 
 
-def unsupported(vllm_config) -> list[str]:
-    """Every reason this deployment cannot run the specialized decode."""
+def _unsupported_deployment(vllm_config) -> list[str]:
+    """Deployment restrictions common to all specialized decode policies."""
     import torch
 
     from vllm.config import CompilationMode, CUDAGraphMode
-    from vllm.platforms import current_platform
-    from vllm.utils.import_utils import has_cutedsl, has_tilelang
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.utils.import_utils import has_cutedsl
 
-    from ..policy import DEFAULT
-
-    boundary_only = current_platform.is_device_capability_family(90)
-    extra = vllm_config.additional_config
-    extra = extra if isinstance(extra, dict) else {}
     parallel, spec = vllm_config.parallel_config, vllm_config.speculative_config
-    model, cache = vllm_config.model_config, vllm_config.cache_config
+    model = vllm_config.model_config
     quant = vllm_config.quant_config
-    attention = vllm_config.attention_config
-    backend = attention.backend_per_kind.get("mla_attention", attention.backend)
-    text = vllm_config.model_config.hf_text_config
+    text = model.hf_text_config
     geometry = [
         f"{name}={getattr(text, name, None)} (expects {value})"
         for name, value in GEOMETRY.items()
@@ -125,22 +101,7 @@ def unsupported(vllm_config) -> list[str]:
     compilation = vllm_config.compilation_config
     graphs = compilation.cudagraph_mode
     checks = (
-        (
-            not current_platform.is_cuda()
-            or not (boundary_only or current_platform.is_device_capability_family(100)),
-            "this GPU (requires NVIDIA SM90 or SM100/103)",
-        ),
-        (
-            boundary_only
-            and any(
-                spec
-                for stage, spec in extra.get("policy", {}).items()
-                if stage in DEFAULT and stage != "boundary"
-            ),
-            "specialized stages other than boundary on Hopper",
-        ),
         (not has_cutedsl(), "missing CuTe DSL"),
-        (boundary_only and not has_tilelang(), "missing TileLang on Hopper"),
         (model.dtype != torch.bfloat16, "activation dtypes other than BF16"),
         (
             model.quantization != "fp8"
@@ -168,38 +129,10 @@ def unsupported(vllm_config) -> list[str]:
             graphs is None or graphs.decode_mode() != CUDAGraphMode.FULL,
             "deployments without FULL decode CUDA graphs (e.g. enforce-eager)",
         ),
-        (
-            not boundary_only and cache.cache_dtype not in ("fp8", "fp8_e4m3"),
-            "KV cache dtypes other than FP8 E4M3",
-        ),
-        (
-            not boundary_only and bool(cache.kv_cache_dtype_skip_layers),
-            "mixed KV cache dtypes",
-        ),
-        (
-            not boundary_only
-            and backend not in (None, AttentionBackendEnum.FLASHINFER_MLA_SPARSE),
-            "attention backends other than FLASHINFER_MLA_SPARSE",
-        ),
-        (not boundary_only and attention.hisparse_config is not None, "HiSparse"),
         (spec is not None and spec.method != "mtp", "speculative methods but MTP"),
         (
             spec is not None and spec.num_speculative_tokens > 7,
             "more than 7 speculative tokens",
-        ),
-        # The KDA decode keeps a BF16 conv state and an FP32 recurrent state in place;
-        # it maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.
-        (
-            not boundary_only
-            and kda_dtypes(vllm_config) != (torch.bfloat16, torch.float32),
-            (
-                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-                "state (mamba cache dtype)"
-            ),
-        ),
-        (
-            not boundary_only and (cache.use_replayssm or cache.use_kda_recoverssm),
-            "ReplaySSM / RecoverSSM (--use-replayssm)",
         ),
         # The KDA decode reads its projection weights directly as BF16.
         (
