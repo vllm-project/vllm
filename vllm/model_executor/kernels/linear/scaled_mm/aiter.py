@@ -129,6 +129,12 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return rocm_aiter_ops.w8a8_gemm(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
+# AiterPreshuffledPerTokenFp8ScaledMMLinearKernel takes N < 128 only when the
+# bpreshuffle table has a row at this M, so large prefill batches never fall
+# back to AITER's default config for a narrow N.
+_NARROW_N_REQUIRED_M = 16384
+
+
 class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -183,6 +189,22 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 (
                     f"requires N and K dimensions divisible by 16, received "
                     f"N={N} and K={K}."
+                ),
+            )
+
+        # The tuned check below matches on (N, K) at any M, so one tuned small M
+        # selects this kernel for every M. Untuned M then use AITER's default
+        # bpreshuffle config, which has no kernel for N < 128 at large M
+        # ("This GEMM is not supported"). For N < 128, require a tuned row at
+        # a large M too, otherwise leave the layer to the next kernel.
+        if N < 128 and not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned_at_m(
+            _NARROW_N_REQUIRED_M, N, K, fp8_dtype
+        ):
+            return (
+                False,
+                (
+                    f"N={N} < 128 requires a tuned configuration at "
+                    f"M={_NARROW_N_REQUIRED_M}."
                 ),
             )
 

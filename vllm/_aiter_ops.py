@@ -252,9 +252,15 @@ def _triton_gemm_config_is_tuned(
 
 
 def _ck_gemm_shape_is_tuned(
-    N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
+    N: int,
+    K: int,
+    q_dtype_w: torch.dtype,
+    csv_attr: str,
+    m_values: tuple[int, ...] | None = None,
 ) -> bool:
-    l_m = (
+    """True if the CSV holds a tuned row for (N, K) at any of `m_values`.
+    Without `m_values` it checks a sweep of M from 1 to 2**18."""
+    l_m = m_values or (
         [1, 2, 4]
         + list(range(8, 513, 8))
         + [1024, 1536]
@@ -5162,6 +5168,15 @@ class rocm_aiter_ops:
     ) -> bool:
         return _ck_gemm_shape_is_tuned(
             N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE"
+        )
+
+    @staticmethod
+    @functools.cache
+    def is_shuffled_per_token_w8a8_gemm_tuned_at_m(
+        M: int, N: int, K: int, q_dtype_w: torch.dtype
+    ) -> bool:
+        return _ck_gemm_shape_is_tuned(
+            N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE", (M,)
         )
 
     @staticmethod

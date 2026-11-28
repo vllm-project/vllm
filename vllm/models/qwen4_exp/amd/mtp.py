@@ -210,13 +210,19 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             # embedding, fc_hidden (shared across HC branches) projects the
             # backbone hidden; the embedding is added as a residual to every
             # branch (see mtp_residual_linear_shared.md).
+            # Every Qwen3.8-Flash-Next checkpoint stores these two
+            # projections in BF16, as SGLang and the reference load them
+            # (plain nn.Linear). The AttnFP8-PLEFP8 checkpoint lists only
+            # fc_hidden in its Quark exclude list, so taking the quant
+            # config here would make fc_embedding an MXFP4 layer and its
+            # BF16 weight fails to load.
             self.fc_embedding = ColumnParallelLinear(
                 self.hidden_size,
                 self.hidden_size,
                 gather_output=True,
                 bias=False,
                 return_bias=False,
-                quant_config=draft_vllm_config.quant_config,
+                quant_config=None,
                 prefix=f"{prefix}.fc_embedding",
             )
             self.fc_hidden = ColumnParallelLinear(
@@ -225,7 +231,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 gather_output=True,
                 bias=False,
                 return_bias=False,
-                quant_config=draft_vllm_config.quant_config,
+                quant_config=None,
                 prefix=f"{prefix}.fc_hidden",
             )
             self.layers = nn.ModuleList(
