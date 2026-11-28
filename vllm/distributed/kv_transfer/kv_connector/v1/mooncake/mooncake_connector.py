@@ -105,8 +105,8 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
-# Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
-# one only costs that peer a LAYOUT_MISS and one layout resend.
+# Bound both layout caches across decode restarts. Eviction only costs a
+# layout resend or rebuilding its prepared regions.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
 # A pull's reply can only arrive on the connection it was sent on: P's ROUTER
 # drops replies to a lost connection, and a refused reconnect means nothing
@@ -1475,10 +1475,10 @@ class MooncakeConnectorWorker:
         self._kv_unregistered = False
         # Aligned regions depend only on the peer's registered layout.
         # The third item is an error string when alignment cannot proceed.
-        self._prepared_transfer_regions: dict[
+        self._prepared_transfer_regions: OrderedDict[
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
-        ] = {}
+        ] = OrderedDict()
         # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
         # order. Filled only after a pull that actually carried the layout.
         self._layout_by_peer: OrderedDict[
@@ -3265,6 +3265,7 @@ class MooncakeConnectorWorker:
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
+            self._prepared_transfer_regions.move_to_end(cache_key)
             # A new layout_id can carry a layout this cache already holds.
             self._remember_peer_layout(meta, cached)
             return cached
@@ -3276,6 +3277,8 @@ class MooncakeConnectorWorker:
         ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
             prepared = (local, remote, err)
             self._prepared_transfer_regions[cache_key] = prepared
+            while len(self._prepared_transfer_regions) > _MAX_PEER_LAYOUTS:
+                self._prepared_transfer_regions.popitem(last=False)
             return prepared
 
         shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
@@ -3367,8 +3370,7 @@ class MooncakeConnectorWorker:
                 n_aligned,
                 len(local_regions),
             )
-        prepared = (local_regions, remote_regions, None)
-        self._prepared_transfer_regions[cache_key] = prepared
+        prepared = finish(local_regions, remote_regions, None)
         self._remember_peer_layout(meta, prepared)
         return prepared
 

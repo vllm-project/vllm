@@ -3179,6 +3179,54 @@ def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMe
     )
 
 
+@pytest.mark.parametrize("invalid_layout", [False, True])
+@pytest.mark.parametrize("layout_id", [0, 1], ids=["legacy", "layout-id"])
+def test_prepared_layout_cache_bounds_successes_and_errors(
+    monkeypatch, invalid_layout, layout_id
+):
+    """Peer churn bounds both successful plans and cached alignment failures."""
+    monkeypatch.setattr(mooncake_connector, "_MAX_PEER_LAYOUTS", 2)
+    worker, _, regions, _ = _register_sliced_packed_mla([0])
+    if invalid_layout:
+        regions = [_region(0x2000, layer_name=_layer_name(9), layer_index=9)]
+
+    def handshake(port):
+        return _xfer_meta(regions, {}, remote_port=port, layout_id=layout_id)
+
+    first = worker._prepare_transfer_regions(handshake(1))
+    second = worker._prepare_transfer_regions(handshake(2))
+    assert (first[2] is not None) == invalid_layout
+    assert worker._prepare_transfer_regions(handshake(1)) is first
+    worker._prepare_transfer_regions(handshake(3))
+
+    assert len(worker._prepared_transfer_regions) == 2
+    assert worker._prepare_transfer_regions(handshake(1)) is first
+    rebuilt = worker._prepare_transfer_regions(handshake(2))
+    assert rebuilt == second
+    assert rebuilt is not second
+    assert len(worker._prepared_transfer_regions) == 2
+
+
+def test_prepared_layout_eviction_preserves_peer_regions(monkeypatch):
+    """An acknowledged peer can keep using regions evicted from the plan cache."""
+    monkeypatch.setattr(mooncake_connector, "_MAX_PEER_LAYOUTS", 2)
+    worker, _, regions, _ = _register_sliced_packed_mla([0])
+
+    def handshake(port):
+        return _xfer_meta(regions, {}, remote_port=port, layout_id=port)
+
+    first = worker._prepare_transfer_regions(handshake(1))
+    worker._prepare_transfer_regions(handshake(2))
+    assert worker._lookup_peer_layout(handshake(1)) == first[:2]
+    worker._prepare_transfer_regions(handshake(3))
+
+    assert len(worker._prepared_transfer_regions) == 2
+    assert worker._lookup_peer_layout(handshake(1)) == first[:2]
+    rebuilt = worker._prepare_transfer_regions(handshake(1))
+    assert rebuilt == first
+    assert rebuilt is not first
+
+
 @pytest.mark.asyncio
 async def test_steady_pull_omits_layout_and_unknown_id_asks_for_resend():
     """A later pull is much smaller, and an unseen layout_id is not guessed."""
