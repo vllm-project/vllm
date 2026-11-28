@@ -3,7 +3,7 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, opt, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
@@ -267,13 +267,17 @@ fn function_event(input: &mut &str, trim_parameter_newlines: bool) -> ModalResul
 }
 
 /// Parse a Qwen Coder parameter block.
+///
+/// A value also ends at the next `<parameter=` opener, so a missing
+/// `</parameter>` does not swallow the following parameter, matching the
+/// Python parser (`vllm/parser/qwen3.py`).
 fn parameter(input: &mut &str, trim_newlines: bool) -> ModalResult<(String, String)> {
     let (name, value) = seq!(
         _: literal(PARAMETER_START),
         take_until(1.., ">"),
         _: ">",
-        take_until(0.., PARAMETER_END),
-        _: literal(PARAMETER_END),
+        take_until(0.., (PARAMETER_END, PARAMETER_START)),
+        _: opt(literal(PARAMETER_END)),
     )
     .parse_next(input)?;
 
@@ -812,6 +816,49 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Hangzhou" })
+        );
+    }
+
+    /// Output missing one `</parameter>`, from the Python parser test
+    /// `test_extract_tool_calls_missing_closing_parameter_tag`.
+    const MISSING_CLOSING_TAG_OUTPUT: &str = "Let me check the weather for you:\n\
+         <tool_call>\n\
+         <function=get_weather>\n\
+         <parameter=city>\n\
+         Dallas\n\
+         <parameter=state>\n\
+         TX\n\
+         </parameter>\n\
+         <parameter=unit>\n\
+         fahrenheit\n\
+         </parameter>\n\
+         </function>\n\
+         </tool_call>";
+
+    #[test]
+    fn qwen_coder_parse_complete_ends_value_at_next_parameter_when_closing_tag_missing() {
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let output = parser.parse_complete(MISSING_CLOSING_TAG_OUTPUT).unwrap();
+
+        assert_eq!(output.normal_text(), "Let me check the weather for you:\n");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "city": "Dallas", "state": "TX", "unit": "fahrenheit" })
+        );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_ends_value_at_next_parameter_when_closing_tag_missing() {
+        let chunks = split_by_chars(MISSING_CLOSING_TAG_OUTPUT, 7);
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let output = collect_stream(&mut parser, &chunks);
+
+        assert_eq!(output.normal_text(), "Let me check the weather for you:\n");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "city": "Dallas", "state": "TX", "unit": "fahrenheit" })
         );
     }
 
