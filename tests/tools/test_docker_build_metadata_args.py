@@ -96,6 +96,7 @@ def test_nightly_metadata_args_fall_back_to_pipeline_slug() -> None:
 @pytest.mark.parametrize(
     ("variant", "expected_image_tag"),
     [
+        ("rust-frontend", "vllm/vllm-rust-frontend:nightly-def456"),
         ("efa", "vllm/vllm-openai:efa-nightly-def456"),
         ("cu135-efa", "vllm/vllm-openai:cu135-nightly-def456-efa"),
     ],
@@ -103,7 +104,7 @@ def test_nightly_metadata_args_fall_back_to_pipeline_slug() -> None:
 def test_nightly_variant_tags_match_published_nightly_tags(
     variant: str, expected_image_tag: str
 ) -> None:
-    """push-nightly-builds.sh <variant> publishes as <variant>-nightly-<commit>."""
+    """The embedded tag matches the public commit-pinned nightly tag."""
     args = run_helper(
         variant,
         env={"BUILDKITE": "1", "BUILDKITE_COMMIT": "def456", "NIGHTLY": "1"},

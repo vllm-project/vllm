@@ -169,7 +169,9 @@ Docker publishing and nightly cleanup use the Buildkite secret
 `VLLM_DOCKERHUB_TOKEN`, mapped to `RELEASE_DOCKERHUB_TOKEN` on publishing
 steps. Use Docker Hub organization username `vllm` with an organization access
 token granting Image Push, Image Delete, and Tag Admin on `vllm/vllm-openai`,
-`vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, and `vllm/vllm-openai-xpu`.
+`vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, `vllm/vllm-openai-xpu`, and
+`vllm/vllm-rust-frontend`. Create the frontend repository before its first publish.
+The short image aliases also require push access to `vllm/vllm`.
 Tag Admin and Image Delete are needed for nightly tag cleanup. Do not grant
 organization administration or access to unrelated repositories.
 

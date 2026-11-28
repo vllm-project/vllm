@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
+WORKDIR /workspace
+COPY rust-toolchain.toml .
+COPY rust rust
+ARG TARGETARCH
+ARG VLLM_RS_BUILD_VERSION=dev
+ENV CARGO_BUILD_JOBS=4 PCRE2_SYS_STATIC=1
+# Cargo compares local source mtimes against fingerprints in the shared target.
+# A checkout restored with older timestamps must still rebuild changed crates.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/workspace/rust/target,id=vllm-rs-1.95-${TARGETARCH},sharing=locked \
+    export RUSTUP_TOOLCHAIN="$(rustup default | cut -d' ' -f1)" \
+    && test "$(rustc --version | cut -d' ' -f2 | cut -d. -f1,2)" = "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" \
+    && find rust -path rust/target -prune -o -type f -exec touch {} + \
+    && cargo build --manifest-path rust/Cargo.toml --locked --release \
+        -p vllm-cmd --bin vllm-rs --features native-tls-vendored \
+    && install -s rust/target/release/vllm-rs /usr/local/bin/
+
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS rust-frontend
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates ffmpeg libstdc++6 libturbojpeg0 libwebp7 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 2000 --gid 0 --create-home vllm \
+    && install -d -o vllm -g root -m 0775 /home/vllm/.cache/huggingface \
+    && chmod -R g+rwX /home/vllm
+COPY --from=build /usr/local/bin/vllm-rs /usr/local/bin/
+COPY LICENSE /usr/share/doc/vllm/LICENSE
+ARG VLLM_BUILD_COMMIT=unknown
+ARG VLLM_BUILD_PIPELINE=local
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG=local/vllm-rust-frontend:dev
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}" \
+      ai.vllm.build.url="${VLLM_BUILD_URL}"
+ENV HOME=/home/vllm
+USER 2000:0
+WORKDIR /home/vllm
+EXPOSE 8000
+ENTRYPOINT ["vllm-rs"]
+CMD ["--help"]

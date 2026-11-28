@@ -184,6 +184,16 @@ steps:
     depends_on: block-build-release-images
     allow_dependency_failure: true
     steps:
+      - label: "Build Rust frontend - x86_64"
+        key: build-rust-frontend-x86
+        agents: {queue: cpu_queue_release}
+        command: bash .buildkite/scripts/build-rust-frontend-image.sh
+
+      - label: "Build Rust frontend - aarch64"
+        key: build-rust-frontend-arm64
+        agents: {queue: arm64_cpu_queue_release}
+        command: bash .buildkite/scripts/build-rust-frontend-image.sh
+
       - label: "Build release image - x86_64 - CUDA 13.0"
         depends_on: ~
         id: build-release-image-x86
@@ -499,6 +509,23 @@ steps:
           - "bash .buildkite/scripts/xpu/create-xpu-ecr-manifest.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu" release-manifests'
 
+      - label: "Publish nightly Rust frontend to Docker Hub"
+        key: publish-nightly-rust-frontend
+        depends_on: [build-rust-frontend-x86, build-rust-frontend-arm64]
+        if: build.env("NIGHTLY") == "1"
+        agents: {queue: small_cpu_queue_release}
+        concurrency: 1
+        concurrency_group: rust-frontend-nightly-publish
+        commands:
+          - bash .buildkite/scripts/publish-rust-frontend-image.sh nightly
+          - bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-rust-frontend
+        secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
+        env: {DOCKERHUB_USERNAME: vllm}
+
       - label: "Publish nightly multi-arch image to DockerHub"
         depends_on:
           - create-multi-arch-manifest
@@ -755,6 +782,22 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllm"
+
+  - label: "Publish release Rust frontend to Docker Hub"
+    key: publish-release-rust-frontend
+    depends_on:
+      - block-publish-release-images
+      - build-rust-frontend-x86
+      - build-rust-frontend-arm64
+    agents: {queue: small_cpu_queue_release}
+    concurrency: 1
+    concurrency_group: rust-frontend-release-publish
+    command: bash .buildkite/scripts/publish-rust-frontend-image.sh release
+    secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllm
+          password-env: RELEASE_DOCKERHUB_TOKEN
 
   - group: "Publish wheels"
     key: "publish-wheels"

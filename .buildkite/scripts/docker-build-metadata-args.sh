@@ -24,6 +24,11 @@ if [[ -n "${BUILDKITE:-}" || -n "${BUILDKITE_COMMIT:-}" ]]; then
 
   staging_image_ref="${staging_repo}:${tag_commit}-$(uname -m)${variant_suffix}"
 
+  if [[ "${variant}" == "rust-frontend" ]]; then
+    image_name="${VLLM_DOCKER_IMAGE_NAME:-vllm/vllm-rust-frontend}"
+    variant_suffix=""
+  fi
+
   if [[ "${NIGHTLY:-}" == "1" ]]; then
     if [[ -z "${variant}" ]]; then
       image_tag="${image_name}:nightly-${tag_commit}"
