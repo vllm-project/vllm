@@ -12,6 +12,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.device_allocator.alloc_conf import expandable_segments_enabled
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -29,6 +30,9 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     PackedIpcConsumer,
     packed_ipc_producer,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -379,6 +383,14 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         storage in .contiguous(); the caller must keep these alive until the
         post-send barrier (past `finish`) so the consumer's IPC views stay valid.
         """
+        if expandable_segments_enabled():
+            logger.warning_once(
+                "Sharing weights over CUDA IPC from expandable segments: the "
+                "receiver must open them with pidfd_getfd, which fails with "
+                "'Operation not permitted' under the default Yama ptrace_scope. "
+                "Use IPCTrainerInitInfo(packed=True), which shares a buffer "
+                "allocated outside expandable segments, or turn them off."
+            )
         names: list[str] = []
         dtype_names: list[str] = []
         shapes: list[list[int]] = []

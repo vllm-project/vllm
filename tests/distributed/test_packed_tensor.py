@@ -9,9 +9,17 @@ These utilities enable efficient batched tensor transfer over NCCL.
 import pytest
 import torch
 
+from vllm.device_allocator.alloc_conf import (
+    EXPANDABLE_SEGMENTS,
+    current_alloc_conf,
+    expandable_segments_enabled,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.distributed.weight_transfer.packed_tensor import (
     ALIGN,
     DEFAULT_PACKED_NUM_BUFFERS,
+    MIN_PACKED_BUFFER_BYTES,
     Chunk,
     PackedIpcConsumer,
     Piece,
@@ -22,6 +30,8 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_producer,
 )
 from vllm.utils.math_utils import round_down, round_up
+
+from ..utils import create_new_process_for_each_test
 
 
 class MockCommunicationGroup:
@@ -398,6 +408,35 @@ class TestPackedBroadcastDeferredConsumer:
 
 
 # --- Unit Tests: packed_ipc_producer ---
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@create_new_process_for_each_test()
+def test_ipc_buffer_is_not_an_expandable_segment():
+    """The consumer opens the buffer over CUDA IPC. An expandable segment
+    needs pidfd_getfd for that, which the default Yama ptrace_scope blocks
+    ("Operation not permitted"), so the buffer must not be one. Runs in its own
+    process: the allocator keeps its expandable segments for later tests."""
+    set_alloc_conf(with_conf_flag(current_alloc_conf(), EXPANDABLE_SEGMENTS, True))
+    if not expandable_segments_enabled():
+        pytest.skip("expandable segments are unavailable")
+    producer = packed_ipc_producer(
+        iterator=iter([("w", torch.randn(1024, device="cuda"))]),
+        gpu_uuid="uuid",
+        device_index=torch.cuda.current_device(),
+        post_iter_func=lambda x: x[1],
+    )
+    next(producer)  # the buffer stays allocated while suspended
+    buffer_segments = [
+        segment
+        for segment in torch.cuda.memory_snapshot()
+        for block in segment["blocks"]
+        if block["state"] == "active_allocated"
+        and block["requested_size"] == MIN_PACKED_BUFFER_BYTES
+    ]
+    assert len(buffer_segments) == 1
+    assert not buffer_segments[0]["is_expandable"]
+    producer.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
