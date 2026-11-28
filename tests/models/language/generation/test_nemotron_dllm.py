@@ -101,7 +101,10 @@ def test_arch_in_model_registry():
 
 
 @pytest.mark.parametrize("flash_version", [None, 3])
-def test_attention_backend_supports_mixed_causality(flash_version):
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+def test_attention_backend_supports_mixed_causality(
+    flash_version, pipeline_parallel_size
+):
     from types import SimpleNamespace
     from typing import cast
 
@@ -128,9 +131,17 @@ def test_attention_backend_supports_mixed_causality(flash_version):
             ),
             diffusion_config=None,
             scheduler_config=None,
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=pipeline_parallel_size
+            ),
         ),
     )
-    if flash_version is not None:
+    if pipeline_parallel_size != 1:
+        with pytest.raises(ValueError, match="PP=1"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+    elif flash_version is not None:
         with pytest.raises(ValueError, match="requires FA4"):
             NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
                 config

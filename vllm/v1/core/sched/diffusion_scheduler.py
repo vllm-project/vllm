@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Canvas-width handling and async read deferral for diffusion requests."""
 
+from dataclasses import replace
+
+import torch
+
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.outputs import DraftTokenIds
+from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.outputs import DraftTokenIds, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.request import Request
 
 
@@ -34,7 +39,55 @@ def _read_in_flight(request: Request, width: int) -> bool:
     return request.num_output_placeholders >= steps * width
 
 
+def _hold_prompt_scores(scores: dict, held: dict, emitting: set[str]) -> dict:
+    scores = dict(scores)
+    for req_id in scores.keys() - emitting:
+        held[req_id] = scores.pop(req_id)
+    for req_id in held.keys() & emitting:
+        # A recomputed prefill after preemption supplies newer scores.
+        scores.setdefault(req_id, held[req_id])
+    return scores
+
+
 class DiffusionScheduler(Scheduler):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Prompt scores from the token-free prefill, held until the first canvas.
+        self._held_logprobs: dict[str, LogprobsTensors | None] = {}
+        self._held_token_id_logprobs: dict[str, torch.Tensor] = {}
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> dict[int, EngineCoreOutputs]:
+        out = model_runner_output
+        held_lp, held_tid = self._held_logprobs, self._held_token_id_logprobs
+        if (
+            held_lp
+            or held_tid
+            or out.prompt_logprobs_dict
+            or out.prompt_token_id_logprobs_dict
+        ):
+            sampled = out.sampled_token_ids or ()
+            emitting = {r for r, t in zip(out.req_ids, sampled) if t}
+            out = replace(
+                out,
+                prompt_logprobs_dict=_hold_prompt_scores(
+                    out.prompt_logprobs_dict, held_lp, emitting
+                ),
+                prompt_token_id_logprobs_dict=_hold_prompt_scores(
+                    out.prompt_token_id_logprobs_dict, held_tid, emitting
+                ),
+            )
+        engine_outputs = super().update_from_output(scheduler_output, out)
+        for held in (held_lp, held_tid):
+            for req_id in list(held):
+                # Keep scores whose output the base scheduler skipped.
+                if (r := self.requests.get(req_id)) is None or r.num_output_tokens:
+                    del held[req_id]
+        return engine_outputs
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for i, (req_id, token_ids) in enumerate(
             zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)

@@ -63,6 +63,7 @@ MINIMAL_PP_ARCH_LIST = [
 KNOWN_PP_DEFECTS: dict[str, str] = {
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
+    "NemotronLabsDiffusionModel": "Diffusion mode rejects PP; see #52015",
 }
 # Decoders that modify their input before the layers, run with the Transformers
 # modeling backend

@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import torch
+from transformers import OPTConfig
 
 from tests.v1.kv_connector.unit.utils import MockKVConnectorMetadata
 from vllm.config import (
@@ -95,6 +96,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
     KVConnectorOutput,
+    LogprobsTensors,
     ModelRunnerOutput,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
@@ -9481,6 +9483,57 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     assert config.get_scheduler_cls() is (
         DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_diffusion_prompt_logprobs_arrive_with_first_tokens(async_scheduling, tmp_path):
+    """Prompt scores must not create a token-free first output."""
+    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
+    scheduler = _diffusion_scheduler(
+        async_scheduling=async_scheduling,
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=2, prompt_logprobs=0
+    )
+    scheduler.add_request(request)
+    scores = LogprobsTensors(
+        logprob_token_ids=torch.ones(7, 1, dtype=torch.int64),
+        logprobs=torch.full((7, 1), -1.0),
+        selected_token_ranks=torch.ones(7, dtype=torch.int64),
+    )
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            sampled_token_ids=[[]],
+            prompt_logprobs_dict={request.request_id: scores},
+        ),
+    )
+    assert not any(client.outputs for client in outputs.values())
+    assert request.status == RequestStatus.RUNNING
+
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1] * 8]))
+    first = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[1]]),
+    )
+    (output,) = first[request.client_index].outputs
+    assert output.new_token_ids == [1]
+    assert output.new_prompt_logprobs_tensors is scores
+    assert output.prefill_stats is not None
+    assert output.finish_reason is None
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[2] * 8]))
+    final = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[2]]),
+    )
+    (output,) = final[request.client_index].outputs
+    assert output.new_token_ids == [2]
+    assert output.new_prompt_logprobs_tensors is None
+    assert output.prefill_stats is None
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
 def test_diffusion_scheduler_narrows_the_canvas_per_request():
