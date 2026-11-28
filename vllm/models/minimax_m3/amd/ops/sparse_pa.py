@@ -10,8 +10,11 @@ except ModuleNotFoundError:
     import triton
     import triton.language as tl
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
+
+logger = init_logger(__name__)
 
 ASM_PAGE_SIZE = 16
 PAGES_PER_SPARSE_BLOCK = SPARSE_BLOCK_SIZE // ASM_PAGE_SIZE
@@ -629,4 +632,98 @@ def _run_gluon_decode(
         sinks=None,
         sliding_window=-1,
         ps=True,
+    )
+
+
+@torch.no_grad()
+def minimax_m3_sparse_pa_decode_warmup(
+    model: torch.nn.Module, dtype: torch.dtype
+) -> None:
+    """Compile the AITER Gluon decode variants serving reaches but the startup
+    forwards may not: one per context partition count (a constexpr, 8 down to
+    1 = `ONE_SHOT` as rows grow) and per 16-byte alignment of the context
+    lengths (a prefill's rows follow the decode rows in the table buffers).
+    Each takes seconds to compile inside the request that first meets it.
+    Runs on each layer's own cache and table buffers (rewritten before use).
+    """
+    from vllm.models.minimax_m3.amd.model import MiniMaxM3SparseAttention
+    from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+        MiniMaxM3SparseAiterPAImpl,
+    )
+
+    layouts: dict[tuple, tuple] = {}
+    for layer in model.modules():
+        impl = getattr(layer, "impl", None)
+        bt_buf = getattr(layer, "sparse_bt_buffer", None)
+        ctx_buf = getattr(layer, "sparse_ctx_buffer", None)
+        if (
+            not isinstance(layer, MiniMaxM3SparseAttention)
+            or not layer.use_aiter_sparse_pa
+            or not isinstance(impl, MiniMaxM3SparseAiterPAImpl)
+            or bt_buf is None
+            or ctx_buf is None
+            or layer.kv_cache.numel() == 0
+        ):
+            continue
+        k_cache, v_cache = layer.get_aiter_sparse_pa_kv_cache()
+        k_scale = getattr(layer, "_k_scale", None) if impl.use_fp8_kv else None
+        v_scale = getattr(layer, "_v_scale", None) if impl.use_fp8_kv else None
+        # The layers share the table buffers, so they differ at most in their
+        # cache views.
+        key = (
+            impl.num_heads,
+            impl.num_kv_heads,
+            k_cache.dtype,
+            k_cache.shape,
+            v_cache.shape,
+            None if k_scale is None else k_scale.shape,
+            bt_buf.data_ptr(),
+            ctx_buf.data_ptr(),
+        )
+        layouts.setdefault(
+            key, (impl, k_cache, v_cache, k_scale, v_scale, bt_buf, ctx_buf)
+        )
+    if not layouts:
+        return
+
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+
+    num_variants = 0
+    for impl, k_cache, v_cache, k_scale, v_scale, bt_buf, ctx_buf in layouts.values():
+        kvh = impl.num_kv_heads
+        # One row in total is its own Triton specialization (an integer
+        # argument equal to 1), so it is keyed apart from its partition count.
+        rows_by_variant: dict[tuple[int, bool], int] = {}
+        for n in range(1, ctx_buf.shape[0] // kvh):
+            splits = get_recommended_splits(n * kvh, 1)
+            rows_by_variant.setdefault((splits, n * kvh == 1), n)
+            if splits == 1:
+                break
+        for n in rows_by_variant.values():
+            q = torch.zeros(
+                n, impl.num_heads, impl.head_size, dtype=dtype, device=ctx_buf.device
+            )
+            for first in (0, 1):  # aligned, and as after an odd decode count
+                rows = slice(first * kvh, (first + n) * kvh)
+                bt_buf[rows].zero_()  # page 0 exists in every cache view
+                ctx_buf[rows].fill_(ASM_PAGE_SIZE)  # one page
+                _run_gluon_decode(
+                    q,
+                    k_cache,
+                    v_cache,
+                    bt_buf[rows],
+                    ctx_buf[rows],
+                    kvh,
+                    impl.scale,
+                    torch.empty_like(q),
+                    k_scale,
+                    v_scale,
+                )
+                num_variants += 1
+    torch.accelerator.synchronize()
+    logger.info(
+        "Warmed up %d MiniMax-M3 AITER sparse PA decode variant(s) over %d cache "
+        "layout(s).",
+        num_variants,
+        len(layouts),
     )

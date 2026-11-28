@@ -326,6 +326,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        if "vllm.models.minimax_m3.amd.model" in sys.modules:
+            from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+                minimax_m3_sparse_pa_decode_warmup,
+            )
+
+            minimax_m3_sparse_pa_decode_warmup(
+                worker.get_model(), worker.model_config.dtype
+            )
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
