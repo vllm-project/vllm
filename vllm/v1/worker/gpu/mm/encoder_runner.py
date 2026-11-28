@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import BatchedTensorInputs, MultiModalKwargsItem
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
@@ -192,22 +192,41 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
-            cg_manager = self.cudagraph_manager
-            cudagraph_output = (
-                cg_manager.execute(mm_kwargs_batch)
-                if cg_manager is not None
-                and cg_manager.is_captured()
-                and cg_manager.supports_batch(modality, mm_kwargs_batch)
-                else None
-            )
-            batch_outputs = (
-                cudagraph_output
-                if cudagraph_output is not None
-                else self.model.embed_multimodal(**mm_kwargs_batch)
-            )
-            sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
+            # Bucket before the CUDA-graph decision: each rung is a fixed-shape
+            # sub-batch and picks graph or eager on its own.
+            batch_outputs: list[torch.Tensor | None] = [None] * num_items
+            for indices, rung_kwargs in self._bucket_mm_batch(
+                mm_kwargs_batch, num_items
+            ):
+                cg_manager = self.cudagraph_manager
+                cudagraph_output = (
+                    cg_manager.execute(rung_kwargs)
+                    if cg_manager is not None
+                    and cg_manager.is_captured()
+                    and cg_manager.supports_batch(modality, rung_kwargs)
+                    else None
+                )
+                rung_outputs = (
+                    cudagraph_output
+                    if cudagraph_output is not None
+                    else self.model.embed_multimodal(**rung_kwargs)
+                )
+                sanity_check_mm_encoder_outputs(
+                    rung_outputs, expected_num_items=len(indices)
+                )
+                for position, output in zip(indices, rung_outputs):
+                    batch_outputs[position] = output
             encoder_outputs.extend(batch_outputs)
         return [encoder_outputs[i] for i in np.argsort(order)]
+
+    def _bucket_mm_batch(
+        self, mm_kwargs_batch: BatchedTensorInputs, num_items: int
+    ) -> list[tuple[list[int], BatchedTensorInputs]]:
+        """Split a batch into rungs when the model declares bucketing, else one."""
+        bucketer = getattr(self.model, "_encoder_bucketing", None)
+        if bucketer is None:
+            return [(list(range(num_items)), mm_kwargs_batch)]
+        return bucketer.bucket(mm_kwargs_batch, num_items)
 
     @contextmanager
     def timed_encoder_operation(self, request_ids: Collection[str]):

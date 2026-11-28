@@ -260,3 +260,9 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+## Encoder Length Bucketing
+
+Batching clips of different durations makes every item pay for the longest one's
+padding; [encoder length bucketing](../../configuration/optimization.md#encoder-length-bucketing)
+regroups such a batch by true item length (opt-in, currently Qwen2-Audio).

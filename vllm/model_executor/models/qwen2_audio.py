@@ -28,7 +28,9 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import BatchFeature
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_audio import (
     Qwen2AudioConfig,
     Qwen2AudioEncoder,
@@ -65,6 +67,11 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .mm_encoder_bucketing import (
+    EncoderBucketingSpec,
+    install_encoder_bucketing,
+    register_forward_shim,
+)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
@@ -104,6 +111,70 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
 
 
 Qwen2AudioInputs: TypeAlias = Qwen2AudioFeatureInputs | Qwen2AudioEmbeddingInputs
+
+
+class Qwen2AudioBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for Qwen2-Audio's padded mel encoder.
+
+    Length is the number of valid mel frames; both time-varying fields crop on
+    the mel time axis. The encoder is mask-aware, so the crop is content-exact.
+    """
+
+    frames_per_second = 100  # mel frames per second (WhisperFeatureExtractor)
+    context_margin = 4  # conv receptive field (conv1 k3 s1 + conv2 k3 s2)
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, torch.Tensor]
+    ) -> list[int] | None:
+        feature_attention_mask = mm_kwargs_batch.get("feature_attention_mask")
+        if feature_attention_mask is None:
+            return None
+        return feature_attention_mask.sum(-1).tolist()
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, torch.Tensor]) -> int:
+        input_features = mm_kwargs_batch.get("input_features")
+        return int(input_features.shape[-1]) if input_features is not None else 0
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, torch.Tensor],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, torch.Tensor]:
+        input_features = mm_kwargs_batch["input_features"]
+        feature_attention_mask = mm_kwargs_batch["feature_attention_mask"]
+        rows = torch.tensor(indices, dtype=torch.long, device=input_features.device)
+        return {
+            "input_features": input_features[rows, :, :rung],
+            "feature_attention_mask": feature_attention_mask[rows, :rung],
+        }
+
+
+def _qwen2audio_varlen_shim(
+    module: nn.Module,
+    input_features: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    **kwargs: object,
+) -> object:
+    """Mirror `Qwen2AudioEncoder.forward` minus its fixed-length assumption.
+
+    Positional embeddings are sliced to the input length so a rung indexes only
+    the leading positions; for a full-length input the result is identical.
+    """
+    x = F.gelu(module.conv1(input_features))
+    x = F.gelu(module.conv2(x)).permute(0, 2, 1)
+    x = x + module.embed_positions.weight[: x.size(1)]
+    for layer in module.layers:
+        x = layer(x, attention_mask, **kwargs)
+    x = x.permute(0, 2, 1)
+    x = module.avg_pooler(x)
+    x = x.permute(0, 2, 1)
+    x = module.layer_norm(x)
+    return BaseModelOutput(last_hidden_state=x)
+
+
+register_forward_shim("Qwen2AudioEncoder", _qwen2audio_varlen_shim)
+
 
 # === Audio Encoder === #
 
@@ -356,6 +427,12 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+        install_encoder_bucketing(
+            self,
+            {"audio": self.audio_tower},
+            Qwen2AudioBucketingSpec(),
+            additional_config=getattr(vllm_config, "additional_config", None),
+        )
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -373,10 +450,14 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             )
 
         if input_features is not None:
+            # Rung windows are pre-validated by the processor; skip the fixed
+            # 3000-frame check only while bucketing is active.
+            bucketing = getattr(self, "_encoder_bucketing", None)
             return Qwen2AudioFeatureInputs(
                 type="audio_features",
                 input_features=input_features,
                 feature_attention_mask=feature_attention_mask,
+                validate=not (bucketing is not None and bucketing.active),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -424,7 +505,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         audio_attention_mask[audio_attention_mask_] = float("-inf")
 
         audio_outputs = self.audio_tower(
-            input_features, attention_mask=audio_attention_mask
+            input_features,
+            attention_mask=audio_attention_mask,
         )
         selected_audio_feature = audio_outputs.last_hidden_state
         audio_features = self.multi_modal_projector(selected_audio_feature)

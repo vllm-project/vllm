@@ -507,6 +507,71 @@ Based on the configuration, the content of the multi-modal caches on `P0` and `P
 K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
 
+## Encoder Length Bucketing
+
+Padded audio encoders pad every mel to a fixed window (for example 3000 frames)
+or to the batch maximum, so a mixed-length batch computes every item at full
+length: a 2 s clip batched with a 30 s clip computes 15x more frames than it
+needs. Encoder length bucketing regroups a batch by true item length into
+fixed-length rungs (one discrete window length each), so short clips stop paying
+for long clips' padding. It is opt-in and GPU-only.
+
+### Applicability
+
+Opt-in per model: a model declares a bucketing spec to enable it, which
+Qwen2-Audio does today. For any other model the config is ignored -- the
+original forward runs unchanged, so setting the keys is always safe.
+
+| Model | Encoder type |
+| --- | --- |
+| Qwen2-Audio | fixed-window mel encoder |
+
+### Enabling
+
+```bash
+vllm serve <model> --additional-config '{"audio_bucket_seconds": [2, 4, 8, 16, 30]}'
+```
+
+```python
+llm = LLM(model="<model>", additional_config={"audio_bucket_seconds": [2, 4, 8, 16, 30]})
+```
+
+### Configuration
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `audio_bucket_seconds` | `list[float]` | unset (disabled) | Rung ladder in seconds, converted to frames at the model's frame rate. |
+| `audio_bucket_budget` | `int` | unset (no merging) | Per-call compute bound in items x padded frames (16 x the largest rung is a good start). |
+
+Items are grouped by length into rungs before the CUDA-graph decision, so each
+rung is a fixed-shape sub-batch that can use a captured graph or eager
+execution. If bucketing would not reduce the computed frames for a batch, that
+batch runs the original forward unchanged. With `audio_bucket_budget`, groups
+above the budget split into balanced chunks, and groups below `budget // 6`
+merge into the next rung up so small calls amortize fixed overhead.
+
+### Losslessness
+
+| Encoder class | Model | Guarantee |
+| --- | --- | --- |
+| pad + explicit mask | Qwen2-Audio | bit-exact: masked padding contributes nothing to softmax/conv |
+
+Other encoder classes (for example unmasked attention with relative positional
+encodings) can be supported by adding their own bucketing spec; unmasked
+absolute-PE encoders are lossy to crop and stay unsupported.
+
+bf16 residuals are ULP-level kernel rounding; the measured WER delta is within
+0.001 for all adapted models.
+
+### Measured gains
+
+RTX 5090, bf16, 300 prompts, c=32, request rate `inf`; recommended per-model
+config, throughput off -> on:
+
+| Model | Config | Throughput off -> on | Delta |
+| --- | --- | --- | --- |
+| Qwen2-Audio | bucketing only | 22.0 -> 28.6 | +30% |
+
 ## CPU Resources for GPU Deployments
 
 vLLM V1 uses a multi-process architecture (see [V1 Process Architecture](../design/arch_overview.md#v1-process-architecture)) where each process requires CPU resources. Underprovisioning CPU cores is a common source of performance degradation, especially in virtualized environments.
