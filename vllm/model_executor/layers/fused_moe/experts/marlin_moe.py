@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -54,6 +55,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 
 def _fused_marlin_moe(
@@ -634,6 +638,27 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            prepare_fp8_moe_layer_for_marlin,
+            prepare_mxfp8_moe_layer_for_marlin,
+        )
+
+        if getattr(layer, "weight_block_size", None) == [1, 32]:
+            return prepare_mxfp8_moe_layer_for_marlin(
+                layer, w13, w2, w13_scale, w2_scale
+            )
+        return prepare_fp8_moe_layer_for_marlin(layer, w13, w2, w13_scale, w2_scale)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()

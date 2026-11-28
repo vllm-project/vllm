@@ -71,6 +71,7 @@ from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
     from vllm.model_executor.layers.quantization.utils.humming import (
         HummingMoEQuantConfig,
     )
@@ -136,8 +137,80 @@ def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
     return gemm_type
 
 
+def _humming_fp8_weight_schema(
+    layer: "RoutedExperts", weight: torch.Tensor, weight_scale: torch.Tensor
+) -> dict[str, Any]:
+    """Build the humming weight schema from the canonical on-device fp8/mxfp8
+    tensors (scale dtype/shape, block size), not the producing quant method."""
+    # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
+    # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
+    if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        return {"quant_method": "modelopt", "quant_algo": "mxfp8"}
+
+    if hasattr(layer, "w13_weight_scale_inv"):
+        assert hasattr(layer, "weight_block_size")
+        return {"quant_method": "fp8", "weight_block_size": layer.weight_block_size}
+
+    # fp8 (e4m3): recover the strategy from the scale layout (block from
+    # weight_block_size, else channel vs tensor by per-expert scale count).
+    config: dict[str, Any] = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "type": "float",
+        "num_bits": 8,
+        "symmetric": True,
+    }
+    weight_block_size = getattr(layer, "weight_block_size", None)
+    num_experts, num_output = weight.shape[0], weight.shape[-2]
+    if weight_block_size is not None:
+        config["strategy"] = "block"
+        config["block_structure"] = list(weight_block_size)
+    elif weight_scale.numel() >= num_experts * num_output:
+        config["strategy"] = "channel"
+    else:
+        config["strategy"] = "tensor"
+    return config
+
+
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     quant_config: "HummingMoEQuantConfig"
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.humming import (
+            convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
+        )
+        from vllm.model_executor.utils import move_parameter, set_kernel_parameter
+
+        scale_name = stage_moe_weights_for_humming(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
+        )
+        if scale_name == "weight_scale_inv":
+            # One param under both names: the loaded `_inv` holds the runtime scale.
+            for prefix in ("w13", "w2"):
+                scale = layer._parameters.pop(f"{prefix}_weight_scale").data
+                move_parameter(
+                    layer, f"{prefix}_{scale_name}", f"{prefix}_weight_scale"
+                )
+                set_kernel_parameter(layer, f"{prefix}_weight_scale", scale)
+        return (
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        )
 
     def __init__(
         self,

@@ -4,13 +4,14 @@
 
 - `AiterMxfp8Experts` (gfx950): FlyDSL two-stage grouped GEMM through
   `aiter.fused_moe` (per_1x32, gate_mode=INTERLEAVE); weights are preshuffled in
-  `convert_to_fp8_moe_kernel_format`.
+  `convert_fp8_weights`.
 - `AiterTritonMxfp8ExpertsMonolithic` (gfx942): AITER routing and two Triton
   `moe_gemm_a8w8` calls. gfx942 has no MX matrix cores, so the kernel runs each
   32-wide K step as an FP8 MFMA and applies the E8M0 scales to the accumulator.
 """
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -42,6 +43,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 logger = init_logger(__name__)
 
 _AITER_SWIGLU_ALPHA = 1.702
@@ -52,6 +56,23 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
     consumes_expert_mask = True
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
+            w13, w2, w13_scale, w2_scale
+        )
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+        return w13, w2, w13_scale, w2_scale
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -259,6 +280,20 @@ def aiter_triton_mxfp8_moe(
 class AiterTritonMxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     """Router logits -> AITER fused top-k and sort -> two `moe_gemm_a8w8`
     (gfx942)."""
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        w13, w13_scale = prepare_mxfp8_moe_weights_for_aiter_triton(w13, w13_scale)
+        w2, w2_scale = prepare_mxfp8_moe_weights_for_aiter_triton(w2, w2_scale)
+        return w13, w2, w13_scale, w2_scale
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)

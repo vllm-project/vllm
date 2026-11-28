@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Any, final
+from typing import TYPE_CHECKING, Any, final
 
 import torch
 
@@ -47,6 +47,9 @@ from vllm.v1.worker.ubatching import (
     dbo_yield,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -604,9 +607,12 @@ class FusedMoEExperts(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
+        pass
+
     @staticmethod
     def convert_fp8_weights(
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -614,12 +620,11 @@ class FusedMoEExperts(ABC):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Convert FP8 weights and scales to the layout of an out-of-tree
-        backend's experts. In-tree layouts live in the FP8 oracle."""
-        return w13, w2, w13_scale, w2_scale
+        """Convert loaded FP8 MoE weights to this kernel's layout.
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
-        pass
+        Returns the weights unchanged by default.
+        """
+        return w13, w2, w13_scale, w2_scale
 
     # Tensors this object allocates that its kernels read.
     kept_constants: tuple[str, ...] = ()

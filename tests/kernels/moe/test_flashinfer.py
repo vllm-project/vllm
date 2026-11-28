@@ -848,7 +848,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
                 e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
             )
         w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsMonolithic,
             SimpleNamespace(
                 weight_block_size=block_shape,
                 moe_config=SimpleNamespace(
@@ -984,7 +984,7 @@ def test_trtllm_fp8_moe_padding_robust(block_shape: list[int], workspace_init):
                 e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
             )
         w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsMonolithic,
             SimpleNamespace(
                 weight_block_size=block_shape,
                 moe_config=SimpleNamespace(
@@ -1109,7 +1109,7 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
     set_random_seed(7)
     with set_current_vllm_config(vllm_config):
         w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsMonolithic,
             SimpleNamespace(
                 weight_block_size=block_shape,
                 moe_config=SimpleNamespace(
@@ -1224,7 +1224,7 @@ def test_trtllm_fp8_monolithic_routed_skips_padding(
             )
             weights = (w1, w2, w1_scale, w2_scale)
         w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsMonolithic,
             SimpleNamespace(
                 weight_block_size=block_shape,
                 moe_config=SimpleNamespace(
@@ -1396,7 +1396,7 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
             activation=activation,
         )
         w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsMonolithic,
             layer,
             w1,
             w2,

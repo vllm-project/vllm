@@ -633,7 +633,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         w2_input_scale: torch.Tensor,
     ):
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=w13,
             w2=w2,
@@ -641,7 +641,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
-            experts_cls=self.experts_cls,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -1608,7 +1607,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         layer.weight_block_size = self.weight_block_size
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.mxfp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=layer.w13_weight,
             w2=layer.w2_weight,

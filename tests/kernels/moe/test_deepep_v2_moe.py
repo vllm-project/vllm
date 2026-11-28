@@ -196,7 +196,6 @@ def _make_experts(
         TrtLlmFp8ExpertsModular,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        Fp8MoeBackend,
         convert_to_fp8_moe_kernel_format,
     )
 
@@ -234,7 +233,7 @@ def _make_experts(
             is_gated = True
 
     w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
-        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+        experts_cls=TrtLlmFp8ExpertsModular,
         layer=_MockLayer(),
         w13=qw.w13_weight[e_start:e_end],
         w2=qw.w2_weight[e_start:e_end],

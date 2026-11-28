@@ -116,7 +116,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
         layer.weight_block_size = self.weight_block_size
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=layer.w13_weight,
             w2=layer.w2_weight,

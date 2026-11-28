@@ -2384,7 +2384,7 @@ def test_rocm_mxfp8_moe_oracle(
     w13_dq = mxfp8_dequantize(w13_q.clone(), w13_s).to(torch.bfloat16)
     w2_dq = mxfp8_dequantize(w2_q.clone(), w2_s).to(torch.bfloat16)
     w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-        backend, torch.nn.Module(), w13_q, w2_q, w13_s, w2_s, None, None
+        experts_cls, torch.nn.Module(), w13_q, w2_q, w13_s, w2_s, None, None
     )
     quant_config = make_fp8_moe_quant_config(
         fp8_backend=backend,

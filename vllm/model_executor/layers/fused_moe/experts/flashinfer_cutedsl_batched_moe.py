@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -34,6 +36,9 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import round_up
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 logger = init_logger(__name__)
 
 
@@ -44,6 +49,23 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
     the valid rows of each expert; their weight scales must be swizzled at load
     time with `swizzle_mxfp8_moe_weight_scales`.
     """
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            w13,
+            w2,
+            swizzle_mxfp8_moe_weight_scales(w13_scale),
+            swizzle_mxfp8_moe_weight_scales(w2_scale),
+        )
 
     def __init__(
         self,

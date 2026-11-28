@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -36,6 +38,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 logger = init_logger(__name__)
 
 
@@ -65,6 +70,31 @@ class TrtLlmFp8ExpertsBase:
     """Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
     interfaces.
     """
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            prepare_fp8_moe_layer_for_fi,
+        )
+
+        return prepare_fp8_moe_layer_for_fi(
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w13_input_scale=w13_input_scale,
+            w2_scale=w2_scale,
+            w2_input_scale=w2_input_scale,
+            is_trtllm=True,
+        )
 
     kept_constants: tuple[str, ...] = (
         "_g1_alphas",
