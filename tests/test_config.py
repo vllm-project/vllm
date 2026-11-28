@@ -637,7 +637,14 @@ def nixl_kv_transfer_config(request):
 @pytest.mark.parametrize(
     "connector_name", ["NixlConnector", "NixlPullConnector", "NixlPushConnector"]
 )
-def test_nixl_connector_aliases(nixl_kv_transfer_config, connector_name):
+@pytest.mark.parametrize("nested", [False, True])
+def test_nixl_connector_aliases(nixl_kv_transfer_config, connector_name, nested):
+    if nested:
+        nixl_kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": [asdict(nixl_kv_transfer_config)]},
+        )
     assert nixl_kv_transfer_config.has_connector(connector_name) == (
         connector_name != "NixlPushConnector"
     )
