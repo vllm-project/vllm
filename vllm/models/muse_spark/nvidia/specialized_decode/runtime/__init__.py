@@ -221,8 +221,8 @@ def unsupported(vllm_config) -> str | None:
             "deployments without FULL decode CUDA graphs (e.g. enforce-eager)",
         ),
         (
-            spec is None or spec.method != "dspark",
-            "speculative methods but DSpark",
+            spec is None or spec.method not in ("dspark", "dflash"),
+            "speculative methods but DSpark and DFlash",
         ),
         (
             spec is not None and spec.enable_adaptive_verification,
@@ -233,11 +233,14 @@ def unsupported(vllm_config) -> str | None:
             spec is not None and spec.num_speculative_tokens != 7,
             "speculative token counts but 7",
         ),
-        # The draft runs the fused Markov loop (markov.py), which the draft
-        # model checks again at load against its weights.
+        # The DSpark draft runs the fused Markov loop (markov.py), which the draft
+        # model checks again at load against its weights. DFlash's selector walk
+        # samples probabilistically by construction; it has no fused loop.
         (
-            spec is not None and spec.draft_sample_method != "probabilistic",
-            "draft sampling methods but probabilistic",
+            spec is not None
+            and spec.method == "dspark"
+            and spec.draft_sample_method != "probabilistic",
+            "draft sampling methods but probabilistic (DSpark)",
         ),
         (
             spec is not None and model.head_dtype != torch.bfloat16,
