@@ -531,19 +531,18 @@ def qsa_prepare(
     main_slot_mapping: torch.Tensor,
     main_k_scale: float,
     main_v_scale: float,
-    main_q_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its Q (in `main_q_dtype`) and gate.
+    and returns its Q (in the cache's dtype, so FP8 with an FP8 cache) and gate.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2
     num_main_kv_heads = main_kv_cache.shape[2]
     num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
     main_gate_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
-    main_q_out = torch.empty_like(main_gate_out, dtype=main_q_dtype)
+    main_q_out = torch.empty_like(main_gate_out, dtype=main_kv_cache.dtype)
     if num_tokens == 0:
         return main_q_out, main_gate_out
     num_q_heads, head_dim = q_out.shape[1:]

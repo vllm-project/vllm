@@ -342,7 +342,6 @@ class QSAIndexer(nn.Module):
                 main_slot_mapping=slot_mapping[:num_tokens],
                 main_k_scale=attn._k_scale_float,
                 main_v_scale=attn._v_scale_float,
-                main_q_dtype=attn.q_dtype,
             )
         else:
             # Unfused reference path

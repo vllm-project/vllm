@@ -351,7 +351,6 @@ def test_qsa_fused_prepare_matches_unfused(
         compress_ratio=CR,
         mrope_section=MROPE_SECTION if mrope else None,
         rope_pos_offset=ROPE_POS_OFFSET if cache_rope_positions else None,
-        main_q_dtype=main["main_kv_cache"].dtype,
         **main,
     )
     _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
