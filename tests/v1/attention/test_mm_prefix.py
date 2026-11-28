@@ -21,6 +21,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
     fill_mm_prefix_query_ranges,
 )
 from vllm.v1.kv_cache_interface import KVCacheLayout
@@ -95,6 +96,25 @@ def _query_ranges(mm_ranges, query_lens, seq_lens):
     if num_tokens == 0:
         return None
     return torch.from_numpy(out[:num_tokens])
+
+
+@pytest.mark.parametrize(
+    ("num_ranges", "bucket"),
+    [(1, 1), (3, 4), (5, 8), (33, 64), (138, 256)],
+)
+def test_range_tensor_width_is_a_power_of_two(num_ranges: int, bucket: int):
+    """The width is the Triton kernel's MAX_MM_RANGES constexpr."""
+    ranges = [(10 * i, 10 * i + 5) for i in range(num_ranges)]
+    tensor = compute_mm_prefix_range_tensor(
+        {0: ranges, 1: ranges[:1]}, num_seqs=3, device=torch.device("cpu")
+    )
+    assert tensor is not None
+    assert tensor.shape == (3, bucket, 2)
+    assert tensor.dtype == torch.int32
+    torch.testing.assert_close(tensor[0, :num_ranges], torch.tensor(ranges).int())
+    assert (tensor[0, num_ranges:] == 0).all()
+    assert (tensor[1, 1:] == 0).all()
+    assert (tensor[2] == 0).all()
 
 
 def test_matches_range_scan_semantics_with_context_offset():
