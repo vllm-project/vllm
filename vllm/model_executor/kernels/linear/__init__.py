@@ -736,6 +736,22 @@ def _first_usable_kernel(
     return None, failure_reasons
 
 
+def _only_shape_rejected(
+    kernels: list[type[_LinearKernelT]],
+    config: Any,
+    extra_check: Callable[[type[_LinearKernelT]], str | None],
+) -> bool:
+    """Whether every kernel is enabled, supported and runs the quantization
+    scheme, but `can_implement` rejects `config`."""
+    return all(
+        kernel_cls.__name__ not in envs.VLLM_DISABLED_KERNELS
+        and kernel_cls.is_supported()[0]
+        and extra_check(kernel_cls) is None
+        and not kernel_cls.can_implement(config)[0]
+        for kernel_cls in kernels
+    )
+
+
 def _int8_activation_quant_key(config: Int8ScaledMMLinearLayerConfig) -> QuantKey:
     if config.is_static_input_scheme:
         return kInt8StaticTensorSym if config.input_symmetric else kInt8StaticTensorAsym
@@ -1116,18 +1132,34 @@ def init_mxfp8_linear_kernel(
         possible = [k for k in possible if k.supports_batch_invariance()]
 
     # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(
+    requested: list[type[Mxfp8LinearKernel]] = _resolve_backend_kernels(
         possible,
         "MXFP8",
         quantization="mxfp8",
     )
 
+    scheme_check = _quant_scheme_check(kMxfp8Static, activation_quant_key)
     kernel_cls, failure_reasons = _first_usable_kernel(
-        possible,
-        config,
-        activation_quant_key,
-        _quant_scheme_check(kMxfp8Static, activation_quant_key),
+        requested, config, activation_quant_key, scheme_check
     )
+    if (
+        kernel_cls is None
+        and requested != possible
+        and _only_shape_rejected(requested, config, scheme_check)
+    ):
+        # The requested backend runs MXFP8 here, but not at this layer's shape.
+        logger.warning_once(
+            "--linear-backend=%s cannot implement the MXFP8 linear layer with "
+            "weight shape %s (%s); using automatic selection for this layer.",
+            _get_linear_backend(quantization="mxfp8"),
+            tuple(config.weight_shape),
+            "; ".join(failure_reasons),
+            scope="global",
+        )
+        kernel_cls, fallback_reasons = _first_usable_kernel(
+            possible, config, activation_quant_key, scheme_check
+        )
+        failure_reasons += fallback_reasons
     if kernel_cls is not None:
         logger.debug_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
         return kernel_cls(config)

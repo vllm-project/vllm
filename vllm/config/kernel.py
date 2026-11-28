@@ -447,7 +447,8 @@ class KernelConfig:
     """Backend for linear layer GEMM kernels. Available options:
 
     Layer types without an implementation from the requested backend use
-    automatic selection.
+    automatic selection, as do MXFP8 layers whose shape the requested backend
+    cannot run.
 
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
