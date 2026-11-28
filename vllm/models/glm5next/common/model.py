@@ -1216,7 +1216,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                         if wrapped in params_dict:
                             name = wrapped
                     # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    remapped_name = _remap_glm5next_kv_scale_name(name, params_dict)
                     if remapped_name is None:
                         continue
                     name = remapped_name
@@ -1634,6 +1634,28 @@ def _lora_base_layer_name(name: str) -> str:
     """Where a LoRA wrapper keeps parameter `name`: on its `base_layer`."""
     module, _, leaf = name.rpartition(".")
     return f"{module}.base_layer.{leaf}"
+
+
+def _remap_glm5next_kv_scale_name(name: str, params_dict: dict) -> str | None:
+    """Map GLM5Next checkpoint cache scales to its nested MLA parameters.
+
+    GLM checkpoints use ``self_attn.attn`` (or bare ``self_attn``) scale
+    names, while vLLM registers them under ``self_attn.mla_attn.mla_attn``.
+    Keep this format-specific mapping here so other models using the shared
+    KV-scale remapper retain their existing naming behavior.
+    """
+    for scale in ("q", "k", "v"):
+        mla_suffix = f".self_attn.mla_attn.mla_attn.{scale}_scale"
+        for checkpoint_suffix in (
+            f".self_attn.attn.{scale}_scale",
+            f".self_attn.{scale}_scale",
+        ):
+            if name.endswith(checkpoint_suffix):
+                mla_name = name[: -len(checkpoint_suffix)] + mla_suffix
+                if mla_name in params_dict:
+                    return mla_name
+
+    return maybe_remap_kv_scale_name(name, params_dict)
 
 
 def _find_unique_weight_name(params_dict, name):
