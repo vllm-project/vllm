@@ -84,6 +84,39 @@ fn shutdown_signal() -> CancellationToken {
     token
 }
 
+/// Open-file soft limit the API server raises to, as Python's `set_ulimit`.
+///
+/// Not the hard limit: the managed engine and its workers inherit it, and
+/// Python runs them at this value unless the inherited soft limit is higher.
+const TARGET_NOFILE_SOFT_LIMIT: u64 = 65535;
+
+/// Raise the open-file soft limit (`RLIMIT_NOFILE`) to
+/// [`TARGET_NOFILE_SOFT_LIMIT`], within the hard limit, so high-concurrency
+/// serving does not hit `EMFILE` under a 1024 default. A higher soft limit is
+/// kept.
+fn raise_nofile_limit() {
+    let prev_soft = match rlimit::Resource::NOFILE.get() {
+        Ok((soft, _hard)) => soft,
+        Err(error) => {
+            warn!(%error, "failed to read open-file limit");
+            return;
+        }
+    };
+    match rlimit::increase_nofile_limit(TARGET_NOFILE_SOFT_LIMIT) {
+        Ok(new) if new > prev_soft => {
+            info!(
+                previous = prev_soft,
+                soft_limit = new,
+                "raised open-file soft limit"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(%error, soft_limit = prev_soft, "failed to raise open-file soft limit");
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let process_label =
         match env::args_os().nth(1).as_deref().and_then(OsStr::to_str).unwrap_or_default() {
@@ -97,6 +130,12 @@ fn main() -> ExitCode {
         Cli::parse()
     };
     vllm_tracing::init_tracing(process_label, cli.log_level(), cli.log_formatter());
+    if matches!(
+        cli.command,
+        Command::Frontend(_) | Command::Serve(_) | Command::Render(_)
+    ) {
+        raise_nofile_limit();
+    }
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
@@ -120,7 +159,7 @@ fn main() -> ExitCode {
 
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
+        Command::Frontend(args) => args.into_config().into_server().serve(shutdown_signal()).await,
         Command::Bench(BenchCommand::Serve(bench_args)) => {
             vllm_bench::prepare_process();
             vllm_bench::run(bench_args).await
@@ -141,7 +180,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     "running Rust frontend without a managed local Python engine"
                 );
                 let config = args.to_frontend_config(handshake_address, &topology);
-                return vllm_server::serve(config, shutdown_signal()).await;
+                return config.into_server().serve(shutdown_signal()).await;
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
@@ -176,7 +215,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 let config = args.to_frontend_config(handshake_address, &topology);
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = vllm_server::serve(config, shutdown).await;
+                    let result = config.into_server().serve(shutdown).await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }

@@ -17,6 +17,7 @@ from typing import (
 )
 
 import torch
+from transformers.feature_extraction_utils import BatchFeature
 from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
@@ -34,23 +35,20 @@ from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
     MultiModalFieldConfig,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
-from .context import BaseProcessingInfo, TimingContext
+from .context import BaseProcessingInfo, TimingContext, profiling_media
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
 if TYPE_CHECKING:
-    from transformers.feature_extraction_utils import BatchFeature
-
     from ..cache import BaseMultiModalProcessorCache
 else:
-    BatchFeature = object
-
     BaseMultiModalProcessorCache = object
 
 logger = init_logger(__name__)
@@ -1098,10 +1096,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         scheduler_config: "SchedulerConfig | None" = None,
+        seq_len: int | None = None,
     ) -> MultiModalInput:
         """Create dummy data for profiling the memory usage of a model."""
         model_config = self.info.ctx.model_config
-        seq_len = model_config.max_model_len
+        if seq_len is None:
+            seq_len = self.info.get_dummy_seq_len(model_config.max_model_len)
         if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
             seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 
@@ -1114,10 +1114,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processor_inputs.cache = cache
 
-        mm_inputs = self.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
-        )
+        with profiling_media():
+            mm_inputs = self.apply(
+                processor_inputs,
+                timing_ctx=TimingContext(enabled=False),
+            )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -1159,6 +1160,68 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
         raise NotImplementedError
+
+    def build_mm_kwargs_from_processed_tensors(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+    ) -> MultiModalKwargsItems:
+        """Build multimodal kwargs from this processor's batched output tensors.
+
+        Args:
+            tensors: Batched processor outputs keyed by field name.
+
+        Returns:
+            The items, with this model's field metadata restored.
+
+        Raises:
+            ValueError: If `tensors` has fields the model does not declare,
+                only CPU-side metadata fields, or a flat field whose sizes
+                don't cover its tensor exactly.
+
+        """
+        hf_inputs = BatchFeature(dict(tensors))
+        fields_config = self._get_mm_fields_config(hf_inputs, {})
+        if unknown_fields := set(tensors).difference(fields_config):
+            raise ValueError(
+                "Processed multimodal tensor bundle contains unsupported fields: "
+                f"{sorted(unknown_fields)}"
+            )
+        # Fields kept on the CPU (e.g. the image grid) are metadata; without
+        # any other field there is nothing for the encoder.
+        if all(fields_config[key].field.keep_on_cpu for key in tensors):
+            raise ValueError(
+                "Processed multimodal tensor bundle has only metadata fields "
+                f"{sorted(tensors)} and no encoder input"
+            )
+
+        # The field sizes (e.g. from the image grid) must cover a flat tensor
+        # exactly: slicing past the end or leaving rows unused drops data
+        # silently, and negative sizes slice from the end.
+        for key, config in fields_config.items():
+            data = tensors.get(key)
+            if data is None or not isinstance(config.field, MultiModalFlatField):
+                continue
+            end: int | None = None
+            for item_slice in config.field.slices:
+                index = (item_slice,) if isinstance(item_slice, slice) else item_slice
+                if not isinstance(index[-1], slice):
+                    continue
+                dim, s = len(index) - 1, index[-1]
+                length = data.shape[dim] if dim < data.ndim else -1
+                start = 0 if s.start is None else s.start
+                stop = length if s.stop is None else s.stop
+                if s.step not in (None, 1) or not 0 <= start <= stop <= length:
+                    raise ValueError(
+                        f"Processed multimodal tensor {key!r} has shape "
+                        f"{tuple(data.shape)}, which doesn't match its field sizes"
+                    )
+                end = max(stop, end or 0)
+            if end is not None and end != length:
+                raise ValueError(
+                    f"Processed multimodal tensor {key!r} has shape "
+                    f"{tuple(data.shape)}, but its field sizes cover {end} entries"
+                )
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, fields_config)
 
     @abstractmethod
     def _get_prompt_updates(
@@ -1306,8 +1369,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> BatchFeature:
         """Merge passthrough fields and apply model-specific postprocessing."""
         if processed_data is None:
-            from transformers.feature_extraction_utils import BatchFeature
-
             processed_data = BatchFeature()
 
         processed_data.update(passthrough_data)

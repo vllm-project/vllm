@@ -977,6 +977,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
+            experts_cls=self.experts_cls,
         )
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)

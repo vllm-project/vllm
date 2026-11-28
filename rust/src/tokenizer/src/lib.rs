@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::incremental::DecodeStream;
 
 mod byte_level_decode;
+mod checkpoint_json;
 #[macro_use]
 mod error;
 mod hf;
@@ -16,6 +17,7 @@ pub mod test_utils;
 mod tiktoken;
 mod unavailable;
 
+pub use checkpoint_json::{CheckpointJsonError, parse_checkpoint_json};
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
 pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution};

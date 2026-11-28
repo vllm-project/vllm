@@ -191,6 +191,61 @@ With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholde
 - The processor cache is disabled (`--mm-processor-cache-gb 0`), so the returned keys can't be reused.
 - The server runs the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) which doesn't support omitting `kwargs_data` yet. It still returns `mm_hashes`.
 
+### Processed tensors in object storage
+
+A client that already has an item's processed tensors, such as an RL trainer on another node, can upload them to an S3-compatible store and send a reference in `features.kwargs_refs` instead of inlining them in `kwargs_data`. The tensors then skip the request body and any gateway in front of vLLM. The server downloads each object, checks its size and SHA-256 digest, and rebuilds the model's field metadata before it submits the request to the engine.
+
+Each object holds one item, saved with `safetensors.torch.save`. Its tensors are the ones this server's multimodal processor produces for that item, under the same names and dtypes and with their batch dimension, so the same tensors that `/render` returns in `kwargs_data`. The client doesn't need vLLM, but the tensors can differ from what the model's Hugging Face processor returns. For example, Qwen3-VL with the default `mm_device_do_normalize` normalizes on the GPU, so its object holds a `uint8` `pixel_values` and an `image_grid_thw` of shape `[1, 3]`:
+
+```python
+import hashlib
+
+import boto3
+from safetensors.torch import save
+
+payload = save({"pixel_values": pixel_values, "image_grid_thw": image_grid_thw})
+key = f"rollouts/{request_id}/image-0"
+boto3.client("s3").put_object(Bucket="mm-tensors", Key=key, Body=payload)
+
+features = {
+    "mm_hashes": {"image": [image_hash]},
+    "mm_placeholders": {"image": [{"offset": 15, "length": 64}]},
+    "kwargs_refs": {
+        "image": [{
+            "uri": f"s3://mm-tensors/{key}",
+            "format": "safetensors-v1",
+            "nbytes": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }]
+    },
+}
+```
+
+Like `kwargs_data`, each `kwargs_refs` list is parallel to `mm_hashes`, and a `null` entry falls back to `kwargs_data` or the processor cache. An item can't set both. `mm_metadata` for a referenced item may only repeat fields of its object with the same values. The `mm_hashes` entry stays the cache key, so give different content different hashes.
+
+`kwargs_refs` are off by default. Enable them at startup with `--mm-tensor-refs-config`; a server started without it rejects them with a 400:
+
+```bash
+vllm serve Qwen/Qwen3-VL-2B-Instruct --enable-scale-out \
+    --mm-tensor-refs-config '{"s3_allowed_uri_prefix": "s3://mm-tensors/rollouts"}'
+```
+
+The config's fields are:
+
+- `s3_allowed_uri_prefix`: the `s3://bucket/prefix` that every reference must be under. Required.
+- `max_object_bytes`: the largest object the server downloads. Default: 1 GiB.
+- `max_request_bytes`: the largest total size of the objects one request references. A request over it fails with a 400 before anything is downloaded. Default: 1 GiB.
+- `max_reserved_bytes`: the memory one API server reserves for referenced tensors. Each request reserves twice the declared size of its objects, for the downloaded bytes and the decoded tensors, and keeps the reservation until it finishes, even if the client disconnects. Requests wait in arrival order until their reservation fits. It must be at least twice `max_request_bytes`. Default: 8 GiB.
+- `max_concurrent_reads`: how many requests per API server can download references at once. Default: 32.
+
+The endpoint and credentials come from the server's environment, never from the request: `S3_ENDPOINT_URL` if set, otherwise the standard boto3 configuration (for example `AWS_ENDPOINT_URL_S3`, or `addressing_style` in the AWS config file). The server needs `boto3` installed, creates its S3 client at startup, and never deletes objects, so expire them on the client side, for example with a bucket lifecycle rule. Only the Python frontend accepts `kwargs_refs`.
+
+Like `kwargs_data`, `kwargs_refs` is meant for clients in one trust domain:
+
+- The server reads objects with its own credentials, so every caller of the endpoint can reference every object the server can read under the allowed prefix. Don't share a prefix between callers that shouldn't see each other's objects.
+- A missing, inaccessible or mismatched object (wrong size or digest) returns the same 422, so a caller can't probe objects it doesn't know. The details are in the server log.
+- The server checks each object's size, digest and fields, but tensors with a shape the model doesn't expect, such as `pixel_values` rows of the wrong width, can still fail inside the engine.
+
 ## Aborting requests
 
 `POST /inference/v1/abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is and requires the API key when `--api-key` is set, like `/inference/v1/generate`.

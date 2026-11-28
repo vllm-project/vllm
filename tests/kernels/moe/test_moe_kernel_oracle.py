@@ -19,7 +19,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import KernelConfig, VllmConfig
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -40,6 +42,8 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle import base as oracle_base
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as int_wna16_oracle
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -47,8 +51,10 @@ from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     Fp8MoEKernelOracle,
+    convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     map_fp8_backend,
+    resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
@@ -96,10 +102,15 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
 )
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptFp8MoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
     kInt4Static,
     kInt8Dynamic32Sym,
     kInt8DynamicTokenSym,
@@ -108,6 +119,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
 # the "moe_backend=... is not supported for <name> MoE" error).
@@ -485,6 +497,150 @@ def test_fp8_aiter_env_selection(
             select()
         return
     assert select()[0] is expected
+
+
+def _oot_experts(weight_key) -> type[TritonExperts]:
+    """Experts for one weight key, storing w2 (scales) transposed (doubled)."""
+
+    class OOTExperts(TritonExperts):
+        @staticmethod
+        def is_supported_config(cls, moe_config, key, act_key, act_format):
+            return key == weight_key, f"supports only {weight_key}"
+
+        @staticmethod
+        def _supports_quant_scheme(key, act_key):
+            return key == weight_key
+
+        @staticmethod
+        def convert_fp8_weights(layer, w13, w2, w13_scale, w2_scale, a13, a2):
+            return w13, w2.transpose(1, 2), w13_scale, w2_scale * 2
+
+    return OOTExperts
+
+
+@pytest.fixture
+def oot_backends(monkeypatch):
+    """Register `int4`, `foo` and `bar` backends, without in-tree FP8 kernels."""
+    backends = {
+        "oot_int4": _oot_experts(kInt4Static),
+        "foo": _oot_experts(kFp8Static128BlockSym),
+        "bar": _oot_experts(kFp8Static128BlockSym),
+    }
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "get_moe_backends", lambda: backends)
+    monkeypatch.setattr(fp8_oracle, "backend_to_kernel_cls", lambda backend: [])
+    return backends
+
+
+def _select_fp8(moe_backend, weight_key=kFp8Static128BlockSym):
+    config = make_dummy_moe_config()
+    config.moe_backend = moe_backend
+    return select_fp8_moe_backend(config, weight_key, kFp8Dynamic128Sym)
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "expected"), [("auto", "foo"), ("foo", "foo"), ("bar", "bar")]
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_selects_oot_backend(moe_backend, expected, oot_backends):
+    """`auto` takes the platform's first supported backend; a name forces one."""
+    backend, experts_cls = _select_fp8(moe_backend)
+    assert backend is Fp8MoeBackend.OOT
+    assert experts_cls is oot_backends[expected]
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_rejects_unsupported_oot_backend(oot_backends):
+    with pytest.raises(ValueError, match="'oot_int4' does not support"):
+        _select_fp8("oot_int4")
+    with pytest.raises(ValueError, match="Expected one of .*'foo', 'bar'"):
+        _select_fp8("baz")
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_without_supported_oot_backend(oot_backends):
+    """Selection falls back, but the reasons are visible without debug logs,
+    since the layer may be left without a kernel."""
+    with patch.object(oracle_base.logger, "warning_once") as warning:
+        assert _select_fp8("auto", kFp8StaticTensorSym) == (Fp8MoeBackend.NONE, None)
+    message, *args = warning.call_args.args
+    assert "supports only" in message % tuple(args)
+
+    oot_backends.clear()
+    assert _select_fp8("auto") == (Fp8MoeBackend.NONE, None)
+
+
+def test_fp8_oot_backend_resolves_weight_block_shape(oot_backends):
+    """Block-FP8 layers map an explicit backend before selecting it."""
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+    config.moe_backend = "foo"
+    assert resolve_fp8_moe_weight_block_shape(
+        config, [128, 128], kFp8Dynamic128Sym, is_checkpoint_fp8_serialized=True
+    ) == ([128, 128], None)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_oot_backend_converts_weights(oot_backends):
+    """The FP8 oracle applies the selected experts' conversion."""
+    backend, experts_cls = _select_fp8("foo")
+    w13, w2 = torch.empty(2, 16, 4), torch.empty(2, 4, 8)
+    scale = torch.ones(2)
+    new_w13, new_w2, new_w13_scale, new_w2_scale = convert_to_fp8_moe_kernel_format(
+        backend,
+        torch.nn.Module(),
+        w13,
+        w2,
+        scale,
+        scale,
+        None,
+        None,
+        experts_cls=experts_cls,
+    )
+    assert new_w13 is w13
+    assert new_w2.shape == (2, 8, 4)
+    assert new_w13_scale is scale
+    torch.testing.assert_close(new_w2_scale, scale * 2, rtol=0, atol=0)
+
+
+@pytest.mark.usefixtures("default_vllm_config", "dist_init")
+def test_modelopt_fp8_converts_oot_weights(oot_backends):
+    """Quant methods must hand their selected experts to the oracle."""
+    oot_backends["baz"] = _oot_experts(kFp8StaticTensorSym)
+    method = ModelOptFp8MoEMethod(
+        ModelOptFp8Config("FP8", True, None, []), make_dummy_moe_config()
+    )
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: None
+    method.create_weights(
+        layer, 1, 4, 8, torch.bfloat16, weight_loader=lambda *args, **kwargs: None
+    )
+    # Not `process_weights_after_loading`: its requantization needs a CUDA op.
+    method._setup_kernel(
+        layer,
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale.max(dim=1).values,
+        layer.w2_weight_scale,
+        layer.w13_input_scale,
+        layer.w2_input_scale,
+    )
+    assert layer.w2_weight.shape == (1, 8, 4)
+
+
+def test_oot_backend_names_are_accepted_by_config(oot_backends):
+    """Registered names pass the CLI and configs; unknown ones still fail."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert parser.parse_args(["--moe-backend", "foo"]).moe_backend == "foo"
+    assert KernelConfig(moe_backend="bar").moe_backend == "bar"
+    with pytest.raises(ValueError, match="Unknown moe_backend='baz'"):
+        KernelConfig(moe_backend="baz")
+
+    # `EngineArgs` assigns the field, which skips the field validator.
+    config = VllmConfig()
+    config.kernel_config.moe_backend = "baz"
+    with pytest.raises(ValueError, match="Unknown moe_backend='baz'"):
+        config.kernel_config.set_platform_defaults(config)
 
 
 _FORMAT = mk.FusedMoEActivationFormat

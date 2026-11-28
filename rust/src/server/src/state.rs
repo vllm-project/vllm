@@ -21,6 +21,7 @@ use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
 use crate::model_names::ServedModelNames;
+use crate::routes::decisions::NextTokenReads;
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -63,6 +64,11 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
+    /// so routes and services that drive its engine-core client are served.
+    has_engine_core_client: bool,
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    decisions: Option<NextTokenReads>,
 }
 
 impl AppState {
@@ -93,6 +99,8 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            has_engine_core_client: false,
+            decisions: None,
         }
     }
 
@@ -100,6 +108,17 @@ impl AppState {
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
         self
+    }
+
+    /// Serve `/v1/decisions` with these reads.
+    pub(crate) fn with_decisions(mut self, decisions: Option<NextTokenReads>) -> Self {
+        self.decisions = decisions;
+        self
+    }
+
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    pub(crate) fn decisions(&self) -> Option<&NextTokenReads> {
+        self.decisions.as_ref()
     }
 
     /// Set the `system_fingerprint` of chat and completion responses.
@@ -130,6 +149,21 @@ impl AppState {
     /// Set the backend model path reported as `root` for base-model cards.
     pub fn with_model_path(mut self, model_path: String) -> Self {
         self.model_path = Some(model_path);
+        self
+    }
+
+    /// Mark the `Llm` as an [`EngineCoreLlm`] the server connected itself, so
+    /// routes and services that drive its engine-core client are served.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `Llm` is not an [`EngineCoreLlm`].
+    pub(crate) fn with_engine_core_client(mut self) -> Self {
+        assert!(
+            self.engine_core_llm().is_some(),
+            "the server's `Llm` is not an `EngineCoreLlm`"
+        );
+        self.has_engine_core_client = true;
         self
     }
 
@@ -286,15 +320,23 @@ impl AppState {
         (self.llm() as &dyn Any).downcast_ref()
     }
 
+    /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
+    /// so routes and services that need its engine-core client can be served.
+    /// A provided `Llm` is opaque even when it is an `EngineCoreLlm`.
+    pub(crate) fn has_engine_core_client(&self) -> bool {
+        self.has_engine_core_client
+    }
+
     /// Return a reference to the underlying engine core client for utility
     /// calls.
     ///
     /// # Panics
     ///
-    /// Panics if the server does not run an [`EngineCoreLlm`], which cannot
-    /// happen yet: the server always builds its state around one.
+    /// Panics if the server does not run an [`EngineCoreLlm`]. Routes and
+    /// services that call this are only built when
+    /// [`Self::has_engine_core_client`] holds.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        (self.engine_core_llm().expect("the server runs an `EngineCoreLlm`")).engine_core_client()
+        (self.engine_core_llm().expect("route requires an `EngineCoreLlm`")).engine_core_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

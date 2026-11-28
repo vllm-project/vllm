@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnector,
     MoRIIOConnectorScheduler,
 )
 from vllm.v1.request import RequestStatus
@@ -116,6 +117,12 @@ def _step(scheduler, worker):
     scheduler.update_from_output(out, result)
 
 
+def _moriio_scheduler(scheduler) -> MoRIIOConnectorScheduler:
+    assert isinstance(scheduler.connector, MoRIIOConnector)
+    assert scheduler.connector.connector_scheduler is not None
+    return scheduler.connector.connector_scheduler
+
+
 @pytest.mark.cpu_test
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
@@ -126,7 +133,7 @@ def test_write_consumer_abort_while_waiting(
     monkeypatch, completion_before_abort, rejection_notice
 ):
     scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
-    connector = scheduler.connector.connector_scheduler
+    connector = _moriio_scheduler(scheduler)
     monkeypatch.setattr(connector, "send_notify_block", lambda **kw: None)
     release = MagicMock()
     monkeypatch.setattr(connector, "_send_transfer_release", release)
@@ -188,7 +195,7 @@ def test_write_consumer_abort_while_waiting(
 @pytest.mark.skip_global_cleanup
 def test_write_consumer_rejection_without_receive_releases_prefill(monkeypatch):
     scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
-    connector = scheduler.connector.connector_scheduler
+    connector = _moriio_scheduler(scheduler)
     release = MagicMock()
     monkeypatch.setattr(connector, "_send_transfer_release", release)
     pool = scheduler.kv_cache_manager.block_pool
@@ -211,19 +218,21 @@ def test_write_consumer_rejection_without_receive_releases_prefill(monkeypatch):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("already_in_flight", [False, True])
 def test_write_allocation_without_remote_prefill_preserves_receive_tracking(
-    already_in_flight,
+    already_in_flight, monkeypatch
 ):
     scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
-    connector = scheduler.connector.connector_scheduler
+    connector = _moriio_scheduler(scheduler)
     request = create_request(num_tokens=16, do_remote_prefill=True)
     _setup_kv_transfer_request(request, fake_transfer_id="xfer-local")
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["do_remote_prefill"] = False
     pending = {request.request_id: False} if already_in_flight else {}
     connector._write_recvs_in_flight.update(pending)
-    connector.send_notify_block = MagicMock()
+    send_notify_block = MagicMock()
+    monkeypatch.setattr(connector, "send_notify_block", send_notify_block)
 
     connector.update_state_after_alloc(request, MagicMock(), num_external_tokens=16)
 
     assert connector._write_recvs_in_flight == pending
     assert connector.transfer_id_to_request_id == {"xfer-local": request.request_id}
-    connector.send_notify_block.assert_not_called()
+    send_notify_block.assert_not_called()

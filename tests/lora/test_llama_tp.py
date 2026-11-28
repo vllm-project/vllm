@@ -91,6 +91,7 @@ def test_llama_lora(vllm_runner, llama32_lora_files, cudagraph_specialize_lora: 
     with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         # also test odd max_num_seqs
         max_num_seqs=7,
         max_model_len=1024,
@@ -110,6 +111,7 @@ def test_llama_lora_transformers_backend(vllm_runner, llama32_lora_files):
         MODEL_PATH,
         model_impl="transformers",
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
@@ -126,6 +128,7 @@ def test_llama_lora_tp4(vllm_runner, llama32_lora_files):
     with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
@@ -140,6 +143,7 @@ def test_llama_lora_tp4_fully_sharded_loras(vllm_runner, llama32_lora_files):
     with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         max_num_seqs=8,
         max_loras=4,
         max_model_len=1024,

@@ -65,12 +65,12 @@ pub struct DataParallelLbArgs {
     /// balances between its local data parallel ranks, while an external LB
     /// balances between nodes. Set explicitly in conjunction with
     /// `--data-parallel-size-local` and `--data-parallel-start-rank`.
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub data_parallel_hybrid_lb: bool,
     /// Whether to use "external" DP LB mode: every data parallel rank runs its
     /// own frontend, as in a "one-pod-per-rank" wide-EP setup in Kubernetes.
     /// Set implicitly when `--data-parallel-rank` is provided.
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub data_parallel_external_lb: bool,
 }
 

@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
@@ -41,9 +42,8 @@ use self::types::{
     ResponsesResponse,
 };
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, chat_submit_error, engine_error, server_error};
+use crate::error::{ApiError, chat_request_error, engine_error, server_error};
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{EventExt as _, resolve_request_context, sse_response, unix_timestamp};
 
@@ -51,10 +51,11 @@ use crate::utils::{EventExt as _, resolve_request_context, sse_response, unix_ti
 pub async fn create_responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ResponsesRequest>,
+    body: Result<Json<ResponsesRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream_requested = body.stream.unwrap_or(false);
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context = resolve_request_context(&headers, "resp_", body.request_id.as_deref())?;
     let lora_resolution = state
         .resolve_model_with_loras(body.model.as_deref().filter(|model| !model.is_empty()))
         .await;
@@ -74,7 +75,7 @@ pub async fn create_responses(
         .chat(prepared.chat_request)
         .instrument(request_span.clone())
         .await
-        .map_err(|error| chat_submit_error("failed to submit responses request", error))?;
+        .map_err(|error| chat_request_error("failed to submit responses request", error))?;
     // Echo the values the engine uses, as Python does, rather than the request's.
     let response = build_response(
         prepared.meta,
@@ -146,15 +147,11 @@ async fn collect_responses(
                 "responses stream ended before generation completed"
             ));
         };
-        let event = event.map_err(|error| {
-            server_error!(
-                "failed to collect responses result: {}",
-                error.to_report_string()
-            )
-        })?;
+        let event = event
+            .map_err(|error| chat_request_error("failed to collect responses result", error))?;
         // Only the final output matters here; the item events are discarded.
         items.on_event(&event);
-        if let Some(terminal) = TerminalOutput::from_event(event) {
+        if let Some(terminal) = TerminalOutput::from_event(event, false) {
             break terminal;
         }
     };
@@ -199,11 +196,12 @@ struct TerminalOutput {
     kv_transfer_params: Option<serde_json::Value>,
     ec_transfer_params: Option<serde_json::Value>,
     timestamps: RequestTimestamps,
+    first_content_token_ts: Option<f64>,
 }
 
 impl TerminalOutput {
     /// Take the terminal metadata from a `Done` event.
-    fn from_event(event: ChatEvent) -> Option<Self> {
+    fn from_event(event: ChatEvent, streaming: bool) -> Option<Self> {
         match event {
             ChatEvent::Done {
                 // The output items already carry the parser's final blocks.
@@ -213,6 +211,7 @@ impl TerminalOutput {
                 kv_transfer_params,
                 ec_transfer_params,
                 timestamps,
+                first_content_token_ts,
                 ..
             } => Some(Self {
                 usage,
@@ -220,6 +219,7 @@ impl TerminalOutput {
                 kv_transfer_params: kv_transfer_params.map(|params| *params),
                 ec_transfer_params: ec_transfer_params.map(|params| *params),
                 timestamps,
+                first_content_token_ts: first_content_token_ts.filter(|_| streaming),
             }),
             _ => None,
         }
@@ -236,6 +236,7 @@ fn completed_response(
         kv_transfer_params,
         ec_transfer_params,
         timestamps,
+        first_content_token_ts,
     }: TerminalOutput,
     enable_per_request_metrics: bool,
 ) -> ResponsesResponse {
@@ -247,8 +248,13 @@ fn completed_response(
         }),
         output,
         usage: Some(build_usage(&usage)),
-        metrics: enable_per_request_metrics
-            .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count)),
+        metrics: enable_per_request_metrics.then(|| {
+            PerRequestMetrics::from_timestamps(
+                timestamps,
+                usage.output_token_count,
+                first_content_token_ts,
+            )
+        }),
         kv_transfer_params,
         ec_transfer_params,
         ..response
@@ -309,7 +315,7 @@ async fn responses_event_stream(
                 for event in items.on_event(&event) {
                     y.yield_ok(event).await;
                 }
-                if let Some(output) = TerminalOutput::from_event(event) {
+                if let Some(output) = TerminalOutput::from_event(event, true) {
                     terminal = Some(output);
                     break;
                 }

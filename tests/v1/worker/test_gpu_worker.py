@@ -5,7 +5,7 @@ import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -1155,3 +1155,30 @@ def test_startup_heap_frozen_before_weight_loading(monkeypatch):
     monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
     LLM("facebook/opt-125m", enforce_eager=True)
     assert frozen_at_load > frozen_before
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["passes", "fails"])
+def test_probe_forward_leaves_serving_state(fails):
+    """The engine keeps serving after a probe, so the probe leaves the KV
+    connector enabled and the iteration records to the engine's own dummy
+    batches."""
+    connector = SimpleNamespace(disabled=False)
+    connector.set_disabled = lambda disabled: setattr(connector, "disabled", disabled)
+
+    def dummy_run(*args, **kwargs):
+        connector.set_disabled(True)
+        if fails:
+            raise RuntimeError("injected")
+        connector.set_disabled(False)
+
+    worker = object.__new__(gpu_worker.Worker)
+    worker.model_runner = SimpleNamespace(
+        decode_query_len=1, kv_connector=connector, _dummy_run=dummy_run
+    )
+    worker.iteration_timer = Mock()
+
+    error = worker.probe_forward()
+
+    assert (error is not None and "injected" in error) == fails
+    assert not connector.disabled
+    assert not worker.iteration_timer.method_calls

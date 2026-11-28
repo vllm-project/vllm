@@ -65,7 +65,7 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
         dtype=torch.bfloat16,
     )
     vllm_config = create_vllm_config(
-        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        model_name="vllm/tiny-random-LlamaForCausalLM",
         max_model_len=1024,
     )
     vllm_config.speculative_config = SpeculativeConfig(
@@ -716,7 +716,10 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
 
 
 @pytest.mark.parametrize("compress_ratio", [1, 4])
-def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
+@pytest.mark.parametrize("pcp,dcp", [(1, 1), (4, 1), (1, 4), (4, 4)])
+def test_indexer_prefill_budget_matches_compressed_workspace(
+    dist_init, compress_ratio, pcp, dcp
+):
     """The chunker budget is in compressed rows, like the K-gather workspace."""
     max_model_len = 1024
     kv_cache_spec = MLAAttentionSpec(
@@ -726,7 +729,18 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
         dtype=torch.bfloat16,
         tokens_per_state=compress_ratio,
     )
-    vllm_config = create_vllm_config(max_model_len=max_model_len)
+    vllm_config = create_vllm_config(
+        max_model_len=max_model_len,
+        hf_config_override={
+            "index_n_heads": 32,
+            "index_head_dim": 128,
+            "index_topk": 2048,
+        },
+    )
+    vllm_config.parallel_config.tensor_parallel_size = max(1, dcp // pcp)
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp
+    vllm_config.parallel_config.decode_context_parallel_size = dcp
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = compress_ratio
     group = new_kv_cache_group(["layer"], kv_cache_spec)
     max_num_blocks = group.max_num_blocks_per_req(vllm_config, max_model_len)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
@@ -754,6 +768,27 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     assert len(chunks) > 1
     for req_slice, _ in chunks:
         assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows
+
+    eligible = indexer_module.use_fused_mqa_topk(
+        query_shape=(32, 128),
+        topk=2048,
+        fp4_cache=False,
+        full_context=pcp > 1 or dcp == 1,
+    )
+    assert builder.fused_mqa_topk_eligible is eligible
+    if pcp > 1 and dcp > 1:
+        import numpy as np
+
+        context = max_model_len // compress_ratio
+        chunks = builder._split_pcp_dcp_prefill_chunks(
+            np.array([0]),
+            np.array([context // dcp]),
+            torch.tensor([64]),
+            max_logits_bytes=8 * context * 4,
+            request_offset=0,
+        )
+        lengths = [64] if eligible else [8] * 8
+        assert [q.stop - q.start for _, q in chunks] == lengths
 
 
 def test_indexer_expanded_block_table_sized_by_decode_tokens():

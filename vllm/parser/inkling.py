@@ -44,6 +44,7 @@ from vllm.parser.abstract_parser import structured_outputs_to_format
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -118,6 +119,67 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
         # No args value yet (streaming) or none at all (treat as empty).
         return "" if partial else "{}"
     return span
+
+
+def _inkling_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Extend the open trailing value of the `args` object until it closes.
+
+    `_inkling_arg_converter` returns a verbatim span of `raw_args`, so while
+    the last member value is open every delta appends to the converted JSON
+    as is: a string streams it, other values are held by the engine without
+    re-running the converter. Returns None before the value starts, so the
+    converter decides whether a string value may stream.
+    """
+    span = extract_json_member_object(raw_args, "args")
+    if span is None:
+        return None
+    depth = 0
+    in_string = escape = in_value = False
+    for ch in span:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif depth == 1 and ch in ":,":
+            in_value = ch == ":"
+    if depth < 1 or not in_value or span[-1] in ": \t\r\n":
+        return None
+    is_string = in_string and depth == 1
+
+    def extend(delta: str) -> str | None:
+        nonlocal depth, in_string, escape
+        for ch in delta:
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                    if is_string:
+                        return None
+            elif ch == '"':
+                in_string = True
+            elif ch in "{[":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+                if depth <= 1:
+                    return None
+            elif depth == 1 and ch in ", \t\r\n":
+                return None
+        return delta
+
+    return extend
 
 
 @functools.cache
@@ -244,6 +306,7 @@ def inkling_config() -> ParserEngineConfig:
         token_id_terminals={},
         transitions=transitions,
         arg_converter=_inkling_arg_converter,
+        arg_value_extender=_inkling_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=True,
         strip_trailing_reasoning_whitespace=True,

@@ -1660,6 +1660,23 @@ class Worker(WorkerBase):
             num_active_loras=0,
         )
 
+    def probe_forward(self) -> str | None:
+        try:
+            # Not execute_dummy_batch: its timer drains the iteration records,
+            # which only the engine's own dummy batches report.
+            self.model_runner._dummy_run(
+                self.model_runner.decode_query_len,
+                uniform_decode=True,
+                num_active_loras=0,
+            )
+            self.synchronize_device()
+        except Exception as e:
+            logger.exception("Forward probe failed")
+            # The engine keeps serving: undo the dummy run's connector disable.
+            self.model_runner.kv_connector.set_disabled(False)
+            return repr(e)
+        return None
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
@@ -1878,9 +1895,10 @@ class Worker(WorkerBase):
             self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
-        model_runner = getattr(self, "model_runner", None)
-        if model_runner is not None and model_runner.eplb_state is not None:
-            model_runner.eplb_state.stop_async_loop()
+        if (model_runner := getattr(self, "model_runner", None)) is not None and (
+            eplb_state := getattr(model_runner, "eplb_state", None)
+        ) is not None:
+            eplb_state.stop_async_loop()
 
         gc.unfreeze()
 

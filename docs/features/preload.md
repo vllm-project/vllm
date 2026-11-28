@@ -79,7 +79,7 @@ daemons; VMM daemons reject engines that do not advertise VMM support.
 After loading, post-processing and warmup, the daemon calls `build_manifest`
 to record the final canonical parameters and buffers as logical views over
 distinct storages, including any tensors created or replaced during warmup. It
-then materializes the storages, drops the model and releases startup runtime
+then drops the model, materializes the storages and releases startup runtime
 resources. VMM moves non-empty GPU storages into exportable `cuMemCreate` or
 `hipMemCreate` allocations. By default, consecutive storages are packed in
 input order toward a 1 GiB logical cap, with 512-byte alignment between logical
@@ -94,8 +94,9 @@ strides. Each `StorageRecord` holds `owner`, `storage` and `byte_offset`. The
 manifest records each logical storage's `nbytes`, while
 `record.storage.nbytes()` reports the physical size of its potentially shared
 allocation. Granularity padding counts once per unique owner in the
-external-weight memory budget. CPU and empty storages continue to use the
-existing by-value transfer path.
+external-weight memory budget. Each non-empty pinned CPU storage is copied to a
+Linux memfd. Pageable CPU tensors and empty storages use the existing by-value
+transfer path.
 
 `WeightCacheState` carries `manifest`, `storages`, `aliases` and `attrs` on both
 sides; the producer and consumer differ only in where they use the same state
@@ -128,6 +129,31 @@ backends. They implement `IPCBackendBase`, whose `materialize(storages)` returns
 `StorageRecord`s and whose `export_storage(record)` returns a rebuildable
 `StorageEntry`. Tensor reconstruction remains separate from the model's
 processed-weight contract and daemon-to-daemon copy movers.
+
+## Qwen4Exp PLE offload
+
+To preload a private pinned PLE table, use the same Engram configuration for
+the daemon and engine.
+
+```bash
+vllm preload --model Qwen/Qwen3.8-Flash-Next --tensor-parallel-size 4 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}'
+
+vllm serve Qwen/Qwen3.8-Flash-Next --tensor-parallel-size 4 --load-format ipc_cache \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}'
+```
+
+The worker receives the GPU handles and pinned CPU storage descriptors in one
+`get_state` response. It maps and registers each memfd locally, then binds the
+PLE accelerator views to the imported tables. The mapping stays registered
+until the last tensor view releases its storage. The loader's existing
+`fallback` setting applies to the whole model.
+
+Private pinned PLE uses `ipc_cache` with either local GPU sharing backend.
+Disk-backed tables need open checkpoint files, and DP-shared tables need their
+group mappings. Both require state outside the manifest. The memfd path
+guarantees pinned memory only. Qwen4Exp HiSparse and peer seeding of
+CPU-offloaded PLE tables are outside the supported configurations.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -379,9 +405,9 @@ daemons at a trusted deployment.
    identical weights in different directories still match), model
    architecture, TP/DP size/rank, dtype, quantization method and config, text
    RoPE parameters, model revision, KV cache dtype and quantization skip layers,
-   the multimodal options that skip model components, and vLLM version. On any
-   mismatch the engine falls back to disk loading (unless `fallback` is
-   disabled).
+   Engram placement and sharding, indexer KV dtype, the multimodal options
+   that skip model components, and vLLM version. On any mismatch the engine
+   falls back to disk loading (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 

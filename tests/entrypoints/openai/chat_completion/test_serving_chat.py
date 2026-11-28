@@ -879,10 +879,13 @@ async def test_streaming_errors_preserve_envelope(
 
 def test_build_per_request_timing_metrics_valid_timestamps():
     metrics = build_per_request_timing_metrics(
-        _PER_REQUEST_STATS, num_generation_tokens=10
+        _PER_REQUEST_STATS,
+        num_generation_tokens=10,
+        first_content_token_ts=2.5,
     )
 
     assert metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert metrics.time_to_first_content_token_ms == pytest.approx(1000.0)
     assert metrics.generation_time_ms == pytest.approx(1000.0)
     assert metrics.queue_time_ms == pytest.approx(500.0)
     assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
@@ -931,6 +934,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
     assert not isinstance(enabled_response, ErrorResponse)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms is None
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1035,9 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
     assert usage_chunks
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+    assert usage_chunks[-1]["metrics"][
+        "time_to_first_content_token_ms"
+    ] == pytest.approx(1500.0)
 
 
 @pytest.mark.asyncio

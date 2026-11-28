@@ -38,6 +38,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// The first scored prompt row; the prompt positions up to it are `None`.
+    pub prompt_logprob_start: u32,
     /// Whether the caller requested final prompt token metadata.
     pub return_token_ids: bool,
     /// The response level.
@@ -52,7 +54,8 @@ pub(super) fn prepare_generate_request(
     ctx: ResolvedRequestContext,
     mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
@@ -69,6 +72,7 @@ pub(super) fn prepare_generate_request(
             .unwrap_or(false);
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let prompt_logprob_start = request.sampling_params.inner.prompt_logprob_start.unwrap_or(0);
     let return_token_ids = request.return_token_ids.unwrap_or(false);
     let output_mode = request.output_mode.unwrap_or_default();
     let stop_strings = request.sampling_params.stop.map(StringOrArray::into_vec);
@@ -128,6 +132,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            prompt_logprob_start,
             return_token_ids,
             output_mode,
         },
@@ -285,7 +290,7 @@ mod tests {
         let prepared = prepare_generate_request(
             request,
             &served(&["test-model"]),
-            resolve_request_context(&headers, None).expect("valid headers"),
+            resolve_request_context(&headers, "", None).expect("valid headers"),
             None,
         )
         .expect("prepare");

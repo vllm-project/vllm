@@ -189,7 +189,9 @@ def test_stop_string_trims_speculative_overflow(
             )
         ]
     )
-    result = outputs.request_outputs[0].outputs[0]
+    completions = outputs.request_outputs[0].outputs
+    assert isinstance(completions, list)
+    result = completions[0]
 
     assert result.stop_reason == stop_string
     expected_text = "abcd" if include_stop_str_in_output else "ab"
