@@ -15,12 +15,6 @@ permissions:
   pull-requests: read
 
 jobs:
-  runner-snapshot:
-    runs-on: [self-hosted, linux, x64, vllm-runners]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Snapshot
-        run: bash tools/pre_commit/runner_snapshot.sh
   run:
     if: github.repository_owner == 'vllm-project'
     uses: vllm-project/vllm/.github/workflows/_reusable-pre-commit.yml@main
