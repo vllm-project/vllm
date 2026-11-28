@@ -10,6 +10,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tp_group,
+    is_fake_distributed,
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.device_communicators.nvlink_fabric import (
@@ -95,6 +96,10 @@ class LatentMoERunner(MoERunner):
                 "but TP=%d is configured. Falling back to the default path.",
                 self.moe_config.tp_size,
             )
+            self.enable_k3_latent_moe_tail_fusion = False
+        # Static memory estimation's fake TP group cannot run the collective
+        # tail; the projections it reads are declared regardless.
+        if use_fused_path and is_fake_distributed():
             self.enable_k3_latent_moe_tail_fusion = False
 
         if (

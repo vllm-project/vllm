@@ -2,6 +2,30 @@
 
 Large models might cause your machine to run out of memory (OOM). Here are some options that help alleviate this problem.
 
+## Estimate memory before launching
+
+To check whether a parallel layout fits before launching it, estimate its static GPU memory. The estimator takes the usual engine arguments plus the request lengths to size the KV cache for:
+
+```bash
+python -m vllm.entrypoints.memory_estimate --model deepseek-ai/DeepSeek-V3 \
+    --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+    --context-lengths 32768 131072
+```
+
+It builds the model with its weights on the meta device (`load_format="meta"`), so weights are never downloaded or loaded, and it needs only one GPU whatever the layout. It prints a JSON list with one entry per pipeline stage, for the stage's first tensor-parallel rank:
+
+- `weight_bytes`: the model's tensors on the GPU, including a speculative decoding draft model's. Tables kept in host memory (pinned or CPU-offloaded) are excluded.
+- `kv_cache_bytes`: for each context length, the KV cache that one request of that length needs. vLLM does not start unless its KV cache can hold one request of `max_model_len` tokens.
+
+Activations, CUDA graphs, communication buffers, allocator overhead and weight conversions after loading are not included, so a stage needs this much plus some headroom within `gpu_memory_utilization` of its GPU.
+
+To compare layouts, `--sweep` estimates every tensor x pipeline x data parallel split of `--nnodes` x `--gpus-per-node` GPUs (tensor parallelism within a node), with and without expert parallelism, `--jobs` (default 8) at a time. It prints one JSON line per layout, with an `error` for each layout vLLM rejects:
+
+```bash
+python -m vllm.entrypoints.memory_estimate --model deepseek-ai/DeepSeek-V3 \
+    --sweep --nnodes 2 --gpus-per-node 8 --context-lengths 131072
+```
+
 ## Tensor Parallelism (TP)
 
 Tensor parallelism (`tensor_parallel_size` option) can be used to split the model across multiple GPUs.
