@@ -60,6 +60,22 @@ def _mtp_depth_from_name(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _mtp_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> QuantizationConfig | None:
+    """Quantization for the MTP depth layers.
+
+    NVFP4 (ModelOpt) Inkling checkpoints ship the MTP depths in BF16, but the
+    exporter's exclude list does not name them, so inheriting the target's
+    quantization allocates packed FP4 params that do not match the
+    checkpoint. Build the depths unquantized in that case, as Qwen3-Next does
+    for its BF16 ``mtp.fc``.
+    """
+    if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
+        return None
+    return quant_config
+
+
 def _select_mtp_depth_count(n_predict: int, num_spec: int | None) -> int:
     num_layers = min(n_predict, num_spec) if num_spec else n_predict
     if num_layers <= 0:
@@ -143,7 +159,7 @@ class InklingMultiTokenPredictor(nn.Module):
                     config,
                     f"{prefix}.layers.{idx}",
                     idx in local_ids,
-                    quant_config=vllm_config.quant_config,
+                    quant_config=_mtp_quant_config(vllm_config.quant_config),
                 )
                 for idx in range(self.num_mtp_layers)
             }
@@ -256,6 +272,11 @@ class InklingMultiTokenPredictor(nn.Module):
 
 
 class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
+    # The drafter never builds its own embedding; it always uses the target's.
+    # Declaring it lets maybe_share_target_embed attach the target's
+    # embedding under PP > 1 too (undeclared drafts are skipped there).
+    has_own_embed_tokens = False
+
     hf_to_vllm_mapper = _TmlForCausalLMBase.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_prefix={"model.mtp.": "model."},
     )
