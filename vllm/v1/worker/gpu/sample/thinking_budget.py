@@ -102,10 +102,10 @@ class ThinkingBudgetState:
     def _init_loop_break(self, reasoning_config: "ReasoningConfig | None") -> None:
         """Set up reasoning-scoped loop breaking, if the server configured it.
 
-        Detection semantics mirror `check_sequence_repetition`, which rejects
-        a degenerate parameter set rather than firing on it; the equivalent
-        rejection here has to happen on the host, because a `min_count` below
-        2 would make the on-device tail comparison vacuously true.
+        Detection semantics mirror `check_sequence_repetition`, and
+        `ReasoningConfig` rejects the parameter sets it rejects. A config that
+        skipped that validation stays disabled here, because a `min_count`
+        below 2 would make the on-device tail comparison vacuously true.
         """
         max_pattern = getattr(reasoning_config, "loop_break_max_pattern_size", 0)
         min_pattern = getattr(reasoning_config, "loop_break_min_pattern_size", 0)

@@ -4,7 +4,7 @@
 from dataclasses import field
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
@@ -54,11 +54,11 @@ class ReasoningConfig:
     """Number of consecutive repetitions of a pattern that triggers reasoning
     loop breaking. Must be >= 2 when enabled."""
 
-    loop_break_min_reasoning_tokens: int = 256
+    loop_break_min_reasoning_tokens: int = Field(default=256, ge=0)
     """Do not check a reasoning section for loops until it has generated at
     least this many tokens."""
 
-    loop_break_check_interval: int = 16
+    loop_break_check_interval: int = Field(default=16, ge=1)
     """Check for loops every this many newly accepted reasoning tokens."""
 
     loop_break_release: Literal["force", "ramp"] = "force"
@@ -92,6 +92,29 @@ class ReasoningConfig:
     _enabled: bool = field(default=False, init=False, repr=False)
     """Private field indicating whether reasoning token IDs have been initialized.
     Set to True by `initialize_token_ids` once token IDs are initialized."""
+
+    @model_validator(mode="after")
+    def _validate_loop_break(self) -> "ReasoningConfig":
+        """Reject the loop-break settings `RepetitionDetectionParams` rejects,
+        instead of leaving the feature silently off."""
+        if (
+            self.loop_break_max_pattern_size < 0
+            or self.loop_break_min_pattern_size < 0
+            or self.loop_break_min_pattern_size > self.loop_break_max_pattern_size
+        ):
+            raise ValueError(
+                "loop_break_max_pattern_size and loop_break_min_pattern_size "
+                "must be >= 0, with loop_break_min_pattern_size <= "
+                "loop_break_max_pattern_size. Set both to 0 to disable "
+                "reasoning loop breaking."
+            )
+        if self.loop_break_max_pattern_size > 0 and self.loop_break_min_count < 2:
+            raise ValueError(
+                "loop_break_min_count must be >= 2 to detect a reasoning loop. "
+                "Set loop_break_max_pattern_size to 0 to disable reasoning "
+                "loop breaking."
+            )
+        return self
 
     @property
     def enabled(self) -> bool:
