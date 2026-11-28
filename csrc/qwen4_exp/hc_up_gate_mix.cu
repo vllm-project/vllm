@@ -154,8 +154,7 @@ __device__ __forceinline__ void st_shared_v4(uint32_t addr, uint4 v) {
 // through a PTX predicate: no divergent loop, so loop state stays uniform.
 __device__ __forceinline__ uint32_t elect_lane() {
   uint32_t pred;
-  asm volatile(
-      "{\n"
+  asm("{\n"
       ".reg .pred p;\n"
       "elect.sync _|p, 0xffffffff;\n"
       "selp.u32 %0, 1, 0, p;\n"
