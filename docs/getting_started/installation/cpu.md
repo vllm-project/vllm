@@ -50,6 +50,12 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 
 ## Set up using Python
 
+When using the CPU platform, vLLM defaults `TRITON_DEFAULT_BACKEND` to `cpu` if
+it is unset. This selects the Triton CPU backend even when an NVIDIA driver is
+visible, for example in WSL2, without requiring `CUDA_VISIBLE_DEVICES` to be
+cleared. An explicitly set `TRITON_DEFAULT_BACKEND` is preserved. Install the
+CPU wheel and its Triton CPU dependency as described below.
+
 ### Create a new Python environment
 
 --8<-- "docs/getting_started/installation/python_env_setup.inc.md"
