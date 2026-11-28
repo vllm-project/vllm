@@ -82,6 +82,61 @@ def test_pynccl():
 
 
 @worker_fn_wrapper
+def stream_wrappers_worker_fn():
+    world_group = get_world_group()
+    device = world_group.device
+    comm = PyNcclCommunicator(world_group.cpu_group, device=device)
+    try:
+        for bind_generic, stream in (
+            (False, torch.cuda.default_stream(device)),
+            (True, torch.cuda.Stream(device=device)),
+        ):
+            with torch.cuda.stream(stream):
+                cuda_stream = torch.cuda.current_stream()
+                generic_stream = torch.accelerator.current_stream(device)
+                cuda_handle = comm._stream_handle(cuda_stream)
+                generic_handle = comm._stream_handle(generic_stream)
+                assert cuda_handle == cuda_stream.cuda_stream
+                assert generic_handle == generic_stream.native_handle
+                assert cuda_handle == generic_handle
+
+                first, second = (
+                    (generic_stream, cuda_stream)
+                    if bind_generic
+                    else (cuda_stream, generic_stream)
+                )
+                assert comm._comm_for(first) is comm.comm
+                comm.bind_stream(first)
+                bound_comm = comm._comm_for(second)
+                assert bound_comm is not comm.comm
+                comm.bind_stream(second)
+                assert comm._comm_for(first) is bound_comm
+                assert comm._comm_for(second) is bound_comm
+
+                tensor = torch.full((4,), comm.rank + 1, device=device)
+                for wrapper in (cuda_stream, generic_stream):
+                    result = comm.all_reduce(tensor, stream=wrapper)
+                    torch.testing.assert_close(result, torch.full_like(tensor, 3))
+
+        with pytest.raises(TypeError, match="Unsupported stream type"):
+            comm.bind_stream(object())
+
+        other_device = torch.device("cuda", 1 - comm.rank)
+        other_stream = torch.accelerator.current_stream(other_device)
+        with pytest.raises(ValueError, match="does not match communicator device"):
+            comm.bind_stream(other_stream)
+    finally:
+        comm.destroy()
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="Need at least 2 CUDA GPUs to run the test."
+)
+def test_pynccl_stream_wrappers():
+    distributed_run(stream_wrappers_worker_fn, 2)
+
+
+@worker_fn_wrapper
 def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
