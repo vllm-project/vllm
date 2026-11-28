@@ -34,6 +34,7 @@ from vllm.entrypoints.launchers.run_batch import (
     ignore_admission_limits,
     is_same_local_file,
     make_arg_parser,
+    make_responses_wrapper,
     make_transcription_wrapper,
     open_batch_input,
     run_request,
@@ -44,6 +45,10 @@ from vllm.entrypoints.launchers.run_batch import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
@@ -171,6 +176,28 @@ INPUT_COMPLETIONS_BATCH = "\n".join(
                 "model": CHAT_MODEL_NAME,
                 "prompt": ["The capital of France is", "One plus one is"],
                 "max_tokens": 10,
+            },
+        },
+    ]
+)
+
+INPUT_RESPONSES_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/responses",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": "42",
+                    }
+                ],
+                "max_output_tokens": 10,
             },
         },
     ]
@@ -2013,3 +2040,106 @@ def test_url_matches_accepts_any_prefix_for_unversioned_endpoints():
     assert url_matches("/v1/embeddings", "/v1/embeddings")
     for url in ("/v2/embeddings", "/api/v1/embeddings"):
         assert not url_matches("/v1/embeddings", url), url
+
+
+# ---------------------------------------------------------------------------
+# /v1/responses support
+# ---------------------------------------------------------------------------
+
+
+def test_responses_body_parses_for_url():
+    # Responses-only input items must parse as ResponsesRequest, not fall
+    # through to the embedding body union.
+    request = BatchRequestInput.model_validate_json(INPUT_RESPONSES_BATCH)
+    assert isinstance(request.body, ResponsesRequest)
+    assert request.body.background is False
+
+
+@pytest.mark.asyncio
+async def test_batch_responses_body_round_trips():
+    response = ResponsesResponse.model_construct(id="resp_1", status="completed")
+
+    async def handler(body):
+        assert isinstance(body, ResponsesRequest)
+        return response
+
+    request = BatchRequestInput.model_validate_json(INPUT_RESPONSES_BATCH)
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.response is not None
+    assert result.response.body is response
+    line = result.to_json_line()
+    assert json.loads(line)["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_responses_background_rejected():
+    # A background response finishes in a task the batch runner never
+    # collects, so it must fail the line instead of returning queued.
+    handler = AsyncMock()
+
+    line = json.loads(INPUT_RESPONSES_BATCH)
+    line["body"]["background"] = True
+    request = BatchRequestInput.model_validate_json(json.dumps(line))
+    assert request.body.background is True
+
+    result = await run_batch_module.run_request(
+        make_responses_wrapper()(handler), request
+    )
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert result.error is not None
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_responses_chaining_rejected(monkeypatch):
+    # With the store enabled, a chained line resolves or 404s depending on
+    # whether the earlier line has finished, so chaining is rejected up front.
+    monkeypatch.setattr("vllm.envs.VLLM_ENABLE_RESPONSES_API_STORE", True)
+    handler = AsyncMock()
+
+    line = json.loads(INPUT_RESPONSES_BATCH)
+    line["body"]["previous_response_id"] = "resp_first"
+    request = BatchRequestInput.model_validate_json(json.dumps(line))
+    assert request.body.previous_response_id == "resp_first"
+
+    result = await run_batch_module.run_request(
+        make_responses_wrapper()(handler), request
+    )
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert "previous_response_id" in result.error.error.message
+    assert result.error is not None
+    handler.assert_not_called()
+
+
+def test_responses():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_RESPONSES_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                CHAT_MODEL_NAME,
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            BatchRequestOutput.model_validate_json(line)
+            line_dict = json.loads(line)
+            assert line_dict["error"] is None
+            assert line_dict["response"]["body"]["object"] == "response"

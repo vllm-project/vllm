@@ -49,6 +49,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -210,6 +214,8 @@ class BatchRequestInput(OpenAIBaseModel):
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/completions":
             return CompletionRequest.model_validate(value)
+        if url == "/v1/responses":
+            return ResponsesRequest.model_validate(value)
         if url == "/v1/embeddings":
             return _EMBEDDING_REQUEST_ADAPTER.validate_python(value)
         if url.endswith("/score"):
@@ -226,6 +232,7 @@ class BatchRequestInput(OpenAIBaseModel):
 AllResponse: TypeAlias = (
     ChatCompletionResponse
     | CompletionResponse
+    | ResponsesResponse
     | EmbeddingResponse
     | ScoreResponse
     | RerankResponse
@@ -815,6 +822,45 @@ def make_transcription_wrapper(
     return wrapper
 
 
+def make_responses_wrapper() -> WrapperFn:
+    """Factory function to create a wrapper for the /v1/responses handler.
+
+    A background response returns a queued placeholder and finishes
+    generation in a task the batch runner never collects, so background
+    requests are rejected per line. `previous_response_id` is rejected
+    because batch lines run concurrently: with
+    `VLLM_ENABLE_RESPONSES_API_STORE=1` it would resolve only if the
+    earlier line has already finished.
+    """
+
+    def wrapper(handler_fn: Callable):
+        async def responses_wrapper(
+            request: ResponsesRequest,
+        ) -> ResponsesResponse | ErrorResponse:
+            if request.background:
+                message = "Background responses are not supported in batch mode."
+            elif request.previous_response_id is not None:
+                message = (
+                    "Chaining responses with previous_response_id is not "
+                    "supported in batch mode."
+                )
+            else:
+                message = None
+            if message is not None:
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=message,
+                        type="BadRequestError",
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    )
+                )
+            return await handler_fn(request)
+
+        return responses_wrapper
+
+    return wrapper
+
+
 async def build_endpoint_registry(
     engine_client: EngineClient,
     args: Namespace,
@@ -843,6 +889,7 @@ async def build_endpoint_registry(
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)
     openai_serving_completion = getattr(state, "openai_serving_completion", None)
+    openai_serving_responses = getattr(state, "openai_serving_responses", None)
     openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
     openai_serving_translation = getattr(state, "openai_serving_translation", None)
     serving_embedding = getattr(state, "serving_embedding", None)
@@ -869,6 +916,15 @@ async def build_endpoint_registry(
                 else None
             ),
             "wrapper_fn": None,
+        },
+        "responses": {
+            "url": "/v1/responses",
+            "handler_getter": lambda: (
+                openai_serving_responses.create_responses
+                if openai_serving_responses is not None
+                else None
+            ),
+            "wrapper_fn": make_responses_wrapper(),
         },
         "embeddings": {
             "url": "/v1/embeddings",
