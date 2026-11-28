@@ -28,6 +28,14 @@ def has_flashinfer_situ_activation() -> bool:
     return hasattr(ActivationType, "Situ")
 
 
+def has_flashinfer_swiglustep_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "SwigluStep")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
@@ -36,6 +44,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         if situ is None:
             raise ValueError("The installed FlashInfer does not support SITU")
         return situ
+
+    if activation == MoEActivation.SWIGLUSTEP:
+        step = getattr(ActivationType, "SwigluStep", None)
+        if step is None:
+            raise ValueError("The installed FlashInfer does not support SWIGLUSTEP")
+        return step
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -69,6 +83,28 @@ def quantize_nvfp4_per_token_input(
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     return (
         x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
+    )
+
+
+def interleave_w13_up_gate_for_flashinfer_cutedsl_sm90(
+    w13: torch.Tensor,
+) -> torch.Tensor:
+    """Repack `[gate; up]` weights `[E, 2I, K]` into the up/gate interleave of
+    FlashInfer's SM90 CuTe-DSL gated GEMM1, `[up 0:32 | gate 0:32 | up 32:64 |
+    gate 32:64 | ...]` along dim 1, so each epilogue thread holds an (up, gate)
+    pair."""
+    num_experts, two_inter, hidden = w13.shape
+    inter = two_inter // 2
+    if inter % 32 != 0:
+        raise ValueError(
+            f"intermediate size per partition {inter} must be a multiple of 32"
+        )
+    gate = w13[:, :inter].reshape(num_experts, inter // 32, 32, hidden)
+    up = w13[:, inter:].reshape(num_experts, inter // 32, 32, hidden)
+    return (
+        torch.stack((up, gate), dim=2)
+        .reshape(num_experts, two_inter, hidden)
+        .contiguous()
     )
 
 
@@ -111,12 +147,13 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
             shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
         )
 
-    # Stack weights for all experts
-    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    # Stack weights for all experts, in place: they may be the layer's
+    # parameters, whose addresses captured CUDA graphs keep across reloads
+    gemm1_weights.copy_(
+        torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
-    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    gemm2_weights.copy_(
+        torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
 
 
@@ -494,12 +531,12 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
-    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    All three transforms (gate/up row reorder, `shuffle_matrix_a` weight
+    shuffle, `shuffle_matrix_sf_a` scale shuffle) are fixed row/index
     permutations that depend only on the per-expert matrix shape, so the
     permutation is computed once and applied to every expert in a single
-    gather instead of once per expert. ``block_scale_interleave`` accepts a
-    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    gather instead of once per expert. `block_scale_interleave` accepts a
+    batched `(E, M, K)` scale tensor directly. Output is bit-identical to
     the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
     seconds per layer at load).
     """

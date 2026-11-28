@@ -77,14 +77,22 @@ fi
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
-PREFILLER_PP_SIZE=${PREFILLER_PP_SIZE:-1} # >1 requires NixlPushConnector
+PREFILLER_PP_SIZE=${PREFILLER_PP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+# Set to 1 to give the decoder decode-only CUDA graphs without torch.compile.
+DECODER_CUDAGRAPH=${DECODER_CUDAGRAPH:-0}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Set to 1 to put every instance to sleep and wake it up before the eval.
+SLEEP_WAKE=${SLEEP_WAKE:-0}
+if [[ "$SLEEP_WAKE" == "1" ]]; then
+  export VLLM_SERVER_DEV_MODE=1
+  VLLM_SERVE_EXTRA_ARGS="${VLLM_SERVE_EXTRA_ARGS:+${VLLM_SERVE_EXTRA_ARGS},}--enable-sleep-mode"
+fi
 # Pin concurrent prefiller and non-DP decoder engines to separate internal
 # port windows. DP decoder ranks retain their existing internal port selection.
 PREFILLER_INTERNAL_PORT_BASE=${PREFILLER_INTERNAL_PORT_BASE:-20000}
@@ -97,7 +105,7 @@ INTERNAL_PORT_STRIDE=${INTERNAL_PORT_STRIDE:-100}
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
@@ -111,10 +119,55 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-# Function to clean up previous instances
+# Seconds the instances get to exit after SIGTERM before they are killed. Above
+# the 30 s an API server gives its EngineCore before killing it, so a stuck
+# EngineCore is still reaped by its own server.
+SHUTDOWN_TIMEOUT_S=${SHUTDOWN_TIMEOUT_S:-45}
+# Seconds killed processes and their GPU memory get to go away before the
+# script fails instead of starting the next instances on a busy GPU.
+RELEASE_TIMEOUT_S=${RELEASE_TIMEOUT_S:-120}
+# The API servers and their EngineCore/worker children, which set their
+# process titles to "VLLM::<name>" and no longer match "vllm serve".
+VLLM_PROCESS_PATTERN="vllm serve|^${VLLM_PROCESS_NAME_PREFIX:-VLLM}::"
+
+list_vllm_processes() {
+  local pids
+  pids=$(pgrep -d, -f -- "$VLLM_PROCESS_PATTERN") || return 0
+  ps -o pid=,ppid=,etime=,args= -p "$pids" || true
+}
+
+# Returns 1 if vLLM processes are still running after $1 seconds.
+wait_for_vllm_exit() {
+  local deadline=$((SECONDS + $1))
+  while pgrep -f -- "$VLLM_PROCESS_PATTERN" > /dev/null; do
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Fails if a GPU still holds more than 10% of its memory after the timeout.
 wait_for_gpu_memory_release() {
-  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+  if [[ "$SMI_BIN" == *rocm-smi || "$SMI_BIN" == *amd-smi ]]; then
     PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
+  elif [[ "$SMI_BIN" == *"nvidia"* ]]; then
+    local deadline=$((SECONDS + RELEASE_TIMEOUT_S))
+    local usage
+    while true; do
+      usage=$($SMI_BIN --query-gpu=index,memory.used,memory.total \
+        --format=csv,noheader,nounits)
+      if awk -F', ' '$2 > $3 * 0.1 { busy = 1 } END { exit busy }' <<< "$usage"; then
+        return 0
+      fi
+      if (( SECONDS >= deadline )); then
+        echo "ERROR: GPU memory still in use ${RELEASE_TIMEOUT_S}s after the vLLM processes exited (index, used MiB, total MiB):"
+        echo "$usage"
+        $SMI_BIN || true
+        exit 1
+      fi
+      sleep 1
+    done
   fi
 }
 
@@ -122,23 +175,29 @@ cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "toy_proxy_server.py" || true
   pkill -TERM -f "vllm serve" || true
-  sleep 3
-  pkill -9 -f "vllm serve" || true
-  sleep 2
+  if ! wait_for_vllm_exit "$SHUTDOWN_TIMEOUT_S"; then
+    echo "WARNING: vLLM processes still running ${SHUTDOWN_TIMEOUT_S}s after SIGTERM, killing them:"
+    list_vllm_processes
+    pkill -9 -f -- "$VLLM_PROCESS_PATTERN" || true
+    if ! wait_for_vllm_exit "$RELEASE_TIMEOUT_S"; then
+      echo "ERROR: vLLM processes still running ${RELEASE_TIMEOUT_S}s after SIGKILL:"
+      list_vllm_processes
+      exit 1
+    fi
+  fi
   wait_for_gpu_memory_release
 }
 
 get_num_gpus() {
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    $SMI_BIN -l | grep -c GPU
-  else
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l ;;
+    rocm-smi)   $SMI_BIN -l | grep -c GPU ;;
+    amd-smi)    $SMI_BIN list | grep -c "^GPU" ;;
     # works for non-cuda platforms,
     # assuming at least 1 device and
     # let system to decide which card to use
-    echo "1"
-  fi
+    *)          echo 1 ;;
+  esac
 }
 
 # Function to run tests for a specific model
@@ -213,6 +272,17 @@ run_tests_for_model() {
     PREFILL_PORTS+=("$PORT")
   done
 
+  # When decoders wrap onto the prefillers' GPUs, start them only after the
+  # prefillers are up: an instance that profiles memory while another loads
+  # weights on the same GPU counts those weights against its own budget.
+  GPUS_NEEDED=$((NUM_PREFILL_INSTANCES * PREFILLER_WORLD_SIZE + NUM_DECODE_INSTANCES * DECODER_TP_SIZE))
+  if (( GPUS_NEEDED > $(get_num_gpus) )); then
+    for PORT in "${PREFILL_PORTS[@]}"; do
+      echo "Waiting for prefill instance on port $PORT before starting decoders on shared GPUs..."
+      wait_for_server "$PORT"
+    done
+  fi
+
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
@@ -237,22 +307,30 @@ run_tests_for_model() {
       DECODER_INTERNAL_PORT_ENV="VLLM_DP_MASTER_PORT=$INTERNAL_PORT"
     fi
 
+    DECODER_EAGER_ARG=""
+    DECODER_CUDAGRAPH_ENV=""
+    if [[ "$ENFORCE_EAGER" == "1" && "$DECODER_CUDAGRAPH" == "1" ]]; then
+      DECODER_CUDAGRAPH_ENV="VLLM_USE_BREAKABLE_CUDAGRAPH=1"
+      DECODER_EAGER_ARG="-cc.cudagraph_mode=FULL_DECODE_ONLY"
+    elif [[ "$ENFORCE_EAGER" == "1" ]]; then
+      DECODER_EAGER_ARG="--enforce-eager"
+    fi
+
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     ${DECODER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT} \
     $DECODER_INTERNAL_PORT_ENV \
+    $DECODER_CUDAGRAPH_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG_D'"
-    if [[ "$ENFORCE_EAGER" == "1" ]]; then
-      BASE_CMD="${BASE_CMD} --enforce-eager"
-    fi
+    --kv-transfer-config '$KV_CONFIG_D' \
+    $DECODER_EAGER_ARG"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
@@ -313,9 +391,17 @@ run_tests_for_model() {
   # Wait for the proxy to start
   sleep 5
 
+  SLEEP_WAKE_URLS=""
+  if [[ "$SLEEP_WAKE" == "1" ]]; then
+    for PORT in "${PREFILL_PORTS[@]}" "${DECODE_PORTS[@]}"; do
+      SLEEP_WAKE_URLS="${SLEEP_WAKE_URLS:+${SLEEP_WAKE_URLS},}http://localhost:${PORT}"
+    done
+  fi
+
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name SLEEP_WAKE_URLS=$SLEEP_WAKE_URLS \
+    python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

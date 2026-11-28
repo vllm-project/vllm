@@ -5,20 +5,18 @@
 2. test multi loras request
 """
 
-import os
-
 import pytest
 
 from tests.utils import multi_gpu_test
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "charent/self_cognition_Alice",
-    "Bob": "charent/self_cognition_Bob",
-    "Cat": "charent/self_cognition_Bob",  # same as Bob
+    "Alice": "vllm/self_cognition_Alice",
+    "Bob": "vllm/self_cognition_Bob",
+    "Cat": "vllm/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}
@@ -41,18 +39,6 @@ def format_chatml_messages(
     ]
 
 
-@pytest.fixture(autouse=True)
-def set_mrv2_env():
-    original = os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0")
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-    yield
-
-    if original is None:
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-    else:
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = original
-
-
 def make_add_lora_request(name: str, path: str):
     global INCREASE_LORA_ID, LORA_NAME_ID_MAP
 
@@ -67,9 +53,9 @@ def make_add_lora_request(name: str, path: str):
 
 
 @multi_gpu_test(num_gpus=2)
-def test_multi_loras_with_tp_sync():
-    llm = LLM(
-        model=MODEL_PATH,
+def test_multi_loras_with_tp_sync(vllm_runner):
+    with vllm_runner(
+        MODEL_PATH,
         enable_lora=True,
         max_loras=2,  # ensure max_loras < max_cpu_loras
         max_lora_rank=LORA_RANK,
@@ -77,227 +63,234 @@ def test_multi_loras_with_tp_sync():
         gpu_memory_utilization=0.5,
         tensor_parallel_size=2,  # ensure tp >= 2
         max_cpu_loras=4,  # ensure max_cpu_loras >= 2
-    )
+        enable_chunked_prefill=None,
+    ) as runner:
 
-    def run_check_lora(fn, args, expected: list):
-        fn(args)
-        assert set(llm.llm_engine.list_loras()) == set(expected)
+        def run_check_lora(fn, args, expected: list):
+            fn(args)
+            assert set(runner.llm.llm_engine.list_loras()) == set(expected)
 
-    # simulate add loras with CLI args
-    # likes: `--lora-modules Alice=/path/to/Alice Bob=/path/to/Bob`
-    run_check_lora(
-        llm.llm_engine.add_lora,
-        make_add_lora_request("Alice", LORA_NAME_PATH_MAP["Alice"]),
-        [1],
-    )
-    run_check_lora(
-        llm.llm_engine.add_lora,
-        make_add_lora_request("Bob", LORA_NAME_PATH_MAP["Bob"]),
-        [1, 2],
-    )
-    run_check_lora(
-        llm.llm_engine.add_lora,
-        make_add_lora_request("Cat", LORA_NAME_PATH_MAP["Cat"]),
-        [1, 2, 3],
-    )
-
-    # set temperature = 0 for greedy search
-    sampling_params = SamplingParams(temperature=0, max_tokens=64)
-
-    def call_llm_get_outputs(prompt: str, lora_name: str):
-        lora_request = LoRARequest(
-            lora_name=lora_name,
-            lora_int_id=LORA_NAME_ID_MAP[lora_name],
-            lora_path=LORA_NAME_PATH_MAP[lora_name],
+        # simulate add loras with CLI args
+        # likes: `--lora-modules Alice=/path/to/Alice Bob=/path/to/Bob`
+        run_check_lora(
+            runner.llm.llm_engine.add_lora,
+            make_add_lora_request("Alice", LORA_NAME_PATH_MAP["Alice"]),
+            [1],
         )
-        messages = format_chatml_messages(prompt)
-        outputs = llm.chat(
-            [messages],
-            sampling_params,
-            chat_template_kwargs={
-                "enable_thinking": False
-            },  # for those loras, ensure enable_thinking=False
-            lora_request=lora_request,
-            use_tqdm=False,
+        run_check_lora(
+            runner.llm.llm_engine.add_lora,
+            make_add_lora_request("Bob", LORA_NAME_PATH_MAP["Bob"]),
+            [1, 2],
         )
-        output_text = outputs[0].outputs[0].text
-        return output_text
-
-    def reload_lora(name: str):
-        """Reload a lora to simulate the case:
-        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
-        for dynamic lora loading and unloading
-        """
-        remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=LORA_NAME_ID_MAP[name]
+        run_check_lora(
+            runner.llm.llm_engine.add_lora,
+            make_add_lora_request("Cat", LORA_NAME_PATH_MAP["Cat"]),
+            [1, 2, 3],
         )
 
-        add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
-        )
+        # set temperature = 0 for greedy search
+        sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
-        print(f"{remove_lora_response=}, {add_lora_response=}")
+        def call_llm_get_outputs(prompt: str, lora_name: str):
+            lora_request = LoRARequest(
+                lora_name=lora_name,
+                lora_int_id=LORA_NAME_ID_MAP[lora_name],
+                lora_path=LORA_NAME_PATH_MAP[lora_name],
+            )
+            messages = format_chatml_messages(prompt)
+            outputs = runner.llm.chat(
+                [messages],
+                sampling_params,
+                chat_template_kwargs={
+                    "enable_thinking": False
+                },  # for those loras, ensure enable_thinking=False
+                lora_request=lora_request,
+                use_tqdm=False,
+            )
+            output_text = outputs[0].outputs[0].text
+            return output_text
 
-    def check_outputs(outputs: str, expected: str):
-        print(f"{prompt=}.\n{expected_output=}\n{output_text=}")
-        print("\n----------------------------\n")
-        assert outputs == expected
+        def reload_lora(name: str):
+            """Reload a lora to simulate the case:
+            setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
+            for dynamic lora loading and unloading
+            """
+            remove_lora_response = runner.llm.llm_engine.remove_lora(
+                lora_id=LORA_NAME_ID_MAP[name]
+            )
 
-    for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
-        output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+            add_lora_response = runner.llm.llm_engine.add_lora(
+                make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
+            )
 
-        # call Bob, ignore what it is output
-        call_llm_get_outputs(prompt, "Bob")
-        print("After call Bob:")
+            print(f"{remove_lora_response=}, {add_lora_response=}")
 
-        # call Alice
-        output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+        def check_outputs(outputs: str, expected: str):
+            print(f"{prompt=}.\n{expected_output=}\n{output_text=}")
+            print("\n----------------------------\n")
+            assert outputs == expected
 
-        # reload Bob Lora
-        reload_lora("Bob")
-        print("After reload Bob:")
+        for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
+            output_text = call_llm_get_outputs(prompt, "Alice")
+            check_outputs(output_text, expected_output)
 
-        # call Alice
-        output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+            # call Bob, ignore what it is output
+            call_llm_get_outputs(prompt, "Bob")
+            print("After call Bob:")
 
-        # reload Alice Lora
-        reload_lora("Alice")
-        print("After reload Alice:")
+            # call Alice
+            output_text = call_llm_get_outputs(prompt, "Alice")
+            check_outputs(output_text, expected_output)
 
-        output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+            # reload Bob Lora
+            reload_lora("Bob")
+            print("After reload Bob:")
+
+            # call Alice
+            output_text = call_llm_get_outputs(prompt, "Alice")
+            check_outputs(output_text, expected_output)
+
+            # reload Alice Lora
+            reload_lora("Alice")
+            print("After reload Alice:")
+
+            output_text = call_llm_get_outputs(prompt, "Alice")
+            check_outputs(output_text, expected_output)
 
 
-def test_multiple_lora_requests():
-    llm = LLM(
-        model=MODEL_PATH,
+def test_multiple_lora_requests(vllm_runner):
+    with vllm_runner(
+        MODEL_PATH,
         enable_lora=True,
         max_loras=4,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-    )
-    PROMPTS = ["Hello, my name is"] * 2
-    LORA_NAME = "Alice"
-    lora_request = [
-        LoRARequest(LORA_NAME + str(idx), idx + 1, LORA_NAME_PATH_MAP[LORA_NAME])
-        for idx in range(len(PROMPTS))
-    ]
-    # Multiple SamplingParams should be matched with each prompt
-    outputs = llm.generate(PROMPTS, lora_request=lora_request)
-    assert len(PROMPTS) == len(outputs)
+        enable_chunked_prefill=None,
+    ) as runner:
+        PROMPTS = ["Hello, my name is"] * 2
+        LORA_NAME = "Alice"
+        lora_request = [
+            LoRARequest(LORA_NAME + str(idx), idx + 1, LORA_NAME_PATH_MAP[LORA_NAME])
+            for idx in range(len(PROMPTS))
+        ]
+        # Each prompt has its own LoRA request and should return prompt logprobs.
+        outputs = runner.llm.generate(
+            PROMPTS, SamplingParams(prompt_logprobs=0), lora_request=lora_request
+        )
+        assert len(PROMPTS) == len(outputs)
+        for output, request in zip(outputs, lora_request):
+            assert output.lora_request == request
+            prompt_logprobs = output.prompt_logprobs
+            assert prompt_logprobs is not None and any(prompt_logprobs)
 
-    # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(VLLMValidationError):
-        outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
+        # Exception raised, if the size of params does not match the size of prompts
+        with pytest.raises(VLLMValidationError):
+            outputs = runner.llm.generate(PROMPTS, lora_request=lora_request[:1])
 
-    # Single LoRARequest should be applied to every prompt
-    single_lora_request = lora_request[0]
-    outputs = llm.generate(PROMPTS, lora_request=single_lora_request)
-    assert len(PROMPTS) == len(outputs)
+        # Single LoRARequest should be applied to every prompt
+        single_lora_request = lora_request[0]
+        outputs = runner.llm.generate(PROMPTS, lora_request=single_lora_request)
+        assert len(PROMPTS) == len(outputs)
 
 
 def test_load_inplace_offline_reload(
-    qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
+    vllm_runner, qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
     """Test that load_inplace=True allows reloading LoRA adapters with the same ID
     in offline mode (using LLM class directly).
     """
-    llm = LLM(
-        model=MODEL_PATH,
+    with vllm_runner(
+        MODEL_PATH,
         enable_lora=True,
         max_loras=2,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-    )
-    adapter_id = 1
-    messages = format_chatml_messages(
-        "Make your favorite animal noise.",
-        system_prompt="Follow the instructions to make animal noises",
-    )
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        enable_chunked_prefill=None,
+    ) as runner:
+        adapter_id = 1
+        messages = format_chatml_messages(
+            "Make your favorite animal noise.",
+            system_prompt="Follow the instructions to make animal noises",
+        )
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-    # Load meowing LoRA with load_inplace=True
-    meowing_request = LoRARequest(
-        lora_name="test-adapter",
-        lora_int_id=adapter_id,
-        lora_path=qwen3_meowing_lora_files,
-    )
+        # Load meowing LoRA with load_inplace=True
+        meowing_request = LoRARequest(
+            lora_name="test-adapter",
+            lora_int_id=adapter_id,
+            lora_path=qwen3_meowing_lora_files,
+        )
 
-    outputs = llm.chat([messages], sampling_params, lora_request=meowing_request)
-    first_output = outputs[0].outputs[0].text.strip()
-    assert "Meow Meow Meow" in first_output, (
-        f"Expected meowing output, got: {first_output}"
-    )
+        outputs = runner.llm.chat(
+            [messages], sampling_params, lora_request=meowing_request
+        )
+        first_output = outputs[0].outputs[0].text.strip()
+        assert "Meow Meow Meow" in first_output, (
+            f"Expected meowing output, got: {first_output}"
+        )
 
-    # Reload with woofing LoRA (same ID, different weights, load_inplace=True)
-    woofing_request = LoRARequest(
-        lora_name="test-adapter-woof",
-        lora_int_id=adapter_id,  # Same ID
-        lora_path=qwen3_woofing_lora_files,  # Different weights
-        load_inplace=True,  # Force reload
-    )
+        # Reload with woofing LoRA (same ID, different weights, load_inplace=True)
+        woofing_request = LoRARequest(
+            lora_name="test-adapter-woof",
+            lora_int_id=adapter_id,  # Same ID
+            lora_path=qwen3_woofing_lora_files,  # Different weights
+            load_inplace=True,  # Force reload
+        )
 
-    outputs = llm.chat([messages], sampling_params, lora_request=woofing_request)
-    second_output = outputs[0].outputs[0].text.strip()
-    assert "Woof Woof Woof" in second_output, (
-        f"Expected woofing output, got: {second_output}"
-    )
+        outputs = runner.llm.chat(
+            [messages], sampling_params, lora_request=woofing_request
+        )
+        second_output = outputs[0].outputs[0].text.strip()
+        assert "Woof Woof Woof" in second_output, (
+            f"Expected woofing output, got: {second_output}"
+        )
 
 
 def test_load_inplace_false_no_reload(
-    qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
+    vllm_runner, qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """Test that load_inplace=False prevents reloading when an adapter
-    with the same ID already exists.
+    """Without load_inplace, an id already used by another adapter is
+    rejected instead of serving the loaded adapter's weights.
     """
-    llm = LLM(
-        model=MODEL_PATH,
+    with vllm_runner(
+        MODEL_PATH,
         enable_lora=True,
         max_loras=2,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-    )
-    adapter_id = 2
-    messages = format_chatml_messages(
-        "Make your favorite animal noise.",
-        system_prompt="Follow the instructions to make animal noises",
-    )
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        enable_chunked_prefill=None,
+    ) as runner:
+        adapter_id = 2
+        messages = format_chatml_messages(
+            "Make your favorite animal noise.",
+            system_prompt="Follow the instructions to make animal noises",
+        )
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-    # Load meowing LoRA first with load_inplace=True
-    meowing_request_initial = LoRARequest(
-        lora_name="test-adapter-2",
-        lora_int_id=adapter_id,
-        lora_path=qwen3_meowing_lora_files,
-    )
+        # Load meowing LoRA first with load_inplace=True
+        meowing_request_initial = LoRARequest(
+            lora_name="test-adapter-2",
+            lora_int_id=adapter_id,
+            lora_path=qwen3_meowing_lora_files,
+        )
 
-    outputs = llm.chat(
-        [messages], sampling_params, lora_request=meowing_request_initial
-    )
-    first_output = outputs[0].outputs[0].text.strip()
-    assert "Meow Meow Meow" in first_output, (
-        f"Expected meowing output, got: {first_output}"
-    )
+        outputs = runner.llm.chat(
+            [messages], sampling_params, lora_request=meowing_request_initial
+        )
+        first_output = outputs[0].outputs[0].text.strip()
+        assert "Meow Meow Meow" in first_output, (
+            f"Expected meowing output, got: {first_output}"
+        )
 
-    # Try to load woofing LoRA with same ID but load_inplace=False
-    # This should NOT reload (adapter 2 already exists)
-    woofing_request_no_reload = LoRARequest(
-        lora_name="test-adapter-2-woof",
-        lora_int_id=adapter_id,  # Same ID
-        lora_path=qwen3_woofing_lora_files,
-    )
-
-    outputs = llm.chat(
-        [messages], sampling_params, lora_request=woofing_request_no_reload
-    )
-    second_output = outputs[0].outputs[0].text.strip()
-    # Should still get meowing output because it didn't reload
-    assert "Meow Meow Meow" in second_output, (
-        f"Expected meowing output (no reload), got: {second_output}"
-    )
+        woofing_request_no_reload = LoRARequest(
+            lora_name="test-adapter-2-woof",
+            lora_int_id=adapter_id,
+            lora_path=qwen3_woofing_lora_files,
+        )
+        with pytest.raises(VLLMValidationError, match="already used"):
+            runner.llm.chat(
+                [messages], sampling_params, lora_request=woofing_request_no_reload
+            )

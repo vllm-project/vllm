@@ -81,7 +81,7 @@ def test_per_token_group_quant_fp8(
 
 
 def _misaligned_clone(x: torch.Tensor) -> torch.Tensor:
-    """Contiguous copy of ``x`` whose ``data_ptr`` is not 16B aligned."""
+    """Contiguous copy of `x` whose `data_ptr` is not 16B aligned."""
     numel = x.numel()
     base = torch.empty(numel + 16 // x.element_size(), device=x.device, dtype=x.dtype)
     view = base[1 : 1 + numel]
@@ -374,7 +374,7 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
 ):
     """When output_q is allocated with shape (tma_aligned_mn, k) instead of
     (mn, k), the kernel must overwrite the padded mn rows with zeros so
-    callers can use ``torch.empty`` instead of ``torch.zeros``."""
+    callers can use `torch.empty` instead of `torch.zeros`."""
     device = "cuda"
     group_size = 128
     torch.manual_seed(42)

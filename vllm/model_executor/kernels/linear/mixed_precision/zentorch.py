@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Zentorch int4 weight-quantized linear kernels for AMD Zen CPUs.
 
-Selected by ``choose_mp_linear_kernel`` ahead of the generic oneDNN-backed
-``CPUWNA16LinearKernel``. When ``can_implement`` rejects a layer, the selector
-falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
+Selected by `choose_mp_linear_kernel` ahead of the generic oneDNN-backed
+`CPUWNA16LinearKernel`. When `can_implement` rejects a layer, the selector
+falls through to the next kernel in `_POSSIBLE_KERNELS[PlatformEnum.CPU]`.
 """
 
 import torch
+from torch.nn import Parameter
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -21,8 +23,19 @@ from .MPLinearKernel import MPLinearLayerConfig
 logger = init_logger(__name__)
 
 
+def _store_in_param(layer: torch.nn.Module, attr: str, name: str | None) -> None:
+    """Back kernel tensor `layer.<attr>` by the storage of loaded param `name`."""
+    tensor = getattr(layer, attr)
+    if name is None or tensor is None:
+        return
+    if not isinstance(getattr(layer, name, None), Parameter):
+        return
+    replace_parameter(layer, name, tensor)
+    setattr(layer, attr, getattr(layer, name).data)
+
+
 def _import_unpack_from_int32():
-    """Import compressed-tensors' ``unpack_from_int32`` across versions."""
+    """Import compressed-tensors' `unpack_from_int32` across versions."""
     try:
         from compressed_tensors.compressors.pack_quantized.helpers import (
             unpack_from_int32,
@@ -35,8 +48,8 @@ def _import_unpack_from_int32():
 
 
 class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
-    """Int4 kernel backed by ``zentorch_dynamic_qlinear`` (DA8W4) or
-    ``zentorch_woq_linear`` (W4A16)."""
+    """Int4 kernel backed by `zentorch_dynamic_qlinear` (DA8W4) or
+    `zentorch_woq_linear` (W4A16)."""
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
@@ -48,9 +61,11 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CPUWNA16, supported types are: "
-                f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "CPUWNA16, supported types are: "
+                    f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         # -1 is per-channel, one group spanning K. Anything else has to divide
@@ -60,15 +75,19 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             if c.group_size <= 0 or in_features % c.group_size != 0:
                 return (
                     False,
-                    f"Group size ({c.group_size}) must divide input size "
-                    f"({in_features})",
+                    (
+                        f"Group size ({c.group_size}) must divide input size "
+                        f"({in_features})"
+                    ),
                 )
 
         if not has_zentorch_op(["zentorch_woq_repack_weight", "zentorch_woq_linear"]):
             return (
                 False,
-                "torch.ops.zentorch.{zentorch_woq_repack_weight, "
-                "zentorch_woq_linear} are not registered.",
+                (
+                    "torch.ops.zentorch.{zentorch_woq_repack_weight, "
+                    "zentorch_woq_linear} are not registered."
+                ),
             )
 
         return True, None
@@ -76,8 +95,8 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
     def _zentorch_woq_eligible(self, layer: torch.nn.Module) -> bool:
         """Eligibility predicate for the zentorch W4A16 GPTQ fast path.
 
-        Constraints (any failure -> ``cpu_gemm_wna16`` path via ``super()``
-        with ``layer`` untouched).
+        Constraints (any failure -> `cpu_gemm_wna16` path via `super()`
+        with `layer` untouched).
         """
         weight_packed = getattr(layer, self.w_q_name, None)
         weight_scale = getattr(layer, self.w_s_name, None)
@@ -109,7 +128,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         return num_groups > 0 and in_features % num_groups == 0
 
     def _maybe_process_da8w4_weights(self, layer: torch.nn.Module) -> bool:
-        """Repack ``layer`` into the DA8W4 layout, or leave it untouched.
+        """Repack `layer` into the DA8W4 layout, or leave it untouched.
 
         Returns False without mutating the layer when it is not eligible, so
         the caller falls through to the W4A16 paths.
@@ -144,8 +163,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if (in_features // num_groups) % 4 != 0 or in_features % 2 != 0:
             return False
 
-        if self.w_zp_name is not None:
-            setattr(layer, self.w_zp_name, None)
+        self._retire_unused_zp(layer)
 
         unpack_from_int32 = _import_unpack_from_int32()
 
@@ -165,10 +183,8 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         # CT stores scales as [N, G]; DA8W4 wants per-group {G, N}.
         layer._zentorch_da8w4_scale = weight_scale.t().to(torch.bfloat16).contiguous()
 
-        for param_name in (self.w_q_name, self.w_s_name):
-            param = getattr(layer, param_name, None)
-            if param is not None and hasattr(param, "data"):
-                param.data = torch.empty(0)
+        _store_in_param(layer, "_zentorch_da8w4_packed", self.w_q_name)
+        _store_in_param(layer, "_zentorch_da8w4_scale", self.w_s_name)
 
         layer._zentorch_kind = "compressed_tensors_w4a8_da8w4"
         layer._zentorch_da8w4 = True
@@ -184,11 +200,11 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack CT GPTQ weights into the zentorch DA8W4 or WOQ layout.
 
-        Falls back to ``CPUWNA16LinearKernel.process_weights_after_loading``
-        via ``super()`` when the layer doesn't satisfy
-        ``_zentorch_woq_eligible``.
+        Falls back to `CPUWNA16LinearKernel.process_weights_after_loading`
+        via `super()` when the layer doesn't satisfy
+        `_zentorch_woq_eligible`.
 
-        On success, ``layer._zentorch_processed_weights`` is set to ``True``
+        On success, `layer._zentorch_processed_weights` is set to `True`
         """
         if getattr(layer, "_zentorch_processed_weights", False):
             return
@@ -205,8 +221,8 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             super().process_weights_after_loading(layer)
             return
 
-        if (not self.config.zero_points) and (self.w_zp_name is not None):
-            setattr(layer, self.w_zp_name, None)
+        if not self.config.zero_points:
+            self._retire_unused_zp(layer)
 
         weight_q = getattr(layer, self.w_q_name)
         weight_s = getattr(layer, self.w_s_name)
@@ -255,16 +271,9 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         layer._zentorch_woq_scale = weight_scale.t().contiguous()
         layer._zentorch_woq_zero_point = zp_tc
 
-        for param_name in (self.w_q_name, self.w_s_name, self.w_zp_name):
-            if param_name is None:
-                continue
-            param = getattr(layer, param_name, None)
-            if param is None:
-                continue
-            if hasattr(param, "data"):
-                param.data = torch.empty(0)
-            else:
-                setattr(layer, param_name, torch.empty(0))
+        _store_in_param(layer, "_zentorch_woq_packed", self.w_q_name)
+        _store_in_param(layer, "_zentorch_woq_scale", self.w_s_name)
+        _store_in_param(layer, "_zentorch_woq_zero_point", self.w_zp_name)
 
         layer._zentorch_kind = "compressed_tensors_w4a16_gptq"
         layer._zentorch_processed_weights = True

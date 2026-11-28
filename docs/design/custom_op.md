@@ -10,7 +10,7 @@ This document will introduce how CustomOp works in vLLM and how to implement a n
 
 We can use `@CustomOp.register("op_name")` to register an op class to the `CustomOp` system. After this, the `op_name` and its class will be added into the `op_registry` dictionary. In addition, We can also register an OOT op by `@CustomOp.register_oot("op_name")`. We will introduce this mechanism in detail later.
 
-When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation_config.custom_ops '["+op_name"]'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
+When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation-config.custom_ops '["+op_name"]'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
 
 - **CPU platform:** dispatch to `forward_cpu()`.
 - **CUDA platform:** dispatch to `forward_cuda()`.
@@ -37,14 +37,14 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
 ## How to Customise Your Configuration for CustomOp
 
-vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation_config.custom_ops '["..."]'` when launching a server.
+vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation-config.custom_ops '["+op_name"]'` when launching a server.
 
 For example:
 
-- Use `--compilation_config.custom_ops '["all"]'` to enable all custom ops.
-- Use `--compilation_config.custom_ops '["none"]'` to disable all custom ops.
-- Use `--compilation_config.custom_ops '["all,-op1"]'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
-- Use `--compilation_config.custom_ops '["none,+op1,+op2"]'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
+- Use `--compilation-config.custom_ops '["all"]'` to enable all custom ops.
+- Use `--compilation-config.custom_ops '["none"]'` to disable all custom ops.
+- Use `--compilation-config.custom_ops '["all", "-op1"]'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
+- Use `--compilation-config.custom_ops '["none", "+op1", "+op2"]'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
 
 ## Types of Supported CustomOp in vLLM
 
@@ -116,8 +116,6 @@ For example:
 **7. Mamba:**
 
 ```python
---8<-- "vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
-
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
 
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
@@ -159,8 +157,6 @@ For example:
 
 ```python
 --8<-- "vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
-
---8<-- "vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
 
 --8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
 ```
@@ -264,7 +260,7 @@ Currently, thanks to [vLLM's hardware-plugin mechanism](./plugin_system.md), the
 
 - **Official device plugins:** [vllm-ascend](https://github.com/vllm-project/vllm-ascend) (for Huawei Ascend NPU), [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
 (for Spyre), [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) (for Intel Gaudi), [vllm-neuron](https://github.com/vllm-project/vllm-neuron) (for AWS Neuron), [vllm-meta](https://github.com/vllm-project/vllm-metal) (for Apple Silicon), etc.
-- **Non-official device plugins:** [vllm-metax](https://github.com/MetaX-MACA/vLLM-metax) (for MetaX GPU), [vllm-kunlun](https://github.com/baidu/vLLM-Kunlun) (for Baidu Kunlun XPU), [vllm-musa](https://github.com/MooreThreads/vllm-musa) (for Moore Threads GPU), etc.
+- **Non-official device plugins:** [vllm-metax](https://github.com/MetaX-MACA/vLLM-metax) (for MetaX GPU), [vllm-kunlun](https://github.com/baidu/vLLM-Kunlun) (for Baidu Kunlun XPU), [vllm-musa](https://github.com/MooreThreads/vllm-musa) (for Moore Threads GPU), [vllm-iluvatar](https://github.com/Deep-Spark/vllm-iluvatar) (for Iluvatar CoreX GPU), etc.
 
 In this case, `CustomOp` can enable these hardware manufacturers to seamlessly replace vLLM's operations with their deep-optimized kernels for specific devices at runtime, by just registering an OOT `CustomOp` and implementing the `forward_oot()` method.
 
@@ -313,4 +309,47 @@ In addition, you can also register all your `CustomOp` at one place for better m
 
     for op_name, op_cls in REGISTERED_CUSTOM_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=op_name)
+    ```
+
+#### Opt in to the hw-agnostic layers
+
+With `VLLM_USE_HW_AGNOSTIC=1`, the Transformers modeling backend builds layers from `vllm.model_executor.hw_agnostic.layers` where a hw-agnostic implementation exists, and from the in-tree `vllm.model_executor.layers` otherwise. These are separate classes with separate `op_registry_oot`s, so an override of the in-tree class does not reach the hw-agnostic one.
+
+To override the class the Transformers backend builds on either path, obtain it with `hw_agnostic.resolve` instead of importing it, and register through that class's `register_oot`:
+
+??? code
+
+    ```python
+    from vllm.model_executor import hw_agnostic
+
+    SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
+
+
+    @SiluAndMul.register_oot
+    class CustomSiluAndMul(SiluAndMul):
+
+        def forward_oot(...):
+            # Call optimized device-specific kernels.
+            ...
+    ```
+
+`resolve` returns the hw-agnostic class when `VLLM_USE_HW_AGNOSTIC` is set and one exists, and the in-tree class otherwise, so the plugin code is the same for both paths. Do not register through `vllm.model_executor.custom_op.CustomOp.register_oot`, which always writes to the in-tree registry. On the hw-agnostic path, vLLM warns about an override registered only for the in-tree class, and raises if an override does not derive from the class it replaces.
+
+`VLLM_USE_HW_AGNOSTIC` only affects the Transformers backend. Models with a native vLLM implementation build the in-tree class even when it is set, so a plugin that also serves those models registers its override for the in-tree class as well.
+
+The Transformers backend builds its norms as `TPAwareRMSNorm` and `TPAwareGemmaRMSNorm`, subclasses of `RMSNorm` and `GemmaRMSNorm`. Overrides are keyed on the exact class name, so an `RMSNorm` or `GemmaRMSNorm` override does not reach them yet.
+
+Type checkers do not accept a variable as a base class, so plugins that run mypy can import the in-tree class for type checking only:
+
+??? code
+
+    ```python
+    from typing import TYPE_CHECKING
+
+    from vllm.model_executor import hw_agnostic
+
+    if TYPE_CHECKING:
+        from vllm.model_executor.layers.activation import SiluAndMul
+    else:
+        SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
     ```

@@ -82,11 +82,11 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "node_rank": 1,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
         "uvicorn_log_level": "info",
         "shutdown_timeout": 5.0,
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
-        "log_config_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -120,11 +120,11 @@ def _make_args(**overrides) -> argparse.Namespace:
         node_rank=0,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
         uvicorn_log_level="warning",
         shutdown_timeout=0.0,
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
-        log_config_file=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -251,9 +251,11 @@ async def test_shutdown_children_uses_engine_process_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
-    supervisor._processes = [
-        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)],
+    )
     calls = []
     timeout_calls = []
 
@@ -285,12 +287,18 @@ async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args())
-    supervisor._processes = [
-        SimpleNamespace(
-            name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
-        ),
-        SimpleNamespace(name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False),
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [
+            SimpleNamespace(
+                name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
+            ),
+            SimpleNamespace(
+                name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False
+            ),
+        ],
+    )
 
     async def fake_probe(*_args, **_kwargs) -> bool:
         return True

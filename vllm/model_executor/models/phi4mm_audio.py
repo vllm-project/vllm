@@ -1045,7 +1045,7 @@ class ConformerEncoder(TransformerEncoderBase):
         if _simplified_path:
             input_tensor, *_ = self.encoders(input_tensor, pos_k, pos_v, hs_mask)
         else:
-            for i, layer in enumerate(self.encoders):
+            for layer in self.encoders:
                 input_tensor, _, _, _ = layer(
                     input_tensor,
                     pos_k,
@@ -1174,13 +1174,11 @@ class AudioEmbedding(nn.Module):
             self.encoder = ConformerEncoder(**encoder_config)
 
             audio_dim_out = encoder_config["attention_dim"]
-            n_mels = encoder_config["input_size"]
         else:
             raise NotImplementedError("")
 
         assert audio_dim_out is not None, "Remember to set values for audio_dim_out"
         self.audio_dim_out = audio_dim_out
-        self.audio_dim_in = n_mels
 
         self.freeze_audio_processor = kwargs.get("freeze_audio_processor", False)
 

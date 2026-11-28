@@ -13,6 +13,9 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_c
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -92,6 +95,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_kernel_size = int(config.ple_conv_kernel_size)
         self.short_conv_dilation = int(config.ngram_size)
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
+        # The conv window ending at a checkpoint is a copy of its last inputs.
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=self.conv_state_len
+        )
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
         self.ple_embedding = Qwen4ExpNGramEmbedding(
@@ -185,6 +192,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_kernel=self.conv_state_len + 1,
             num_spec=self.num_spec_tokens,
         )
+
+    def get_cache_checkpoint_alignment(self) -> int | None:
+        return 1
 
     def _short_conv_dilated_dispatch(
         self,
@@ -313,6 +323,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 has_initial_states=has_initial_states,
                 token_indices=token_indices_p,
             )
+            if metadata.checkpoint is not None:
+                assert metadata.non_spec_query_start_loc is not None
+                self._checkpoint_exporter.export(
+                    metadata.checkpoint,
+                    raw_qkv=inputs,
+                    conv_state=conv_state,
+                    cu_seqlens=metadata.non_spec_query_start_loc,
+                    token_indices=non_spec_token_indices,
+                )
         else:
             num_decode_rows = (
                 non_spec_token_indices.numel()

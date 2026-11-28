@@ -9,19 +9,23 @@ import dataclasses
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import MockKVConfig, create_model_runner_output
+from tests.v1.kv_connector.unit.utils import (
+    MockKVConfig,
+    MockKVConnector,
+    create_model_runner_output,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowMLASpec,
+    MLAAttentionSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, new_kv_cache_group
 
 BLOCK_SIZE = 16
 WINDOW = 32
@@ -34,10 +38,12 @@ FULL, SWA = 0, 1
 def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
-    use_kv_connector: MockKVConfig | None = None,
+    use_kv_connector: MockKVConfig | str | None = None,
+    rebuilt_state_window: int | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
-    replayed sliding-window group."""
+    replayed sliding-window group, plus optionally a state group the replay
+    rebuilds (as DeepSeek-V4's compressor states)."""
     base = create_scheduler(
         block_size=BLOCK_SIZE,
         enable_prefix_caching=True,
@@ -49,36 +55,53 @@ def _replay_scheduler(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowMLASpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.bfloat16,
+                SlidingWindowManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.bfloat16,
+                    ),
                     sliding_window=WINDOW,
                     bounded_replay=True,
                 ),
             ),
         ],
     )
+    if rebuilt_state_window is not None:
+        kv_cache_config.kv_cache_groups.append(
+            new_kv_cache_group(
+                ["state"],
+                SlidingWindowManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.float32,
+                    ),
+                    sliding_window=rebuilt_state_window,
+                    rebuilt_by_replay=True,
+                ),
+            )
+        )
     scheduler = Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=BLOCK_SIZE,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    scheduler.use_v2_model_runner = True
     assert scheduler.prefix_replay_tokens == WINDOW
     return scheduler
 
@@ -98,7 +121,6 @@ def _step_output(out, requests) -> ModelRunnerOutput:
     scheduled = [r for r in requests if r.request_id in out.num_scheduled_tokens]
     return ModelRunnerOutput(
         req_ids=[r.request_id for r in scheduled],
-        req_id_to_index={r.request_id: i for i, r in enumerate(scheduled)},
         sampled_token_ids=[
             [1000] if r.num_computed_tokens >= r.num_prompt_tokens else []
             for r in scheduled
@@ -154,6 +176,70 @@ def test_hit_replays_window_without_reallocating():
 
     scheduler.update_from_output(out, _step_output(out, [first, second]))
     assert second.num_computed_tokens == NUM_PROMPT_TOKENS
+
+
+@pytest.mark.parametrize("via_connector", [False, True])
+def test_throttle_defers_prefix_replay(via_connector):
+    """A one-token cache-hit tail still needs prefill when its window replays."""
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig() if via_connector else None
+    )
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=HIT_TOKENS + 1,
+        same_prompt=not via_connector,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    if via_connector:
+        assert isinstance(scheduler.connector, MockKVConnector)
+        scheduler.connector.config = dataclasses.replace(
+            scheduler.connector.config, matched_tokens=HIT_TOKENS
+        )
+    scheduler.add_request(second)
+
+    for _ in range(2):
+        out = scheduler.schedule(throttle_prefills=True)
+        assert out.num_scheduled_tokens == {first.request_id: 1}
+        assert second.num_computed_tokens == 0
+        assert second.replay_start == 0
+        scheduler.update_from_output(out, _step_output(out, [first]))
+
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens == {
+        first.request_id: 1,
+        second.request_id: WINDOW + 1,
+    }
+    new_req = _new_req_data(out, second)
+    assert new_req.num_computed_tokens == HIT_TOKENS - WINDOW
+    assert new_req.replay_start == HIT_TOKENS - WINDOW
+
+
+def test_state_rebuilt_by_replay_is_not_prefix_cached():
+    """A state group rebuilt by the SWA replay neither hits nor adds a second
+    replay window; the hit still replays the SWA window once."""
+    state_window = 8
+    scheduler = _replay_scheduler(rebuilt_state_window=state_window)
+    state_group = scheduler.kv_cache_config.kv_cache_groups[2]
+    assert not state_group.prefix_cacheable
+    assert state_group.prefix_replay_tokens == 0
+    assert scheduler.prefix_replay_tokens == WINDOW
+
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        same_prompt=True,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    scheduler.add_request(second)
+    out = scheduler.schedule()
+
+    assert _new_req_data(out, second).replay_start == HIT_TOKENS - WINDOW
+    first_state = scheduler.kv_cache_manager.get_blocks(first.request_id).blocks[2]
+    second_state = scheduler.kv_cache_manager.get_blocks(second.request_id).blocks[2]
+    live = [b for b in second_state if not b.is_null]
+    assert live and not {b.block_id for b in live} & {b.block_id for b in first_state}
 
 
 def test_replay_only_chunks_make_progress():
@@ -259,7 +345,10 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
     )[0]
-    scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+    assert scheduler.connector is not None
+    scheduler.connector.get_loaded_kv_cache_group_ids = (  # type: ignore[method-assign]
+        lambda request: (FULL, SWA)
+    )
     scheduler.add_request(request)
     out = scheduler.schedule()
     if is_async:
@@ -272,6 +361,23 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert new_req.num_computed_tokens == matched
     assert new_req.replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
+
+
+@pytest.mark.parametrize("throttle_prefills", [False, True])
+def test_decode_bench_fill_does_not_replay(throttle_prefills):
+    """DecodeBenchConnector fills every group like a P/D transfer, so a filled
+    request starts with a one-token decode step, not a replay."""
+    scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
+    first, request = create_requests(
+        num_requests=2, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )
+    scheduler.add_request(first)
+    out = scheduler.schedule()
+    scheduler.update_from_output(out, _step_output(out, [first]))
+    scheduler.add_request(request)
+    out = scheduler.schedule(throttle_prefills=throttle_prefills)
+    assert _new_req_data(out, request).replay_start == 0
+    assert out.num_scheduled_tokens[request.request_id] == 1
 
 
 @pytest.mark.parametrize("via_connector", [False, True])
@@ -315,15 +421,19 @@ def test_kv_load_zeroing_respects_loaded_groups(is_async, loads_window):
     the non-cacheable window; stores leave it to be initialized locally."""
     local = 5 * BLOCK_SIZE
     scheduler = _replay_scheduler(use_kv_connector=MockKVConfig())
+    connector = scheduler.connector
+    assert isinstance(connector, MockKVConnector)
     if loads_window:
-        scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+        connector.get_loaded_kv_cache_group_ids = (  # type: ignore[method-assign]
+            lambda request: (FULL, SWA)
+        )
     assert scheduler.needs_kv_cache_zeroing
     first = create_requests(
         num_requests=1, num_tokens=local, same_prompt=True, block_size=BLOCK_SIZE
     )[0]
     _prefill(scheduler, first)
-    scheduler.connector.config = dataclasses.replace(
-        scheduler.connector.config,
+    connector.config = dataclasses.replace(
+        connector.config,
         matched_tokens=NUM_PROMPT_TOKENS - 1 - local,
         is_async=is_async,
     )

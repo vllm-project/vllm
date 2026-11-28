@@ -45,7 +45,7 @@ QUANT_CONFIG_TENSORS = (
 
 
 class _RoutedExpertsStub(torch.nn.Module):
-    """Minimal ``RoutedExperts`` stand-in for NVFP4 weight processing."""
+    """Minimal `RoutedExperts` stand-in for NVFP4 weight processing."""
 
     def __init__(self, moe_config: FusedMoEConfig) -> None:
         super().__init__()
@@ -123,7 +123,7 @@ def _make_raw_weights(
 def _build_processed_layer(
     backend: str, raw: dict[str, torch.Tensor], device: torch.device
 ) -> tuple[CompressedTensorsW4A4Nvfp4MoEMethod, _RoutedExpertsStub]:
-    """Create the method + layer, load ``raw`` and run the real
+    """Create the method + layer, load `raw` and run the real
     process_weights_after_loading (which builds the flashinfer kernel)."""
     moe_config = _make_moe_config(backend)
     method = CompressedTensorsW4A4Nvfp4MoEMethod(moe_config, "layer.0", use_a16=False)

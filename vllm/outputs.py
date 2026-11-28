@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
-from vllm.exceptions import GenerationError, RetryableRequestError
+from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -27,7 +27,9 @@ class RequestError:
     message: str
     retryable: bool = False
 
-    def to_exception(self) -> GenerationError:
+    def to_exception(self) -> GenerationError | VLLMValidationError:
+        if self.code == "validation_error":
+            return VLLMValidationError(self.message)
         if self.retryable:
             return RetryableRequestError(self.message)
         return GenerationError(self.message)
@@ -74,9 +76,9 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
         spec_decode_metrics: Per-sequence speculative-decoding acceptance metrics,
             populated on finish when speculative decoding ran and
-            ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
-            Surfaced in the response as ``metrics.speculative_decoding`` for
-            single-sequence (``n == 1``) requests.
+            `--per-request-spec-decode-metrics` is enabled; None otherwise.
+            Surfaced in the response as `metrics.speculative_decoding` for
+            single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
 
@@ -211,6 +213,7 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        self.metrics = next_output.metrics
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

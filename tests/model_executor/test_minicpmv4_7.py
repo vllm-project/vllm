@@ -175,7 +175,7 @@ def _canvas_positions(tokens, target_sizes):
 def test_canvas_mrope_trailing_newline_stays_inside_the_canvas():
     """A newline right after `</image>` belongs to the canvas, not to the text.
 
-    The chat template joins content parts with ``\\n``, so an image followed by
+    The chat template joins content parts with `\\n`, so an image followed by
     text always leaves one there. The transformers reference closes a frame over
     every marker including newlines; leaving it out pushes every later position
     one step forward and makes `rope_delta` differ by one.

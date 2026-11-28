@@ -12,11 +12,13 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
 )
 from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
     get_block_hash,
@@ -25,14 +27,16 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_cache_hit_alignment_tokens,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
-    get_mamba_prefill_checkpoint_position,
+    get_reusable_prefix_length,
 )
 
 
@@ -100,17 +104,19 @@ def make_full_mamba_manager(
     full_block_size: int = 4,
     mamba_block_size: int = 4,
     num_blocks: int = 32,
-    use_eagle: bool = False,
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
+    num_hash_lookahead_tokens: int = 0,
 ):
-    mamba_group = KVCacheGroupSpec(
+    mamba_group = new_kv_cache_group(
         ["mamba"],
         MambaSpec(
             block_size=mamba_block_size,
             shapes=(1, 1),
             dtypes=(torch.float32,),
-            mamba_cache_mode="align",
+        ),
+        MambaManager.config(
+            enable_prefix_caching=True,
             num_speculative_blocks=num_speculative_blocks,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
@@ -122,9 +128,9 @@ def make_full_mamba_manager(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=full_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -145,7 +151,7 @@ def make_full_mamba_manager(
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
-        use_eagle=use_eagle,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -158,7 +164,6 @@ def make_full_mamba_manager(
         *[(8, 128, 896, p, 1) for p in (127, 128, 129, 7040, 7168, 7296, 7449)],
     ],
 )
-@pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("extension_tokens", [0, 32])
 def test_dcp_fine_hit_retention_uses_hash_alignment(
     dcp_world_size,
@@ -166,7 +171,6 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
     block_size,
     prompt_tokens,
     checkpoint_blocks,
-    use_eagle,
     extension_tokens,
 ):
     """Resends and extensions reuse the retained hash-aligned checkpoint."""
@@ -176,8 +180,8 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         full_block_size=block_size,
         mamba_block_size=block_size,
         num_blocks=128,
-        use_eagle=use_eagle,
-        num_speculative_blocks=4 if use_eagle else 0,
+        num_hash_lookahead_tokens=1,
+        num_speculative_blocks=4,
         num_prefill_checkpoint_blocks=checkpoint_blocks,
     )
     manager.coordinator.retention_interval = 0
@@ -188,14 +192,18 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         hash_block_size=hash_block_size,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=use_eagle,
+        num_hash_lookahead_tokens=1,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
         mamba_prefill_checkpoint_alignment=16,
     )
     producer = make_request(
-        "producer", list(range(prompt_tokens)), hash_block_size, sha256
+        "producer",
+        list(range(prompt_tokens)),
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=1,
     )
     while producer.num_computed_tokens < prompt_tokens:
         scheduled = Scheduler._mamba_block_aligned_split(
@@ -209,18 +217,22 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
     manager.new_step_starts()
 
     replay = make_request(
-        "replay", list(range(prompt_tokens + extension_tokens)), hash_block_size, sha256
+        "replay",
+        list(range(prompt_tokens + extension_tokens)),
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=1,
     )
     _, hit, _ = manager.get_computed_blocks(replay)
-    expected = (
-        max((prompt_tokens // hash_block_size - 1) * hash_block_size, 0)
-        if use_eagle
-        else ((prompt_tokens - 1) // hash_block_size * hash_block_size)
-    )
+    expected = (prompt_tokens - 1) // hash_block_size * hash_block_size
     assert hit == expected
     cached_states = {
         end
-        for end in range(hash_block_size, prompt_tokens + 1, hash_block_size)
+        for end in range(
+            hash_block_size,
+            len(producer.block_hashes) * hash_block_size + 1,
+            hash_block_size,
+        )
         if manager.block_pool.get_cached_block(
             producer.block_hashes[end // hash_block_size - 1], [1]
         )
@@ -243,7 +255,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
@@ -293,7 +305,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
@@ -334,7 +346,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         scheduler_config=SimpleNamespace(
             long_prefill_token_threshold=long_prefill_threshold
         ),
-        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
@@ -368,23 +380,23 @@ def test_hybrid_mamba_align_partial_hash_hit():
         num_blocks=20,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -436,80 +448,6 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
 
 
-def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
-    """An EAGLE group must not re-floor what partial hash hits leaves un-floored.
-
-    ``cache_blocks`` decides once how far a request may be registered, and with
-    fine-grained partial hash hits that bound is the raw token count. The EAGLE
-    branch then re-derives its own bound for the lookahead block; if it rounds
-    down to ``scheduler_block_size`` again, everything between the last aligned
-    boundary and the tail stops being registered -- ``(n % scheduler_block_size)
-    - manager.block_size`` tokens per call, which is most of a segment whenever
-    the group's own block is much smaller than the scheduler block.
-    """
-    hash_block_size = 2
-    mamba_block_size = 4 * hash_block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=40,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["full"],
-                FullAttentionSpec(
-                    block_size=hash_block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=mamba_block_size,
-                    shapes=(1, 1),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                ),
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        kv_cache_config=kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
-        hash_block_size=hash_block_size,
-    )
-    coordinator = manager.coordinator
-    assert coordinator.enable_partial_hash_hits
-    # The full-attention group is the EAGLE one, and its block is smaller than
-    # the scheduler block -- the geometry where re-flooring loses tokens.
-    eagle_manager = coordinator.single_type_managers[0]
-    eagle_manager.use_eagle = True
-    assert eagle_manager.block_size < coordinator.scheduler_block_size
-
-    # Deliberately not a multiple of the scheduler block, so the two bounds
-    # differ: floor(22/8)*8 + 2 = 18 against 22.
-    num_tokens = coordinator.scheduler_block_size * 2 + hash_block_size * 3
-    req = make_request("0", list(range(num_tokens)), hash_block_size, sha256)
-
-    recorded: list[int] = []
-    for single_type_manager in coordinator.single_type_managers:
-        original = single_type_manager.cache_blocks
-
-        def spy(request, num_tokens_to_cache, *args, _orig=original, **kwargs):
-            recorded.append(num_tokens_to_cache)
-            return _orig(request, num_tokens_to_cache, *args, **kwargs)
-
-        single_type_manager.cache_blocks = spy
-
-    # allocate_slots caches on the way out, so this exercises the real path.
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
-    assert manager.allocate_slots(req, num_tokens, num_computed, computed_blocks)
-
-    # Every group, EAGLE or not, may register the whole unaligned tail.
-    assert recorded == [num_tokens] * len(coordinator.single_type_managers)
-
-
 def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     hash_block_size = 2
     block_size = 2 * hash_block_size
@@ -517,23 +455,23 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -675,11 +613,134 @@ def test_internal_checkpoint_uses_partial_hash_lifecycle():
     assert num_computed == 112
 
 
+def _resume_mid_block(retention_interval, prompt_len):
+    """A 100-token prompt caches state@96, mid Mamba block 1 (block 64); a
+    request extending it to `prompt_len` hits there."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+    owner = make_request("owner", list(range(100)), 16, sha256)
+    assert manager.allocate_slots(owner, 100) is not None
+    manager.free(owner)
+    manager.new_step_starts()
+    request = make_request("resume", list(range(prompt_len)), 16, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert num_computed == 96
+    return manager, request, computed_blocks
+
+
+def _mamba_split(request, num_new_tokens, num_local_computed_tokens):
+    scheduler = SimpleNamespace(
+        block_size=64,
+        cache_config=SimpleNamespace(block_size=64),
+        hash_block_size=16,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=True,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=True,
+        mamba_prefill_checkpoint_alignment=16,
+    )
+    return Scheduler._mamba_block_aligned_split(
+        scheduler, request, num_new_tokens, num_local_computed_tokens
+    )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_mid_block_resume_exports_checkpoint_into_resumed_block(retention_interval):
+    """Resuming at 96 and ending in the next block (150) runs in one step: the
+    checkpoint (144) goes into the resumed block, which the worker reads into
+    the running block before the forward, and is keyed at 144, never as the
+    block's end state (128)."""
+    manager, request, computed_blocks = _resume_mid_block(retention_interval, 150)
+    assert _mamba_split(request, 54, 96) == 54
+    assert manager.allocate_slots(request, 54, 96, computed_blocks) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash_num_tokens == 144
+    hit = manager.block_pool.get_cached_block(request.block_hashes[144 // 16 - 1], [1])
+    assert hit is not None and hit[0] is mamba_blocks[1]
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_mid_block_resume_run_past_keeps_resumed_block_unkeyed(retention_interval):
+    """Resuming at 96 and ending two blocks later, the resumed block keeps
+    state@96: it must not get the full-block hash of state@128."""
+    manager, request, computed_blocks = _resume_mid_block(retention_interval, 230)
+    assert _mamba_split(request, 134, 96) == 134
+    assert manager.allocate_slots(request, 134, 96, computed_blocks) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash is None
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+    assert mamba_blocks[2].block_hash_num_tokens == 224
+    # The stale resumed block must not reach a connector either.
+    offloads = drain_boundary_state_offloads(manager).get(request.request_id, [])
+    assert offloads == [(1, mamba_blocks[2].block_id, 224)]
+
+
+def test_running_request_resuming_mid_block_exports_into_resumed_block():
+    """A running request whose chunk stopped mid-block (96) exports its next
+    chunk's checkpoint into that block, its own previous running block."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("running", list(range(150)), 16, sha256)
+    assert manager.allocate_slots(request, 96) is not None
+    request.num_computed_tokens = 96
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 54) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash_num_tokens == 144
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+
+
+@pytest.mark.parametrize(("num_new", "num_accepted"), [(17, 15), (40, 40)])
+def test_decode_step_resuming_mid_block_exports_no_checkpoint(num_new, num_accepted):
+    """A decode step with at least a hash block of drafts can pass the
+    checkpoint rule, but decode rows export none: the block gets only the
+    block-end state saved once 128 tokens are committed."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("decode", list(range(112)), 16, sha256)
+    assert manager.allocate_slots(request, 112) is not None
+    request.num_computed_tokens = 112
+    request.append_output_token_ids([1])
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, num_new) is not None
+    request.append_output_token_ids(list(range(num_accepted)))
+    request.num_computed_tokens = 112 + num_accepted
+    manager.cache_blocks(request, request.num_computed_tokens)
+
+    block = manager.get_blocks(request.request_id).blocks[1][1]
+    expected = 128 if request.num_computed_tokens >= 128 else None
+    assert block.block_hash_num_tokens == expected
+
+
 @pytest.mark.parametrize("retention_interval", [None, 0, 32, 64, 256])
 @pytest.mark.parametrize("hash_block_size", [16, 32])
-@pytest.mark.parametrize("use_eagle", [False, True])
 def test_internal_checkpoint_publication_respects_retention(
-    retention_interval, hash_block_size, use_eagle
+    retention_interval, hash_block_size
 ):
     """Publish only retained block boundaries and the final prompt checkpoint."""
     manager = make_full_mamba_manager(
@@ -688,18 +749,14 @@ def test_internal_checkpoint_publication_respects_retention(
         full_block_size=hash_block_size,
         mamba_block_size=32,
         num_prefill_checkpoint_blocks=1,
-        use_eagle=use_eagle,
     )
     manager.coordinator.retention_interval = retention_interval
 
     request = make_request("producer", list(range(240)), hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
 
-    # The EAGLE adjustment can make a chunk checkpoint block-aligned or partial.
     assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
-    checkpoint = (128 if use_eagle else 127) // hash_block_size * hash_block_size - (
-        hash_block_size if use_eagle else 0
-    )
+    checkpoint = 127 // hash_block_size * hash_block_size
     retained_checkpoint = checkpoint % 32 == 0 and (
         retention_interval is None
         or (retention_interval > 0 and checkpoint % retention_interval == 0)
@@ -728,9 +785,7 @@ def test_internal_checkpoint_publication_respects_retention(
 
     # The final checkpoint is reusable regardless of the retention interval.
     assert manager.allocate_slots(request, 112) is not None
-    prompt_checkpoint = (
-        240 if use_eagle else 239
-    ) // hash_block_size * hash_block_size - (hash_block_size if use_eagle else 0)
+    prompt_checkpoint = 239 // hash_block_size * hash_block_size
     end_hash = request.block_hashes[prompt_checkpoint // hash_block_size - 1]
     assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
     assert any(
@@ -774,7 +829,7 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
 
 @pytest.mark.parametrize("prompt_len", [120, 104, 96])
 def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
-    """At the default match unit the hybrid coordinator hands ``cache_blocks``
+    """At the default match unit the hybrid coordinator hands `cache_blocks`
     a block-aligned token count, which is below the prompt length whenever the
     prompt is not block-aligned. The prompt-end checkpoint is the replay
     boundary and must stay published under retention_interval=0; only a
@@ -793,8 +848,10 @@ def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
 
     request = make_request("producer", list(range(prompt_len)), hash_block_size, sha256)
     assert manager.allocate_slots(request, request.num_tokens) is not None
-    checkpoint_position = get_mamba_prefill_checkpoint_position(
-        prompt_len, hash_block_size, drop_eagle_block=False
+    checkpoint_position = get_reusable_prefix_length(
+        prompt_len,
+        num_hash_lookahead_tokens=0,
+        alignment_tokens=hash_block_size,
     )
     checkpoint_hash = request.block_hashes[checkpoint_position // hash_block_size - 1]
     hit = manager.block_pool.get_cached_block(checkpoint_hash, [1])
@@ -847,33 +904,6 @@ def test_intermediate_chunk_checkpoint_reserved_only_under_dense_retention(
     assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
 
 
-def test_eagle_block_aligned_checkpoint_replaces_newer_hash():
-    hash_block_size = mamba_block_size = 32
-    manager = make_full_mamba_manager(
-        dcp_world_size=1,
-        hash_block_size=hash_block_size,
-        full_block_size=hash_block_size,
-        mamba_block_size=mamba_block_size,
-        use_eagle=True,
-        num_speculative_blocks=3,
-        num_prefill_checkpoint_blocks=1,
-    )
-    request = make_request("producer", list(range(104)), hash_block_size, sha256)
-
-    assert manager.allocate_slots(request, request.num_tokens) is not None
-
-    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
-    checkpoint_block = mamba_blocks[2]
-    checkpoint_hash = request.block_hashes[64 // hash_block_size - 1]
-    checkpoint_hit = manager.block_pool.get_cached_block(checkpoint_hash, [1])
-    assert checkpoint_hit is not None
-    assert checkpoint_hit[0] is checkpoint_block
-    assert checkpoint_block.block_hash_num_tokens == 64
-
-    overwritten_full_hash = request.block_hashes[96 // hash_block_size - 1]
-    assert manager.block_pool.get_cached_block(overwritten_full_hash, [1]) is None
-
-
 def test_hash_aligned_query_end_uses_regular_partial_tail():
     hash_block_size = 2
     mamba_block_size = 4
@@ -901,6 +931,101 @@ def test_hash_aligned_query_end_uses_regular_partial_tail():
     assert cached[0].block_hash_num_tokens == 14
 
 
+@pytest.mark.parametrize("case", ["local", "local_junction", "external"])
+def test_mid_block_resume_running_past_block_end_does_not_cache_it(case):
+    """A prefill chunk that resumes inside a Mamba block and runs past its end
+    leaves that block at the resume state, so it must not get the full-block
+    hash (nor be offered to a connector as the block-end state)."""
+    hash_block_size, mamba_block_size, mamba_group = 16, 64, 1
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=128,
+        num_prefill_checkpoint_blocks=1,
+    )
+    # "local_junction": default sparse retention, where block 1 is retained
+    # because 128 is the shared-prefix junction left by a sibling; the junction
+    # stop ends the chunk there, so block 1 does get state@128.
+    manager.coordinator.retention_interval = 0 if case == "local_junction" else None
+    scheduler = SimpleNamespace(
+        block_size=mamba_block_size,
+        cache_config=SimpleNamespace(block_size=mamba_block_size),
+        hash_block_size=hash_block_size,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=True,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=True,
+        mamba_prefill_checkpoint_alignment=16,
+    )
+    tokens = list(range(1000, 1300))
+
+    def prefill(request_id, prompt, num_external=0):
+        request = make_request(request_id, prompt, hash_block_size, sha256)
+        computed, num_hit, junction = manager.get_computed_blocks(request)
+        request.shared_prefix_boundary = junction
+        start = num_hit + num_external
+        num_new = Scheduler._mamba_block_aligned_split(
+            scheduler, request, len(prompt) - start, num_hit, num_external
+        )
+        chunks = [(start, num_new)]
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new,
+                num_hit,
+                computed,
+                num_external_computed_tokens=num_external,
+            )
+            is not None
+        )
+        request.num_computed_tokens = start + num_new
+        while request.num_computed_tokens < len(prompt):
+            manager.new_step_starts()
+            start = request.num_computed_tokens
+            num_new = Scheduler._mamba_block_aligned_split(
+                scheduler, request, len(prompt) - start
+            )
+            chunks.append((start, num_new))
+            assert manager.allocate_slots(request, num_new) is not None
+            request.num_computed_tokens = start + num_new
+        manager.new_step_starts()
+        return request, num_hit, chunks
+
+    if case == "local_junction":
+        manager.free(prefill("sibling", tokens[:130] + [7] * 40)[0])
+    if case != "external":
+        manager.free(prefill("owner", tokens[:100])[0])  # caches state@96
+    drain_boundary_state_offloads(manager)
+
+    # Resume at 96, inside block 1 = [64, 128). With an internal checkpoint
+    # column past the resume block, the split runs [96, 230) in one step.
+    resume, num_hit, chunks = prefill(
+        "resume", tokens[:230], num_external=96 if case == "external" else 0
+    )
+    assert num_hit == (0 if case == "external" else 96)
+    if case == "local_junction":
+        assert chunks == [(96, 32), (128, 102)]
+    else:
+        assert chunks == [(96, 134)]
+    resumed_block = manager.get_blocks("resume").blocks[mamba_group][1]
+    offloads = drain_boundary_state_offloads(manager).get("resume", [])
+    manager.free(resume)
+    manager.new_step_starts()
+
+    cached_at_block_end = case == "local_junction"
+    assert (resumed_block.block_hash_num_tokens == 128) == cached_at_block_end
+    assert (
+        (mamba_group, resumed_block.block_id, 128) in offloads
+    ) == cached_at_block_end
+    probe = make_request("probe", tokens[:128] + [9] * 16, hash_block_size, sha256)
+    _, num_hit, _ = manager.get_computed_blocks(probe)
+    assert num_hit == {"local": 96, "local_junction": 128, "external": 0}[case]
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
@@ -910,23 +1035,23 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -982,22 +1107,24 @@ def test_boundary_state_offloads_returns_cow_target():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                ),
+                MambaManager.config(
+                    enable_prefix_caching=True,
                     num_prefill_checkpoint_blocks=1,
                 ),
             ),
@@ -1059,23 +1186,23 @@ def test_finished_partial_tail_uses_table_source_once():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1127,7 +1254,8 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
             return False, None
 
     scheduler = object.__new__(Scheduler)
-    scheduler.connector = _Connector()
+    connector = _Connector()
+    scheduler.connector = connector
     scheduler.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True)
     )
@@ -1150,7 +1278,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
 
     assert delay_free is True
     assert kv_xfer_params is None
-    assert scheduler.connector.registered == (
+    assert connector.registered == (
         request,
         ([3], [9]),
         [(1, 9, 12)],
@@ -1168,23 +1296,23 @@ def test_boundary_state_offload_dropped_when_request_freed_before_drain():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1215,23 +1343,23 @@ def test_boundary_state_offloads_block_aligned_prompt():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1268,23 +1396,23 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=2 * hash_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1323,23 +1451,23 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=2 * hash_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1386,23 +1514,23 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1466,23 +1594,23 @@ def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1525,23 +1653,23 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1599,23 +1727,23 @@ def test_hybrid_partial_hit_cow_target_starts_uncached():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1682,23 +1810,23 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1756,23 +1884,23 @@ def test_cow_retained_blocks_returned_for_release():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -1836,10 +1964,8 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     assert freed == blocks
 
 
-def test_full_attention_eagle_drops_one_hash_unit():
-    """With fine-grained partial hits, eagle rewinds the hit by one hash unit
-    instead of a whole cache block: the tail block's KV is append-only, so it
-    still covers the reduced length and stays in the hit as a partial block."""
+def test_full_attention_keeps_proven_partial_hash_boundary():
+    """Full-attention lookup keeps both full and partial hash-ready boundaries."""
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
@@ -1848,24 +1974,22 @@ def test_full_attention_eagle_drops_one_hash_unit():
     pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
 
-    def find(drop_eagle_block):
+    def find():
         return FullAttentionManager.find_longest_cache_hit(
             block_hashes=req.block_hashes,
             max_length=8,
             kv_cache_group_ids=[0],
             block_pool=pool,
-            kv_cache_spec=spec,
-            drop_eagle_block=drop_eagle_block,
+            block_size=spec.block_size,
+            manager_config=FullAttentionManager.config(),
             alignment_tokens=hash_block_size,
         )
 
-    # Two full cached blocks (hit 8): eagle rewinds to 6, keeping the last
-    # block as a partial hit instead of dropping it to 4.
     blocks = pool.get_new_blocks(2)
     pool.cache_full_blocks(
         request=req,
@@ -1875,17 +1999,12 @@ def test_full_attention_eagle_drops_one_hash_unit():
         block_size=block_size,
         kv_cache_group_id=0,
     )
-    hit_blocks, hit_length = find(drop_eagle_block=False)
+    hit_blocks, hit_length = find()
     assert (hit_length, len(hit_blocks[0])) == (8, 2)
-    hit_blocks, hit_length = find(drop_eagle_block=True)
-    assert (hit_length, len(hit_blocks[0])) == (6, 2)
 
-    # A partial tail at 6 (block 1 not fully cached): eagle rewinds to the
-    # block boundary and trims the tail block.
-    pool2 = BlockPool(
+    pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
     )
-    pool = pool2
     blocks = pool.get_new_blocks(2)
     pool.cache_full_blocks(
         request=req,
@@ -1905,86 +2024,19 @@ def test_full_attention_eagle_drops_one_hash_unit():
         )
         is not None
     )
-    hit_blocks, hit_length = find(drop_eagle_block=False)
+    hit_blocks, hit_length = find()
     assert (hit_length, len(hit_blocks[0])) == (6, 2)
-    hit_blocks, hit_length = find(drop_eagle_block=True)
-    assert (hit_length, len(hit_blocks[0])) == (4, 1)
 
 
-def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
-    """Regression: with eagle, the mamba group must not receive the eagle
-    lookup margin — its finder never applies the drop, so it could return a
-    hit past the blocks the (dropped) full-attention group covers, crashing
-    the consumer's CoW with block_idx >= len(req_blocks)."""
-    hash_block_size = 2
-    block_size = 2 * hash_block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=32,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["full"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=block_size,
-                    shapes=(1, 1),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                ),
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        kv_cache_config=kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
-        hash_block_size=hash_block_size,
-        use_eagle=True,
-    )
-
-    # The owner prefills in scheduler-split style: stop at the block boundary
-    # (4), then at the prompt's last hash boundary (6, partial entries).
-    req0 = make_request("0", [7] * 6, hash_block_size, sha256)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
-    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
-    req0.num_computed_tokens = 4
-    manager.new_step_starts()
-    assert manager.allocate_slots(req0, 2) is not None
-    req0.num_computed_tokens = 6
-    manager.new_step_starts()
-
-    # A longer request with eagle: full attention drops the partial tail, so
-    # the joint hit must fall back to the block boundary the FA blocks cover.
-    req1 = make_request("1", [7] * 6 + [9] * 2, hash_block_size, sha256)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
-    assert num_computed == 4
-    assert all(
-        len(group) * block_size >= num_computed for group in computed_blocks.blocks
-    )
-    assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
-
-
-def test_mamba_align_split_stops_below_eagle_proof_boundary():
-    """The chunk that registers the partial tail must end one hash unit below
-    the prompt's last hash boundary under Eagle, which drops one unit past the
-    candidate.
-    """
+def test_mamba_align_split_stops_at_hash_ready_boundary():
+    """The split stops where the prompt supplies finalized lookahead."""
     block_size = 1536
     hash_block_size = 128
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=True,
-        use_eagle_block_drop=True,
+        num_hash_lookahead_tokens=1,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
@@ -1997,47 +2049,35 @@ def test_mamba_align_split_stops_below_eagle_proof_boundary():
         req.num_computed_tokens = 23040
         assert (
             split(self=mock, request=req, num_new_tokens=prompt_len - 23040)
-            == 24448 - 23040
+            == (24448 if prompt_len == 24576 else 24576) - 23040
         )
 
-    # Without the eagle block drop the tail stays at the prompt's own last hash
-    # boundary -- the shift exists only to compensate for the drop, so it keys
-    # on use_eagle_block_drop rather than plain use_eagle.
-    mock.use_eagle_block_drop = False
-    req = make_request("1", [0] * 24577, hash_block_size, sha256)
-    req.num_computed_tokens = 23040
-    assert split(self=mock, request=req, num_new_tokens=1537) == 24576 - 23040
 
-
-def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
-    """Regression: a prompt whose last hash boundary coincides with its last
-    mamba block boundary registered its only fine-grained checkpoint at a
-    position Eagle can never resume from, collapsing the next turn to the
-    coarse block boundary (or, under sparse retention, to a full miss).
-    """
+def test_mamba_partial_tail_hits_hash_ready_boundary():
+    """A seven-token prompt retains its six-token partial checkpoint."""
     hash_block_size = 2
     mamba_block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -2046,19 +2086,20 @@ def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
+        num_hash_lookahead_tokens=1,
     )
 
-    # 9 tokens: the last hash boundary (8) is also a mamba block boundary, so
-    # the prompt's two checkpoints collapse. The reachable tail is 6.
-    req0 = make_request("0", [7] * 9, hash_block_size, sha256)
+    # 7 tokens: the last hash-ready boundary is 6, inside the second mamba block.
+    req0 = make_request(
+        "0", [7] * 7, hash_block_size, sha256, num_hash_lookahead_tokens=1
+    )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
     req0.num_computed_tokens = 6
     manager.new_step_starts()
-    assert manager.allocate_slots(req0, 3) is not None
-    req0.num_computed_tokens = 9
+    assert manager.allocate_slots(req0, 1) is not None
+    req0.num_computed_tokens = 7
     manager.new_step_starts()
 
     partial_hash = req0.block_hashes[6 // hash_block_size - 1]
@@ -2068,42 +2109,37 @@ def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
     assert partial_block is not None
     assert partial_block[0].block_hash_num_tokens == 6
 
-    # Full attention matches to 8 and drops one hash unit to 6, where the
-    # mamba tail now exists -- instead of falling back to the block boundary 4.
-    req1 = make_request("1", [7] * 9 + [9] * 4, hash_block_size, sha256)
+    req1 = make_request(
+        "1", [7] * 7 + [9] * 4, hash_block_size, sha256, num_hash_lookahead_tokens=1
+    )
     _, num_computed, _ = manager.get_computed_blocks(req1)
     assert num_computed == 6
 
 
-def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
-    """Without a prefix-match unit there is no partial tail, so the only
-    checkpoint comes from the retention mask. A prompt ending just past its
-    last block boundary pinned that checkpoint where eagle can never resume,
-    so under ``retention_interval=0`` the reachable block was masked out and
-    the next turn missed entirely.
-    """
+def test_mamba_coarse_checkpoint_retained_at_hash_ready_boundary():
+    """Sparse retention keeps the materialized eight-token checkpoint."""
     block_size = 4
     kv_cache_config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
         prefix_cache_retention_interval=0,
@@ -2113,35 +2149,33 @@ def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
-        use_eagle=True,
+        num_hash_lookahead_tokens=1,
     )
 
-    # 9 tokens: the last aligned boundary is 8, which eagle cannot resume
-    # from, so block 0 (ending at 4) must stay retained. Prefill in
-    # scheduler-split style -- Mamba keeps one rolling state, so a boundary is
-    # only materialized by a chunk that ends exactly on it.
-    req0 = make_request("0", [7] * 9, block_size, sha256)
+    req0 = make_request("0", [7] * 9, block_size, sha256, num_hash_lookahead_tokens=1)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
-    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
-    req0.num_computed_tokens = 4
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 8
     manager.new_step_starts()
-    assert manager.allocate_slots(req0, 5) is not None
+    assert manager.allocate_slots(req0, 1) is not None
     req0.num_computed_tokens = 9
     manager.free(req0)
     manager.new_step_starts()
 
-    # The reachable state (4) is retained; the unreachable one (8) is not.
+    # The prompt-end state (8) survives retention_interval=0.
     assert (
         manager.block_pool.get_cached_block(
-            req0.block_hashes[0], kv_cache_group_ids=[1]
+            req0.block_hashes[1], kv_cache_group_ids=[1]
         )
         is not None
     )
 
-    req1 = make_request("1", [7] * 9 + [9] * 4, block_size, sha256)
+    req1 = make_request(
+        "1", [7] * 9 + [9] * 4, block_size, sha256, num_hash_lookahead_tokens=1
+    )
     _, num_computed, _ = manager.get_computed_blocks(req1)
-    assert num_computed == 4
+    assert num_computed == 8
 
 
 def test_hybrid_sliding_window_group_disables_partial_hash_hits():
@@ -2152,34 +2186,33 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_draft"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=sliding_window_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=sliding_window_block_size,
                 ),
-                is_eagle_group=True,
+                SlidingWindowManager.config(sliding_window=sliding_window_block_size),
             ),
         ],
     )
@@ -2188,7 +2221,6 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
     )
 
     tokens = list(range(3 * sliding_window_block_size))
@@ -2223,36 +2255,36 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["full"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=hash_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["mamba"],
             MambaSpec(
                 block_size=mamba_block_size,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
             ),
+            MambaManager.config(enable_prefix_caching=True),
         ),
     ]
     if with_sliding_window:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=2 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=2 * hash_block_size,
                 ),
+                SlidingWindowManager.config(sliding_window=2 * hash_block_size),
             )
         )
     kv_cache_config = KVCacheConfig(
@@ -2269,6 +2301,7 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
     assert coordinator.enable_partial_hash_hits != with_sliding_window
     assert (
         resolve_cache_hit_alignment_tokens(
@@ -2288,32 +2321,33 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["tail"],
-                CircularBufferSpec(
+                AttentionSpec(
                     block_size=mamba_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CircularBufferManager.config(),
             ),
         ],
     )
@@ -2345,32 +2379,33 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=cache_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=cache_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["tail"],
-                CircularBufferSpec(
+                AttentionSpec(
                     block_size=kpool_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CircularBufferManager.config(),
             ),
         ],
     )
@@ -2381,9 +2416,11 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         hash_block_size=hash_block_size,
     )
 
-    assert manager.coordinator.scheduler_block_size == cache_block_size
-    assert manager.coordinator.hash_block_size == hash_block_size
-    assert manager.coordinator.enable_partial_hash_hits
+    coordinator = manager.coordinator
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
+    assert coordinator.scheduler_block_size == cache_block_size
+    assert coordinator.hash_block_size == hash_block_size
+    assert coordinator.enable_partial_hash_hits
 
     shared_prefix = [10] * (12 * hash_block_size)
     req0 = make_request("0", shared_prefix + [11], hash_block_size, sha256)
@@ -2522,32 +2559,6 @@ def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
     assert [len(group) for group in computed_blocks.blocks] == [2, 3]
 
 
-def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
-    hash_block_size = 2
-    manager = make_full_mamba_manager(
-        dcp_world_size=2,
-        hash_block_size=hash_block_size,
-        full_block_size=4,
-        mamba_block_size=4,
-        use_eagle=True,
-    )
-
-    req0 = make_request("eagle-owner", [7] * 6, hash_block_size, sha256)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
-    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
-    req0.num_computed_tokens = 4
-    manager.new_step_starts()
-    assert manager.allocate_slots(req0, 2) is not None
-    req0.num_computed_tokens = 6
-    manager.new_step_starts()
-
-    req1 = make_request("eagle-replay", [7] * 6 + [9] * 2, 2, sha256)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
-    assert num_computed == 4
-    assert [len(group) for group in computed_blocks.blocks] == [1, 1]
-    assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
-
-
 def _snapshot_offload_kv_cache_config(
     hash_block_size: int, block_size: int, num_blocks: int = 24
 ):
@@ -2555,23 +2566,23 @@ def _snapshot_offload_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
@@ -2653,7 +2664,7 @@ def test_snapshot_handoff_dense_default_retention():
 
 
 def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
-    """Prefill ``req`` one ``chunk_size`` chunk per scheduler step, yielding the
+    """Prefill `req` one `chunk_size` chunk per scheduler step, yielding the
     boundary-state hand-offs offered (and claimed) at each step."""
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
     for step in range(num_chunks):
@@ -2678,9 +2689,9 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
             num_blocks=200,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["full"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -2688,14 +2699,14 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
                     ),
                 ),
                 *(
-                    KVCacheGroupSpec(
+                    new_kv_cache_group(
                         [f"mamba{i}"],
                         MambaSpec(
                             block_size=block_size,
                             shapes=(1, 1),
                             dtypes=(torch.float32,),
-                            mamba_cache_mode="align",
                         ),
+                        MambaManager.config(enable_prefix_caching=True),
                     )
                     for i in range(num_mamba_groups)
                 ),
@@ -2715,7 +2726,7 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
 
 def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     """The core offers every committed boundary, including past
-    ``num_prompt_tokens``. A resumed request re-prefills its generated tokens
+    `num_prompt_tokens`. A resumed request re-prefills its generated tokens
     and every group re-saves them, so filtering on the original prompt length
     would silently strip the mamba key for boundaries full attention still
     stores; only the connector knows where its save window ends."""
@@ -2761,7 +2772,7 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
 def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
     """With hash_block_size == mamba block size (no fine-grained matching), the
     hybrid coordinator caches the final chunk only up to its last full block,
-    so the managers see ``num_tokens < num_prompt_tokens`` there too. The
+    so the managers see `num_tokens < num_prompt_tokens` there too. The
     prompt-end checkpoint must still be published under retention_interval=0,
     otherwise the next request that extends this prompt misses the prefix.
     """
@@ -2793,8 +2804,14 @@ def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
 
 
 @pytest.mark.parametrize(
-    "hash_block_size,mamba_block_size,use_eagle",
-    [(32, 32, False), (16, 32, False), (32, 32, True)],
+    "hash_block_size,mamba_block_size,lookahead",
+    [
+        (32, 32, 0),
+        (16, 32, 0),
+        (32, 32, 1),
+        (16, 32, 1),
+        (16, 32, 2),
+    ],
 )
 @pytest.mark.parametrize("retention_interval", [0, None])
 @pytest.mark.parametrize(
@@ -2805,7 +2822,7 @@ def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
 def test_checkpoint_reservation_matches_worker(
     hash_block_size,
     mamba_block_size,
-    use_eagle,
+    lookahead,
     retention_interval,
     num_prompt_tokens,
     num_output_tokens,
@@ -2823,15 +2840,19 @@ def test_checkpoint_reservation_matches_worker(
         full_block_size=hash_block_size,
         mamba_block_size=mamba_block_size,
         num_blocks=64,
-        use_eagle=use_eagle,
-        num_speculative_blocks=3 if use_eagle else 0,
+        num_speculative_blocks=3 if lookahead else 0,
         num_prefill_checkpoint_blocks=1,
+        num_hash_lookahead_tokens=lookahead,
     )
     manager.coordinator.retention_interval = retention_interval
     mamba_manager = manager.coordinator.single_type_managers[1]
 
     request = make_request(
-        "req", list(range(num_prompt_tokens)), hash_block_size, sha256
+        "req",
+        list(range(num_prompt_tokens)),
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
     )
     request.append_output_token_ids(list(range(1000, 1000 + num_output_tokens)))
     num_tokens = request.num_tokens
@@ -2847,8 +2868,8 @@ def test_checkpoint_reservation_matches_worker(
             hash_block_size=hash_block_size,
             mamba_block_size=mamba_block_size,
             checkpoint_alignment=16,
-            drop_eagle_block=use_eagle,
             cache_hit_alignment_tokens=mamba_manager.cache_hit_alignment_tokens,
+            num_hash_lookahead_tokens=lookahead,
         )
         reserved = mamba_manager._checkpoints.get(request.request_id)
         if reserved is not None:

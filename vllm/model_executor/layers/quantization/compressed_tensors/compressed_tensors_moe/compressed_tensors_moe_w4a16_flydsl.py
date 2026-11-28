@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -201,13 +201,13 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         w13 = layer.w13_weight_packed.data
         w13 = _gptq_int32_to_flydsl_packed(w13)
         w13 = w13.view(-1).contiguous()
-        layer.w13_weight_packed = torch.nn.Parameter(w13, requires_grad=False)
+        replace_parameter(layer, "w13_weight_packed", w13)
 
         # Convert w2 weights
         w2 = layer.w2_weight_packed.data
         w2 = _gptq_int32_to_flydsl_packed(w2)
         w2 = w2.view(-1).contiguous()
-        layer.w2_weight_packed = torch.nn.Parameter(w2, requires_grad=False)
+        replace_parameter(layer, "w2_weight_packed", w2)
 
         # Convert scales for FlyDSL:
         #   per-row:   [E, 1, N] -> squeeze -> [E, N]
@@ -225,9 +225,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         elif w13_scale.dim() == 3 and w13_scale.shape[1] == 1:
             # Per-row: squeeze [E, 1, N] -> [E, N]
             w13_scale = w13_scale.squeeze(1)
-        layer.w13_weight_scale = torch.nn.Parameter(
-            w13_scale.contiguous(), requires_grad=False
-        )
+        replace_parameter(layer, "w13_weight_scale", w13_scale.contiguous())
 
         w2_scale = layer.w2_weight_scale.data
         if self.group_size > 0 and w2_scale.dim() == 3 and w2_scale.shape[1] > 1:
@@ -242,9 +240,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         elif w2_scale.dim() == 3 and w2_scale.shape[1] == 1:
             # Per-row: squeeze [E, 1, N] -> [E, N]
             w2_scale = w2_scale.squeeze(1)
-        layer.w2_weight_scale = torch.nn.Parameter(
-            w2_scale.contiguous(), requires_grad=False
-        )
+        replace_parameter(layer, "w2_weight_scale", w2_scale.contiguous())
 
         layer.w13_weight_packed.is_shuffled = True
         layer.w2_weight_packed.is_shuffled = True

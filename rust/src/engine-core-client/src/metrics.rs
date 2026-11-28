@@ -2,24 +2,39 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fmt::Write;
 
+use tracing::info;
 use vllm_metrics::{
-    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
-    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
-    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    EngineLabels, HistogramMetric, METRICS, RequestMetrics, SchedulerMetrics, SchedulerStatsHandles,
 };
 
-use crate::protocol::stats::{
-    CachedTokensBySource, KvConnectorStats, MooncakeStats, MultiConnectorStats, NixlStats,
-    SchedulerStats,
-};
+use crate::protocol::stats::{SchedulerIterationDetails, SchedulerStats};
+use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
 
-const WAITING_REASON_CAPACITY: &str = "capacity";
-const WAITING_REASON_DEFERRED: &str = "deferred";
+/// Engine sleep state exported as `vllm:engine_sleep_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineSleepState {
+    Awake,
+    Asleep(SleepLevel),
+    /// After `release_kv_cache_memory`, which Python records like a level-0
+    /// sleep.
+    KvCacheReleased,
+}
+
+impl EngineSleepState {
+    /// Gauge values for the `awake`, `weights_offloaded` and `discard_all`
+    /// series, as Python's `PrometheusStatLogger.record_sleep_state` sets them.
+    fn gauge_values(self) -> [u64; 3] {
+        match self {
+            Self::Awake => [1, 0, 0],
+            Self::Asleep(SleepLevel::PauseOnly) | Self::KvCacheReleased => [0, 0, 0],
+            Self::Asleep(SleepLevel::OffloadWeights) => [0, 1, 0],
+            Self::Asleep(SleepLevel::DiscardAll) => [0, 0, 1],
+        }
+    }
+}
 
 /// Cached output-batch metric handles for one model and engine index.
 pub(crate) struct IterationMetricHandles {
@@ -44,64 +59,6 @@ pub(crate) struct SchedulerStatsRecorder {
     engines: BTreeMap<u32, SchedulerStatsHandles>,
 }
 
-/// Per-engine cached metric handles used while recording `SchedulerStats`.
-struct SchedulerStatsHandles {
-    // Base labels reused for dynamic child labels.
-    labels: EngineLabels,
-
-    // Scheduler state gauges.
-    scheduler_running: U64Gauge,
-    scheduler_waiting: U64Gauge,
-    scheduler_waiting_capacity: U64Gauge,
-    scheduler_waiting_deferred: U64Gauge,
-    kv_cache_usage: F64Gauge,
-
-    // Prefix-cache counters, including the connector-backed external cache path.
-    prefix_cache_queries: U64Counter,
-    prefix_cache_hits: U64Counter,
-    external_prefix_cache_queries: U64Counter,
-    external_prefix_cache_hits: U64Counter,
-    /// One handle per `CachedTokensBySource::SOURCES` entry.
-    prompt_tokens_cached_by_source: [U64Counter; 5],
-
-    // Speculative decoding counters.
-    spec_decode_num_drafts: U64Counter,
-    spec_decode_num_draft_tokens: U64Counter,
-    spec_decode_num_accepted_tokens: U64Counter,
-    spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
-
-    // Per-engine performance / MFU counters.
-    estimated_flops_per_gpu: U64Counter,
-    estimated_read_bytes_per_gpu: U64Counter,
-    estimated_write_bytes_per_gpu: U64Counter,
-
-    // Sampled KV-cache residency histograms.
-    kv_block_lifetime_seconds: HistogramMetric,
-    kv_block_idle_before_evict_seconds: HistogramMetric,
-    kv_block_reuse_gap_seconds: HistogramMetric,
-
-    // Mooncake store connector telemetry, decoded from `kv_connector_stats`.
-    // Kept as `Family` (not pre-resolved) because `operation`/`status` are
-    // dynamic per-record labels.
-    mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
-    mooncake_operation_total: MooncakeOperationCounterFamily,
-    mooncake_operation_keys_total: MooncakeOperationCounterFamily,
-    mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
-    mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
-
-    // NIXL connector telemetry, decoded from `kv_connector_stats`.
-    nixl_xfer_time_seconds: HistogramMetric,
-    nixl_post_time_seconds: HistogramMetric,
-    nixl_bytes_transferred: HistogramMetric,
-    nixl_num_descriptors: HistogramMetric,
-    nixl_num_failed_transfers: U64Counter,
-    nixl_num_failed_notifications: U64Counter,
-    nixl_num_kv_expired_reqs: U64Counter,
-
-    // Non-Prometheus interval accumulator for periodic text-log helpers.
-    log_stats: SchedulerLogStatsAccumulator,
-}
-
 impl SchedulerStatsRecorder {
     /// Resolve the fixed-label metric handles for the connected engines.
     pub(crate) fn new(
@@ -109,453 +66,234 @@ impl SchedulerStatsRecorder {
         model_name: &str,
         engines: &[ConnectedEngine],
     ) -> Self {
+        Self::record_cache_config_info(metrics, engines);
+        if let Some(engine) = engines.first() {
+            metrics.set_kv_cache_device(engine.ready_response.kv_cache_device());
+        }
         let engines = engines
             .iter()
             .filter_map(|engine| {
                 let engine = engine.engine_id.engine_index()?;
-                Some((
-                    engine,
-                    resolve_scheduler_stats_handles(metrics, model_name, engine),
-                ))
+                Some((engine, metrics.resolve_handles(model_name, engine)))
             })
             .collect();
 
-        Self { engines }
+        let recorder = Self { engines };
+        // Engines start awake, as Python sets when it creates the stat logger.
+        recorder.record_sleep_state(EngineSleepState::Awake);
+        recorder
     }
 
-    /// Record one scheduler-stats payload for the given engine index.
-    pub(crate) fn record(&self, engine_index: u32, stats: &SchedulerStats) {
-        if let Some(handles) = self.engines.get(&engine_index) {
-            record_scheduler_stats_with_handles(handles, stats);
-        }
-    }
-}
-
-/// Resolve all fixed-label scheduler metrics for one engine.
-fn resolve_scheduler_stats_handles(
-    metrics: &SchedulerMetrics,
-    model_name: &str,
-    engine: u32,
-) -> SchedulerStatsHandles {
-    let labels = EngineLabels {
-        model_name: model_name.to_string(),
-        engine,
-    };
-    let capacity = WaitingReasonLabels {
-        model_name: model_name.to_string(),
-        engine,
-        reason: WAITING_REASON_CAPACITY,
-    };
-    let deferred = WaitingReasonLabels {
-        model_name: model_name.to_string(),
-        engine,
-        reason: WAITING_REASON_DEFERRED,
-    };
-
-    SchedulerStatsHandles {
-        scheduler_running: metrics.scheduler_running.get_or_create_owned(&labels),
-        scheduler_waiting: metrics.scheduler_waiting.get_or_create_owned(&labels),
-        scheduler_waiting_capacity: metrics
-            .scheduler_waiting_by_reason
-            .get_or_create_owned(&capacity),
-        scheduler_waiting_deferred: metrics
-            .scheduler_waiting_by_reason
-            .get_or_create_owned(&deferred),
-        kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
-        prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
-        prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
-        external_prefix_cache_queries: metrics
-            .external_prefix_cache_queries
-            .get_or_create_owned(&labels),
-        external_prefix_cache_hits: metrics.external_prefix_cache_hits.get_or_create_owned(&labels),
-        prompt_tokens_cached_by_source: CachedTokensBySource::SOURCES.map(|source| {
-            metrics
-                .prompt_tokens_cached_by_source
-                .get_or_create_owned(&CacheHitSourceLabels {
-                    model_name: model_name.to_string(),
-                    engine,
-                    source,
-                })
-        }),
-        spec_decode_num_drafts: metrics.spec_decode_num_drafts.get_or_create_owned(&labels),
-        spec_decode_num_draft_tokens: metrics
-            .spec_decode_num_draft_tokens
-            .get_or_create_owned(&labels),
-        spec_decode_num_accepted_tokens: metrics
-            .spec_decode_num_accepted_tokens
-            .get_or_create_owned(&labels),
-        spec_decode_num_accepted_tokens_per_pos: metrics
-            .spec_decode_num_accepted_tokens_per_pos
-            .clone(),
-        log_stats: metrics.log_stats.get_or_create_owned(&labels),
-        estimated_flops_per_gpu: metrics.estimated_flops_per_gpu.get_or_create_owned(&labels),
-        estimated_read_bytes_per_gpu: metrics
-            .estimated_read_bytes_per_gpu
-            .get_or_create_owned(&labels),
-        estimated_write_bytes_per_gpu: metrics
-            .estimated_write_bytes_per_gpu
-            .get_or_create_owned(&labels),
-        kv_block_lifetime_seconds: metrics.kv_block_lifetime_seconds.get_or_create_owned(&labels),
-        kv_block_idle_before_evict_seconds: metrics
-            .kv_block_idle_before_evict_seconds
-            .get_or_create_owned(&labels),
-        kv_block_reuse_gap_seconds: metrics.kv_block_reuse_gap_seconds.get_or_create_owned(&labels),
-        mooncake_operation_time_seconds: metrics.mooncake_operation_time_seconds.clone(),
-        mooncake_operation_total: metrics.mooncake_operation_total.clone(),
-        mooncake_operation_keys_total: metrics.mooncake_operation_keys_total.clone(),
-        mooncake_operation_bytes_total: metrics.mooncake_operation_bytes_total.clone(),
-        mooncake_operation_failed_keys_total: metrics.mooncake_operation_failed_keys_total.clone(),
-        nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
-        nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
-        nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
-        nixl_num_descriptors: metrics.nixl_num_descriptors.get_or_create_owned(&labels),
-        nixl_num_failed_transfers: metrics.nixl_num_failed_transfers.get_or_create_owned(&labels),
-        nixl_num_failed_notifications: metrics
-            .nixl_num_failed_notifications
-            .get_or_create_owned(&labels),
-        nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
-        labels,
-    }
-}
-
-/// Record scheduler-stats values through pre-resolved metric handles.
-fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &SchedulerStats) {
-    // Scheduler state gauges.
-    handles.scheduler_running.set(stats.num_running_reqs);
-    handles
-        .scheduler_waiting
-        .set(stats.num_waiting_reqs + stats.num_skipped_waiting_reqs);
-    handles.scheduler_waiting_capacity.set(stats.num_waiting_reqs);
-    handles.scheduler_waiting_deferred.set(stats.num_skipped_waiting_reqs);
-    handles.kv_cache_usage.set(stats.kv_cache_usage);
-
-    // Prefix-cache counters, including the connector-backed external cache path.
-    handles.prefix_cache_queries.inc_by(stats.prefix_cache_stats.base.queries);
-    handles.prefix_cache_hits.inc_by(stats.prefix_cache_stats.base.hits);
-    // Local prefix-cache hits are the `device` tier.
-    handles.prompt_tokens_cached_by_source[0].inc_by(stats.prefix_cache_stats.base.hits);
-
-    if let Some(connector_prefix_cache_stats) = &stats.connector_prefix_cache_stats {
-        handles
-            .external_prefix_cache_queries
-            .inc_by(connector_prefix_cache_stats.base.queries);
-        handles
-            .external_prefix_cache_hits
-            .inc_by(connector_prefix_cache_stats.base.hits);
-        let counts = connector_prefix_cache_stats.hits_by_source.counts();
-        for (handle, count) in handles.prompt_tokens_cached_by_source.iter().zip(counts) {
-            handle.inc_by(count);
-        }
-    }
-
-    // Speculative decoding counters.
-    if let Some(spec_decoding_stats) = &stats.spec_decoding_stats {
-        handles.spec_decode_num_drafts.inc_by(spec_decoding_stats.num_drafts);
-        handles
-            .spec_decode_num_draft_tokens
-            .inc_by(spec_decoding_stats.num_draft_tokens);
-        handles
-            .spec_decode_num_accepted_tokens
-            .inc_by(spec_decoding_stats.num_accepted_tokens);
-        handles.log_stats.observe_spec_decode(
-            spec_decoding_stats.num_drafts,
-            &spec_decoding_stats.num_accepted_tokens_per_pos,
-        );
-
-        for (position, accepted_tokens) in
-            spec_decoding_stats.num_accepted_tokens_per_pos.iter().copied().enumerate()
-        {
-            handles
-                .spec_decode_num_accepted_tokens_per_pos
-                .get_or_create(&EnginePositionLabels {
-                    model_name: handles.labels.model_name.clone(),
-                    engine: handles.labels.engine,
-                    position: position as u32,
-                })
-                .inc_by(accepted_tokens);
-        }
-    }
-
-    // Per-engine performance / MFU counters.
-    if let Some(perf_stats) = &stats.perf_stats
-        && (perf_stats.num_flops_per_gpu != 0
-            || perf_stats.num_read_bytes_per_gpu != 0
-            || perf_stats.num_write_bytes_per_gpu != 0)
-    {
-        handles.estimated_flops_per_gpu.inc_by(perf_stats.num_flops_per_gpu);
-        handles.estimated_read_bytes_per_gpu.inc_by(perf_stats.num_read_bytes_per_gpu);
-        handles.estimated_write_bytes_per_gpu.inc_by(perf_stats.num_write_bytes_per_gpu);
-    }
-
-    if let Some(cudagraph_stats) = &stats.cudagraph_stats {
-        handles.log_stats.observe_cudagraph(
-            cudagraph_stats.num_unpadded_tokens,
-            cudagraph_stats.num_padded_tokens,
-            cudagraph_stats.num_paddings,
-            &cudagraph_stats.runtime_mode,
-        );
-    }
-
-    // Sampled KV-cache residency histograms.
-    if !stats.kv_cache_eviction_events.is_empty() {
-        for event in &stats.kv_cache_eviction_events {
-            handles.kv_block_lifetime_seconds.observe(event.lifetime_seconds);
-            handles.kv_block_idle_before_evict_seconds.observe(event.idle_seconds);
-            for reuse_gap_seconds in &event.reuse_gaps_seconds {
-                handles.kv_block_reuse_gap_seconds.observe(*reuse_gap_seconds);
-            }
-        }
-    }
-
-    // Connector-specific KV transfer stats. A bare connector reports its own
-    // flat payload; MultiConnector reports connector class name -> flat child
-    // payload.
-    if let Some(kv_connector_stats) = &stats.kv_connector_stats {
-        match kv_connector_stats {
-            KvConnectorStats::Nixl(stats) => record_nixl_stats(handles, stats),
-            KvConnectorStats::Mooncake(stats) => record_mooncake_stats(handles, stats),
-            KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
-            KvConnectorStats::Other(_) => {}
-        }
-    }
-}
-
-fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiConnectorStats) {
-    for nixl in [&stats.nixl, &stats.nixl_pull, &stats.nixl_push].into_iter().flatten() {
-        record_nixl_stats(handles, nixl);
-    }
-    if let Some(mooncake) = &stats.mooncake {
-        record_mooncake_stats(handles, mooncake);
-    }
-}
-
-fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats) {
-    for (operation, records) in &stats.0 {
-        for record in records {
-            let labels = MooncakeOperationLabels {
-                model_name: handles.labels.model_name.clone(),
-                engine: handles.labels.engine,
-                operation: operation.as_str().to_string(),
-                status: record.status.as_str().to_string(),
+    /// Export each engine's cache config as `vllm:cache_config_info`, which
+    /// Python also creates with its stat logger.
+    fn record_cache_config_info(metrics: &SchedulerMetrics, engines: &[ConnectedEngine]) {
+        for engine in engines {
+            let (Some(index), Some(info)) = (
+                engine.engine_id.engine_index(),
+                &engine.ready_response.cache_config_info,
+            ) else {
+                continue;
             };
-            handles
-                .mooncake_operation_time_seconds
-                .get_or_create(&labels)
-                .observe(record.duration_seconds);
-            handles.mooncake_operation_total.get_or_create(&labels).inc();
-            handles
-                .mooncake_operation_keys_total
-                .get_or_create(&labels)
-                .inc_by(record.num_keys);
-            handles
-                .mooncake_operation_bytes_total
-                .get_or_create(&labels)
-                .inc_by(record.num_bytes);
-            handles
-                .mooncake_operation_failed_keys_total
-                .get_or_create(&labels)
-                .inc_by(record.num_failed_keys);
+            metrics.engine_state.record_cache_config_info(index, info);
+        }
+    }
+
+    /// Record the sleep state of every connected engine. Sleep and wake are
+    /// utility calls on all engines, so the state is not per engine.
+    pub(crate) fn record_sleep_state(&self, state: EngineSleepState) {
+        let values = state.gauge_values();
+        for handles in self.engines.values() {
+            handles.engine_sleep_state.record(values);
+        }
+    }
+
+    /// Record one scheduler-stats payload for the given engine index, handing
+    /// each metric group its part.
+    pub(crate) fn record(&self, engine_index: u32, stats: &SchedulerStats) {
+        let Some(handles) = self.engines.get(&engine_index) else {
+            return;
+        };
+
+        handles.state.record(
+            stats.num_running_reqs,
+            stats.num_waiting_reqs,
+            stats.num_skipped_waiting_reqs,
+            &stats.num_kv_fetch_reqs_by_stage,
+            stats.kv_cache_usage,
+            stats.num_preempted_reqs,
+        );
+        for record in &stats.iteration_records {
+            info!(
+                "{}",
+                iteration_log_line(engine_index, record, stats.kv_cache_usage)
+            );
+        }
+        handles.prefix_cache.record(
+            &stats.prefix_cache_stats,
+            stats.connector_prefix_cache_stats.as_ref(),
+        );
+
+        if let Some(spec_decoding_stats) = &stats.spec_decoding_stats {
+            handles.spec_decode.record(spec_decoding_stats);
+            handles.log_stats.observe_spec_decode(
+                spec_decoding_stats.num_drafts,
+                &spec_decoding_stats.num_accepted_tokens_per_pos,
+            );
+        }
+
+        if let Some(perf_stats) = &stats.perf_stats {
+            handles.perf.record(perf_stats);
+        }
+
+        if let Some(cudagraph_stats) = &stats.cudagraph_stats {
+            handles.log_stats.observe_cudagraph(
+                cudagraph_stats.num_unpadded_tokens,
+                cudagraph_stats.num_padded_tokens,
+                cudagraph_stats.num_paddings,
+                &cudagraph_stats.runtime_mode,
+            );
+        }
+
+        handles.kv_cache_residency.record(&stats.kv_cache_eviction_events);
+
+        if let Some(kv_connector_stats) = &stats.kv_connector_stats {
+            handles.kv_connector.record(kv_connector_stats);
         }
     }
 }
 
-fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
-    for value in &stats.transfer_duration {
-        handles.nixl_xfer_time_seconds.observe(*value);
+/// One iteration-details line, as Python's `LoggingStatLogger` logs each record
+/// of `--enable-logging-iteration-details`.
+fn iteration_log_line(
+    engine_index: u32,
+    details: &SchedulerIterationDetails,
+    kv_cache_usage: f64,
+) -> String {
+    let mut line = format!(
+        "Engine {engine_index:03}: Iteration({}): {} context requests, {} context tokens, \
+         {} generation requests, {} generation tokens",
+        details.iteration_index,
+        details.num_ctx_requests,
+        details.num_ctx_tokens,
+        details.num_generation_requests,
+        details.num_generation_tokens,
+    );
+    if let Some(elapsed_ms) = details.elapsed_ms {
+        write!(line, ", iteration elapsed time: {elapsed_ms:.2} ms").unwrap();
     }
-    for value in &stats.post_duration {
-        handles.nixl_post_time_seconds.observe(*value);
+    if details.is_dummy {
+        line.push_str(" (dummy)");
     }
-    for value in &stats.bytes_transferred {
-        handles.nixl_bytes_transferred.observe(*value as f64);
+    write!(
+        line,
+        ", {} KV cache usage: {:.1}%",
+        METRICS.scheduler.kv_cache_device(),
+        kv_cache_usage * 100.0
+    )
+    .unwrap();
+    if details.num_encoder_inputs > 0 {
+        write!(
+            line,
+            ", encoder inputs: {}, encoder output embeddings: {}",
+            details.num_encoder_inputs, details.num_encoder_output_tokens
+        )
+        .unwrap();
     }
-    for value in &stats.num_descriptors {
-        handles.nixl_num_descriptors.observe(*value as f64);
-    }
-    handles
-        .nixl_num_failed_transfers
-        .inc_by(stats.num_failed_transfers.iter().sum());
-    handles
-        .nixl_num_failed_notifications
-        .inc_by(stats.num_failed_notifications.iter().sum());
-    handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
-}
-
-/// Exports `vllm:lora_requests_info` as a single series covering all LoRA
-/// requests tracked by this client across every engine in the replica.
-///
-/// The engine's `SchedulerStats` never carries adapter names: the Python
-/// frontend fills them in from per-request lifecycle events tracked by
-/// `LoRARequestStates` in `vllm/v1/engine/output_processor.py`. The Rust
-/// frontend mirrors that, deriving the sets from the request registry.
-#[derive(Default)]
-pub(crate) struct LoraInfoExporter {
-    current: Option<LoraInfoLabels>,
-}
-
-impl LoraInfoExporter {
-    pub(crate) fn update(
-        &mut self,
-        metrics: &SchedulerMetrics,
-        running: BTreeSet<String>,
-        waiting: BTreeSet<String>,
-    ) {
-        let next = (!running.is_empty() || !waiting.is_empty()).then_some(LoraInfoLabels {
-            running_lora_adapters: LoraAdapterNames(running),
-            waiting_lora_adapters: LoraAdapterNames(waiting),
-        });
-
-        if self.current != next
-            && let Some(prev) = &self.current
-        {
-            metrics.lora_info.remove(prev);
-        }
-
-        // Python sets this gauge to the current time on every record.
-        if let Some(labels) = &next {
-            metrics.lora_info.get_or_create(labels).set(now_unix_secs());
-        }
-
-        self.current = next;
-    }
-}
-
-fn now_unix_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    line
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::io;
+    use std::sync::{Arc, Mutex};
 
     use expect_test::expect;
-    use vllm_metrics::Metrics;
+    use vllm_metrics::METRICS;
 
-    use crate::metrics::LoraInfoExporter;
-    use crate::protocol::stats::{
-        KvConnectorStats, MooncakeOperation, MooncakeRecord, MooncakeStats, MooncakeStatus,
-        MultiConnectorStats, NixlStats, SchedulerStats,
-    };
+    use super::SchedulerStatsRecorder;
+    use crate::protocol::stats::{SchedulerIterationDetails, SchedulerStats};
 
-    fn names(values: &[&str]) -> BTreeSet<String> {
-        values.iter().map(|name| (*name).to_string()).collect()
-    }
+    /// Captures formatted log output in memory.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
-    /// The `lora_requests_info` series with the non-deterministic timestamp
-    /// value replaced by `<ts>`, one line per series.
-    fn lora_series(rendered: &str) -> String {
-        rendered
-            .lines()
-            .filter(|l| l.starts_with("vllm:lora_requests_info{"))
-            .map(|l| match l.rsplit_once("} ") {
-                Some((labels, _value)) => format!("{labels}}} <ts>"),
-                None => l.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
+    impl io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
 
-    #[test]
-    fn lora_info_emits_clears_stale_and_drains() {
-        let metrics = Metrics::new();
-        let mut exporter = LoraInfoExporter::default();
-
-        // No adapters: nothing emitted.
-        exporter.update(&metrics.scheduler, names(&[]), names(&[]));
-        expect![[""]].assert_eq(&lora_series(&metrics.render().unwrap()));
-
-        // Two running (sorted), one waiting.
-        exporter.update(&metrics.scheduler, names(&["b", "a"]), names(&["c"]));
-        expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="a,b",waiting_lora_adapters="c"} <ts>"#
-        ]]
-        .assert_eq(&lora_series(&metrics.render().unwrap()));
-
-        // "c" gets scheduled and "d" arrives: the stale series is replaced.
-        exporter.update(&metrics.scheduler, names(&["a", "b", "c"]), names(&["d"]));
-        expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="a,b,c",waiting_lora_adapters="d"} <ts>"#
-        ]]
-        .assert_eq(&lora_series(&metrics.render().unwrap()));
-
-        // Everything but "d" finishes.
-        exporter.update(&metrics.scheduler, names(&["d"]), names(&[]));
-        expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="d",waiting_lora_adapters=""} <ts>"#
-        ]]
-        .assert_eq(&lora_series(&metrics.render().unwrap()));
-
-        // All requests done: series removed entirely.
-        exporter.update(&metrics.scheduler, names(&[]), names(&[]));
-        expect![[""]].assert_eq(&lora_series(&metrics.render().unwrap()));
-    }
-
-    fn nixl_stats() -> NixlStats {
-        NixlStats {
-            transfer_duration: vec![0.01, 0.02],
-            post_duration: vec![0.001, 0.002],
-            bytes_transferred: vec![4096, 8192],
-            num_descriptors: vec![2, 4],
-            num_failed_transfers: vec![],
-            num_failed_notifications: vec![],
-            num_kv_expired_reqs: vec![1],
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
-    fn mooncake_stats() -> MooncakeStats {
-        MooncakeStats(BTreeMap::from([(
-            MooncakeOperation::LoadGet,
-            vec![MooncakeRecord {
-                duration_seconds: 0.05,
-                num_keys: 3,
-                num_bytes: 1024,
-                status: MooncakeStatus::Ok,
-                num_failed_keys: 0,
-            }],
-        )]))
-    }
-
-    /// Records one MultiConnector payload into Mooncake and NIXL metrics.
     #[test]
-    fn kv_connector_stats_are_recorded_into_mooncake_and_nixl_metrics() {
-        let metrics = Metrics::new();
-        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
-
-        let stats = SchedulerStats {
-            kv_connector_stats: Some(KvConnectorStats::Multi(Box::new(MultiConnectorStats {
-                nixl: Some(nixl_stats()),
-                mooncake: Some(mooncake_stats()),
+    fn scheduler_stats_log_one_line_per_iteration_record_like_python() {
+        let record =
+            |iteration_index, ctx: (u64, u64), generation: (u64, u64)| SchedulerIterationDetails {
+                iteration_index,
+                num_ctx_requests: ctx.0,
+                num_ctx_tokens: ctx.1,
+                num_generation_requests: generation.0,
+                num_generation_tokens: generation.1,
                 ..Default::default()
-            }))),
+            };
+        // The first four are the cases of Python's
+        // `test_iteration_lines_have_an_elapsed_time_only_when_timed`.
+        let stats = SchedulerStats {
+            kv_cache_usage: 0.125,
+            iteration_records: vec![
+                SchedulerIterationDetails {
+                    elapsed_ms: Some(1.5),
+                    ..record(0, (1, 8), (2, 2))
+                },
+                record(1, (0, 0), (2, 2)),
+                SchedulerIterationDetails {
+                    is_dummy: true,
+                    ..record(2, (0, 0), (0, 0))
+                },
+                SchedulerIterationDetails {
+                    elapsed_ms: Some(0.0),
+                    is_dummy: true,
+                    ..record(3, (0, 0), (0, 0))
+                },
+                SchedulerIterationDetails {
+                    num_encoder_inputs: 2,
+                    num_encoder_output_tokens: 128,
+                    ..record(4, (2, 300), (1, 1))
+                },
+            ],
             ..Default::default()
         };
+        let recorder = SchedulerStatsRecorder {
+            engines: [(
+                3,
+                METRICS.scheduler.resolve_handles("iteration-log-test", 3),
+            )]
+            .into(),
+        };
 
-        super::record_scheduler_stats_with_handles(&handles, &stats);
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let buffer = buffer.clone();
+                move || buffer.clone()
+            })
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || recorder.record(3, &stats));
 
-        let rendered = metrics.render().unwrap();
-        assert!(rendered.contains(
-            "vllm:mooncake_store_operation_total{model_name=\"model\",engine=\"0\",\
-             operation=\"load_get\",status=\"ok\"} 1"
-        ));
-        assert!(rendered.contains(
-            "vllm:mooncake_store_operation_keys_total{model_name=\"model\",engine=\"0\",\
-             operation=\"load_get\",status=\"ok\"} 3"
-        ));
-        assert!(rendered.contains(
-            "vllm:mooncake_store_operation_bytes_total{model_name=\"model\",engine=\"0\",\
-             operation=\"load_get\",status=\"ok\"} 1024"
-        ));
-        assert!(
-            rendered.contains(
-                "vllm:nixl_num_kv_expired_reqs_total{model_name=\"model\",engine=\"0\"} 1"
-            )
-        );
-        assert!(
-            rendered
-                .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")
-        );
+        let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        // The formatter pads `INFO` to the width of the longest level name.
+        let logs = logs.lines().map(str::trim_start).collect::<Vec<_>>().join("\n");
+        expect![[r#"
+            INFO Engine 003: Iteration(0): 1 context requests, 8 context tokens, 2 generation requests, 2 generation tokens, iteration elapsed time: 1.50 ms, GPU KV cache usage: 12.5%
+            INFO Engine 003: Iteration(1): 0 context requests, 0 context tokens, 2 generation requests, 2 generation tokens, GPU KV cache usage: 12.5%
+            INFO Engine 003: Iteration(2): 0 context requests, 0 context tokens, 0 generation requests, 0 generation tokens (dummy), GPU KV cache usage: 12.5%
+            INFO Engine 003: Iteration(3): 0 context requests, 0 context tokens, 0 generation requests, 0 generation tokens, iteration elapsed time: 0.00 ms (dummy), GPU KV cache usage: 12.5%
+            INFO Engine 003: Iteration(4): 2 context requests, 300 context tokens, 1 generation requests, 1 generation tokens, GPU KV cache usage: 12.5%, encoder inputs: 2, encoder output embeddings: 128"#]].assert_eq(&logs);
     }
 }

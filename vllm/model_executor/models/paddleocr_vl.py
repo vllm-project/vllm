@@ -23,7 +23,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
+from transformers import (
+    AutoModel,
+    BaseImageProcessor,
+    BatchFeature,
+    PaddleOCRTextConfig,
+    PaddleOCRTextModel,
+    PreTrainedConfig,
+)
 from transformers.activations import GELUActivation
 from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
@@ -31,6 +38,10 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
@@ -71,13 +82,12 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .ernie45 import Ernie4_5ForCausalLM
 from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
 from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
+    init_vllm_registered_model,
     maybe_prefix,
 )
 from .vision import get_vit_attn_backend
@@ -400,7 +410,6 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.cache_position_embedding: dict[tuple[int, int], torch.Tensor] = {}
         self.cache_position_count: dict[tuple[int, int], int] = {}
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
@@ -649,6 +658,15 @@ class SigLIPRotaryEmbedding(nn.Module):
         return freqs
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 1,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -945,13 +963,6 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        if hasattr(config, "text_config"):
-            text_config = config.text_config.to_dict()
-            unsafe_keys = ["model_type", "architectures", "tie_word_embeddings"]
-            for key in unsafe_keys:
-                text_config.pop(key, None)
-            config.update(text_config)
-
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -962,17 +973,22 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.mlp_AR = Projector(config, config.vision_config)
+            self.mlp_AR = Projector(config.text_config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = Ernie4_5ForCausalLM(
+            # TODO: Remove this shim when PaddleOCR-VL is migrated after
+            # https://github.com/huggingface/transformers/pull/50671.
+            AutoModel.register(
+                PaddleOCRTextConfig,
+                PaddleOCRTextModel,
+                exist_ok=True,
+            )
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
+                hf_config=config.text_config,
+                architectures=["TransformersForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-
-            for layer in self.language_model.model.layers:
-                if not isinstance(layer, PPMissingLayer):
-                    layer.self_attn.rotary_emb.is_neox_style = True
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

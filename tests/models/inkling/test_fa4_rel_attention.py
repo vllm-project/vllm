@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness test for the Inkling FA4 relative-attention score-mod kernel.
 
-Checks ``_INKLING_FA4_REL_ATTENTION_KERNEL`` against a pure-PyTorch reference
+Checks `_INKLING_FA4_REL_ATTENTION_KERNEL` against a pure-PyTorch reference
 that implements the relative bias exactly as documented in the Inkling architecture
 guide::
 
@@ -333,10 +333,6 @@ def test_score_mod_relative_attention(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
-)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
     "seq_lens",
@@ -358,10 +354,6 @@ def test_full_attention(seq_lens, num_heads, rel_extent):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
-)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
     "seq_lens",
@@ -379,10 +371,6 @@ def test_chunked_prefill(seq_lens, num_heads, rel_extent):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
-)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
     "seq_lens",
@@ -408,10 +396,6 @@ def test_sliding_window(seq_lens, num_heads, local_extent):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
-)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
     "seq_lens",

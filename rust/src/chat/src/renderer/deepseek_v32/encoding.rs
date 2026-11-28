@@ -13,9 +13,10 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_messages};
 use crate::reasoning::ReasoningControl;
-use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
+use crate::renderer::tool_call_arguments_or_empty;
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
@@ -55,11 +56,7 @@ pub(super) fn render_request(
         request.messages.last().map(ChatMessage::role),
         Some(ChatRole::User | ChatRole::Developer)
     );
-    let initial_tools = if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    };
+    let initial_tools = request.initial_tools();
     let render_offset = isize::from(!initial_tools.is_empty());
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
@@ -209,9 +206,7 @@ fn render_developer_message(
     add_generation_prompt: bool,
 ) -> Result<()> {
     if content.is_empty() {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek V3.2 developer message: empty content".to_string(),
-        ));
+        bail_invalid_messages!("invalid DeepSeek V3.2 developer message: empty content");
     }
 
     out.push_str("<｜User｜>");
@@ -268,35 +263,33 @@ fn render_tool_message(
     }
 
     let Some(prev_assistant_idx) = previous_assistant_actual_index(messages, block_start) else {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek V3.2 tool message: missing previous assistant message".to_string(),
-        ));
+        bail_invalid_messages!(
+            "invalid DeepSeek V3.2 tool message: missing previous assistant message"
+        );
     };
 
     let ChatMessage::Assistant {
         content: assistant_content,
     } = &messages[prev_assistant_idx]
     else {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool message: previous non-tool message is not assistant"
-                .to_string(),
-        ));
+        );
     };
 
     let assistant_tool_calls = assistant_content.tool_calls().collect::<Vec<_>>();
     if assistant_tool_calls.is_empty() {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool message: previous assistant message has no tool calls"
-                .to_string(),
-        ));
+        );
     }
 
     let mut expected_tool_call_ids = HashSet::with_capacity(assistant_tool_calls.len());
     for tool_call in &assistant_tool_calls {
         if !expected_tool_call_ids.insert(tool_call.id.as_str()) {
-            return Err(Error::ChatTemplate(
-                "invalid DeepSeek V3.2 assistant tool calls: duplicate tool_call_id".to_string(),
-            ));
+            bail_invalid_messages!(
+                "invalid DeepSeek V3.2 assistant tool calls: duplicate tool_call_id"
+            );
         }
     }
 
@@ -311,23 +304,22 @@ fn render_tool_message(
         };
 
         if !expected_tool_call_ids.contains(tool_call_id.as_str()) {
-            return Err(Error::ChatTemplate(format!(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 tool message: unknown tool_call_id `{tool_call_id}`"
-            )));
+            );
         }
 
         if tool_results_by_id.insert(tool_call_id.as_str(), content).is_some() {
-            return Err(Error::ChatTemplate(format!(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 tool message: duplicate tool_call_id `{tool_call_id}`"
-            )));
+            );
         }
     }
 
     if tool_results_by_id.len() != assistant_tool_calls.len() {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool messages: missing tool result for assistant tool call"
-                .to_string(),
-        ));
+        );
     }
 
     out.push_str("\n\n<function_results>");
@@ -394,10 +386,9 @@ fn render_assistant_message(
 
     if after_last_user_turn {
         if !has_reasoning && !has_tool_calls {
-            return Err(Error::ChatTemplate(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"
-                    .to_string(),
-            ));
+            );
         }
 
         if has_reasoning {
@@ -437,19 +428,10 @@ fn render_tool_call(out: &mut String, tool_call: &AssistantToolCall) -> Result<(
 /// String values are emitted raw with `string="true"`, while all other JSON
 /// values are rendered with JSON syntax and `string="false"`.
 fn encode_arguments_to_dsml(out: &mut String, tool_call: &AssistantToolCall) -> Result<()> {
-    let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-        Error::ChatTemplate(format!(
-            "assistant tool call has invalid JSON arguments for DeepSeek V3.2: {error}"
-        ))
-    })?;
-    let Some(arguments) = arguments.as_object() else {
-        return Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek V3.2 must be a JSON object".to_string(),
-        ));
-    };
+    let arguments = tool_call_arguments_or_empty(&tool_call.arguments);
 
     let mut wrote_parameter = false;
-    for (key, value) in arguments {
+    for (key, value) in &arguments {
         if wrote_parameter {
             out.push('\n');
         }
@@ -539,12 +521,24 @@ fn write_chat_content(out: &mut String, content: &ChatContent) -> Result<()> {
     match content {
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
-            for part in parts {
-                out.push_str(part.as_text()?);
-            }
+            let texts = parts.iter().map(ChatContentPart::as_text).collect::<Result<Vec<_>>>()?;
+            write_text_parts(out, texts);
         }
     }
     Ok(())
+}
+
+/// Join text parts like Python vLLM's `string` content format, which this
+/// renderer's Python counterpart uses for every role: empty parts are dropped
+/// and the rest are separated by "\n". The official encoder takes string
+/// content only, so it defines no join of its own.
+fn write_text_parts<'a>(out: &mut String, texts: impl IntoIterator<Item = &'a str>) {
+    for (index, text) in texts.into_iter().filter(|text| !text.is_empty()).enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(text);
+    }
 }
 
 /// Write all reasoning blocks in encounter order.
@@ -558,11 +552,13 @@ fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]
 
 /// Write all visible assistant text blocks in encounter order.
 fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
-    for block in content {
-        if let AssistantContentBlock::Text { text } = block {
-            out.push_str(text);
-        }
-    }
+    write_text_parts(
+        out,
+        content.iter().filter_map(|block| match block {
+            AssistantContentBlock::Text { text } => Some(text.as_str()),
+            AssistantContentBlock::Reasoning { .. } | AssistantContentBlock::ToolCall(_) => None,
+        }),
+    );
 }
 
 /// Compact JSON serialization used by this renderer for exact prompt text.

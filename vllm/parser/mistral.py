@@ -13,20 +13,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import ijson
 import regex as re
-from mistral_common.protocol.instruct.tool_calls import (
-    NamedToolChoice as MistralNamedToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    Tool as MistralTool,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoice as MistralToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoiceEnum as MistralToolChoiceEnum,
+from mistral_common.exceptions import InvalidRequestException
+from mistral_common.protocol.instruct.request import (
+    ChatCompletionRequest as MistralChatCompletionRequest,
 )
 from mistral_common.tokens.tokenizers.base import SpecialTokens
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -40,6 +32,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -63,9 +56,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _ALPHANUMERIC = ascii_letters + digits
-_DEFAULT_JSON_SCHEMA: dict[str, Any] = {
-    "anyOf": [{"type": "object"}, {"type": "array"}]
-}
 
 # Special token strings as emitted/decoded by MistralTokenizer.
 _TOOL_CALLS = SpecialTokens.tool_calls.value
@@ -110,6 +100,41 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
+def _mistral_response_format(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Return the OpenAI-format response format to pass to mistral-common.
+
+    `structured_outputs` (`json`, `json_object`) takes precedence over
+    `response_format`, as in `structured_outputs_from_response_format`.
+    """
+    structured_outputs = request.structured_outputs
+    if structured_outputs is not None:
+        if structured_outputs.json_object is not None:
+            return {"type": "json_object"}
+        if structured_outputs.json is None:
+            raise ValueError(
+                "Unsupported request.structured_outputs for MistralParser. "
+                "Only `json` and `json_object` are supported."
+            )
+        schema = structured_outputs.json
+        if isinstance(schema, str):
+            check_json_nesting(schema)
+            schema = json.loads(schema)
+        # `structured_outputs.json` asks vLLM to enforce the schema.
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": schema, "strict": True},
+        }
+
+    if request.response_format is None:
+        return {"type": "text"}
+    if request.response_format.type not in ("text", "json_object", "json_schema"):
+        raise ValueError(
+            "MistralParser only accepts `text`, `json_object` or "
+            f"`json_schema`, got {request.response_format=}"
+        )
+    return request.response_format.model_dump(by_alias=True, exclude_none=True)
+
+
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     if is_mistral_tokenizer(model_tokenizer):
         return model_tokenizer.version < 11
@@ -118,11 +143,11 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
 
 
 def _pre_v11_function_calls(parsed: Any) -> list[FunctionCall]:
-    """Decode the JSON after a pre-v11 ``[TOOL_CALLS]`` marker.
+    """Decode the JSON after a pre-v11 `[TOOL_CALLS]` marker.
 
     Mirrors the streaming path: a bare object is a single call, entries that
     are not call objects are skipped, a missing or non-string name becomes
-    ``""`` (as in the v11+ path) and string arguments are kept as-is.
+    `""` (as in the v11+ path) and string arguments are kept as-is.
     """
     if isinstance(parsed, dict):
         parsed = [parsed]
@@ -154,19 +179,19 @@ def mistral_config(
     reasoning_encoding: Literal["special_token", "text", "none"],
     name: str = "mistral",
 ) -> ParserEngineConfig:
-    """Return a :class:`ParserEngineConfig` for the Mistral output format.
+    """Return a `ParserEngineConfig` for the Mistral output format.
 
     Args:
         reasoning_encoding: Reasoning token format.
-            ``"special_token"`` – v13+ ``[THINK]``/``[/THINK]`` special
-            tokens placed in both ``terminals`` and ``token_id_terminals``.
-            ``"text"`` – v11 ``<think>``/``</think>`` plain text placed in
-            ``terminals`` only; no ``token_id_terminals`` for think tokens.
-            ``"none"`` – no reasoning support.
+            `"special_token"` – v13+ `[THINK]`/`[/THINK]` special
+            tokens placed in both `terminals` and `token_id_terminals`.
+            `"text"` – v11 `<think>`/`</think>` plain text placed in
+            `terminals` only; no `token_id_terminals` for think tokens.
+            `"none"` – no reasoning support.
         name: Name embedded in the returned config (used for debugging).
 
     Returns:
-        A frozen :class:`ParserEngineConfig` with ``initial_state=CONTENT``.
+        A frozen `ParserEngineConfig` with `initial_state=CONTENT`.
 
     """
     if reasoning_encoding == "special_token":
@@ -271,23 +296,23 @@ def mistral_config(
 
 
 class MistralParser(ParserEngine):
-    """Mistral parser: engine-based reasoning + ``[TOOL_CALLS]`` tool calls.
+    """Mistral parser: engine-based reasoning + `[TOOL_CALLS]` tool calls.
 
     Reasoning encoding is auto-detected from the tokenizer:
 
-    - ``"special_token"`` – ``[THINK]`` present in vocab (v13+).
-    - ``"text"`` – tokenizer supports grammar but has no ``[THINK]`` (v11).
-    - ``"none"`` – no grammar support; reasoning disabled.
+    - `"special_token"` – `[THINK]` present in vocab (v13+).
+    - `"text"` – tokenizer supports grammar but has no `[THINK]` (v11).
+    - `"none"` – no grammar support; reasoning disabled.
 
-    Tool calls use the ``[TOOL_CALLS]func_name{...}`` format.  The opening
-    ``{`` doubles as the NAME→ARGS separator and is included in the argument
-    buffer via an ``ARG_VALUE_CHUNK`` event on the transition (mirrors
+    Tool calls use the `[TOOL_CALLS]func_name{...}` format.  The opening
+    `{` doubles as the NAME→ARGS separator and is included in the argument
+    buffer via an `ARG_VALUE_CHUNK` event on the transition (mirrors
     kimi_k2, JSON args, `tool_args_json=True`).
 
-    When the tokenizer does not support grammar (``_reasoning_encoding ==
-    "none"``), the legacy ``[TOOL_CALLS]``-based extraction path is used
+    When the tokenizer does not support grammar (`_reasoning_encoding ==
+    "none"`), the legacy `[TOOL_CALLS]`-based extraction path is used
     instead of the declarative engine, handling both pre-v11 JSON-array and
-    v11+ ``funcname{args}`` formats.
+    v11+ `funcname{args}` formats.
     """
 
     def __init__(
@@ -371,11 +396,9 @@ class MistralParser(ParserEngine):
             or any_so_non_supported_active
             or response_format_non_supported_active
         ):
-            request = super().adjust_request(request)
-            if request.tools and request.tool_choice != "none":
-                # Keep special tokens so the [TOOL_CALLS] marker
-                # survives for tool detection.
-                request.skip_special_tokens = False
+            # MistralTokenizer keeps the parser's special tokens when skipping.
+            if not is_mistral_tokenizer(self.model_tokenizer):
+                request = super().adjust_request(request)
             # Inject a guided JSON schema for pre-v11 required/named tool choice
             # so the model emits a well-formed bare JSON array instead of
             # rambling. tool_choice forces a tool call, so a json_object /
@@ -407,82 +430,32 @@ class MistralParser(ParserEngine):
                     request.response_format = None
             return request
 
-        json_schema: dict[str, Any] | None = None
-        if request.structured_outputs is not None:
-            if request.structured_outputs.json_object is not None:
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.structured_outputs.json is not None:
-                if isinstance(request.structured_outputs.json, str):
-                    check_json_nesting(request.structured_outputs.json)
-                    json_schema = json.loads(request.structured_outputs.json)
-                else:
-                    json_schema = request.structured_outputs.json
-            else:
-                raise ValueError(
-                    "Unsupported request.structured_outputs for MistralParser. "
-                    "Only `json` and `json_object` are supported."
-                )
-        elif (
-            request.response_format is not None
-            and request.response_format.type != "text"
-        ):
-            if request.response_format.type == "json_object":
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.response_format.type == "json_schema":
-                if request.response_format.json_schema is not None:
-                    json_schema = request.response_format.json_schema.json_schema
-                else:
-                    json_schema = _DEFAULT_JSON_SCHEMA
-            else:
-                raise ValueError(
-                    "MistralParser only accepts `text`, `json_object` or "
-                    f"`json_schema`, got {request.response_format=}"
-                )
-            request.response_format = None
+        response_format = _mistral_response_format(request)
+        # The grammar replaces response_format as the engine constraint.
+        request.response_format = None
 
         grammar_factory = self.model_tokenizer.grammar_factory
 
         # Rendering grammar is cached in mistral-common given tools, template and mode.
         template = grammar_factory.select_jinja_template()
 
-        mistral_tools = (
-            [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
-            if request.tools is not None
-            else None
-        )
+        try:
+            mistral_request = MistralChatCompletionRequest.from_openai(
+                **request.model_dump(
+                    include={"messages", "tools", "tool_choice", "parallel_tool_calls"},
+                    exclude_none=True,
+                ),
+                response_format=response_format,
+            )
+            lark_grammar = grammar_factory.get_grammar_for_chat_request(
+                request=mistral_request, template=template
+            )
+        except (ValidationError, InvalidRequestException) as e:
+            raise VLLMValidationError(str(e)) from e
 
-        tool_choice: MistralToolChoice
-        match request.tool_choice:
-            case "none" | "auto" | "required":
-                tool_choice = MistralToolChoiceEnum(request.tool_choice)
-            case None:
-                tool_choice = MistralToolChoiceEnum.auto
-            # _ == Named tool choice
-            case _:
-                tool_choice = MistralNamedToolChoice.model_validate(
-                    {
-                        "type": "function",
-                        "function": {"name": request.tool_choice.function.name},
-                    }
-                )
-
-        match tool_choice, json_schema is not None:
-            case MistralToolChoiceEnum.none, True:
-                lark_grammar = grammar_factory.get_lark_for_json_schema(
-                    template=template, json_schema=json_schema
-                )
-            case _, _:
-                lark_grammar = grammar_factory.get_lark_from_jinja(
-                    template=template,
-                    mode=tool_choice,
-                    tools=mistral_tools,
-                    json_schema=json_schema,
-                    parallel_tool_calls=request.parallel_tool_calls,
-                    json_only=False,
-                )
-
-        request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
-        request._grammar_from_parser = True
+        if lark_grammar is not None:
+            request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
+            request._grammar_from_parser = True
         return request
 
     def _build_guided_schema_pre_v11(
@@ -492,7 +465,7 @@ class MistralParser(ParserEngine):
         """Build a guided JSON schema for pre-v11 required/named tool choice.
 
         The schema enforces the Mistral-native array format
-        ``[{"name": ..., "arguments": {...}}]`` so the model emits a parseable
+        `[{"name": ..., "arguments": {...}}]` so the model emits a parseable
         bare JSON array instead of free-form text.
 
         Args:
@@ -500,7 +473,7 @@ class MistralParser(ParserEngine):
                 `tool_choice`.
 
         Returns:
-            A JSON Schema dict, or ``None`` if the named tool is not found.
+            A JSON Schema dict, or `None` if the named tool is not found.
 
         """
         tool_choice = request.tool_choice
@@ -566,7 +539,7 @@ class MistralParser(ParserEngine):
     ) -> ExtractedToolCallInformation:
         """Pre-v11 non-streaming extraction.
 
-        Handles ``[TOOL_CALLS][{...}]`` and guided bare-array formats.
+        Handles `[TOOL_CALLS][{...}]` and guided bare-array formats.
         """
         if request is None:
             tool_choice = None
@@ -722,7 +695,7 @@ class MistralParser(ParserEngine):
     ) -> DeltaMessage | None:
         """Extract tool calls for pre-v11 Mistral models.
 
-        Handles ``[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5}}]``.
+        Handles `[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5}}]`.
         """
         assert self.parse_coro is not None
         content = None
@@ -959,11 +932,11 @@ class MistralParser(ParserEngine):
         event: SemanticEvent,
         deltas: list[DeltaToolCall],
     ) -> None:
-        """Emit the opening ``{`` as an arg delta when the name is first sent.
+        """Emit the opening `{` as an arg delta when the name is first sent.
 
-        When the TOOL_NAME→TOOL_ARGS transition fires, ``{`` arrives as an
-        ARG_VALUE_CHUNK before ``name_sent`` is True.  The parent emits the
-        name delta but not the ``{`` arg delta.  This override re-emits the
+        When the TOOL_NAME→TOOL_ARGS transition fires, `{` arrives as an
+        ARG_VALUE_CHUNK before `name_sent` is True.  The parent emits the
+        name delta but not the `{` arg delta.  This override re-emits the
         current chunk so streaming clients receive a valid JSON prefix.
         """
         idx = event.tool_index
@@ -985,11 +958,11 @@ class MistralParser(ParserEngine):
             )
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
-        """Return the first complete JSON value in ``raw_args``.
+        """Return the first complete JSON value in `raw_args`.
 
-        v11+ tool calls are emitted as ``name{args}`` with no terminator, so a
+        v11+ tool calls are emitted as `name{args}` with no terminator, so a
         model may append ordinary text after the closing brace. Parse the first
-        JSON value with ``raw_decode`` and drop any trailing output, mirroring
+        JSON value with `raw_decode` and drop any trailing output, mirroring
         the pre-v11 path (fixes gh#48975).
         """
         stripped = raw_args.strip()

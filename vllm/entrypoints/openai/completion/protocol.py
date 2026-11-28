@@ -4,17 +4,21 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     AnyResponseFormat,
+    BadWordsParam,
     MMPayload,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
@@ -80,11 +84,11 @@ class CompletionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     truncation_side: Literal["left", "right"] | None = Field(
@@ -110,7 +114,7 @@ class CompletionRequest(OpenAIBaseModel):
             "set."
         ),
     )
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -136,8 +140,8 @@ class CompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -214,9 +218,12 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "What the render response's `features` carry for multimodal "
             "items. 'tensors' serializes the processed tensors into "
-            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
-            "callers that need only the token layout and item hashes, such as "
-            "cache-aware routers. Do not send a 'none' response to "
+            "`kwargs_data` and `mm_metadata`. 'metadata' sets `kwargs_data` to "
+            "null and keeps `mm_metadata` for prefill with "
+            "`ec_transfer_params`. 'none' sets both to null for callers that "
+            "need only the token layout and item hashes, such as cache-aware "
+            "routers. `mm_metadata` is null if any modality has no metadata, "
+            "which 'metadata' rejects. Do not send a 'none' response to "
             "`/inference/v1/generate` which reads a null `kwargs_data` as "
             "every item being cached. Only supported on the render endpoints. "
             "Ignored on regular generation endpoints."
@@ -310,7 +317,7 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
     # Default sampling parameters for completion requests
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -332,6 +339,11 @@ class CompletionRequest(OpenAIBaseModel):
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get("temperature", 1.0)
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         return BeamSearchParams(
             beam_width=n,
             allowed_token_ids=self.allowed_token_ids,
@@ -341,11 +353,11 @@ class CompletionRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
@@ -387,6 +399,11 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
@@ -407,7 +424,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             output_kind=RequestOutputKind.DELTA
@@ -659,7 +676,18 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
+    top_logprobs: list[dict[str, float] | None] = Field(
+        default_factory=list,
+        description=(
+            "Per position, the returned candidates keyed by their decoded text. "
+            "Candidates that decode to the same string share one entry, e.g. "
+            "byte-fallback tokens that each hold part of a multi-byte character "
+            '(Thai, CJK or emoji text) all decode to "". The entry keeps the '
+            "highest logprob among them (on a tie, the token at that position). "
+            "Set `return_tokens_as_token_ids` to get one entry per candidate, "
+            "keyed by `token_id:{id}`."
+        ),
+    )
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
@@ -744,3 +772,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
     metrics: PerRequestMetrics | None = None
+    # vLLM-specific: KV transfer params returned with the final chunk
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )

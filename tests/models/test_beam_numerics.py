@@ -5,6 +5,8 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 
 def _torch_rms_norm(x, weight, eps):
     y = x.float()
@@ -47,7 +49,7 @@ def _assert_boundary_close(actual, expected, *, relative_tolerance=1e-4):
 @pytest.mark.parametrize("cap", [7.3, 30.0])
 @torch.inference_mode()
 def test_softcap_rounds_into_original_logits_without_touching_padding(dtype, rows, cap):
-    from vllm.models.beam.nvidia.activation import beam_softcap_logits
+    from vllm.models.beam import beam_softcap_logits
 
     torch.manual_seed(42)
     storage = torch.randn(rows, 264, device="cuda", dtype=dtype) * (cap * 3)
@@ -79,7 +81,7 @@ def test_softcap_rounds_into_original_logits_without_touching_padding(dtype, row
 def test_dense_activation_rounds_after_product(default_vllm_config, dtype, rows, width):
     """BF16 I/O must not round the SiLU result before multiplication."""
     import vllm._custom_ops  # noqa: F401
-    from vllm.models.beam.nvidia.activation import beam_silu_mul
+    from vllm.models.beam import beam_silu_mul
 
     torch.manual_seed(42)
     x = torch.randn(rows, 2 * width, device="cuda", dtype=dtype) * 4
@@ -104,7 +106,7 @@ def test_dense_activation_rounds_after_product(default_vllm_config, dtype, rows,
 @torch.inference_mode()
 def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, shape):
     """QKV slices and near-epsilon values retain the reference's FP32 affine."""
-    from vllm.models.beam.nvidia.layernorm import beam_rms_norm
+    from vllm.models.beam import beam_rms_norm
 
     generator = torch.Generator(device="cuda").manual_seed(42)
     storage = torch.randn(
@@ -134,7 +136,7 @@ def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, shape):
 @torch.inference_mode()
 def test_norm_residual_norm_preserves_intermediate_rounding(dtype, shape, next_):
     """Both residual and next input must retain BF16 casts between fused stages."""
-    from vllm.models.beam.nvidia.layernorm import beam_norm_residual_norm
+    from vllm.models.beam import beam_norm_residual_norm
 
     torch.manual_seed(42)
     x = torch.randn(shape[0], shape[1] + 32, device="cuda", dtype=dtype)[
@@ -199,7 +201,7 @@ def _separate_qk_norm_rope(
 @pytest.mark.parametrize("packed", [False, True])
 @torch.inference_mode()
 def test_output_gate_preserves_activation_dtype_rounding(dtype, rows, packed):
-    from vllm.models.beam.nvidia.attention_ops import beam_output_gate
+    from vllm.models.beam import beam_output_gate
 
     torch.manual_seed(42)
     x = torch.randn(rows, 768, device="cuda", dtype=dtype)
@@ -221,7 +223,7 @@ def test_output_gate_preserves_activation_dtype_rounding(dtype, rows, packed):
 def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
     dtype, rotary_dim, neox, head_dim, q_heads, k_heads
 ):
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     rows = 17
@@ -252,7 +254,7 @@ def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
 @torch.inference_mode()
 def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, neox):
     """Cache insertion preserves Q/K and follows live slot mappings on replay."""
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     sizes = (6 * kv_heads * 128, kv_heads * 128, kv_heads * 128)
@@ -308,7 +310,7 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(dtype):
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     positions = torch.tensor(
@@ -334,10 +336,7 @@ def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(dtype):
 @pytest.mark.parametrize("rotary_dim", [0, 128])
 @torch.inference_mode()
 def test_attention_fusions_replay_with_changed_positions_and_gates(rotary_dim):
-    from vllm.models.beam.nvidia.attention_ops import (
-        beam_output_gate,
-        beam_qk_norm_rope,
-    )
+    from vllm.models.beam import beam_output_gate, beam_qk_norm_rope
 
     torch.manual_seed(42)
     qkv = torch.randn(17, 1025, device="cuda", dtype=torch.bfloat16)[:, 1:]
@@ -383,7 +382,7 @@ def test_attention_fusions_replay_with_changed_positions_and_gates(rotary_dim):
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not torch.accelerator.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("rotary_dim", [0, 128])
 @pytest.mark.parametrize("insert_kv", [False, True])
 @torch.inference_mode()
@@ -393,12 +392,13 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
     """Warm tile buckets once, then vary batch sizes, positions offsets and scales."""
     from triton import knobs
 
-    from vllm.models.beam.nvidia.activation import beam_softcap_logits
-    from vllm.models.beam.nvidia.attention_ops import (
+    from vllm.models.beam import (
+        beam_norm_residual_norm,
         beam_output_gate,
         beam_qk_norm_rope,
+        beam_rms_norm,
+        beam_softcap_logits,
     )
-    from vllm.models.beam.nvidia.layernorm import beam_norm_residual_norm, beam_rms_norm
 
     device = "cuda"
     dtype = torch.bfloat16
@@ -447,7 +447,9 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
         run(tokens, 0, (0.125, 0.9682458365518543))
 
     def unexpected_compile(**kwargs):
-        if kwargs["fn"].module.startswith("vllm.models.beam.nvidia"):
+        if kwargs["fn"].module.startswith(
+            ("vllm.models.beam.amd", "vllm.models.beam.nvidia")
+        ):
             pytest.fail(f"Unexpected shape specialization: {kwargs['fn'].name}")
 
     with monkeypatch.context() as patch:
@@ -458,7 +460,242 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
     torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def _skip_without_beam_allreduce():
+    if current_platform.is_rocm():
+        pytest.skip("Beam multicast all-reduce is specific to the NVIDIA backend")
+    if not hasattr(torch.ops._C, "beam_allreduce_norm"):
+        pytest.skip("Beam all-reduce kernel not built")
+    mnnvl = pytest.importorskip("flashinfer.comm.mnnvl")
+    if not mnnvl.is_multicast_supported(0):
+        pytest.skip("NVLink multicast required")
+
+
+def _beam_allreduce_worker(rank, world_size, port, hidden_size, host="127.0.0.1"):
+    from datetime import timedelta
+
+    import torch.distributed as dist
+
+    from vllm.models.beam.nvidia.allreduce import (
+        BeamAllReduceWorkspace,
+        beam_allreduce_norm_residual_norm,
+    )
+
+    torch.accelerator.set_device_index(rank % torch.accelerator.device_count())
+    dist.init_process_group(
+        "nccl",
+        init_method=f"tcp://{host}:{port}",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=120),
+    )
+    group = dist.new_group(backend="gloo")
+    separate_cutoff = (10 * 1024**2 * world_size + 2 * hidden_size - 1) // (
+        2 * hidden_size
+    )
+    max_tokens = max(513, separate_cutoff + 1)
+    workspace = BeamAllReduceWorkspace(group, hidden_size, max_tokens)
+    torch.manual_seed(42)
+    residual = torch.randn(max_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16)
+    torch.manual_seed(43 + rank)
+    x = torch.randn_like(residual)
+    # Exercise shared Lamport generations across batch and implementation changes.
+    cutoff = workspace.small_batch_max_tokens
+    batches = [0, 1, cutoff, cutoff + 1, 513, 1]
+    if workspace.separate_norm_min_tokens is not None:
+        cutoff = workspace.separate_norm_min_tokens
+        batches += [cutoff - 1, cutoff, cutoff + 1, 1]
+    for iteration, tokens in enumerate(batches):
+        torch.manual_seed(42 + iteration)
+        residual.normal_()
+        weight.normal_()
+        torch.manual_seed(43 + iteration + rank)
+        x.normal_()
+        x[:, ::7] = -0.0
+        next_norm = iteration % 2 == 0
+        scales = (0.125, 0.9682458365518543)
+        args = (
+            x[:tokens],
+            residual[:tokens],
+            weight,
+            1e-6,
+            weight if next_norm else None,
+            1e-6 if next_norm else None,
+            scales,
+        )
+
+        def check(result, args):
+            partial, r, pw, peps, nw, neps, scales = args
+            # The collective rounds the FP32 sum before the post-norm.
+            reduced = partial.float()
+            dist.all_reduce(reduced)
+            reduced = reduced.bfloat16()
+            expected = _torch_boundary(reduced, r, pw, peps, nw, neps, scales)
+            _assert_boundary_close(result, expected, relative_tolerance=1e-3)
+
+        check(beam_allreduce_norm_residual_norm(*args, workspace), args)
+        torch.accelerator.synchronize()
+        dist.barrier()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = beam_allreduce_norm_residual_norm(*args, workspace)
+        for _ in range(2):
+            x.mul_(0.5)
+            graph.replay()
+            check(captured, args)
+        graph.reset()
+    # A small configured capacity still needs enough space for forced one-shot.
+    cutoff = workspace.small_batch_max_tokens
+    small_workspace = BeamAllReduceWorkspace(group, hidden_size, cutoff)
+    args = (x[:cutoff], residual[:cutoff], weight, 1e-6, weight, 1e-6, scales)
+    check(beam_allreduce_norm_residual_norm(*args, small_workspace), args)
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size,hidden_size", [(2, 1024), (2, 8192), (4, 5120), (8, 5120)]
+)
+def test_allreduce_boundary_handles_batch_changes_and_graph_replay(
+    world_size, hidden_size
+):
+    """Changing token counts must not consume stale Lamport slots or deadlock."""
+    from torch.multiprocessing import spawn
+
+    from vllm.utils.network_utils import get_open_port
+
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Requires {world_size} GPUs")
+    _skip_without_beam_allreduce()
+    spawn(
+        _beam_allreduce_worker,
+        args=(world_size, get_open_port(), hidden_size),
+        nprocs=world_size,
+    )
+
+
+def _beam_finalize_worker(rank, world_size, port, hidden_size):
+    import torch.distributed as dist
+
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.beam.nvidia.allreduce import (
+        BeamAllReduceWorkspace,
+        beam_allreduce_norm_residual_norm,
+        beam_finalize_allreduce_norm_residual_norm,
+    )
+
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group(
+        "nccl",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    group = dist.new_group(backend="gloo")
+    n, k = hidden_size, 8
+    workspace = BeamAllReduceWorkspace(group, n, 4095)
+    for iteration, m in enumerate([0, 1, 127, 513, 2]):
+        torch.manual_seed(100 + iteration)
+        residual = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)
+        weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+        torch.manual_seed(200 + rank + iteration)
+        experts = torch.randn(m * k, n, device="cuda", dtype=torch.bfloat16)
+        weights = torch.rand(m, k, device="cuda") / k
+        if iteration % 2:
+            weights = weights.bfloat16()
+        permutation = torch.randperm(m * k, device="cuda", dtype=torch.int32).view(m, k)
+        permutation[::3, -1] = -1
+        x = UnfinalizedMoEOutput(experts, weights, permutation)
+        routed_scale = 2.5 if iteration % 2 else 1.0
+        next_norm = iteration % 2 == 0
+        scales = (0.125, 0.9682458365518543)
+
+        args = (
+            x,
+            residual,
+            weight,
+            1e-6,
+            weight if next_norm else None,
+            1e-6 if next_norm else None,
+            scales,
+            workspace,
+            routed_scale,
+        )
+
+        def run(args=args):
+            return beam_finalize_allreduce_norm_residual_norm(*args)
+
+        def check(actual, args=args):
+            x, residual, pw, peps, nw, neps, scales, _, routed_scale = args
+            m, n = residual.shape
+            local = torch.zeros(m, n, device="cuda")
+            for expert in range(x.expert_weights.shape[1]):
+                rows = x.expanded_idx_to_permuted_idx[:, expert].long()
+                values = x.gemm2_permuted[rows.clamp_min(0)].float()
+                values = torch.where(rows[:, None] >= 0, values, 0)
+                local = local + values * x.expert_weights[:, expert, None].float()
+            local = (local.bfloat16().float() * routed_scale).bfloat16().float()
+            dist.all_reduce(local)
+            expected = _torch_boundary(
+                local.bfloat16(),
+                residual,
+                pw,
+                peps,
+                nw,
+                neps,
+                scales,
+            )
+            _assert_boundary_close(actual, expected)
+
+        check(run())
+        torch.accelerator.synchronize()
+        dist.barrier()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = run(args)
+        for _ in range(2):
+            experts.mul_(0.5)
+            graph.replay()
+            check(captured, args)
+            # Alternate two-stage finalization with the one-stage decode path
+            # on the same Lamport buffers, including during graph replay.
+            small = residual[:8]
+            actual = beam_allreduce_norm_residual_norm(
+                small, small, weight, 1e-6, weight, 1e-6, scales, args[-2]
+            )
+            reduced = small.float()
+            dist.all_reduce(reduced)
+            expected = _torch_boundary(
+                reduced.bfloat16(), small, weight, 1e-6, weight, 1e-6, scales
+            )
+            _assert_boundary_close(actual, expected)
+        graph.reset()
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(world_size):
+    """Empty local routes and live routing metadata retain BF16 casts on replay."""
+    from torch.multiprocessing import spawn
+
+    from vllm.utils.network_utils import get_open_port
+
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Requires {world_size} GPUs")
+    _skip_without_beam_allreduce()
+    spawn(
+        _beam_finalize_worker,
+        args=(world_size, get_open_port(), 5120),
+        nprocs=world_size,
+    )
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Packed projection is specific to the NVIDIA backend",
+)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 12, 16, 24, 64])
 @pytest.mark.parametrize("qkv_rows,gate_rows", [(2048, 1536), (1024, 768)])
 @torch.inference_mode()

@@ -4,7 +4,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Natively multimodal 1T-parameter MoE from Thinking Machines Lab — text/image/audio in, text out, up to 1M context — with relative attention, short convolution, and shared expert sinks."
   date_added: 2026-07-15
-  date_updated: 2026-08-04
+  date_updated: 2026-11-17
   tasks:
     - multimodal
   performance_headline: "380 tok/s/user with MTP8 (mean acceptance length 4.5) and 140 tok/s/user without MTP on 4× GB200 GPUs"
@@ -19,7 +19,6 @@ meta:
 model:
   model_id: "thinkingmachines/Inkling-NVFP4"
   min_vllm_version: "0.26.0"
-  nightly_required: true
   install:
     docker:
     pip:
@@ -75,7 +74,7 @@ variants:
     vram_minimum_gb: 651
     description: "Weight-only NVFP4 (group size 16) on the routed MoE expert matmuls only; attention, norms, sconv, shared experts, routers, embeddings, and the layer 0-1 dense MLPs stay BF16. ~542 GB on disk. On Hopper, the MoE kernel dequantizes the NVFP4 expert weights to BF16 on the fly."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
   mxfp4:
@@ -101,8 +100,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -115,8 +112,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -129,8 +124,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -143,7 +136,7 @@ variants:
     vram_minimum_gb: 2400
     description: "Full BF16 checkpoint (~1.8 TB on disk). Runs on Hopper and Blackwell."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
 
@@ -274,7 +267,7 @@ guide: |
 
   - **Hardware:** NVIDIA Hopper (H200/H20) or Blackwell for NVFP4 and BF16;
     AMD MI300X, MI325X, or MI355X with TP4 for MXFP4.
-  - **vLLM:** Nightly wheels (Day-0 support just landed).
+  - **vLLM:** 0.26.0 or newer.
   - **Parallelism:** 1T parameters requires multi-GPU. The featured configuration is 4x GB200
     (`--tensor-parallel-size 4`) for the NVFP4 variant. On Hopper, NVFP4 uses TP8 on H200;
     the BF16 variant needs multi-node.
@@ -292,7 +285,7 @@ guide: |
     --tool-call-parser inkling \
     --enable-auto-tool-choice \
     --tensor-parallel-size 4 \
-    --kernel-config.enable_flashinfer_autotune=False \
+    --disable-flashinfer-autotune \
     --trust-remote-code
   ```
 

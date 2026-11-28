@@ -104,7 +104,7 @@ def register_vllm_structural_tag(
         model: Structural tag model key.
         builtin_tools: Whether the model can call non-function tools, so its
             builder receives every request tool instead of only the function
-            tools from ``get_function_tools``.
+            tools from `get_function_tools`.
 
     """
 
@@ -122,14 +122,14 @@ def get_structural_tag_tools(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
     tool_choice: ToolChoice,
 ) -> Sequence[ChatCompletionToolsParam | ResponsesTool]:
-    """Return the tools a structural tag for ``model`` lets the model call.
+    """Return the tools a structural tag for `model` lets the model call.
 
     Most models are only shown function tools, so their grammar must cover
     exactly those: a tool missing from the prompt cannot be called, and one
     missing from the grammar is shown but blocked.
 
     Raises:
-        VLLMValidationError: ``tool_choice`` requires a call, but the model
+        VLLMValidationError: `tool_choice` requires a call, but the model
             has no tool it can call.
 
     """
@@ -162,7 +162,7 @@ def _with_tool_strict(
     tool: ChatCompletionToolsParam | ResponsesTool,
     strict: bool,
 ) -> ChatCompletionToolsParam | ResponsesTool:
-    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    """Return a copy of `tool` with `strict` set, leaving the request's alone."""
     if isinstance(tool, FunctionTool):
         return tool.model_copy(update={"strict": strict})
     if isinstance(tool, ChatCompletionToolsParam):
@@ -177,11 +177,11 @@ def resolve_tool_strictness(
     tool_choice: ToolChoice,
     strict_level: ToolStrictLevel,
 ) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
-    """Decide whether a structural tag applies and pin each tool's ``strict``.
+    """Decide whether a structural tag applies and pin each tool's `strict`.
 
-    A tool without an explicit ``strict`` is treated as non-strict: its call
+    A tool without an explicit `strict` is treated as non-strict: its call
     envelope is still constrained, but its arguments stay free unless the
-    server level is PARAMETER. ``None`` means no structural tag.
+    server level is PARAMETER. `None` means no structural tag.
     """
     if (
         tool_choice == "auto"
@@ -258,10 +258,10 @@ _TOOL_CALL_LIST_FORMATS = (
 
 
 def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
-    """Stop every tool-call list in ``tag`` after its first call, in place.
+    """Stop every tool-call list in `tag` after its first call, in place.
 
-    Enforces ``parallel_tool_calls=false`` in the grammar. In every registered
-    tag, ``_TOOL_CALL_LIST_FORMATS`` repeat tool calls, never arguments.
+    Enforces `parallel_tool_calls=false` in the grammar. In every registered
+    tag, `_TOOL_CALL_LIST_FORMATS` repeat tool calls, never arguments.
     """
 
     def visit(node: Any) -> None:
@@ -625,7 +625,7 @@ _K3_JSON_TO_XTML_TYPE = {
 
 
 def _k3_escape_attr(value: str) -> str:
-    """Mirror ``encoding_k3._escape_attr_value`` (``&`` then ``"``)."""
+    """Mirror `encoding_k3._escape_attr_value` (`&` then `"`)."""
     return str(value).replace("&", "&amp;").replace('"', "&quot;")
 
 
@@ -658,22 +658,78 @@ def _k3_bounded_string_regex(prop: dict[str, Any]) -> str | None:
     return _K3_STRING_ATOM + f"{{{min_len},{max_len}}}"
 
 
+_K3_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+_K3_DATA_KEYWORDS = frozenset({"const", "enum", "default", "examples"})
+_K3_ROOT_DEF = "__k3_parameters"
+
+
+def _k3_map_refs(schema: Any, rewrite: Callable[[str], str]) -> Any:
+    """Copy `schema` with every schema-level `$ref` passed through `rewrite`."""
+    if isinstance(schema, list):
+        return [_k3_map_refs(item, rewrite) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    mapped: dict[str, Any] = {}
+    for keyword, value in schema.items():
+        if keyword == "$ref" and isinstance(value, str):
+            mapped[keyword] = rewrite(value)
+        elif keyword in _K3_DATA_KEYWORDS:
+            mapped[keyword] = value
+        elif keyword in _K3_SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            mapped[keyword] = {
+                name: _k3_map_refs(subschema, rewrite)
+                for name, subschema in value.items()
+            }
+        else:
+            mapped[keyword] = _k3_map_refs(value, rewrite)
+    return mapped
+
+
+def _k3_rebased_parameters(parameters: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebase `parameters` for embedding under `$defs/__k3_parameters`.
+
+    Returns a copy whose JSON-pointer refs (`#`, `#/...`) are prefixed with
+    `#/$defs/__k3_parameters`, or `None` when every such ref already targets
+    the root `$defs` / `definitions` tables. Anchor (`#name`) and external refs
+    are kept as they are.
+    """
+    leaves_defs = False
+
+    def rebase(ref: str) -> str:
+        nonlocal leaves_defs
+        if ref != "#" and not ref.startswith("#/"):
+            return ref
+        leaves_defs |= not ref.startswith(("#/$defs/", "#/definitions/"))
+        return f"#/$defs/{_K3_ROOT_DEF}{ref[1:]}"
+
+    rebased = _k3_map_refs(parameters, rebase)
+    return rebased if leaves_defs else None
+
+
 def _k3_argument_tag(
     key: str,
     schema: dict[str, Any],
     root_defs: dict[str, Any] | None = None,
+    rebased_root: dict[str, Any] | None = None,
 ) -> TagFormat | None:
-    """Build one ``argument`` XTML tag for property ``key``.
+    """Build one `argument` XTML tag for property `key`.
 
-    ``string`` values are emitted raw (bounded by the close marker); every other
+    `string` values are emitted raw (bounded by the close marker); every other
     JSON type is emitted as JSON and validated against the property schema. A
     property whose type is a union / missing is left permissive (any XTML type,
     raw value) so a valid call is never rejected.
 
-    ``root_defs`` carries the tool parameters' root-level ``$defs`` /
-    ``definitions``: slicing a property out of the parameters document orphans
-    its ``#/$defs/...`` references, so those tables must be re-attached to keep
+    `root_defs` carries the tool parameters' root-level `$defs` /
+    `definitions`: slicing a property out of the parameters document orphans
+    its `#/$defs/...` references, so those tables must be re-attached to keep
     the embedded schema self-contained.
+
+    `rebased_root` is the output of `_k3_rebased_parameters`: when set, the
+    whole parameters document is attached instead to arguments that use
+    JSON-pointer refs, so refs into its property tree (`#/properties/...`,
+    `#`) keep resolving.
     """
     prop = schema if isinstance(schema, dict) else {}
     json_type = prop.get("type")
@@ -712,7 +768,13 @@ def _k3_argument_tag(
             content = AnyTextFormat(excludes=[_K3_CLOSE])
     else:
         embedded = prop
-        if root_defs:
+        if rebased_root and rebased_root["properties"][key] != prop:
+            embedded = dict(rebased_root["properties"][key])
+            embedded["$defs"] = {
+                **embedded.get("$defs", {}),
+                _K3_ROOT_DEF: rebased_root,
+            }
+        elif root_defs:
             embedded = dict(prop)
             for defs_key, defs_value in root_defs.items():
                 embedded.setdefault(defs_key, defs_value)
@@ -721,7 +783,7 @@ def _k3_argument_tag(
 
 
 def _k3_permissive_argument_tag() -> TagFormat:
-    """A key/type-agnostic ``argument`` tag: any attributes, raw value.
+    """A key/type-agnostic `argument` tag: any attributes, raw value.
 
     Used as a fallback so tools with union/loose schemas still get the XTML
     skeleton constrained without over-rejecting the value.
@@ -739,7 +801,7 @@ def _k3_permissive_argument_tag() -> TagFormat:
 
 
 def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
-    """Build ``argument`` tags for a tool's parameter schema.
+    """Build `argument` tags for a tool's parameter schema.
 
     Require at least one tag when the root schema declares required properties.
     Otherwise, keep accepting zero-or-more tags. Arguments remain order-agnostic
@@ -756,9 +818,10 @@ def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
         for defs_key in ("$defs", "definitions")
         if isinstance(parameters.get(defs_key), dict)
     }
+    rebased_root = _k3_rebased_parameters(parameters)
     tags: list[TagFormat] = []
     for key, prop in props.items():
-        tag = _k3_argument_tag(key, prop, root_defs)
+        tag = _k3_argument_tag(key, prop, root_defs, rebased_root)
         tags.append(tag if tag is not None else _k3_permissive_argument_tag())
     inner = tags[0] if len(tags) == 1 else OrFormat(elements=list(tags))
     required = parameters.get("required")
@@ -768,7 +831,7 @@ def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
 
 
 def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
-    """One ``call`` tag: ``<|open|>call tool="N" index="<digits>"<|sep|> args``."""
+    """One `call` tag: `<|open|>call tool="N" index="<digits>"<|sep|> args`."""
     function = tool.function
     parameters = get_function_parameters(function)
     begin = f'{_K3_OPEN}call tool="{_k3_escape_attr(function.name)}" index="'
@@ -788,10 +851,10 @@ def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
 def _k3_response_prefix() -> list[Any]:
     """The response channel that always precedes the tools channel.
 
-    ``response`` is generated in thinking mode (prefix ends at
-    ``<|open|>think<|sep|>``) but is part of the generation prefix in
+    `response` is generated in thinking mode (prefix ends at
+    `<|open|>think<|sep|>`) but is part of the generation prefix in
     non-thinking mode, so its open marker is optional. Excluding the reserved
-    marker heads commits ``<|close|>`` to the response-close branch immediately
+    marker heads commits `<|close|>` to the response-close branch immediately
     and prevents a nested channel from starting inside response text.
     """
     return [
@@ -863,10 +926,10 @@ def get_kimi_k3_structural_tag(
 
 
 def _hy_v4_argument_keys(parameters: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Split a tool's argument keys into ``(required, optional)``.
+    """Split a tool's argument keys into `(required, optional)`.
 
     Both lists keep declaration order. Required keys missing from
-    ``properties`` are still treated as required.
+    `properties` are still treated as required.
     """
     properties = parameters.get("properties") or {}
     required = parameters.get("required") or []
@@ -893,9 +956,9 @@ def get_hy_v4_structural_tag(
         tool_choice: Simplified tool choice.
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Per-checkpoint structural-token suffix including the
-            leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
+            leading colon (e.g. `":6124c78e"`), or `""` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
-            tokenizer vocab and passes it to ``get_model_structural_tag``.
+            tokenizer vocab and passes it to `get_model_structural_tag`.
 
     """
     del builtin_tools
@@ -1008,6 +1071,14 @@ _GLM_4_7_VALUE_EXCLUDES = [
 ]
 
 
+# Only scalar values are pinned as bare JSON. Array and object values stay raw
+# text: a JSON grammar there admits only JSON escapes after a backslash, so text
+# the model writes with bare backslashes (a Windows path) is forced into escapes
+# the model gives near-zero probability. The parser keeps the raw text when such
+# a value is not valid JSON.
+_GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
+
+
 def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     if "enum" in prop:
         values = [
@@ -1016,20 +1087,15 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
-    if isinstance(prop_type, list):
-        formats = [
-            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
-        ]
-        if "string" in prop_type:
-            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
-        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
-    if prop_type in (None, "string"):
+    types = prop_type if isinstance(prop_type, list) else [prop_type]
+    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
+    return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
-    """Return ``properties`` when the schema is a plain object schema."""
+    """Return `properties` when the schema is a plain object schema."""
     properties = params.get("properties")
     if (
         not isinstance(properties, dict)
@@ -1045,7 +1111,7 @@ def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
-    """Shallow tag for a non-strict tool: keys and basic value types pinned."""
+    """Shallow tag for a non-strict tool: keys and scalar value types pinned."""
     properties = _glm_4_7_plain_properties(tool.function.parameters or {})
     if properties is None:
         return TagFormat(
@@ -1103,11 +1169,11 @@ def get_glm_4_7_structural_tag(
     """Build the GLM-4.7 structural tag, dispatching per tool on strictness.
 
     Args:
-        function_tools: Normalized function tools with ``strict`` pinned by
-            ``resolve_tool_strictness``.
+        function_tools: Normalized function tools with `strict` pinned by
+            `resolve_tool_strictness`.
         builtin_tools: Unused; GLM-4.7 has no builtin tools.
-        tool_choice: Simplified tool choice (``auto`` / ``required`` /
-            ``forced``).
+        tool_choice: Simplified tool choice (`auto` / `required` /
+            `forced`).
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Unused; GLM-4.7 structural tokens are fixed.
 

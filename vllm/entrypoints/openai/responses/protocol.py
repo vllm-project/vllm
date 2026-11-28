@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -52,15 +52,19 @@ from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
+    FailFast,
     Field,
     PrivateAttr,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     MMPayload,
     PerRequestMetrics,
     StopParam,
@@ -71,7 +75,12 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -80,6 +89,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -171,8 +181,75 @@ def _tool_field(tool: Any, field: str) -> Any:
     return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
 
 
+def _merge_additional_tools(tools: list[Any], added: list[Any]) -> list[Any]:
+    """Append `added` to `tools`, keeping one definition per tool.
+
+    Named tools are keyed by (type, namespace, name). A repeated key replaces
+    the earlier definition in place, so the latest one wins (a client resending
+    its history carries every redefinition), and a namespace that is already
+    present is updated and gains only its new tools.
+    """
+
+    def is_namespace(tool: Any) -> bool:
+        return (
+            isinstance(tool, dict)
+            and tool.get("type") == "namespace"
+            and isinstance(tool.get("name"), str)
+            and isinstance(tool.get("tools"), list)
+        )
+
+    def key(tool: Any, namespace: str | None = None) -> tuple | None:
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+            return (tool.get("type"), namespace, tool["name"])
+        return None
+
+    # Namespaces get their own tools list, so updating one never mutates input.
+    merged = [{**t, "tools": list(t["tools"])} if is_namespace(t) else t for t in tools]
+    namespaces: dict[str, int] = {}
+    # Where each named tool lives: its index, or its namespace's index and its
+    # index within that namespace.
+    top_level: dict[tuple, int] = {}
+    namespaced: dict[tuple, tuple[int, int]] = {}
+    for index, tool in enumerate(merged):
+        if is_namespace(tool):
+            namespaces.setdefault(tool["name"], index)
+            for position, namespaced_tool in enumerate(tool["tools"]):
+                if (k := key(namespaced_tool, tool["name"])) is not None:
+                    namespaced.setdefault(k, (index, position))
+        elif (k := key(tool)) is not None:
+            top_level.setdefault(k, index)
+
+    for tool in added:
+        if not is_namespace(tool):
+            k = key(tool)
+            if k in top_level:
+                merged[top_level[k]] = tool
+            else:
+                if k is not None:
+                    top_level[k] = len(merged)
+                merged.append(tool)
+            continue
+        name = tool["name"]
+        if name in namespaces:
+            index = namespaces[name]
+            merged[index] = {**tool, "tools": merged[index]["tools"]}
+        else:
+            index = namespaces[name] = len(merged)
+            merged.append({**tool, "tools": []})
+        for namespaced_tool in tool["tools"]:
+            k = key(namespaced_tool, name)
+            if k in namespaced:
+                owner, slot = namespaced[k]
+                merged[owner]["tools"][slot] = namespaced_tool
+            else:
+                if k is not None:
+                    namespaced[k] = (index, len(merged[index]["tools"]))
+                merged[index]["tools"].append(namespaced_tool)
+    return merged
+
+
 def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
-    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    """Resolve a named tool choice to the flat `<namespace>__<name>` form."""
     from vllm.tool_parsers.utils import flat_namespace_tool_name
 
     exact_names: set[str] = set()
@@ -212,6 +289,31 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     )
 
 
+# OpenAI's response allows only in_memory / 24h; older request SDKs sent "in-memory"
+PromptCacheRetention = Literal["in_memory", "24h"]
+
+
+class PromptCacheOptions(OpenAIBaseModel):
+    """OpenAI prompt_cache_options; defined here because openai>=2.25 lacks it"""
+
+    mode: Literal["implicit", "explicit"] = "implicit"
+    ttl: Literal["30m"] = "30m"
+    comparison_response_id: str | None = None
+
+
+class PromptCacheOptionsParam(PromptCacheOptions):
+    """Request-side variant; prewarm is request-only in OpenAI's schema."""
+
+    prewarm: bool | None = None
+
+    def to_response(self) -> PromptCacheOptions:
+        return PromptCacheOptions(
+            mode=self.mode,
+            ttl=self.ttl,
+            comparison_response_id=self.comparison_response_id,
+        )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -231,11 +333,14 @@ class ResponsesRequest(OpenAIBaseModel):
     ) = None
     input: (
         str
-        | list[
-            Annotated[
-                ResponseInputOutputItem,
-                BeforeValidator(_default_input_image_details),
-            ]
+        | Annotated[
+            list[
+                Annotated[
+                    ResponseInputOutputItem,
+                    BeforeValidator(_default_input_image_details),
+                ]
+            ],
+            FailFast(),
         ]
     )
     instructions: str | None = None
@@ -270,7 +375,8 @@ class ResponsesRequest(OpenAIBaseModel):
     min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
+    spaces_between_special_tokens: bool = True
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -296,6 +402,27 @@ class ResponsesRequest(OpenAIBaseModel):
             "A key that was used to read from or write to the prompt cache."
             "Note: This field has not been implemented yet "
             "and vLLM will ignore it."
+        ),
+    )
+    prompt_cache_options: PromptCacheOptionsParam | None = Field(
+        default=None,
+        description=(
+            "Prompt-caching options. Accepted and echoed in the response; "
+            "vLLM does not act on them."
+        ),
+    )
+    prompt_cache_retention: PromptCacheRetention | None = Field(
+        default=None,
+        description=(
+            "Prompt cache retention policy. Accepted and echoed in the "
+            "response; vLLM does not act on it."
+        ),
+    )
+    safety_identifier: str | None = Field(
+        default=None,
+        description=(
+            "Stable identifier for the end user. Accepted and echoed in the "
+            "response; vLLM does not act on it."
         ),
     )
 
@@ -330,8 +457,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -343,9 +470,12 @@ class ResponsesRequest(OpenAIBaseModel):
         description=(
             "What the render response's `features` carry for multimodal "
             "items. 'tensors' serializes the processed tensors into "
-            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
-            "callers that need only the token layout and item hashes, such as "
-            "cache-aware routers. Do not send a 'none' response to "
+            "`kwargs_data` and `mm_metadata`. 'metadata' sets `kwargs_data` to "
+            "null and keeps `mm_metadata` for prefill with "
+            "`ec_transfer_params`. 'none' sets both to null for callers that "
+            "need only the token layout and item hashes, such as cache-aware "
+            "routers. `mm_metadata` is null if any modality has no metadata, "
+            "which 'metadata' rejects. Do not send a 'none' response to "
             "`/inference/v1/generate` which reads a null `kwargs_data` as "
             "every item being cached. Only supported on the render endpoints. "
             "Ignored on regular generation endpoints."
@@ -395,6 +525,7 @@ class ResponsesRequest(OpenAIBaseModel):
     stop: StopParam = []
     stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
+    thinking_token_budget: ThinkingTokenBudget = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -421,10 +552,16 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     # --8<-- [end:responses-extra-params]
 
+    @field_validator("prompt_cache_retention", mode="before")
+    @classmethod
+    def _normalize_prompt_cache_retention(cls, value: object) -> object:
+        return "in_memory" if value == "in-memory" else value
+
     def build_chat_params(
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
         from .utils import should_continue_final_message
 
@@ -434,7 +571,9 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
-        reasoning_effort = None if reasoning is None else reasoning.effort
+        reasoning_effort = map_reasoning_effort(
+            None if reasoning is None else reasoning.effort, reasoning_effort_map
+        )
 
         extra_kwargs: dict[str, Any] = dict(
             add_generation_prompt=not continue_final,
@@ -459,6 +598,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -478,7 +618,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     """Parser-derived constraints that preserve the public request's text metadata."""
 
-    _DEFAULT_SAMPLING_PARAMS = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -486,7 +626,7 @@ class ResponsesRequest(OpenAIBaseModel):
     }
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         if self._parser_structured_outputs is not None:
             return self._parser_structured_outputs
         if self.text is None or self.text.format is None:
@@ -549,6 +689,11 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
             stop = [stop]
@@ -579,9 +724,11 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
+            thinking_token_budget=self.thinking_token_budget,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
@@ -664,73 +811,105 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if not isinstance(item, dict):
-                processed_input.append(item)
+            normalized_item = cls._normalize_openresponses_input_item(item)
+
+            if not isinstance(normalized_item, dict):
+                processed_input.append(normalized_item)
                 continue
 
-            item_type = item.get("type")
+            item_type = normalized_item.get("type")
 
             if item_type == "function_call":
                 try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
+                    processed_input.append(ResponseFunctionToolCall(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(normalized_item)
 
             elif item_type == "reasoning":
-                if "id" not in item:
-                    item = {**item, "id": f"rs_{random_uuid()}"}
                 try:
-                    processed_input.append(ResponseReasoningItem(**item))
+                    processed_input.append(ResponseReasoningItem(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse reasoning to ResponseReasoningItem, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(normalized_item)
 
-            elif item_type == "message" and item.get("role") == "assistant":
-                content = item.get("content")
-                if not isinstance(content, list):
+            elif item_type == "message" and normalized_item.get("role") == "assistant":
+                if not isinstance(normalized_item.get("content"), list):
                     # String content is a valid EasyInputMessageParam,
                     # do not coerce it to ResponseOutputMessage
                     processed_input.append(item)
                     continue
 
-                original_item = item
-                item = dict(item)
-                if "id" not in item:
-                    item["id"] = f"msg_{random_uuid()}"
-                if "status" not in item:
-                    item["status"] = "completed"
-                # ResponseOutputText requires annotations
-                new_content = []
-                for c in content:
-                    if (
-                        isinstance(c, dict)
-                        and c.get("type") == "output_text"
-                        and "annotations" not in c
-                    ):
-                        c = {**c, "annotations": []}
-                    new_content.append(c)
-                item["content"] = new_content
                 try:
-                    processed_input.append(ResponseOutputMessage(**item))
+                    processed_input.append(ResponseOutputMessage(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(original_item)
+                    processed_input.append(item)
 
             else:
-                processed_input.append(item)
+                processed_input.append(normalized_item)
 
         data["input"] = processed_input
         return data
+
+    @staticmethod
+    def _normalize_openresponses_input_item(item: Any) -> Any:
+        """Normalize input items to bridge OpenResponses schema and openai-python.
+
+        The OpenResponses specification treats several fields as optional
+        (`id`, `status` on assistant/reasoning items; `annotations`
+        on output_text content) that the openai-python SDK marks as
+        required.  Fill sensible defaults so payloads conforming to the
+        OpenResponses spec pass SDK validation.
+        """
+        if not isinstance(item, dict):
+            return item
+
+        item_type = item.get("type", "message")
+        should_fill = item_type == "reasoning" or (
+            item_type == "message" and item.get("role") == "assistant"
+        )
+        if not should_fill:
+            return item
+
+        normalized_item = item.copy()
+        # ``type`` is optional in the OpenResponses schema but load-bearing for
+        # SDK validation: without it a filled-in assistant item matches
+        # ``ItemReference`` in the input union and collapses to ``{"id": ...}``,
+        # silently dropping role/content. Stamp back the type we keyed off.
+        normalized_item["type"] = item_type
+        if normalized_item.get("id") in (None, ""):
+            prefix = "rs" if item_type == "reasoning" else "msg"
+            normalized_item["id"] = f"{prefix}_{random_uuid()}"
+        if normalized_item.get("status") in (None, ""):
+            normalized_item["status"] = "completed"
+        if item_type == "reasoning" and normalized_item.get("summary") is None:
+            normalized_item["summary"] = []
+
+        # OpenResponses schema treats ``annotations`` as optional for
+        # output_text content, but the openai SDK requires it.
+        if item_type == "message" and isinstance(normalized_item.get("content"), list):
+            normalized_content = []
+            for content_item in normalized_item["content"]:
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                    and "annotations" not in content_item
+                ):
+                    content_item = {**content_item, "annotations": []}
+                normalized_content.append(content_item)
+            normalized_item["content"] = normalized_content
+
+        return normalized_item
 
     @model_validator(mode="before")
     @classmethod
@@ -767,6 +946,9 @@ class ResponsesRequest(OpenAIBaseModel):
             return data
 
         tools = data.get("tools")
+        if tools is not None and not isinstance(tools, list):
+            # Leave it to field validation, which answers with a 400.
+            return data
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
         is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
@@ -799,6 +981,50 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_additional_tools_items(cls, data):
+        """Move tools declared by `additional_tools` input items into `tools`.
+
+        Clients such as Codex declare tools through an input item
+        (`{"type": "additional_tools", "role": "developer", "tools": [...]}`)
+        rather than the top-level `tools` field. Everything downstream reads
+        `request.tools`, so merge them there and drop the item from `input`.
+
+        Defined last on purpose: Pydantic runs `before` validators in reverse
+        definition order, so this runs before the validators that read `tools`.
+        """
+        if not isinstance(data, dict):
+            return data
+        input_data = data.get("input")
+        if not isinstance(input_data, list):
+            return data
+
+        remaining_input = []
+        additional_tools = []
+        for item in input_data:
+            if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
+                remaining_input.append(item)
+                continue
+            item_tools = item.get("tools")
+            if not isinstance(item_tools, list):
+                raise VLLMValidationError(
+                    "`additional_tools` input items must contain a `tools` list.",
+                    parameter="input",
+                )
+            additional_tools.extend(item_tools)
+
+        if len(remaining_input) == len(input_data):
+            return data
+        data["input"] = remaining_input
+        tools = data.get("tools")
+        # A non-list `tools` is left to field validation, which rejects it. The
+        # items still leave `input`, so an openai SDK without the
+        # `additional_tools` input type adds no errors of its own to that one.
+        if isinstance(tools, list | None):
+            data["tools"] = _merge_additional_tools(tools or [], additional_tools)
+        return data
+
 
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
@@ -820,7 +1046,11 @@ class ResponsesResponse(OpenAIBaseModel):
     max_tool_calls: int | None = None
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
+    prompt_cache_options: PromptCacheOptions | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: PromptCacheRetention | None = None
     reasoning: Reasoning | None = None
+    safety_identifier: str | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: ResponseTextConfig | None = None
@@ -936,8 +1166,16 @@ class ResponsesResponse(OpenAIBaseModel):
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
             prompt=request.prompt,
+            prompt_cache_key=request.prompt_cache_key,
+            prompt_cache_options=(
+                request.prompt_cache_options.to_response()
+                if request.prompt_cache_options is not None
+                else None
+            ),
+            prompt_cache_retention=request.prompt_cache_retention,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            safety_identifier=request.safety_identifier,
             presence_penalty=sampling_params.presence_penalty,
             frequency_penalty=sampling_params.frequency_penalty,
             status=status,

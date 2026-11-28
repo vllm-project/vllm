@@ -3,16 +3,22 @@
 
 import jinja2
 import pytest
+import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers.chat_utils import load_chat_template
+from vllm.inputs.engine import MultiModalInput
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
 from vllm.renderers.hf import (
+    HfRenderer,
+    _build_prompt_embeds_updates,
     _consolidate_system_messages,
     _convert_developer_to_system,
     _detect_content_format,
     _detect_developer_role_support,
+    _ensure_prompt_embeds_placeholder_token,
     _get_hf_base_chat_template_params,
     _template_error_reason,
     _try_extract_ast,
@@ -30,6 +36,22 @@ EXAMPLES_DIR = VLLM_PATH / "examples"
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tokenize", False),
+        ("padding", False),
+        ("max_length", 8),
+        ("tokenizer_kwargs", {}),
+    ],
+)
+def test_reject_request_tokenizer_options(key, value):
+    with pytest.raises(VLLMValidationError, match=key) as exc:
+        HfRenderer.validate_request_chat_template_kwargs({key: value})
+    assert exc.value.parameter == "chat_template_kwargs"
+
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATION_OUTPUT = [
@@ -81,6 +103,43 @@ TEST_MESSAGES = [
     {"role": "user", "content": "What is the capital of"},
 ]
 ASSISTANT_MESSAGE_TO_CONTINUE = {"role": "assistant", "content": "The capital of"}
+
+
+def test_apply_prompt_embeds_keeps_engine_token_ids_in_vocabulary() -> None:
+    """Consume OOV sentinels without changing text IDs or embedding offsets."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    model_config = ModelConfig(model, enable_prompt_embeds=True)
+    renderer = HfRenderer(VllmConfig(model_config=model_config), get_tokenizer(model))
+    try:
+        assert renderer.tokenizer is not None
+        sentinel = _ensure_prompt_embeds_placeholder_token(renderer.tokenizer)
+        vocab_size = model_config.get_vocab_size()
+        assert sentinel >= vocab_size
+        tensors = [
+            torch.zeros(length, model_config.get_hidden_size()) for length in (2, 1)
+        ]
+        engine_input: MultiModalInput = {
+            "type": "multimodal",
+            "prompt_token_ids": [1, sentinel, sentinel, 2, sentinel, 3],
+            "mm_kwargs": MultiModalKwargsItems(),
+            "mm_hashes": {},
+            "mm_placeholders": {},
+        }
+
+        renderer._apply_prompt_embeds_to_engine_input(
+            engine_input, tensors, _build_prompt_embeds_updates(tensors, sentinel)
+        )
+
+        assert all(
+            0 <= token_id < vocab_size for token_id in engine_input["prompt_token_ids"]
+        )
+        assert engine_input["prompt_token_ids"] == [1, 0, 0, 2, 0, 3]
+        assert engine_input["mm_placeholders"]["prompt_embeds"] == [
+            PlaceholderRange(offset=1, length=2),
+            PlaceholderRange(offset=4, length=1),
+        ]
+    finally:
+        renderer.shutdown()
 
 
 def test_load_chat_template():
@@ -170,6 +229,24 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
         model_config=model_config,
     )
     assert isinstance(chat_template, str)
+
+
+def test_processor_multiple_chat_templates_uses_default():
+    """Render with the "default" template of a processor that has several."""
+    # Ships chat_template.jinja and additional_chat_templates/reranker.jinja
+    model = "Qwen/Qwen3-VL-Reranker-2B"
+    model_config = ModelConfig(model)
+    tokenizer = get_tokenizer(model)
+
+    prompt = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert prompt == "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
 
 
 @pytest.mark.parametrize(
@@ -415,6 +492,25 @@ def test_resolve_chat_template_kwargs_with_template_name():
             """,
             "string",
         ),
+        (
+            """
+            {% set ns = namespace(rest=messages) %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% set ns = namespace(rest=[]) %}
+            {% set ns.rest = messages %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
     ],
 )
 def test_detect_content_format(chat_template, expected_format):
@@ -552,7 +648,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         ("template_falcon_180b.jinja", "string"),
         ("template_falcon.jinja", "string"),
         ("template_inkbot.jinja", "string"),
-        ("template_teleflm.jinja", "string"),
         ("pooling/embed/template/dse_qwen2_vl.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_phi3v.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_qwen2vl.jinja", "openai"),
@@ -567,17 +662,12 @@ def test_resolve_content_format_fallbacks(model, expected_format):
 )
 def test_resolve_content_format_examples(template_path, expected_format):
     model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
-    model_config = ModelConfig(
-        model,
-        tokenizer=model,
-        trust_remote_code=True,
-    )
+    model_config = ModelConfig(model, tokenizer=model)
 
-    dummy_tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
-    dummy_tokenizer.chat_template = None
+    dummy_tokenizer = get_tokenizer(model)
+    # Clear the HF tokenizer's own template so resolution falls back to the
+    # one loaded below; ``chat_template`` is not part of ``TokenizerLike``.
+    dummy_tokenizer.chat_template = None  # type: ignore[attr-defined]
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
     assert isinstance(chat_template, str)
@@ -639,8 +729,10 @@ def test_get_gen_prompt(
         continue_final_message=continue_final_message,
     )
 
-    # Call the function and get the result
-    result = safe_apply_chat_template(
+    # Call the function and get the result. The plain role/content request
+    # messages are already in conversation shape, which mypy cannot see
+    # through ``ChatCompletionMessageParam``.
+    result = safe_apply_chat_template(  # type: ignore[call-overload]
         model_config,
         tokenizer,
         mock_request.messages,
@@ -781,7 +873,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         return get_tokenizer("facebook/opt-125m")
 
     def test_developer_converted_to_system_for_chatml(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -800,7 +892,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_preserved_when_template_supports_it(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -816,7 +908,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_developer_does_not_crash_strict_template(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -832,7 +924,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_no_developer_messages_no_overhead(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -850,7 +942,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_at_non_first_position_consolidated(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -871,7 +963,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "What is 2+2?" in result
 
     def test_developer_only_no_prior_system(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "developer", "content": "Be concise."},
             {"role": "user", "content": "What is 2+2?"},
@@ -949,7 +1041,7 @@ class TestApplyChatTemplateEffortTolerant:
         return get_tokenizer("facebook/opt-125m")
 
     def test_unsupported_effort_raises_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(
             VLLMValidationError,
             match="Unexpected reasoning effort high",
@@ -970,7 +1062,7 @@ class TestApplyChatTemplateEffortTolerant:
         )
 
     def test_supported_effort_accepted(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         result = safe_apply_chat_template(
             model_config,
             tokenizer,
@@ -982,7 +1074,7 @@ class TestApplyChatTemplateEffortTolerant:
         assert result == "user: Hello\n"
 
     def test_non_effort_template_error_is_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(VLLMValidationError, match="unrelated reason"):
             safe_apply_chat_template(
                 model_config,
@@ -1074,3 +1166,93 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+
+GRANITE_20B_FC_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+
+class TestGranite20bFcSystemMessage:
+    """`examples/tool_chat_template_granite_20b_fc.jinja` regression tests.
+
+    The template lifts the system message out of the conversation and renders
+    it as a `SYSTEM:` preamble, so its message loop has no branch for the
+    system role. Iterating the raw `messages` reached that missing branch and
+    raised, which `safe_apply_chat_template` surfaces as a 400, rejecting the
+    ordinary OpenAI request shape.
+    """
+
+    @pytest.fixture
+    def chat_template(self):
+        template = load_chat_template(
+            EXAMPLES_DIR / "tool_chat_template_granite_20b_fc.jinja"
+        )
+        assert isinstance(template, str)
+        return template
+
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig(
+            "facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="float16",
+        )
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    def test_system_message_renders_once_as_the_preamble(
+        self, model_config, tokenizer, chat_template
+    ):
+        conversation: list[ConversationMessage] = [
+            {"role": "system", "content": "You are a terse assistant."},
+            {"role": "user", "content": "What is the weather in Paris?"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            tools=GRANITE_20B_FC_TOOLS,
+            chat_template=chat_template,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "SYSTEM: You are a terse assistant." in result
+        # Once as the preamble, and never again from the message loop.
+        assert result.count("You are a terse assistant.") == 1
+        assert "USER: What is the weather in Paris?" in result
+        assert result.rstrip().endswith("ASSISTANT:")
+
+    def test_generation_prompt_survives_an_empty_message_loop(
+        self, model_config, tokenizer, chat_template
+    ):
+        """The assistant cue is emitted outside the loop, so it still renders
+        when the system message was the only one."""
+        conversation: list[ConversationMessage] = [
+            {"role": "system", "content": "You are a terse assistant."},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            tools=GRANITE_20B_FC_TOOLS,
+            chat_template=chat_template,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert result.rstrip().endswith("ASSISTANT:")

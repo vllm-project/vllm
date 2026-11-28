@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -17,12 +18,28 @@ use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
 };
+use vllm_engine_core_client::protocol::multimodal::MmModality;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
-use vllm_text::backend::hf::HfOverrides;
+use vllm_llm::AdmissionLimits;
+use vllm_metrics::CustomHistogramBuckets;
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
+
+use crate::fingerprint::FingerprintMode;
+use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default interval between periodic engine statistics logs.
+pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Default maximum size of an HTTP request body or a decoded gRPC message.
+pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
+pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
 
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -50,21 +67,127 @@ pub enum CoordinatorMode {
 }
 
 /// HTTP/API-server behavior switches that affect route-layer responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Educe)]
+#[educe(Default)]
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Which generated outputs to log (`--enable-log-outputs`), and how much
+    /// of each (`--max-log-len`).
+    pub log_outputs: OutputLogConfig,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// Format logprob tokens as `token_id:{id}` unless the request sets
+    /// `return_tokens_as_token_ids` itself.
+    pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
+    /// Stream usage on every chat and completions request, as if it set
+    /// `stream_options` with `include_usage` and `continuous_usage_stats`
+    /// (`--enable-force-include-usage`).
+    pub force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, log every error response at ERROR (`--log-error-stack`).
+    pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
+    /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
+    pub server_dev_mode: bool,
+    /// When `true`, register the LoRA load and unload routes
+    /// (`VLLM_ALLOW_RUNTIME_LORA_UPDATING`).
+    pub allow_runtime_lora_updating: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None`
+    /// removes the limit.
+    #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
+    pub request_body_limit_bytes: Option<usize>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
+    #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
+    pub max_n_sequences: i64,
+}
+
+/// The Decisions API read strategies the Rust frontend implements, named
+/// after Python's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DecisionsReadStrategy {
+    /// Python's `NextTokenStrategy`: each question is one request, read from
+    /// the logprobs of the option labels as the reply's first token.
+    NextToken,
+}
+
+/// Which generated outputs to log, like Python's `--enable-log-outputs` and
+/// `--enable-log-deltas`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum OutputLogging {
+    /// Log no generated outputs.
+    #[default]
+    Disabled,
+    /// Log the complete output of each response.
+    Complete,
+    /// Log the complete output of each response and every streamed delta.
+    CompleteAndDeltas,
+}
+
+impl OutputLogging {
+    /// Whether the complete output of each response is logged.
+    pub fn logs_complete(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Whether each streamed delta is logged.
+    pub fn logs_deltas(self) -> bool {
+        matches!(self, Self::CompleteAndDeltas)
+    }
+}
+
+/// Generated-output logging, like Python's `RequestLogger` used for
+/// `--enable-log-outputs`: which outputs to log and how much of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct OutputLogConfig {
+    /// Which generated outputs to log.
+    pub outputs: OutputLogging,
+    /// Maximum number of characters or token IDs of each logged output
+    /// (`--max-log-len`); `None` logs them in full.
+    pub max_log_len: Option<usize>,
+}
+
+impl OutputLogConfig {
+    /// Whether the complete output of each response is logged.
+    pub fn logs_complete(self) -> bool {
+        self.outputs.logs_complete()
+    }
+
+    /// Whether each streamed delta is logged.
+    pub fn logs_deltas(self) -> bool {
+        self.outputs.logs_deltas()
+    }
+}
+
+/// HTTP access log settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessLogConfig {
+    /// Whether to log one line per HTTP response (`--disable-access-log`
+    /// turns it off).
+    pub enabled: bool,
+    /// Request paths whose responses are not logged, matched exactly against
+    /// the path without its query string (`--disable-access-log-for-endpoints`).
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            excluded_paths: Vec::new(),
+        }
+    }
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.
@@ -210,22 +333,36 @@ impl FromStr for LoraModulePath {
     }
 }
 
-/// Normalized runtime configuration for the minimal OpenAI-compatible server.
+/// Default LoRA adapter path or Hugging Face repo id per modality, as
+/// Python's `--default-mm-loras` (e.g. `{"audio": "org/speech-lora"}`).
+pub type DefaultMmLoras = IndexMap<MmModality, String>;
+
+/// Runtime configuration of the OpenAI-compatible server: model files,
+/// rendering and parsing, listeners, and API behavior. Settings that only apply
+/// when the server drives engine-core itself live in [`EngineCoreConfig`].
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
-pub struct Config {
-    /// Frontend-to-engine transport setup.
-    pub transport_mode: TransportMode,
-    /// Requested frontend-side coordinator behavior.
-    pub coordinator_mode: CoordinatorMode,
+pub struct ServerConfig {
     /// Backend model identifier used for engine-core loading.
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for `model`.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
+    pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    #[serde(skip_serializing)]
+    pub hf_token: Option<HfToken>,
     /// JSON Merge Patch applied to the model config before backend initialization.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
+    /// Keys applied over the generation-config sampling defaults.
+    pub override_generation_config: serde_json::Map<String, Value>,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,
     /// the first entry is used as the primary ID in responses and all entries
     /// are accepted in requests. When empty, falls back to `model`.
@@ -241,6 +378,10 @@ pub struct Config {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Backend that compiles every structured-output constraint. Parser-built
+    /// output grammars are xgrammar structural tags, so chat builds them only
+    /// with xgrammar.
+    pub structured_outputs_backend: StructuredOutputBackend,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -249,62 +390,122 @@ pub struct Config {
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
+    /// How `/v1/decisions` reads the model, the strategy Python's
+    /// `select_read_strategy` picks for it. Without one, it answers 501.
+    pub decisions_read_strategy: Option<DecisionsReadStrategy>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    pub reasoning_effort_map: HashMap<ReasoningEffort, String>,
+    /// Whether requests may supply their own chat template.
+    pub trust_request_chat_template: bool,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to the model's default, else 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
-    /// LoRA adapters loaded at startup, in order. Startup fails if any of
-    /// them cannot be loaded.
-    pub lora_modules: Vec<LoraModulePath>,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
-    /// Minimum number of newly generated tokens batched into each streamed
-    /// output after the first one. Requests can raise it with their own
-    /// `stream_interval`.
-    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// What `system_fingerprint` reports on chat and completion responses.
+    pub fingerprint_mode: FingerprintMode,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// HTTP access log settings.
+    pub access_log: AccessLogConfig,
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
     /// listener.
     pub tls: Option<TlsConfig>,
+    /// Path prefix (`--root-path`) under which every route is also served,
+    /// for a server behind a path-based routing proxy. Never empty.
+    pub root_path: Option<String>,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
+    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
+    pub shutdown_timeout: Duration,
+    /// Keep the API server running after the LLM becomes permanently unhealthy
+    /// (`VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`).
+    pub keep_alive_on_engine_death: bool,
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
+    pub keep_alive_timeout: Duration,
+}
+
+/// How the server connects to engine-core and drives it through an
+/// [`EngineCoreLlm`](vllm_llm::EngineCoreLlm). A server built over a
+/// caller-supplied `Llm` has none of these settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EngineCoreConfig {
+    /// Frontend-to-engine transport setup.
+    pub transport_mode: TransportMode,
+    /// Requested frontend-side coordinator behavior.
+    pub coordinator_mode: CoordinatorMode,
+    /// LoRA adapters loaded at startup, in order. Startup fails if any of
+    /// them cannot be loaded.
+    pub lora_modules: Vec<LoraModulePath>,
+    /// LoRA adapters loaded at startup after `lora_modules`, each under its
+    /// modality's name, and applied to chat requests that name no adapter
+    /// but carry that modality.
+    pub default_mm_loras: DefaultMmLoras,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
+    /// Queue limits that reject new requests with HTTP 503.
+    pub admission_limits: AdmissionLimits,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage). Engines also stop recording stats, so metrics derived from
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
-    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
-    pub shutdown_timeout: Duration,
+    /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
+    /// default 10s), or `None` to never log while still recording stats.
+    pub log_stats_interval: Option<Duration>,
+    /// Replacement bucket bounds for the request and scheduler histogram
+    /// families (`--custom-histogram-buckets`); empty keeps the defaults. The
+    /// buckets are process-wide and fixed when the first `EngineCoreLlm` is
+    /// built, so an embedder that builds its own sets them with
+    /// `METRICS.set_custom_histogram_buckets` before that.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+    /// Keep external request IDs as engine-core request IDs instead of adding
+    /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
+    pub disable_request_id_randomization: bool,
     /// Whether the caller manages the engine process and shuts it down when
     /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
     pub manages_engine: bool,
-    /// Maximum idle time on a keep-alive HTTP connection before the server
-    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
-    pub keep_alive_timeout: Duration,
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
 }
 
-impl Config {
+impl ServerConfig {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
-        if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
-            bail!(
-                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
-            );
+        if self.api_server_options.log_outputs.logs_complete()
+            && !self.api_server_options.enable_log_requests
+        {
+            bail!("--enable-log-outputs requires --enable-log-requests");
         }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if matches!(
+            self.tool_strict_level,
+            Some(ToolStrictLevel::Function | ToolStrictLevel::Parameter)
+        ) && self.structured_outputs_backend != StructuredOutputBackend::Xgrammar
+        {
+            bail!(
+                "--tool-strict-level other than `auto` requires the xgrammar structured outputs backend"
+            );
+        }
         self.cors.validate()?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
@@ -317,8 +518,20 @@ impl Config {
                 max_logprobs
             );
         }
-        self.transport_mode.validate()?;
+        Ok(())
+    }
+}
 
+impl EngineCoreConfig {
+    /// Validate these settings together with the server config they run
+    /// under.
+    pub fn validate(&self, config: &ServerConfig) -> Result<()> {
+        if config.api_server_options.enable_per_request_metrics && self.disable_log_stats {
+            bail!(
+                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
+            );
+        }
+        self.transport_mode.validate()?;
         Ok(())
     }
 
@@ -338,7 +551,13 @@ impl Config {
         match &self.coordinator_mode {
             CoordinatorMode::None => None,
             CoordinatorMode::MaybeInProc => {
-                if model_is_moe && self.engine_count() > 1 {
+                // Coordinated DP runs one coordinator, hosted by the frontend
+                // owning rank 0; other frontends learn its address from their
+                // engines' READY `dp_stats_address`.
+                if model_is_moe
+                    && self.transport_mode.data_parallel_size() > 1
+                    && self.transport_mode.engine_start_index() == 0
+                {
                     Some(EngineCoreCoordinatorMode::InProc)
                 } else {
                     None

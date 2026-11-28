@@ -22,7 +22,7 @@ class CustomError(Exception):
 
 @pytest.fixture
 def custom_add_op(fake_vllm_ir):
-    """Register ``_custom_add`` plus impl_a, impl_b, impl_even for this test."""
+    """Register `_custom_add` plus impl_a, impl_b, impl_even for this test."""
 
     @vllm.ir.register_op(allow_inplace=True)
     def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -430,7 +430,7 @@ def test_set_default_torch_wrap(default: bool):
 
 @pytest.fixture
 def custom_mm_op(fake_vllm_ir):
-    """Fixture that registers ``_custom_mm`` (isolated by ``fake_vllm_ir``)."""
+    """Fixture that registers `_custom_mm` (isolated by `fake_vllm_ir`)."""
 
     @vllm.ir.register_op
     def _custom_mm(
@@ -666,7 +666,7 @@ class TestTolerance:
 
 
 def test_naming_validation(fake_vllm_ir):
-    """Test that op and provider names are validated ([a-z_][a-z_0-9]*)."""
+    """Test that op and provider names are validated (`[a-z_][a-z_0-9]*`)."""
 
     # Valid op and provider names
     @vllm.ir.register_op

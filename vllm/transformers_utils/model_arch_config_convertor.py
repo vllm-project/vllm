@@ -38,6 +38,7 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = False
 
     def get_per_layer_hf_configs(
         self,
@@ -83,7 +84,11 @@ class ModelArchConfigConvertorBase:
         return getattr(self.hf_text_config, "num_attention_heads", 0)
 
     def get_vocab_size(self) -> int:
-        return getattr(self.hf_text_config, "vocab_size", 0)
+        # Some configs (e.g. Inkling) give the padded embedding size as `vocab_size`
+        text_config = self.hf_text_config
+        if unpadded := getattr(text_config, "unpadded_vocab_size", None):
+            return unpadded
+        return getattr(text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
@@ -264,6 +269,10 @@ class ModelArchConfigConvertorBase:
                         quant_cfg["quant_method"] = "modelopt"
                     elif quant_algo_upper == "NVFP4":
                         quant_cfg["quant_method"] = "modelopt_fp4"
+                    elif quant_algo_upper == "INT8_PB_WO":
+                        quant_cfg["quant_method"] = "modelopt_int8"
+                    elif quant_algo_upper == "MIXED_PRECISION":
+                        quant_cfg["quant_method"] = "modelopt_mixed"
                     else:
                         raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
@@ -290,6 +299,22 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if self.transformers_backend:
+            config = self.hf_text_config
+            if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
+                return False
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonBackend,
+            )
+
+            head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+            if not MLACommonBackend.supports_head_size(head_size):
+                logger.info_once(
+                    "MLA does not support latent size %d, using full attention.",
+                    head_size,
+                )
+                return False
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
@@ -310,13 +335,16 @@ class ModelArchConfigConvertorBase:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
+            "mistral_large_4",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
             "hy_v4",
+            "hy_v4_flash",
             "hy_v4_mtp",
+            "hy_v4_dfly",
         ):
             # check is deepseek_v4 model
             if get_compress_ratios(self.hf_text_config):
@@ -342,10 +370,10 @@ class ModelArchConfigConvertorBase:
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
 
-        ``supports_multimodal`` is False when the deployment is configuration-
+        `supports_multimodal` is False when the deployment is configuration-
         disabled for multimodal inputs (text-only serving). In that case
         mm_prefix is unnecessary and must stay off so attention backends
-        without ``supports_mm_prefix()`` remain eligible.
+        without `supports_mm_prefix()` remain eligible.
         """
         if not supports_multimodal:
             return False
@@ -358,6 +386,7 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
+            "shieldgemma2",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -521,15 +550,6 @@ class FalconModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return super().get_total_num_kv_heads()
 
 
-class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_total_num_kv_heads(self) -> int:
-        return getattr(
-            self.hf_text_config.attn_config,
-            "kv_n_heads",
-            self.hf_text_config.num_attention_heads,
-        )
-
-
 class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_total_num_kv_heads(self) -> int:
         for block in self.hf_text_config.block_configs:
@@ -635,6 +655,8 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+            elif getattr(hf_config, "modeling_overrides", None) is not None:
+                hf_config.architectures = ["Qwen3_5ForSlotDecision"]
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
@@ -661,7 +683,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
         # because model-class resolution reads hf_config.architectures.
         if getattr(hf_config, "architectures", None) == [
-            "Qwen3OmniMoeForConditionalGeneration"
+            "Qwen3OmniMoeThinkerForConditionalGeneration"
         ]:
             model_path = hf_config.name_or_path
             if model_path and file_or_path_exists(
@@ -736,6 +758,16 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
+        if (per_layer := super().get_per_layer_hf_configs()) is None:
+            return None
+        # Each MTP layer matches the first main layer of the same type
+        layer_types = self.hf_text_config.layer_types
+        mtp_layer_types = self.hf_text_config.mtp_layer_types or []
+        return [per_layer[layer_types.index(t)] for t in mtp_layer_types]
 
 
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -824,14 +856,12 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
-    "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "deepseek_v4": DeepseekV4ModelArchConfigConvertor,
     "diffusion_gemma": Gemma4ModelArchConfigConvertor,
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
@@ -853,11 +883,9 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
-    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
+    "qwen3_omni_moe_thinker": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,

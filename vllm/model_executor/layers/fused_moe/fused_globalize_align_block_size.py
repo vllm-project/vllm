@@ -18,13 +18,13 @@ def fused_globalize_align_block_size(
 ) -> tuple[torch.Tensor, ...]:
     """Fuse the DeepEP-v2 INDEXED decode metadata chain into one launch.
 
-    Replaces ``_globalize_recv_topk_idx`` + ``moe_align_block_size`` +
-    ``count_and_sort_expert_tokens``. ``recv_topk_idx`` holds LOCAL expert ids
+    Replaces `_globalize_recv_topk_idx` + `moe_align_block_size` +
+    `count_and_sort_expert_tokens`. `recv_topk_idx` holds LOCAL expert ids
     and is globalized in place; valid-token count is read on-device from
-    ``psum_recv_per_rank[-1]`` (CUDA-graph safe).
+    `psum_recv_per_rank[-1]` (CUDA-graph safe).
 
-    Returns the globalized ``recv_topk_idx`` and the ``moe_align_block_size``
-    outputs ``(sorted_ids, expert_ids, num_tokens_post_pad)``. When requested,
+    Returns the globalized `recv_topk_idx` and the `moe_align_block_size`
+    outputs `(sorted_ids, expert_ids, num_tokens_post_pad)`. When requested,
     the final output is a masked identity scatter index for valid routes.
     """
     assert recv_topk_idx.dtype == torch.int64

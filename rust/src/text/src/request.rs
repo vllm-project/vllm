@@ -73,7 +73,8 @@ pub struct SamplingParams {
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to this request.
-    pub watermarking: bool,
+    /// `None` applies it, as in Python's `SamplingParams`.
+    pub watermarking: Option<bool>,
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
@@ -147,7 +148,14 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// `None` returns routing for the whole prompt.
+    pub routed_experts_prompt_start: Option<u32>,
     /// Additional request parameters for custom extensions.
+    ///
+    /// Python's `SamplingParams` names this `extra_args`, which clients of the
+    /// token generate API send.
+    #[serde(alias = "extra_args")]
     pub vllm_xargs: Option<HashMap<String, Value>>,
     /// Number of newly generated tokens to batch into each streamed output.
     /// Raises the interval above the frontend-level `--stream-interval`;
@@ -161,7 +169,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
-            watermarking: true,
+            watermarking: None,
             top_p: None,
             top_k: None,
             seed: None,
@@ -186,9 +194,61 @@ impl Default for SamplingParams {
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,
         }
+    }
+}
+
+impl SamplingParams {
+    /// vLLM's neutral sampling defaults, set explicitly: temperature 1, no
+    /// top-k, top-p or min-p truncation, and no penalties, so the sampler sees
+    /// the model's own distribution.
+    ///
+    /// Unlike [`Self::default`], whose unset fields inherit the model's
+    /// generation config during lowering, these lower the same under any
+    /// generation config, as with `--generation-config vllm`.
+    pub fn neutral() -> Self {
+        Self {
+            temperature: Some(1.0),
+            top_p: Some(1.0),
+            top_k: Some(0),
+            min_p: Some(0.0),
+            frequency_penalty: Some(0.0),
+            presence_penalty: Some(0.0),
+            repetition_penalty: Some(1.0),
+            ..Self::default()
+        }
+    }
+
+    /// Validate explicit sampling-parameter invariants that do not depend on
+    /// model defaults, vocabulary size, or prompt length.
+    ///
+    /// Lowering still runs the full check after applying model defaults and
+    /// engine limits; upper layers such as `vllm-chat` may call this early to
+    /// short-circuit before expensive work like template rendering or outbound
+    /// media fetches.
+    pub fn validate(&self) -> Result<()> {
+        crate::lower::sampling::validate_explicit_sampling_params(self)?;
+        if let (Some(min_tokens), Some(max_tokens)) = (self.min_tokens, self.max_tokens)
+            && min_tokens > max_tokens
+        {
+            return Err(Error::MinTokensExceedsMaxTokens {
+                min_tokens,
+                max_tokens,
+            });
+        }
+        crate::lower::normalize_thinking_token_budget(self.thinking_token_budget)?;
+        crate::lower::validate_repetition_detection(self.repetition_detection.as_ref())?;
+        crate::lower::logprobs::validate_explicit_logprobs(
+            self.logprobs,
+            self.prompt_logprobs,
+            self.logprob_token_ids.as_deref(),
+            self.prompt_logprob_token_ids.as_deref(),
+            self.prompt_logprob_start,
+        )?;
+        Ok(())
     }
 }
 
@@ -282,21 +342,19 @@ impl TextRequest {
     }
 
     /// Validate the minimum invariants before tokenization or request lowering.
+    ///
+    /// Keep prompt-independent checks shared with `vllm_chat::ChatRequest::validate`
+    /// so chat requests short-circuit before rendering and outbound media fetches.
     pub fn validate(&self) -> Result<()> {
         if matches!(&self.prompt, Prompt::TokenIds(ids) if ids.is_empty()) {
             return Err(Error::EmptyPromptTokenIds {
                 request_id: self.request_id.clone(),
             });
         }
-        if self
-            .decode_options
-            .stop_strings
-            .as_ref()
-            .is_some_and(|stops| stops.iter().any(String::is_empty))
-        {
-            return Err(Error::EmptyStopString {
-                request_id: self.request_id.clone(),
-            });
+        self.sampling_params.validate()?;
+        self.decode_options.validate(&self.request_id)?;
+        if let Some(salt) = self.cache_salt.as_deref() {
+            validate_cache_salt(salt)?;
         }
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
@@ -305,9 +363,48 @@ impl TextRequest {
     }
 }
 
+/// Validate a prefix-cache salt before handing it to downstream cache
+/// backends, which may use `@`, `/`, `\`, or `\0` as key separators or
+/// terminators. Mirrors Python's `validate_cache_salt`, which counts length in
+/// code points.
+pub fn validate_cache_salt(salt: &str) -> Result<()> {
+    const MAX_LEN: usize = 128;
+    const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
+
+    if salt.is_empty() || salt.chars().count() > MAX_LEN || salt.contains(FORBIDDEN) {
+        return Err(Error::InvalidCacheSalt);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_unsafe_cache_salt() {
+        let max_len = "é".repeat(128);
+        for (salt, valid) in [
+            ("tenant-a", true),
+            (max_len.as_str(), true),
+            ("", false),
+            (&"a".repeat(129), false),
+            ("tenant@a", false),
+            ("tenant/a", false),
+            ("tenant\\a", false),
+            ("tenant\0a", false),
+        ] {
+            let request = TextRequest {
+                cache_salt: Some(salt.to_string()),
+                ..TextRequest::for_test()
+            };
+            let result = request.validate();
+            assert_eq!(result.is_ok(), valid, "{salt:?}");
+            if let Err(err) = result {
+                assert!(err.kind().is_invalid_request());
+            }
+        }
+    }
 
     #[test]
     fn validate_rejects_empty_stop_string_at_shared_chokepoint() {
@@ -317,9 +414,27 @@ mod tests {
 
         let err = request.validate().expect_err("empty stop strings should be rejected");
 
-        assert!(err.is_request_validation_error());
+        assert!(err.kind().is_invalid_request());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn validate_enforces_stop_string_limit_at_shared_chokepoint() {
+        let mut request = TextRequest::for_test();
+        request.decode_options.stop_strings =
+            Some(["one", "two", "three", "four"].into_iter().map(str::to_string).collect());
+        request.validate().expect("four stop strings should be accepted");
+
+        request.decode_options.stop_strings = Some(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        let err = request.validate().expect_err("five stop strings should be rejected");
+        assert_eq!(err.kind(), crate::ErrorKind::invalid_param("stop"));
+        assert!(err.to_string().contains("Too many stop strings: 5"));
     }
 
     #[test]

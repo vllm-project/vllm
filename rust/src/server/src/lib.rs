@@ -5,13 +5,18 @@
 
 mod config;
 mod error;
+mod fingerprint;
 mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod mm_wire;
+mod model_names;
 mod render;
 mod routes;
 mod runtime;
+#[cfg(test)]
+mod serve_tests;
 mod server_info;
 mod state;
 mod tls;
@@ -23,20 +28,27 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
-    ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, LoraModulePath, TlsConfig,
+    AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
+pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
+pub use routes::openai::utils::types::ReasoningEffort;
+use thiserror_ext::AsReport as _;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -48,11 +60,15 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+pub use vllm_llm::AdmissionLimits;
+use vllm_llm::{EngineCoreLlm, Llm};
+pub use vllm_metrics::CustomHistogramBuckets;
+use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
-use crate::listener::{Listener, MaybeTlsListener};
+use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
+use crate::routes::decisions::NextTokenReads;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
@@ -62,7 +78,31 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+async fn monitor_llm_health(
+    mut health: watch::Receiver<bool>,
+    shutdown: CancellationToken,
+    keep_alive: bool,
+) -> Result<()> {
+    if keep_alive {
+        shutdown.cancelled().await;
+        return Ok(());
+    }
+
+    let health_result = tokio::select! {
+        biased;
+
+        result = health.wait_for(|healthy| !*healthy) => result,
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+    let health_channel_error = health_result.err();
+
+    shutdown.cancel();
+    match health_channel_error {
+        None => bail!("LLM became permanently unhealthy"),
+        Some(error) => Err(error).context("LLM health channel closed"),
+    }
+}
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -73,9 +113,10 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
     }
 }
 
-/// Build the shared application state for one configured model and one engine
-/// client, including any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+/// Build the shared application state for one configured model and its
+/// [`Llm`]. When the server drives engine-core itself, connect to it here and
+/// load any static LoRA adapters from `--lora-modules`.
+async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppState>> {
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.
@@ -87,17 +128,26 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
+            override_generation_config: config.override_generation_config.clone(),
             renderer: config.renderer,
+            tool_call_parser: config.tool_call_parser.clone(),
+            reasoning_parser: config.reasoning_parser.clone(),
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs
                 .clone()
                 .unwrap_or_default(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
@@ -105,91 +155,188 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
-    let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
-    info!(
-        engine_count = config.engine_count(),
-        model_is_moe = text_backend.is_moe(),
-        ?coordinator_mode,
-        "resolved coordinator mode"
-    );
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: config.transport_mode.clone(),
-        coordinator_mode,
-        model_name: metrics_model_name,
-        client_index: 0,
-        engine_stats_enabled: !config.disable_log_stats,
-    })
-    .await
-    .context("failed to connect to engine core")?;
-
-    let llm = Llm::new(client)
-        .with_log_stats(!config.disable_log_stats)
-        .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+    let (llm, engine_core) = match llm {
+        LlmSource::EngineCore(engine_core) => {
+            let (llm, server_info) = connect_engine_core(
+                config,
+                &engine_core,
+                text_backend.is_moe(),
+                metrics_model_name.clone(),
+            )
+            .await?;
+            (
+                Box::new(llm) as Box<dyn Llm>,
+                Some((engine_core, server_info)),
+            )
+        }
+        LlmSource::Provided(llm) => (llm, None),
+    };
+    let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
+    let text = TextLlm::from_boxed(llm, text_backend)
+        .with_served_model_name(metrics_model_name)
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
-        .with_tool_call_parser(config.tool_call_parser.clone())
-        .with_reasoning_parser(config.reasoning_parser.clone())
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
-    let state = Arc::new(
-        AppState::new(served_model_names, chat)
-            .with_model_path(config.model.clone())
-            .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_api_keys(config.api_keys.clone())
-            .with_cors(config.cors.clone())
-            .with_profiler(config.profiler.clone()),
-    );
+    let decisions = match config.decisions_read_strategy {
+        Some(DecisionsReadStrategy::NextToken) => (NextTokenReads::probe(&chat))
+            .inspect_err(|error| warn!("/v1/systemone and /v1/decisions are off: {error}"))
+            .ok(),
+        None => None,
+    };
 
-    // Load operator-configured static LoRA adapters before serving, failing
-    // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules).await?;
+    let mut state = AppState::new(served_model_names, chat)
+        .with_model_path(config.model.clone())
+        .with_api_server_options(config.api_server_options)
+        .with_api_keys(config.api_keys.clone())
+        .with_cors(config.cors.clone())
+        .with_access_log(config.access_log.clone())
+        .with_system_fingerprint(system_fingerprint)
+        .with_decisions(decisions);
+    if let Some((engine_core, server_info)) = &engine_core {
+        state = (state.with_engine_core_client())
+            .with_server_info(server_info.clone())
+            .with_profiler(engine_core.profiler.clone())
+            .with_default_mm_lora_modalities(
+                engine_core.default_mm_loras.keys().copied().collect(),
+            );
+    }
+    let state = Arc::new(state);
+
+    if let Some((engine_core, _)) = &engine_core {
+        // Load operator-configured static LoRA adapters before serving, failing
+        // startup on any error like Python's `init_static_loras` does.
+        lora::load_static_loras(
+            &state,
+            &engine_core.lora_modules,
+            &engine_core.default_mm_loras,
+        )
+        .await?;
+    }
 
     Ok(state)
 }
 
-async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
-    for module in modules {
-        let request = state.load_static_lora(module).await.with_context(|| {
-            format!(
-                "failed to load LoRA adapter `{}` from --lora-modules",
-                module.name
-            )
-        })?;
-        info!(
-            lora_name = %request.lora_name,
-            lora_int_id = request.lora_int_id,
-            lora_path = %request.lora_path,
-            "loaded static LoRA adapter"
-        );
-    }
-    Ok(())
+/// Connect to engine-core as `engine_core` describes and drive it through an
+/// [`EngineCoreLlm`].
+async fn connect_engine_core(
+    config: &ServerConfig,
+    engine_core: &EngineCoreConfig,
+    model_is_moe: bool,
+    metrics_model_name: String,
+) -> Result<(EngineCoreLlm, ServerInfoSnapshot)> {
+    let coordinator_mode = engine_core.effective_coordinator_mode(model_is_moe);
+    info!(
+        engine_count = engine_core.engine_count(),
+        model_is_moe,
+        ?coordinator_mode,
+        "resolved coordinator mode"
+    );
+
+    // Fix the histogram buckets before the engine connection records metrics.
+    METRICS.set_custom_histogram_buckets(engine_core.custom_histogram_buckets.clone());
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        transport_mode: engine_core.transport_mode.clone(),
+        coordinator_mode,
+        model_name: metrics_model_name,
+        client_index: 0,
+        engine_stats_enabled: !engine_core.disable_log_stats,
+    })
+    .await
+    .context("failed to connect to engine core")?;
+    let server_info = ServerInfoSnapshot::new(config, engine_core, &client);
+
+    let llm = EngineCoreLlm::new(client)
+        .with_log_stats(engine_core.log_stats_interval.filter(|_| !engine_core.disable_log_stats))
+        .with_request_id_randomization(!engine_core.disable_request_id_randomization)
+        .with_stream_interval(engine_core.stream_interval)
+        .with_admission_limits(engine_core.admission_limits);
+    Ok((llm, server_info))
 }
 
-/// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
-/// cancelled.
+/// Extra routes merged into the finalized vLLM router.
+type RouterExtension = Box<dyn FnOnce(Router) -> Router + Send>;
+
+/// Where the server's [`Llm`] comes from.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "built once per server, so boxing the config would only burden callers"
+)]
+pub enum LlmSource {
+    /// The server connects to engine-core and serves it through an
+    /// [`EngineCoreLlm`].
+    EngineCore(EngineCoreConfig),
+    /// A caller-built `Llm`, such as a router over several engines or a client
+    /// for a remote one. The server treats it as opaque, even when it is an
+    /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core
+    /// client directly are not served.
+    ///
+    /// The server shuts it down after serving. If startup fails or is
+    /// cancelled, it is dropped without [`Llm::shutdown`], so its `Drop` must
+    /// release what it holds.
+    Provided(Box<dyn Llm>),
+}
+
+/// The OpenAI-compatible HTTP server, with an optional gRPC server.
 ///
 /// The server owns one `vllm-chat` facade, which in turn owns the lower
 /// `vllm-text` and `vllm-llm` layers, and shuts them down before returning.
-pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
-    serve_with_router_extension(config, shutdown, |router| router).await
+pub struct Server {
+    config: ServerConfig,
+    llm: LlmSource,
+    extend_router: RouterExtension,
 }
 
-/// Run the OpenAI-compatible HTTP server with an opt-in router extension.
-///
-/// The extension receives the finalized vLLM router and can merge additional
-/// routes before the server starts accepting requests.
-pub async fn serve_with_router_extension<F>(
-    config: Config,
+impl Server {
+    /// Serve the `Llm` that `llm` describes, configured by `config`.
+    pub fn new(config: ServerConfig, llm: LlmSource) -> Self {
+        Self {
+            config,
+            llm,
+            extend_router: Box::new(|router| router),
+        }
+    }
+
+    /// Add an opt-in router extension.
+    ///
+    /// The extension receives the finalized vLLM router and can merge additional
+    /// routes before the server starts accepting requests.
+    pub fn router_extension(
+        mut self,
+        extend_router: impl FnOnce(Router) -> Router + Send + 'static,
+    ) -> Self {
+        self.extend_router = Box::new(extend_router);
+        self
+    }
+
+    /// Run the server until the supplied shutdown token is cancelled.
+    pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
+        serve(self.config, self.llm, shutdown, self.extend_router).await
+    }
+}
+
+async fn serve(
+    config: ServerConfig,
+    llm: LlmSource,
     shutdown: CancellationToken,
-    extend_router: F,
-) -> Result<()>
-where
-    F: FnOnce(Router) -> Router,
-{
+    extend_router: RouterExtension,
+) -> Result<()> {
     config.validate().context("invalid OpenAI frontend configuration")?;
+    if let LlmSource::EngineCore(engine_core) = &llm {
+        (engine_core.validate(&config)).context("invalid engine-core configuration")?;
+    }
+    let manages_engine =
+        matches!(&llm, LlmSource::EngineCore(engine_core) if engine_core.manages_engine);
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
     // before the (potentially long) engine handshake.
@@ -203,11 +350,14 @@ where
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config) => result?,
+        result = build_state(&config, llm) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
-    let app = extend_router(build_router(state.clone()));
+    let mut app = extend_router(build_router(state.clone()));
+    if let Some(root_path) = config.root_path.clone() {
+        app = routes::with_root_path(app, root_path);
+    }
 
     info!(model, "starting vLLM server");
 
@@ -231,33 +381,39 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
+        let message_limit = state.api_server_options.request_body_limit_bytes.unwrap_or(usize::MAX);
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = state.engine_core_client().subscribe_health();
-        health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
-        health_reporter.set_serving::<grpc::ControlGrpcService>().await;
-        let control_service = grpc::ControlGrpcService::new(
-            grpc::ControlServiceImpl::new(state.clone())
-                .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
+        // Control drives the engine-core client directly, so it is only served
+        // over an `EngineCoreLlm`.
+        let control_service = state.has_engine_core_client().then(|| {
+            grpc::ControlGrpcService::new(
+                grpc::ControlServiceImpl::new(state.clone())
+                    .with_engine_shutdown(manages_engine.then(|| shutdown.clone())),
+            )
+            .max_decoding_message_size(message_limit)
+        });
+        let engine_health = grpc::EngineHealth::subscribe(state.llm());
+        let health_monitor = grpc::HealthMonitor::register(
+            health_reporter,
+            engine_health,
+            control_service.is_some(),
         )
-        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        .await;
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
+        let render_service =
+            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
+                .max_decoding_message_size(message_limit);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
-            .add_service(control_service)
-            .add_service(inference_service);
-        Some((
-            addr,
-            grpc_listener,
-            svc,
-            grpc_tls,
-            health_reporter,
-            engine_health,
-        ))
+            .add_optional_service(control_service)
+            .add_service(inference_service)
+            .add_service(render_service);
+        Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
         None
     };
@@ -276,6 +432,11 @@ where
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
+    let health_fut = monitor_llm_health(
+        state.llm().subscribe_health(),
+        server_shutdown.clone(),
+        config.keep_alive_on_engine_death,
+    );
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
     tokio::spawn({
@@ -346,9 +507,7 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((addr, grpc_listener, svc, grpc_tls, health_reporter, engine_health)) =
-                grpc_setup
-            else {
+            let Some((addr, grpc_listener, svc, grpc_tls, health_monitor)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
@@ -359,40 +518,34 @@ where
                 Some(context) => MaybeTlsListener::tls(grpc_listener, context),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
-            let server =
-                svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
+            let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {
+                let server = svc.serve_with_incoming_shutdown(incoming, stop);
+                async move {
+                    let result = server.await.context("gRPC server failed");
+                    server_shutdown.cancel();
+                    result
+                }
+            });
 
             info!(%addr, tls, model, "gRPC server is ready to accept requests");
 
-            let server = async move {
-                let result = tokio::select! {
-                    result = server => {
-                        result.context("gRPC server failed")
-                    }
-                    _ = force_shutdown.cancelled() => {
-                        warn!("gRPC graceful shutdown deadline elapsed; aborting server");
-                        Ok(())
-                    }
-                };
-
-                server_shutdown.cancel();
-                result
-            };
-
-            let (result, ()) = tokio::join!(server, health_monitor);
-            result
+            server.await.unwrap_or_else(|| {
+                warn!("gRPC graceful shutdown deadline elapsed; aborting server");
+                Ok(())
+            })
         }
     };
 
-    let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+    let (http_res, grpc_res, health_res) = tokio::join!(http_fut, grpc_fut, health_fut);
     http_res.and(grpc_res)?;
 
     let shutdown_deadline = shutdown_deadline
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let shutdown_result = state.shutdown(shutdown_deadline).await;
+    health_res?;
+    shutdown_result
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
@@ -413,19 +566,29 @@ async fn serve_connections<L>(
     timeouts: ConnectionTimeouts,
 ) -> Result<()>
 where
-    L: axum::serve::Listener,
+    L: axum::serve::Listener<Addr = ListenerAddr>,
 {
     let graceful = GracefulShutdown::new();
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
-        let (io, _addr) = tokio::select! {
+        let (io, addr) = tokio::select! {
             conn = listener.accept() => conn,
             () = &mut shutdown => break,
         };
 
-        let service = TowerToHyperService::new(
-            app.clone().map_request(|req: Request<Incoming>| req.map(Body::new)),
-        );
+        // Expose the TCP peer to handlers, as `ConnectInfo` does for `axum::serve`.
+        let peer = match addr {
+            ListenerAddr::Tcp(addr) => Some(ConnectInfo(addr)),
+            ListenerAddr::Unix(_) => None,
+        };
+        let service =
+            TowerToHyperService::new(app.clone().map_request(move |req: Request<Incoming>| {
+                let mut req = req.map(Body::new);
+                if let Some(peer) = peer {
+                    req.extensions_mut().insert(peer);
+                }
+                req
+            }));
         let mut builder = http1::Builder::new();
         builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
         if !timeouts.keep_alive_enabled {
@@ -436,7 +599,7 @@ where
 
         tokio::spawn(async move {
             if let Err(err) = connection.await {
-                trace!(error = %err, "failed to serve connection");
+                trace!(error = %err.as_report(), "failed to serve connection");
             }
         });
     }
@@ -448,6 +611,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
 
     #[test]
@@ -466,5 +631,57 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_cancels_server_shutdown_and_returns_error() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not react to an unhealthy LLM");
+        };
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_remains_fatal_when_shutdown_is_already_requested() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+
+        health_tx.send(false).expect("publish unhealthy LLM");
+        shutdown.cancel();
+
+        let result = monitor_llm_health(health, shutdown, false).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_alive_ignores_unhealthy_llm_until_shutdown() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+        assert!(futures::poll!(&mut monitor).is_pending());
+        assert!(!shutdown.is_cancelled());
+
+        shutdown.cancel();
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not finish during shutdown");
+        };
+        result.expect("keep-alive shutdown is graceful");
     }
 }

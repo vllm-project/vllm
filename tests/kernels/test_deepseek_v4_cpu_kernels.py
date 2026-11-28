@@ -20,7 +20,7 @@ from tests.kernels.test_fused_deepseek_v4_qnorm_rope_kv_insert import (
     make_cos_sin_cache,
 )
 from tests.kernels.utils import bf16_ulp_distance, fp8_ulp_distance
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     compress_norm_rope_store_cpu,
     compress_norm_rope_store_indexer_cpu,
     flash_mla_with_kvcache_cpu,
@@ -1341,7 +1341,7 @@ def test_fused_indexer_q_rope_quant_dispatches_to_cpu_kernel():
         positions, q, cos_sin_cache, weights, softmax_scale, head_scale
     )
 
-    with mock.patch("vllm._custom_ops.fused_indexer_q_rope_quant_cpu") as mocked:
+    with mock.patch("vllm._cpu_ops.fused_indexer_q_rope_quant_cpu") as mocked:
         fused_indexer_q_rope_quant(
             positions,
             q.clone(),
@@ -1492,3 +1492,62 @@ def test_hc_head_cpu(num_tokens: int, hidden_size: int):
     )
 
     torch.testing.assert_close(out, ref, atol=5e-2, rtol=1e-2)
+
+
+def test_cpu_swa_builder_decode_step_reads_every_layer_type():
+    """A decode step through the CPU sparse-SWA builder: build() reads a tile
+    scheduler entry for every DeepSeek-V4 layer type, so the CPU override must
+    return all of them (it used to miss c1a/c2a and raise KeyError)."""
+    from tests.v1.attention.test_deepseek_v4_swa_visible import BLOCK_SIZE, make_batch
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.models.deepseek_v4.cpu.cpu_mla import (
+        DeepseekV4CPUSparseSWAMetadataBuilder,
+    )
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device("cpu")
+    window = 8
+    vllm_config = create_vllm_config(
+        max_model_len=4096,
+        max_num_batched_tokens=64,
+        max_num_seqs=8,
+        hf_config_override={"sliding_window": window},
+    )
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        cache_dtype_str="auto",
+        model_version="deepseek_v4",
+    )
+    builder = DeepseekV4CPUSparseSWAMetadataBuilder(
+        kv_cache_spec=spec,
+        layer_names=["layer0"],
+        vllm_config=vllm_config,
+        device=device,
+    )
+    seq_lens, query_lens = [30, 12], [1, 1]
+    query_start_loc, seq_lens_t, _, slot_mapping, block_table = make_batch(
+        seq_lens, query_lens, device
+    )
+    md = builder.build(
+        0,
+        CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc,
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t,
+            num_reqs=len(seq_lens),
+            num_actual_tokens=int(query_start_loc[-1]),
+            max_query_len=max(query_lens),
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=True,
+        ),
+    )
+    assert md.num_decode_tokens == 2
+    assert md.tile_sched_c1a is None
+    assert md.tile_sched_c2a is None

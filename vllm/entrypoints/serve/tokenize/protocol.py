@@ -7,10 +7,20 @@ from typing import Annotated, Any, TypeAlias
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.generate.base.protocol import AnyResponseFormat
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    ReasoningEffort,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -97,6 +107,26 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort used to render the chat template, with the same "
+            "meaning as in the Chat Completions API."
+        ),
+    )
+    documents: list[dict[str, str]] | None = Field(
+        default=None,
+        description=(
+            "A list of dicts representing documents that will be accessible to "
+            "the model if it is performing RAG (retrieval-augmented generation)."
+            " If the template does not support RAG, this argument will have no "
+            "effect."
+        ),
+    )
+    response_format: AnyResponseFormat | None = Field(
+        default=None,
+        description="Output format to include in model-specific chat templating.",
+    )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
         default=None,
         description=(
@@ -129,18 +159,34 @@ class TokenizeChatRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
+        reasoning_effort = map_reasoning_effort(
+            self.reasoning_effort, reasoning_effort_map
+        )
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            documents=self.documents,
+            reasoning_effort=reasoning_effort,
+        )
+
+        # Same as the chat completions request, so that /tokenize renders the
+        # prompt the chat route would generate from.
+        user_kwargs = self.chat_template_kwargs or {}
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            response_format=self.response_format,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -149,6 +195,28 @@ class TokenizeChatRequest(OpenAIBaseModel):
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )
+
+    def to_chat_completion_request(self) -> ChatCompletionRequest:
+        """Build the chat completion request with this request's chat fields."""
+        data = self.model_dump(
+            include={
+                "model",
+                "messages",
+                "tools",
+                "add_generation_prompt",
+                "continue_final_message",
+                "add_special_tokens",
+                "chat_template",
+                "chat_template_kwargs",
+                "reasoning_effort",
+                "documents",
+                "media_io_kwargs",
+                "mm_processor_kwargs",
+                "response_format",
+            },
+            exclude_none=True,
+        )
+        return ChatCompletionRequest.model_validate(data)
 
 
 TokenizeRequest: TypeAlias = TokenizeCompletionRequest | TokenizeChatRequest

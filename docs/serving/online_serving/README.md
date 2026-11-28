@@ -8,7 +8,7 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](./openai_compatible_server.md#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - *Note: `suffix` parameter is not supported.*
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - *Note: `user` parameter is ignored.*
@@ -28,6 +28,9 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - `max_tokens=0` (Anthropic's prompt-cache pre-warming request) is rejected
+      with a 400. vLLM samples at least one token per request, so warm the cache
+      with `max_tokens=1` instead.
 
 ## Cohere APIs
 
@@ -90,6 +93,30 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
+- `/health_generate` - Generation readiness check, see [below](#generation-readiness-check)
+
+### Generation readiness check
+
+`/health` checks that the API server and engine processes are alive. `/health_generate` also checks that every engine rank can run the model right now. It returns 200 when the server can serve generation, and 503 with a JSON body otherwise:
+
+```json
+{"status": "not_ready", "reason": "probe_timeout", "message": "...", "engine_ranks": [1], "timeout_s": 20.0}
+```
+
+| Reason | Meaning |
+| :---- | :---- |
+| `engine_dead` | An engine process has died. |
+| `sleeping` | An engine rank is sleeping or paused, e.g. during a weight sync. |
+| `probe_timeout` | An engine rank did not answer in time. Its busy loop is blocked, e.g. in a hung collective, or a single step is taking longer than the timeout. |
+| `probe_failed` | The GPU probe on an idle engine rank raised an error. |
+
+A busy engine rank is reported ready without extra GPU work. An idle rank runs one dummy forward pass on every worker. For MoE models with data parallelism, idle ranks only check that the engine answers, because a dummy batch outside a DP wave could deadlock.
+
+The `timeout_s` query parameter sets how long to wait for each engine rank before reporting `probe_timeout` (default 20 s), e.g. `/health_generate?timeout_s=10`.
+
+Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
+
+While elastic EP is scaling, the server answers every request, including `/health_generate`, with a 503 and an `{"error": ...}` body instead. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not serve `/health_generate` yet.
 
 ### Metrics APIs
 
@@ -116,7 +143,7 @@ LoRA dynamic loading & unloading is enabled in the API server. This should ONLY 
 
 For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
 
-- `/start_profile` - Start PyTorch profiler
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body with `profiler_kwargs` to pass keyword arguments to the underlying profiler)
 - `/stop_profile` - Stop PyTorch profiler
 
 ### SageMaker APIs
@@ -126,7 +153,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
-Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below; `VLLM_SERVER_DEV_MODE=1` also turns it on unless `--disable-scale-out` is passed. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
 
 ### Tokens IN <> Tokens OUT APIs
 
@@ -171,6 +198,14 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
+
 ## Server in development mode
 
 When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
@@ -185,7 +220,7 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../../training/weight_updates/README.md).
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
@@ -231,6 +266,10 @@ and all chat requests will error.
 ```bash
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
+
+With `--tokenizer-mode cohere`, configure custom templates with
+`--chat-template`. This mode rejects template source in HTTP requests,
+even when `--trust-request-chat-template` is enabled.
 
 vLLM community provides a set of chat templates for popular models. You can find them under the [examples](../../../examples) directory.
 

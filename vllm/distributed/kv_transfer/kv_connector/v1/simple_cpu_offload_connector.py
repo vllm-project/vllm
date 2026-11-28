@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.host_buffer import parse_hugepage_size
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
@@ -130,6 +131,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
+        cpu_hugepage_size = parse_hugepage_size(
+            extra_config.get("cpu_hugepage_block_size")
+        )
 
         if disk_mode:
             if disk_path is None:
@@ -139,6 +143,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             if disk_capacity_bytes <= 0:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
+            if cpu_hugepage_size is not None:
+                raise ValueError(
+                    'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
                 )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
@@ -206,9 +214,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                cpu_hugepage_size=cpu_hugepage_size,
             )
 
     # --- Worker-side methods ---
+
+    def shutdown(self) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:

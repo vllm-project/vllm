@@ -1,7 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import signal
+import socket
+import struct
+import sys
+import threading
+import time
+from contextlib import closing, suppress
+from multiprocessing import get_context
+
 import numpy as np
+import psutil
 import pytest
 import torch
 
@@ -9,8 +20,304 @@ from vllm.distributed.eplb.eplb_state import (
     _compute_eplb_load_stats,  # pyright: ignore[reportPrivateUsage]
     compute_logical_maps,
 )
+from vllm.distributed.eplb.policy import EplbStats
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+from vllm.distributed.eplb.policy_process import (
+    EplbPolicyProcess,
+    EplbPolicyProcessError,
+)
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "layers, experts, replicas, groups, nodes, ranks",
+    [(2, 12, 16, 4, 2, 8), (4, 128, 132, 1, 1, 2), (58, 256, 288, 1, 2, 8)],
+)
+def test_policy_process_preserves_exact_placements(
+    layers, experts, replicas, groups, nodes, ranks
+):
+    """IPC preserves placement and local-slot retention across planning cycles."""
+    generator = torch.Generator().manual_seed(17)
+    policy = DefaultEplbPolicy()
+    old_map = None
+    with closing(EplbPolicyProcess(policy)) as process:
+        for load in (
+            torch.zeros(layers, experts),
+            torch.ones(layers, experts),
+            torch.randint(0, 1000, (layers, experts), generator=generator),
+        ):
+            stats = EplbStats(load, replicas, groups, nodes, ranks)
+            expected = policy.rebalance_experts(stats, old_map)
+            actual = process.rebalance_experts(stats, old_map)
+            assert torch.equal(actual, expected)
+            assert actual.device.type == "cpu"
+            old_map = actual
+
+
+class _CountingPolicy(DefaultEplbPolicy):
+    def __init__(self):
+        self.calls = 0
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        self.calls += 1
+        return torch.tensor([os.getpid(), self.calls, torch.get_num_threads()])
+
+
+class _LockedPolicy(_CountingPolicy):
+    def __init__(self, calls=7):
+        self.calls = calls
+        self.lock = threading.Lock()
+
+    def __getstate__(self):
+        return self.calls
+
+    def __setstate__(self, calls):
+        self.calls = calls
+        self.lock = threading.Lock()
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        with self.lock:
+            return super().rebalance_experts(stats, old_global_expert_indices)
+
+
+def test_policy_process_recreates_private_resources_and_preserves_state():
+    """A custom policy recreates its lock without losing its initial CPU state."""
+    policy = _LockedPolicy()
+    stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+    with closing(EplbPolicyProcess(policy)) as process:
+        first = process.rebalance_experts(stats).tolist()
+        second = process.rebalance_experts(stats).tolist()
+        assert first == [second[0], 8, 1]
+        assert second == [first[0], 9, 1]
+        assert first[0] != os.getpid()
+    assert policy.calls == 7
+    assert not psutil.pid_exists(first[0])
+
+
+def test_policy_process_does_not_initialize_accelerators_or_distributed(monkeypatch):
+    """CPU planning must not create an inference device context or process group."""
+    from vllm.platforms.interface import Platform, PlatformEnum
+
+    class FakeAcceleratorPlatform(Platform):
+        _enum = PlatformEnum.CUDA
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "current_platform", FakeAcceleratorPlatform()
+    )
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            import vllm.platforms as platforms
+
+            return torch.tensor(
+                [
+                    torch.cuda.is_initialized(),
+                    torch.xpu.is_initialized(),
+                    torch.distributed.is_initialized(),
+                    not platforms.current_platform.is_cpu(),
+                    os.environ.get("VLLM_TARGET_DEVICE") != "cpu",
+                ]
+            )
+
+    with closing(EplbPolicyProcess(Policy())) as process:
+        result = process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+    assert not result.any()
+
+
+def test_policy_process_ignores_shadowing_cwd_package(tmp_path, monkeypatch):
+    """Launching from a directory with another vllm/ tree keeps parent's sys.path."""
+    shadow_pkg = tmp_path / "vllm"
+    shadow_pkg.mkdir()
+    (shadow_pkg / "__init__.py").write_text(
+        'raise RuntimeError("shadowed vllm imported from cwd")\n',
+        encoding="utf-8",
+    )
+    clean_sys_path = [
+        p for p in sys.path if p and os.path.abspath(p) != os.path.abspath(tmp_path)
+    ]
+    monkeypatch.setattr(sys, "path", clean_sys_path)
+    monkeypatch.chdir(tmp_path)
+
+    with closing(EplbPolicyProcess(DefaultEplbPolicy())) as process:
+        result = process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+    assert result.shape == (1, 4)
+
+
+def test_policy_process_ignores_sigint():
+    """Terminal Ctrl+C is handled by the parent without killing the planner first."""
+    stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+    with closing(EplbPolicyProcess(_CountingPolicy())) as process:
+        first = process.rebalance_experts(stats).tolist()
+        os.kill(first[0], signal.SIGINT)
+        time.sleep(0.05)
+        second = process.rebalance_experts(stats).tolist()
+        assert second == [first[0], 2, 1]
+
+
+def test_policy_process_explains_incompatible_policy_before_starting_child():
+    policy = _CountingPolicy()
+    policy.lock = threading.Lock()
+    children = {child.pid for child in psutil.Process().children()}
+    with pytest.raises(TypeError, match="__getstate__/__setstate__ or __reduce__"):
+        EplbPolicyProcess(policy)
+    assert {child.pid for child in psutil.Process().children()} == children
+
+
+def test_policy_process_timeout_includes_blocked_request_send():
+    """A stopped child cannot leave a large snapshot blocked in send forever."""
+    with closing(EplbPolicyProcess(_CountingPolicy())) as process:
+        stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+        pid = process.rebalance_experts(stats)[0].item()
+        process._timeout = 0.2
+        os.kill(pid, signal.SIGSTOP)
+        finished = threading.Event()
+        errors = []
+
+        def request():
+            try:
+                process.rebalance_experts(
+                    EplbStats(torch.ones(1, 1024 * 1024), 4, 1, 1, 1)
+                )
+            except EplbPolicyProcessError as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            assert finished.wait(15), "request remained blocked past its IPC budget"
+            assert len(errors) == 1 and "timed out" in str(errors[0])
+        finally:
+            if psutil.pid_exists(pid):
+                os.kill(pid, signal.SIGCONT)
+            worker.join(timeout=15)
+        assert not worker.is_alive()
+        assert not psutil.pid_exists(pid)
+
+
+def test_policy_process_timeout_includes_partial_response():
+    """Read readiness does not imply that the entire response has arrived."""
+    from vllm.distributed.eplb.policy_process import _receive
+
+    reader, writer = socket.socketpair()
+    with reader, writer:
+        writer.sendall(struct.pack("!Q", 1024) + b"partial")
+        with pytest.raises(TimeoutError):
+            _receive(reader, time.monotonic() + 0.1)
+
+
+class _OwnerDeathPolicy(DefaultEplbPolicy):
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        with socket.create_connection(self.endpoint, timeout=20) as connection:
+            connection.sendall(struct.pack("!Q", os.getpid()))
+            threading.Event().wait()
+
+
+def _plan_until_owner_exits(endpoint):
+    with closing(EplbPolicyProcess(_OwnerDeathPolicy(endpoint))) as process:
+        process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+
+
+def test_policy_process_exits_if_owner_is_killed_during_planning():
+    """A forced executor shutdown must not leave an orphaned, blocked policy."""
+    child = None
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(30)
+        owner = get_context("spawn").Process(
+            target=_plan_until_owner_exits, args=(listener.getsockname(),), daemon=True
+        )
+        owner.start()
+        try:
+            with listener.accept()[0] as connection:
+                connection.settimeout(10)
+                payload = bytearray()
+                while len(payload) < 8:
+                    chunk = connection.recv(8 - len(payload))
+                    assert chunk, "planner closed before publishing its PID"
+                    payload.extend(chunk)
+                child = psutil.Process(struct.unpack("!Q", payload)[0])
+                owner.kill()
+                owner.join(timeout=5)
+                assert owner.exitcode is not None
+                try:
+                    child.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    assert child.status() == psutil.STATUS_ZOMBIE
+        finally:
+            if owner.is_alive():
+                owner.kill()
+                owner.join(timeout=5)
+            if child is not None:
+                with suppress(psutil.NoSuchProcess):
+                    if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                        child.kill()
+                        child.wait(timeout=5)
+
+
+def _plan_from_daemon(connection):
+    try:
+        with closing(EplbPolicyProcess(_CountingPolicy())) as process:
+            stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+            first = process.rebalance_experts(stats).tolist()
+            second = process.rebalance_experts(stats).tolist()
+        connection.send((os.getpid(), first, second, psutil.pid_exists(first[0])))
+    finally:
+        connection.close()
+
+
+def test_policy_process_runs_persistently_inside_daemon_worker():
+    """A daemon executor can reuse and reap its independently launched planner."""
+    context = get_context("spawn")
+    parent, child = context.Pipe()
+    worker = context.Process(target=_plan_from_daemon, args=(child,), daemon=True)
+    worker.start()
+    child.close()
+    try:
+        assert parent.poll(60), "daemon worker did not return a policy result"
+        worker_pid, first, second, child_alive = parent.recv()
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+        assert first == [second[0], 1, 1]
+        assert second == [first[0], 2, 1]
+        assert first[0] != worker_pid
+        assert not child_alive
+    finally:
+        parent.close()
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=10)
+
+
+def test_policy_process_reports_policy_exception():
+    """A failed policy is reported instead of leaving IPC waiting forever."""
+    with (
+        closing(EplbPolicyProcess(DefaultEplbPolicy())) as process,
+        pytest.raises(RuntimeError, match="AssertionError"),
+    ):
+        process.rebalance_experts(EplbStats(torch.ones(1, 4), 3, 1, 1, 1))
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_policy_process_reports_unresponsive_child(failure):
+    """Child death and a stuck policy both terminate the planning request."""
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            if failure == "exit":
+                os._exit(7)
+            threading.Event().wait()
+
+    message = "disconnected" if failure == "exit" else "timed out"
+    with closing(EplbPolicyProcess(Policy())) as process:
+        process._timeout = 0.2
+        with pytest.raises(EplbPolicyProcessError, match=message):
+            process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
 
 
 def test_eplb_load_stats_reduce_across_ranks():
@@ -45,8 +352,8 @@ def test_basic_rebalance():
     num_nodes = 2
     num_gpus = 8
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     log2phy, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -100,8 +407,8 @@ def test_single_gpu_case():
     num_nodes = 1
     num_gpus = 1
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     log2phy, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -123,8 +430,8 @@ def test_equal_weights():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -147,8 +454,8 @@ def test_extreme_weight_imbalance():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -176,8 +483,8 @@ def test_multiple_layers():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -202,7 +509,7 @@ def test_parameter_validation():
     # Test non-divisible case - this should handle normally without throwing
     # errors because the function will fall back to global load balancing
     # strategy
-    phy2log = DefaultEplbPolicy.rebalance_experts(weight, 8, 3, 2, 4)
+    phy2log = DefaultEplbPolicy().rebalance_experts(EplbStats(weight, 8, 3, 2, 4))
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
     assert phy2log.shape == (1, 8)
     assert logcnt.shape == (1, 4)
@@ -210,7 +517,9 @@ def test_parameter_validation():
     # Test cases that will actually cause errors:
     # num_physical_experts not divisible by num_gpus
     with pytest.raises(AssertionError):
-        DefaultEplbPolicy.rebalance_experts(weight, 7, 2, 2, 4)  # 7 not divisible by 4
+        DefaultEplbPolicy().rebalance_experts(
+            EplbStats(weight, 7, 2, 2, 4)
+        )  # 7 not divisible by 4
 
 
 def test_small_scale_hierarchical():
@@ -225,8 +534,8 @@ def test_small_scale_hierarchical():
     num_nodes = 2  # 2 nodes
     num_gpus = 4  # 4 GPUs
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -253,8 +562,8 @@ def test_global_load_balance_fallback():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -278,8 +587,8 @@ def test_device_compatibility(device):
     num_nodes = 1
     num_gpus = 2
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
@@ -295,7 +604,7 @@ def test_additional_cases():
     weight1 = torch.tensor(
         [[50, 100, 75, 120, 90, 60, 80, 110, 40, 70, 95, 85, 65, 55, 45, 35]]
     )
-    phy2log1 = DefaultEplbPolicy.rebalance_experts(weight1, 24, 8, 4, 8)
+    phy2log1 = DefaultEplbPolicy().rebalance_experts(EplbStats(weight1, 24, 8, 4, 8))
     _, logcnt1 = compute_logical_maps(phy2log1, weight1.shape[-1])
 
     assert phy2log1.shape == (1, 24)
@@ -309,7 +618,7 @@ def test_additional_cases():
             [12, 25, 50, 100, 150, 200],  # Increasing weights
         ]
     )
-    phy2log2 = DefaultEplbPolicy.rebalance_experts(weight2, 10, 3, 1, 2)
+    phy2log2 = DefaultEplbPolicy().rebalance_experts(EplbStats(weight2, 10, 3, 1, 2))
     _, logcnt2 = compute_logical_maps(phy2log2, weight2.shape[-1])
 
     assert phy2log2.shape == (2, 10)
@@ -369,8 +678,8 @@ if __name__ == "__main__":
     num_nodes = 2
     num_gpus = 8
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    phy2log = DefaultEplbPolicy().rebalance_experts(
+        EplbStats(weight, num_replicas, num_groups, num_nodes, num_gpus)
     )
     print(phy2log)
 
