@@ -36,6 +36,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    find_tool_required,
 )
 from vllm.v1.token_buffer import rfind_tokens
 
@@ -72,6 +73,9 @@ class ToolCallSlot:
         "_name_window",
         "_name_parts_seen",
         "_json_name",
+        "invalid",
+        "fallback_sent",
+        "args_deferred",
     )
 
     def __init__(self) -> None:
@@ -88,6 +92,13 @@ class ToolCallSlot:
         self._name_window = ""
         self._name_parts_seen = 0
         self._json_name: str | None = None
+        # Set when the call violates its schema and must not be emitted.
+        self.invalid: bool = False
+        # Set once the rejected call's source text has been emitted as content.
+        self.fallback_sent: bool = False
+        # Set when the schema gate held the arguments back instead of
+        # streaming them, so that they can be sent in one piece at the end.
+        self.args_deferred: bool = False
 
     @property
     def args(self) -> str:
@@ -514,6 +525,92 @@ class ParserEngine(Parser):
 
     def _accept_tool_name(self, name: str) -> bool:
         return bool(name) and self._is_valid_tool_name(name)
+
+    def _missing_required_args(self, name: str, args_json: str) -> list[str]:
+        """Required parameters declared by the schema but absent from *args_json*.
+
+        Only a key that is entirely absent counts as missing.  A `null` value
+        satisfies the schema: strict-mode structured outputs model optional
+        parameters as `T | null` while still listing them under `required`.
+        Arguments that fail to parse are *not* reported here; malformed JSON
+        is a separate failure mode handled by the arg converter.
+        """
+        if not self.parser_engine_config.validate_required_args:
+            return []
+        required = find_tool_required(self._tools, name)
+        if not required:
+            return []
+        body = (args_json or "").strip()
+        try:
+            args = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if not isinstance(args, dict):
+            return []
+        return [key for key in required if key not in args]
+
+    def _required_keys_seen(self, slot: ToolCallSlot, delta: str) -> bool:
+        """Whether every required key has already appeared in the arguments.
+
+        Keys are only added, so once they are all present the call can no
+        longer become invalid and the gate can let it stream.  The tag path
+        matches only the config's own key tags, so a JSON-spelled key inside
+        a *value* never counts as a key; and because a key can only be
+        completed by a delta that closes one, the scan runs only when the
+        delta contains the key-close literal instead of rescanning the whole
+        argument text on every delta.
+        """
+        name = slot.name
+        if not name:
+            return False
+        required = find_tool_required(self._tools, name)
+        if not required:
+            return True
+        key_open = self.parser_engine_config.terminal_literal("ARG_KEY_START")
+        key_close = self.parser_engine_config.terminal_literal("ARG_KEY_END")
+        if key_open and key_close:
+            if key_close[-1] not in delta:
+                return False
+            text = slot.args
+            if key_close not in text[-(len(delta) + len(key_close)) :]:
+                return False
+            return all(f"{key_open}{key}{key_close}" in text for key in required)
+        text = slot.streamed_json or slot.args
+        return all(
+            re.search(r'"' + re.escape(key) + r'"\s*:', text) for key in required
+        )
+
+    def _gate_withholds(self, slot: ToolCallSlot) -> bool:
+        """Whether the schema gate must hold this call back for now.
+
+        A call can only be withdrawn while nothing about it has been streamed,
+        so the gate defers the whole call — name and arguments — until either
+        every required key has appeared (`_required_keys_seen`, at which point
+        the call can no longer become invalid) or the block closes and
+        `_handle_tool_end` can decide on the completed arguments.  Once the
+        name has been streamed the call can no longer be withdrawn, so the
+        gate stops withholding.  Calls whose tool declares no required
+        parameters are unaffected and keep streaming incrementally.
+        """
+        if not self.parser_engine_config.validate_required_args:
+            return False
+        if not self._tools or slot.name_sent:
+            # After the name has reached the client the call can no longer be
+            # withdrawn, so there is nothing left to withhold; _handle_tool_end
+            # emits such a call unchanged with a warning if it is invalid.
+            return False
+        if not slot.name:
+            # The name is not known yet, so the schema cannot be consulted.
+            # Assume it may have required parameters rather than leak a call.
+            return True
+        return bool(find_tool_required(self._tools, slot.name))
+
+    def _source_text(self, slot: ToolCallSlot) -> str:
+        """Rebuild the source text of a tool call that is not being emitted."""
+        config = self.parser_engine_config
+        start = config.terminal_literal("TOOL_START") or ""
+        end = config.terminal_literal("TOOL_END") or ""
+        return f"{start}{slot.name}{slot.args}{end}"
 
     # ── Private helpers ─────────────────────────────────────────────
 
@@ -949,6 +1046,17 @@ class ParserEngine(Parser):
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
+        # Rejected tool calls are re-emitted verbatim as content so that the
+        # caller sees the same text the model produced.  The text takes back
+        # the slot the call occupied: after any content that preceded it and
+        # before content that followed it in the same chunk.  Emit at most
+        # once per slot: _events_to_delta runs on every streaming step and the
+        # slot outlives a single call.
+        for slot in self._tool_slots:
+            if slot.invalid and not slot.fallback_sent:
+                slot.fallback_sent = True
+                content_parts.append(self._source_text(slot))
+
         if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
             # Deferred content carried in from a previous delta precedes this
             # delta's content; content deferred during this call (text after
@@ -1041,6 +1149,19 @@ class ParserEngine(Parser):
         if event.value:
             slot.append_args(event.value)
 
+        if self._gate_withholds(slot):
+            # Nothing about this call has been streamed yet; keep it that way
+            # until it is certain the call can no longer violate its schema.
+            if event.value:
+                slot.args_deferred = True
+            if self._required_keys_seen(slot, event.value or ""):
+                # Every required key has appeared.  Keys are only ever added,
+                # so the call can no longer turn out to be invalid: release
+                # it and stream the remaining arguments normally.
+                slot.args_deferred = False
+            else:
+                return
+
         if not slot.name_sent:
             if slot.name:
                 self._emit_name_delta(idx, deltas, slot.name)
@@ -1070,6 +1191,46 @@ class ParserEngine(Parser):
 
         remaining = self._flush_arg_converter(idx) if self._emit_arg_deltas else None
         slot = self._tool_slots[idx]
+
+        if remaining is None and slot.args_deferred:
+            # The gate held the arguments back instead of streaming them, so
+            # they have to leave in one piece now.
+            remaining = slot.streamed_json or slot.args or ""
+
+        # A tool call that omits required parameters is far more likely to be
+        # a quoted tag than a real invocation, and emitting it hands the
+        # client an argument object that violates the schema it was given.
+        # While the name is still unstreamed nothing is visible downstream,
+        # so the call can be revoked and re-surfaced as text.
+        if not slot.invalid:
+            candidate = slot.name or self._try_extract_name(idx) or ""
+            if candidate:
+                # `slot.args` is the last resort: a call whose arguments were
+                # held back has never been streamed and may have no converter.
+                args_json = (slot.streamed_json or remaining or slot.args or "").strip()
+                missing = self._missing_required_args(candidate, args_json or "{}")
+                if missing and not slot.name_sent:
+                    slot.invalid = True
+                    remaining = None
+                    logger.warning(
+                        "Rejecting tool call %r: required parameter(s) %s "
+                        "are missing; emitting the call as text instead.",
+                        candidate,
+                        ", ".join(missing),
+                    )
+                elif missing:
+                    # The name already reached the client, so the call cannot
+                    # be withdrawn without corrupting the stream.  Say so
+                    # rather than dropping the arguments silently.
+                    logger.warning(
+                        "Tool call %r is missing required parameter(s) %s, but "
+                        "its name was already streamed; emitting it unchanged.",
+                        candidate,
+                        ", ".join(missing),
+                    )
+
+        if slot.invalid:
+            return
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
@@ -1239,6 +1400,8 @@ class ParserEngine(Parser):
 
         tool_calls: list[ToolCall] = []
         for slot in self._tool_slots:
+            if slot.invalid:
+                continue
             if not slot.name and not slot.args:
                 continue
 
