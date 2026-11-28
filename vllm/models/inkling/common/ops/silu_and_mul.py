@@ -11,6 +11,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from ..platform import num_compute_units
+
 
 @triton.jit(do_not_specialize=["M"])
 def _silu_and_mul_triton_kernel(
@@ -104,9 +106,7 @@ def silu_and_mul_triton(gateup_output: torch.Tensor) -> torch.Tensor:
         BLOCK_SIZE_M = 16
         BLOCK_SIZE_N = max(8, min(128, triton.next_power_of_2(N)))
     max_grid_size = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N)
-    num_sms = torch.cuda.get_device_properties(
-        gateup_output.device
-    ).multi_processor_count
+    num_sms = num_compute_units(gateup_output.device)
     grid_size = min(num_sms * 4, max_grid_size)
 
     _silu_and_mul_triton_kernel[(grid_size,)](
