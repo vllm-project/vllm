@@ -316,9 +316,30 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
+    @overload
+    def execute_dummy_batch(
+        self, non_block: Literal[False] = False
+    ) -> list[SchedulerIterationDetails] | None:
+        pass
+
+    @overload
+    def execute_dummy_batch(
+        self, non_block: Literal[True] = True
+    ) -> Future[list[SchedulerIterationDetails] | None]:
+        pass
+
+    def execute_dummy_batch(
+        self, non_block: bool = False
+    ) -> (
+        list[SchedulerIterationDetails]
+        | None
+        | Future[list[SchedulerIterationDetails] | None]
+    ):
         """Returns the iteration records the output worker has completed."""
-        return self.collective_rpc("execute_dummy_batch")[0]
+        output = self.collective_rpc(  # type: ignore[call-overload]
+            "execute_dummy_batch", non_block=non_block
+        )
+        return output[0]
 
     def probe_forward(self) -> None:
         # Unlike execute_dummy_batch, wait for every rank: PP stages other

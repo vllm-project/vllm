@@ -232,7 +232,7 @@ class EngineCore:
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
         self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
+            deque[tuple[Future[Any], SchedulerOutput | None, Future[Any]]] | None
         ) = None
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
@@ -851,24 +851,29 @@ class EngineCore:
             return None, model_executed
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with self.log_error_detail(scheduler_output):
-            model_output = self._wait_for_output(future)
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
-        iteration_details = self._untimed_iteration_details(scheduler_output)
+        future, queued_scheduler_output, exec_model_fut = batch_queue.pop()
+        engine_core_outputs: dict[int, EngineCoreOutputs] | None = None
+        if queued_scheduler_output is None:
+            records = self._wait_for_output(future)
+            self._publish_dummy_batch_records(records)
+        else:
+            with self.log_error_detail(queued_scheduler_output):
+                model_output = self._wait_for_output(future)
+                if model_output is None:
+                    # None from sample_tokens() implies that the original
+                    # execute_model() call failed - raise that exception.
+                    exec_model_fut.result()
+                    raise RuntimeError("unexpected error")
+            iteration_details = self._untimed_iteration_details(queued_scheduler_output)
 
-        # Before processing the model output, process any aborts that happened
-        # during the model execution.
-        self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._attach_weight_version(engine_core_outputs)
+            # Before processing the model output, process any aborts that happened
+            # during the model execution.
+            self._process_aborts_queue()
+            engine_core_outputs = self.scheduler.update_from_output(
+                queued_scheduler_output, model_output
+            )
+            self._attach_iteration_details(engine_core_outputs, iteration_details)
+            self._attach_weight_version(engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -876,7 +881,8 @@ class EngineCore:
         # With async scheduling depth > 2, wait until no queued step shares a
         # request with the deferred one.
         if self.deferred_step is not None and not any(
-            so.shares_requests_with(self.deferred_step[0]) for _, so, _ in batch_queue
+            so is not None and so.shares_requests_with(self.deferred_step[0])
+            for _, so, _ in batch_queue
         ):
             deferred_scheduler_output, exec_future = self.deferred_step
             self.deferred_step = None
@@ -1240,6 +1246,11 @@ class EngineCore:
         return not self.is_sleeping() and not any(
             self.collective_rpc("has_incomplete_weight_update")
         )
+
+    def _publish_dummy_batch_records(
+        self, records: list[SchedulerIterationDetails] | None
+    ) -> None:
+        pass
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1911,12 +1922,16 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def execute_dummy_batch(self) -> None:
-        records = self.model_executor.execute_dummy_batch()
+    def _publish_dummy_batch_records(
+        self, records: list[SchedulerIterationDetails] | None
+    ) -> None:
         # No request output carries the iteration records a dummy batch returns.
         if records and (stats := self.scheduler.make_stats()) is not None:
             stats.iteration_records = records
             self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def execute_dummy_batch(self) -> None:
+        self._publish_dummy_batch_records(self.model_executor.execute_dummy_batch())
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -2828,6 +2843,49 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    def _publish_dummy_batch_records(
+        self, records: list[SchedulerIterationDetails] | None
+    ) -> None:
+        super()._publish_dummy_batch_records(records)
+        iteration_details = self._untimed_iteration_details(None)
+        if iteration_details is not None and not self.has_coordinator:
+            stats = self._make_iteration_details_stats(iteration_details)
+            self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def _complete_queued_batch(self) -> None:
+        assert self.batch_queue is not None
+        future, scheduler_output, exec_model_fut = self.batch_queue.pop()
+        if scheduler_output is None:
+            records = self._wait_for_output(future)
+            self._publish_dummy_batch_records(records)
+            return
+
+        with self.log_error_detail(scheduler_output):
+            model_output = self._wait_for_output(future)
+            if model_output is None:
+                exec_model_fut.result()
+                raise RuntimeError("unexpected error")
+        iteration_details = self._untimed_iteration_details(scheduler_output)
+        self._process_aborts_queue()
+        outputs = self.scheduler.update_from_output(scheduler_output, model_output)
+        self._attach_iteration_details(outputs, iteration_details)
+        self._attach_weight_version(outputs)
+        for output in outputs.items() if outputs else ():
+            self.output_queue.put_nowait(output)
+
+    def _drain_batch_queue(self) -> None:
+        while self.batch_queue:
+            self._complete_queued_batch()
+
+    def _enqueue_dummy_batch(self) -> None:
+        if self.batch_queue is None or self.deferred_step is not None:
+            self.execute_dummy_batch()
+            return
+        dummy_future = self.model_executor.execute_dummy_batch(non_block=True)
+        self.batch_queue.appendleft((dummy_future, None, dummy_future))
+        if len(self.batch_queue) >= self.batch_queue_size:
+            self._complete_queued_batch()
+
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -2858,25 +2916,29 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not state.commit_requested and state.is_ready_for_switch():
                     self.process_input_queue_block = True
 
-            executed = self._process_engine_step()
+            if (
+                self.batch_queue is not None
+                and not self.scheduler.has_requests()
+                and self.deferred_step is None
+                and all(so is None for _, so, _ in self.batch_queue)
+            ):
+                executed = False
+            else:
+                executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
+                    # All engines are idle; drain any queued dummy batches.
+                    self._drain_batch_queue()
                     continue
 
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                    self.execute_dummy_batch()
-                    iteration_details = self._untimed_iteration_details(None)
-                    if iteration_details is not None and not self.has_coordinator:
-                        stats = self._make_iteration_details_stats(iteration_details)
-                        self.output_queue.put_nowait(
-                            (0, EngineCoreOutputs(scheduler_stats=stats))
-                        )
+                    self._enqueue_dummy_batch()
+                    local_unfinished_reqs = self.scheduler.has_unfinished_requests()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
@@ -2884,6 +2946,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
             if not self.engines_running:
+                self._drain_batch_queue()
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
                     logger.debug(

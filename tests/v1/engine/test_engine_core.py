@@ -1094,3 +1094,91 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def test_dp_dummy_batch_uses_batch_queue_non_blocking():
+    """With batch_queue enabled, DPEngineCoreProc enqueues non-blocking dummy
+    batches, overlaps them up to batch_queue_size, publishes iteration records
+    on completion, and drains cleanly."""
+    core = object.__new__(DPEngineCoreProc)
+    core.batch_queue_size = 2
+    core.batch_queue = deque(maxlen=2)
+    core.deferred_step = None
+    core.has_coordinator = True
+    core.output_queue = MagicMock()
+    core.scheduler = MagicMock()
+    stats_obj = MagicMock()
+    core.scheduler.make_stats.return_value = stats_obj
+    core._untimed_iteration_details = MagicMock(return_value=None)
+    core._wait_for_output = lambda fut: fut.result()
+
+    fut1: Future[list | None] = Future()
+    fut2: Future[list | None] = Future()
+    core.model_executor = MagicMock()
+    core.model_executor.execute_dummy_batch.side_effect = [fut1, fut2]
+
+    # Step 1: non-blocking enqueue; does not wait on unresolved fut1.
+    core._enqueue_dummy_batch()
+    assert len(core.batch_queue) == 1
+    core.model_executor.execute_dummy_batch.assert_called_once_with(non_block=True)
+
+    # Step 2: dispatches fut2 before waiting on fut1.
+    rec1 = [MagicMock()]
+    fut1.set_result(rec1)
+    core._enqueue_dummy_batch()
+    assert len(core.batch_queue) == 1
+    assert core.batch_queue[0][0] is fut2
+    assert core.model_executor.execute_dummy_batch.call_count == 2
+    assert stats_obj.iteration_records == rec1
+    core.output_queue.put_nowait.assert_called_once()
+
+    # Wave end drains remaining fut2.
+    fut2.set_result(None)
+    core._drain_batch_queue()
+    assert not core.batch_queue
+
+
+def test_step_with_batch_queue_pops_queued_dummy_batch():
+    """Transitioning from a queued dummy batch to a real batch dispatches the
+    real batch first and then completes the older dummy batch entry."""
+    core = MagicMock()
+    core.batch_queue_size = 2
+    dummy_fut: Future[list | None] = Future()
+    dummy_records = [MagicMock()]
+    dummy_fut.set_result(dummy_records)
+    core.batch_queue = deque([(dummy_fut, None, dummy_fut)], maxlen=2)
+    core.deferred_step = None
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.num_executed_steps = 0
+    core.scheduler.has_requests.return_value = True
+    scheduled = core.scheduler.schedule.return_value
+    scheduled.total_num_scheduled_tokens = 8
+    scheduled.pending_structured_output_tokens = False
+    scheduled.has_structured_output_spec_decode = False
+
+    exec_fut: Future[ModelRunnerOutput | None] = Future()
+    sample_fut: Future[ModelRunnerOutput] = Future()
+    core.model_executor.execute_model.return_value = exec_fut
+    core.model_executor.sample_tokens.return_value = sample_fut
+    core._wait_for_output.side_effect = lambda fut: fut.result()
+
+    outputs, executed = EngineCore.step_with_batch_queue(core)
+    assert executed is True
+    assert outputs is None
+    assert len(core.batch_queue) == 1
+    assert core.batch_queue[0] == (sample_fut, scheduled, exec_fut)
+    core._publish_dummy_batch_records.assert_called_once_with(dummy_records)
+    core.scheduler.update_from_output.assert_not_called()
+
+
+def test_uniproc_execute_dummy_batch_non_block():
+    """UniProcExecutor.execute_dummy_batch(non_block=True) returns a Future."""
+    executor = object.__new__(UniProcExecutor)
+    expected = [MagicMock()]
+    executor.driver_worker = MagicMock()
+    executor.driver_worker.execute_dummy_batch.return_value = expected
+
+    fut = executor.execute_dummy_batch(non_block=True)
+    assert isinstance(fut, Future)
+    assert fut.result() == expected

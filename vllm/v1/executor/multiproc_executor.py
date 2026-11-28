@@ -454,10 +454,17 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
+    def execute_dummy_batch(  # type: ignore[override]
+        self, non_block: bool = False
+    ) -> (
+        list[SchedulerIterationDetails]
+        | None
+        | Future[list[SchedulerIterationDetails] | None]
+    ):
         return self.collective_rpc(
             "execute_dummy_batch",
             unique_reply_rank=self.output_rank,
+            non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 

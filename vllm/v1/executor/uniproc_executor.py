@@ -22,6 +22,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -140,6 +141,20 @@ class UniProcExecutor(Executor):
             non_block=non_block,
             single_value=True,
         )
+
+    def execute_dummy_batch(  # type: ignore[override]
+        self, non_block: bool = False
+    ) -> (
+        list[SchedulerIterationDetails]
+        | None
+        | Future[list[SchedulerIterationDetails] | None]
+    ):
+        output = self.collective_rpc(
+            "execute_dummy_batch", non_block=non_block, single_value=True
+        )
+        if non_block and output.done():
+            output.result()
+        return output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.collective_rpc("take_draft_token_ids", single_value=True)
