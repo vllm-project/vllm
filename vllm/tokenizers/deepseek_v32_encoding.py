@@ -77,13 +77,24 @@ def tool_calls_from_openai_format(tool_calls):
     ]
 
 
-def encode_arguments_to_dsml(tool_call: dict[str, str]) -> str:
+def encode_arguments_to_dsml(tool_call: dict[str, Any]) -> str:
     p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""
     P_dsml_strs = []
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
-    else:
-        arguments = tool_call["arguments"]
+    arguments = tool_call["arguments"]
+    if not isinstance(arguments, dict):
+        # Tolerate JSON strings, including double-encoded ones, and fall back
+        # to wrapping the raw value when it does not decode to an object.
+        # Mirrors the handling in deepseek_v41_encoding.encode_arguments_to_dsml.
+        for _ in range(2):
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except Exception:
+                    break
+            else:
+                break
+        if not isinstance(arguments, dict):
+            arguments = {"arguments": tool_call["arguments"]}
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
