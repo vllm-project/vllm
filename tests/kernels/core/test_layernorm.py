@@ -131,6 +131,33 @@ def test_rms_norm_weightless(
         )
 
 
+@pytest.mark.parametrize("layout", ["transposed", "column_strided"])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_fused_add_rms_norm_rejects_non_unit_inner_stride(
+    layout: str, device: str
+) -> None:
+    """The kernel indexes input rows as contiguous, so a non-unit last-dim
+    stride must raise instead of silently writing wrong values."""
+    torch.set_default_device(device)
+    num_tokens, hidden_size = 4, 1024
+    if layout == "transposed":
+        x = torch.randn(hidden_size, num_tokens).T
+    else:
+        x = torch.randn(num_tokens, 2 * hidden_size)[:, ::2]
+    assert x.stride(-1) != 1
+    residual = torch.randn(num_tokens, hidden_size)
+    weight = torch.randn(hidden_size)
+    x_before, residual_before = x.clone(), residual.clone()
+
+    with pytest.raises(RuntimeError, match="unit stride"):
+        torch.ops._C.fused_add_rms_norm(x, residual, weight, 1e-6)
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(x, x_before, atol=0, rtol=0)
+    torch.testing.assert_close(residual, residual_before, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
