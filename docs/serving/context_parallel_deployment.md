@@ -34,6 +34,22 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
+### ROCm DSA indexer query-row splitting
+
+On gfx950, the ROCm/AITER sparse-attention indexer automatically distributes
+prefill query rows across tensor-parallel ranks when the batch's longest
+prefill sequence reaches 16,384 tokens. Enable AITER with
+`VLLM_ROCM_USE_AITER=1` and use `--tensor-parallel-size` greater than one.
+No indexer-specific flag is needed.
+
+This optimization applies to the FP8 DSA prefill indexer, including GLM-5.2.
+It exchanges Top-K indices between TP ranks; it does not shard the model's
+KV cache or require `--prefill-context-parallel-size`. Shorter sequences and
+unlisted GPU architectures keep replicated indexer computation. The row split
+also stays off with decode context parallelism, candidate-block selection, or
+when every prefill chunk has fewer rows than TP ranks. Decode behavior is
+unchanged.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.
