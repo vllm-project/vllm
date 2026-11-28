@@ -371,6 +371,74 @@ def test_gfx1151_bf16_decode_tile_selection(M, K, N, G, expected):
     assert tile == expected
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize(
+    "split_k,k_rotate", [(1, True), (2, False), (3, True), (4, True)]
+)
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [
+        (6, 4096, 512, 128),
+        (16, 2688, 520, 128),  # 21 K tiles: uneven split; N past a BLOCK_N edge
+        (32, 5120, 576, 128),
+        (9, 1024, 256, 32),  # BLOCK_K clamps to the group size
+    ],
+)
+def test_triton_skinny_split_k_and_rotate_match_reference(
+    dtype, has_zp, split_k, k_rotate, M, K, N, G
+):
+    """Split-K and the rotated K loop only reorder fp32 partial sums."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    set_random_seed(0)
+
+    x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
+        M, K, N, G, dtype, has_zp
+    )
+    config = (16 if M <= 16 else 32, 64, 128, 4, 2, split_k, False, k_rotate)
+    out = triton_w4a16_skinny_fmt_gemm(
+        a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed, config=config
+    )
+    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+    # The default tile row must also agree with the unsplit kernel.
+    default = triton_w4a16_skinny_fmt_gemm(
+        a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed
+    )
+    torch.testing.assert_close(default, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "M,N,K,split_k,k_rotate",
+    [
+        # Llama-3.1-8B: qkv, o, gate_up (K = 4096) and down (K = 14336); the
+        # packed row stride of all four is a multiple of 1 KiB
+        (8, 6144, 4096, 1, True),
+        (8, 4096, 4096, 2, True),
+        (8, 28672, 4096, 1, True),
+        (8, 4096, 14336, 2, True),
+        # Qwen3-4B: o_proj and down_proj leave most CUs idle without a split
+        (8, 2560, 4096, 4, True),
+        (8, 2560, 9728, 4, False),
+        (8, 19456, 2560, 1, False),
+        # M > 16 uses BLOCK_M=32; still one M tile
+        (32, 2560, 9728, 4, False),
+    ],
+)
+def test_gfx12_small_m_config_rule(M, N, K, split_k, k_rotate):
+    block_m, block_n, block_k, warps, stages, sk, rot = (
+        hybrid_module._select_skinny_gfx12_small_m_config(M, N, K)
+    )
+    assert block_m == (16 if M <= 16 else 32)
+    assert (block_n, block_k, warps, stages) == (64, 128, 4, 2)
+    assert (sk, rot) == (split_k, k_rotate)
+    # Every split keeps at least the minimum number of K tiles.
+    assert sk == 1 or (K // block_k) // sk >= 8
+
+
 # ---------------------------------------------------------------------------
 # pack_int4_exllama_shuffle round-trips correctly
 # ---------------------------------------------------------------------------
