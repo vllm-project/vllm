@@ -679,6 +679,7 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
+    max_expert_lora_rank: int | None = get_field(LoRAConfig, "max_expert_lora_rank")
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     lora_split_k_reduction: Literal["atomic", "kernel"] = LoRAConfig.split_k_reduction
@@ -1618,6 +1619,9 @@ class EngineArgs:
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
+        lora_group.add_argument(
+            "--max-expert-lora-rank", **lora_kwargs["max_expert_lora_rank"]
+        )
         lora_group.add_argument(
             "--lora-split-k-reduction", **lora_kwargs["split_k_reduction"]
         )
@@ -2733,6 +2737,7 @@ class EngineArgs:
         lora_config = (
             LoRAConfig(
                 max_lora_rank=self.max_lora_rank,
+                max_expert_lora_rank=self.max_expert_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,

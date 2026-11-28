@@ -468,6 +468,19 @@ vllm serve model --enable-lora --max-lora-rank 64
 vllm serve model --enable-lora --max-lora-rank 256
 ```
 
+### Configuring `max_expert_lora_rank`
+
+Use `--max-expert-lora-rank` to size the LoRA slots for routed MoE experts
+independently. It defaults to `--max-lora-rank`, which continues to size the
+slots for dense and attention layers. Set a positive integer no greater than
+`--max-lora-rank`. With `--fully-sharded-loras`, the expert slot rank must be
+divisible by the MoE tensor parallel size. vLLM rejects adapters with expert
+weights whose rank exceeds the configured expert slot rank.
+
+```bash
+vllm serve model --enable-lora --max-lora-rank 16 --max-expert-lora-rank 4
+```
+
 ### Restricting LoRA to Specific Modules
 
 The `--lora-target-modules` parameter allows you to restrict which model modules have LoRA applied at deployment time. This is useful for performance tuning when you only need LoRA on specific layers:
