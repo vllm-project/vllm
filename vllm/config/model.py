@@ -957,15 +957,11 @@ class ModelConfig:
 
             pruning_spec = self.multimodal_config.get_video_pruning_spec()
             supported_pruning = self._model_info.supported_video_pruning_methods
-            if (
-                pruning_spec is not None
-                and supported_pruning
-                and pruning_spec[0] not in supported_pruning
-            ):
+            if pruning_spec is not None and pruning_spec[0] not in supported_pruning:
                 raise ValueError(
                     f"Video pruning method '{pruning_spec[0]}' is not "
                     f"supported by {self._model_info.architecture} "
-                    f"(supported methods: {supported_pruning})."
+                    f"(supported methods: {supported_pruning or 'none'})."
                 )
 
             if (
@@ -985,6 +981,11 @@ class ModelConfig:
             # Rebuild after multimodal_config exists so text-only mm_prefix
             # clearing is applied (and cached for later with_hf_config calls).
             self.model_arch_config = self.get_model_arch_config()
+        elif video_pruning_rate:
+            raise ValueError(
+                "Video pruning is not supported by text-only model "
+                f"{self._model_info.architecture}."
+            )
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len

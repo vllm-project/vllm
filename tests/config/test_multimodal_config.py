@@ -784,3 +784,20 @@ def test_auto_video_decode_skipped_without_torchcodec():
         )
         == {}
     )
+
+
+def test_video_pruning_requires_model_support():
+    with pytest.raises(ValueError, match="text-only"):
+        ModelConfig("Qwen/Qwen2-0.5B-Instruct", video_pruning_rate=0.5)
+    with pytest.raises(ValueError, match="supported methods: none"):
+        ModelConfig("llava-hf/llava-1.5-7b-hf", video_pruning_rate=0.5)
+    with pytest.raises(ValueError, match="'vidcom2' is not supported"):
+        ModelConfig(
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            video_pruning_rate=0.5,
+            video_pruning_method="vidcom2",
+        )
+    mm_config = ModelConfig(
+        "Qwen/Qwen2.5-VL-3B-Instruct", video_pruning_rate=0.5
+    ).multimodal_config
+    assert mm_config is not None and mm_config.is_multimodal_pruning_enabled()
