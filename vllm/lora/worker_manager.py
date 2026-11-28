@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Collection
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -316,9 +317,28 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 f"({self._adapter_manager.lora_slots})."
             )
         for lora in loras_map.values():
-            self.add_adapter(lora)
+            if not self.add_adapter(lora, in_use_lora_ids=loras_map.keys()):
+                raise RuntimeError(
+                    f"No CPU LoRA slot can be freed for {lora.lora_name}: every "
+                    "unpinned cached adapter is in use."
+                )
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(
+        self, lora_request: LoRARequest, in_use_lora_ids: Collection[int] = ()
+    ) -> bool:
+        """Load the adapter into the CPU cache and activate it.
+
+        Args:
+            lora_request: The adapter to load.
+            in_use_lora_ids: Adapters that running requests use. They are never
+                evicted to make room, as they would have to be loaded from disk
+                again in the middle of a step.
+
+        Returns:
+            Whether the adapter is cached. False if making room would evict
+            an adapter in use.
+
+        """
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
@@ -329,6 +349,17 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 lora_request.lora_int_id not in self.list_adapters()
                 or lora_request.load_inplace
             ):
+                manager = self._adapter_manager
+                assert isinstance(manager, LRUCacheLoRAModelManager)
+                if (
+                    lora_request.lora_int_id not in self.list_adapters()
+                    and len(manager) + 1 > manager.capacity
+                    and manager.oldest_evictable_adapter(in_use_lora_ids) is None
+                ):
+                    # No room without evicting an adapter in use. Checked
+                    # before reading from disk, as the caller may retry.
+                    return False
+
                 # Load the new adapter first to ensure it is actually valid, before
                 # evicting any existing adapters.
                 # This may cause the # of loaded lora adapters to very temporarily
@@ -341,9 +372,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
                 # Loading succeeded, now check if we will exceed cache capacity and
                 # evict if the oldest adapter if so
-                if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                    assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                    self._adapter_manager.remove_oldest_adapter()
+                if len(manager) + 1 > manager.capacity:
+                    manager.remove_oldest_adapter(keep=in_use_lora_ids)
                 # Then add the new adapter to the cache
                 loaded = self._adapter_manager.add_adapter(lora)
             else:

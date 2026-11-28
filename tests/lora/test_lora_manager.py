@@ -1022,6 +1022,17 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
             mapping,
         )
 
+    # A load never evicts an adapter in use, even the least recently used one.
+    assert worker_adapter_manager.add_adapter(
+        LoRARequest("9", 9, dummy_lora_files), in_use_lora_ids={1}
+    )
+    assert worker_adapter_manager.list_adapters() == {1, 7, 8, 9}
+    # With every cached adapter in use, the new one is not cached.
+    assert not worker_adapter_manager.add_adapter(
+        LoRARequest("10", 10, dummy_lora_files), in_use_lora_ids={1, 7, 8, 9}
+    )
+    assert worker_adapter_manager.list_adapters() == {1, 7, 8, 9}
+
     assert worker_adapter_manager.device == device
     punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
         DEFAULT_LANGUAGE_WRAPPER_KEY

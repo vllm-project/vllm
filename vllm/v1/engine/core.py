@@ -211,6 +211,8 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        if vllm_config.lora_config is not None:
+            self.scheduler.load_lora = self.model_executor.add_lora  # type: ignore
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -1248,7 +1250,9 @@ class EngineCore:
         return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        return self.model_executor.add_lora(
+            lora_request, self.scheduler.get_running_lora_ids()
+        )
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)

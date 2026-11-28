@@ -336,6 +336,101 @@ async def test_loading_invalid_adapters_does_not_break_others(
     )
 
 
+# One GPU slot and one CPU cache entry: loading a second adapter has to evict.
+SINGLE_ADAPTER_ARGS = [
+    "--dtype",
+    "bfloat16",
+    "--max-model-len",
+    "2048",
+    "--enforce-eager",
+    "--enable-lora",
+    "--max-lora-rank",
+    "64",
+    "--max-loras",
+    "1",
+    "--max-cpu-loras",
+    "1",
+    "--gpu-memory-utilization",
+    "0.3",
+]
+
+
+async def _load_adapter(client: openai.AsyncOpenAI, name: str, path) -> None:
+    await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={"lora_name": name, "lora_path": str(path)},
+    )
+
+
+@pytest.mark.asyncio
+async def test_lost_adapter_files_fail_the_request_not_the_engine(
+    qwen3_lora_files, tmp_path
+):
+    """An adapter evicted from the CPU cache is loaded from disk again when a
+    request needs it. If its files are gone by then, only requests for that
+    adapter may fail."""
+    lost, kept = tmp_path / "lost", tmp_path / "kept"
+    shutil.copytree(qwen3_lora_files, lost)
+    shutil.copytree(qwen3_lora_files, kept)
+    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, SINGLE_ADAPTER_ARGS, env_dict=envs
+    ) as remote_server:
+        async with remote_server.get_async_client() as client:
+            await _load_adapter(client, "lost", lost)
+            await _load_adapter(client, "kept", kept)
+            shutil.rmtree(lost)
+
+            with pytest.raises(openai.APIStatusError):
+                await client.completions.create(
+                    model="lost", prompt="Hello there", max_tokens=5
+                )
+
+            for model in (MODEL_NAME, "kept"):
+                completion = await client.completions.create(
+                    model=model, prompt="Hello there", max_tokens=5
+                )
+                assert completion.usage.completion_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_loading_an_adapter_keeps_running_adapters_cached(
+    qwen3_lora_files, tmp_path
+):
+    """Loading an adapter must not evict one that a running request uses: it
+    would be read from disk again in the middle of a step."""
+    running, other = tmp_path / "running", tmp_path / "other"
+    shutil.copytree(qwen3_lora_files, running)
+    shutil.copytree(qwen3_lora_files, other)
+    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, SINGLE_ADAPTER_ARGS, env_dict=envs
+    ) as remote_server:
+        async with remote_server.get_async_client() as client:
+            await _load_adapter(client, "running", running)
+            stream = await client.completions.create(
+                model="running",
+                prompt="Write a long story: ",
+                max_tokens=500,
+                stream=True,
+                extra_body={"ignore_eos": True},
+            )
+            chunks = aiter(stream)
+            await anext(chunks)
+
+            # Reading the running adapter from disk again would now fail.
+            shutil.rmtree(running)
+            await _load_adapter(client, "other", other)
+
+            finish_reason = None
+            async for chunk in chunks:
+                finish_reason = chunk.choices[0].finish_reason or finish_reason
+            assert finish_reason == "length"
+
+
 @pytest.mark.asyncio
 async def test_beam_search_with_lora_adapters(
     client: openai.AsyncOpenAI,

@@ -6,7 +6,7 @@ import copy
 import gc
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
@@ -1677,8 +1677,10 @@ class Worker(WorkerBase):
             return repr(e)
         return None
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
+    def add_lora(
+        self, lora_request: LoRARequest, in_use_lora_ids: Collection[int] = ()
+    ) -> bool:
+        return self.model_runner.add_lora(lora_request, in_use_lora_ids)
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)

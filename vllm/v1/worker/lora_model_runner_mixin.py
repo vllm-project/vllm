@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Define LoRA functionality mixin for model runners."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import contextmanager
 
 import numpy as np
@@ -255,9 +255,11 @@ class LoRAModelRunnerMixin:
             return
         self.lora_manager.remove_all_adapters()
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
+    def add_lora(
+        self, lora_request: LoRARequest, in_use_lora_ids: Collection[int] = ()
+    ) -> bool:
         self._ensure_lora_enabled()
-        return self.lora_manager.add_adapter(lora_request)
+        return self.lora_manager.add_adapter(lora_request, in_use_lora_ids)
 
     def remove_lora(self, lora_id: int) -> bool:
         self._ensure_lora_enabled()

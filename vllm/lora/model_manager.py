@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TypeVar
 
 import torch
@@ -1500,11 +1500,23 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self._active_adapters.touch(lora_id)
         return result
 
-    def remove_oldest_adapter(self) -> bool:
-        if len(self._registered_adapters) > 0:
-            self._registered_adapters.remove_oldest()
-            return True
-        return False
+    def oldest_evictable_adapter(self, keep: Collection[int] = ()) -> int | None:
+        """The least recently used adapter that is neither pinned nor in
+        `keep`, or None if every unpinned adapter is in `keep`."""
+        cache = self._registered_adapters
+        unpinned = [i for i in cache.order if i not in cache.pinned_items]
+        if len(cache) > 0 and not unpinned:
+            raise RuntimeError(
+                "All items are pinned, cannot remove oldest from the cache."
+            )
+        return next((i for i in unpinned if i not in keep), None)
+
+    def remove_oldest_adapter(self, keep: Collection[int] = ()) -> bool:
+        lora_id = self.oldest_evictable_adapter(keep)
+        if lora_id is None:
+            return False
+        self._registered_adapters.pop(lora_id)
+        return True
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""

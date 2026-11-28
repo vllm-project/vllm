@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import torch
@@ -241,7 +241,9 @@ class WorkerBase:
         """Should be called immediately after execute_model iff it returned None."""
         raise NotImplementedError
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
+    def add_lora(
+        self, lora_request: LoRARequest, in_use_lora_ids: Collection[int] = ()
+    ) -> bool:
         raise NotImplementedError
 
     def remove_lora(self, lora_id: int) -> bool:

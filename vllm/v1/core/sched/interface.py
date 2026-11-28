@@ -271,6 +271,10 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
+    def get_running_lora_ids(self) -> set[int]:
+        """LoRA adapters that running requests use."""
+        return set()
+
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None
 

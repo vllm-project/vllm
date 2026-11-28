@@ -494,3 +494,9 @@ vllm serve model --enable-lora --enable-lora-embedding-modules
 If an adapter contains weights for an embedding module excluded by default, vLLM logs a warning, skips those weights, and applies the remaining enabled weights. Use an explicit `--lora-target-modules` list for finer control, such as enabling input embedding LoRA without `lm_head`.
 
 Enabling `lm_head` LoRA through either option disables prompt scoring for the deployment. Requests using `prompt_logprobs` (including `0`) or `prompt_logprob_token_ids` receive a validation error. This restriction also applies to base-model requests because they can be batched with LoRA requests. Input embedding LoRA supports prompt scoring when `lm_head` LoRA is disabled.
+
+### Configuring `max_cpu_loras`
+
+`--max-cpu-loras` is the number of adapters kept loaded in CPU memory; it defaults to `--max-loras`. When it is exceeded, the least recently used adapter is evicted, and it is read from its path again the next time a request needs it. Adapters that running requests use are never evicted.
+
+If an adapter cannot be loaded when a request needs it, for example because its files were removed, that request fails with an HTTP 500 error and the server keeps serving other requests.

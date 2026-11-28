@@ -316,7 +316,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
-    scheduler.grammar_compile_error_reqs = {}
+    scheduler.request_errors = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()

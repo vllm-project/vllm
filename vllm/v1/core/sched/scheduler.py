@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import replace
 from math import lcm
 from typing import Any
@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -290,9 +291,14 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
-        # Grammar compilation failures to finish as per-request errors in
-        # update_from_output.
-        self.grammar_compile_error_reqs: dict[str, RequestError] = {}
+        # Grammar compilation and LoRA load failures to finish as per-request
+        # errors in update_from_output.
+        self.request_errors: dict[str, RequestError] = {}
+        # Loads an adapter into the workers without evicting the given ones.
+        # Set by the engine so that an adapter is loaded before its request is
+        # admitted, and one that cannot be loaded fails that request rather
+        # than the step running it.
+        self.load_lora: Callable[[LoRARequest, Collection[int]], bool] | None = None
         self.encoder_cache_mismatch_reqs: set[str] = set()
         self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
 
@@ -1059,11 +1065,7 @@ class Scheduler(SchedulerInterface):
         # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
-                req.lora_request.lora_int_id
-                for req in self.running
-                if req.lora_request and req.lora_request.lora_int_id > 0
-            )
+            scheduled_loras = self.get_running_lora_ids()
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
@@ -1149,6 +1151,15 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
+                    skip_request(request_queue)
+                    continue
+
+                if (
+                    self.load_lora is not None
+                    and request.lora_request
+                    and request.lora_request.lora_int_id not in scheduled_loras
+                    and not self._load_lora(request, scheduled_loras)
+                ):
                     skip_request(request_queue)
                     continue
 
@@ -2726,8 +2737,8 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        request_errors = self.grammar_compile_error_reqs
-        self.grammar_compile_error_reqs = {}
+        request_errors = self.request_errors
+        self.request_errors = {}
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
@@ -3846,6 +3857,39 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
+    def get_running_lora_ids(self) -> set[int]:
+        return {
+            req.lora_request.lora_int_id
+            for req in self.running
+            if req.lora_request and req.lora_request.lora_int_id > 0
+        }
+
+    def _load_lora(self, request: Request, running_loras: set[int]) -> bool:
+        """Returns whether the request's adapter is loaded.
+
+        If it cannot be loaded, the request is finished with an error in
+        update_from_output. If there is only no room for it while the running
+        adapters stay cached, the request keeps waiting.
+        """
+        assert self.load_lora is not None and request.lora_request is not None
+        if request.request_id in self.request_errors:
+            return False
+        lora_name = request.lora_request.lora_name
+        try:
+            return self.load_lora(request.lora_request, running_loras)
+        except Exception as e:
+            logger.warning(
+                "Failing request %s: could not load LoRA adapter %s: %s",
+                request.request_id,
+                lora_name,
+                e,
+            )
+            self.request_errors[request.request_id] = RequestError(
+                code="lora_load_error",
+                message=f"LoRA adapter {lora_name!r} could not be loaded.",
+            )
+            return False
+
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
         it should be skipped for this step."""
@@ -3870,7 +3914,7 @@ class Scheduler(SchedulerInterface):
             if not struct_output_req or struct_output_req.grammar is None:
                 return False
             if isinstance(struct_output_req.grammar, Exception):
-                self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                self.request_errors[request.request_id] = RequestError(
                     code="validation_error",
                     message=f"Invalid structured outputs: {struct_output_req.grammar}",
                 )

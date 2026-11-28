@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
@@ -1242,6 +1243,65 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens == {"a": 150}
     assert req_c.status == RequestStatus.WAITING
+
+
+def test_lora_load_failure_fails_only_that_request():
+    """An adapter that cannot be loaded when its request is admitted errors
+    that request; requests for other adapters are still scheduled."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+
+    def load_lora(lora_request: LoRARequest, running_loras: set[int]) -> bool:
+        if lora_request.lora_name == "lost":
+            raise LoRAAdapterNotFoundError("lost", lora_request.lora_path)
+        return True
+
+    scheduler.load_lora = load_lora
+    lost, kept = create_requests(num_requests=2, req_ids=["lost", "kept"])
+    lost.lora_request = LoRARequest("lost", 1, "/path/lost")
+    kept.lora_request = LoRARequest("kept", 2, "/path/kept")
+    scheduler.add_request(lost)
+    scheduler.add_request(kept)
+
+    output = scheduler.schedule()
+    assert list(output.num_scheduled_tokens) == ["kept"]
+
+    engine_outputs = scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["kept"],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    (lost_output,) = (
+        o for o in engine_outputs[lost.client_index].outputs if o.request_id == "lost"
+    )
+    assert lost_output.finish_reason == FinishReason.ERROR
+    assert lost_output.error is not None
+    assert "'lost'" in lost_output.error.message
+    assert not scheduler.has_request("lost")
+    assert kept.status == RequestStatus.RUNNING
+
+
+def test_lora_without_cache_room_keeps_waiting():
+    """A request whose adapter has no room yet, short of evicting one in use,
+    waits for room rather than failing."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    has_room = False
+    scheduler.load_lora = lambda lora_request, running_loras: has_room
+    (request,) = create_requests(num_requests=1, req_ids=["a"])
+    request.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {}
+    scheduler.update_from_output(output, EMPTY_MODEL_RUNNER_OUTPUT)
+    assert request.status == RequestStatus.WAITING
+
+    has_room = True
+    assert list(scheduler.schedule().num_scheduled_tokens) == ["a"]
 
 
 @pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
@@ -5597,7 +5657,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
-    scheduler.grammar_compile_error_reqs = {}
+    scheduler.request_errors = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
