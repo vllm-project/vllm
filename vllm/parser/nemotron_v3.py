@@ -60,6 +60,7 @@ class NemotronV3Parser(Qwen3Parser):
             parser_engine_config=nemotron_v3_config(thinking=thinking),
             **kwargs,
         )
+        self._chat_template_kwargs = chat_kwargs
         self._streamed_reasoning: list[str] = []
 
     def _reset(self, initial_state=None) -> None:
@@ -76,16 +77,18 @@ class NemotronV3Parser(Qwen3Parser):
             self._streamed_reasoning.append(delta.reasoning)
         return delta
 
-    @staticmethod
     def _should_force_content(
+        self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> bool:
-        chat_template_kwargs = getattr(request, "chat_template_kwargs", None)
-        return bool(
-            chat_template_kwargs
-            and (
-                chat_template_kwargs.get("enable_thinking") is False
-                or chat_template_kwargs.get("force_nonempty_content") is True
+        # The constructor kwargs include server defaults; the request kwargs
+        # cover callers that build the parser without them.
+        return any(
+            kwargs.get("enable_thinking") is False
+            or kwargs.get("force_nonempty_content") is True
+            for kwargs in (
+                self._chat_template_kwargs,
+                getattr(request, "chat_template_kwargs", None) or {},
             )
         )
 

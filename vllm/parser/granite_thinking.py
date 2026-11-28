@@ -70,6 +70,7 @@ class GraniteThinkingParser(NemotronV3Parser):
             parser_engine_config=granite_thinking_config(thinking=thinking),
             **kwargs,
         )
+        self._chat_template_kwargs = chat_kwargs
         self._streamed_reasoning: list[str] = []
         self._content_started = False
 
