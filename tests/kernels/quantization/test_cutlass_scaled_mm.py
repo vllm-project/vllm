@@ -33,7 +33,11 @@ MNK_FACTORS = [
     (64, 16384, 1024),
     (100, 8192, 496),
     (128, 32768, 4096),
+    (129, 4096, 496),
+    (192, 8192, 4096),
     (256, 4096, 4096),
+    (257, 1408, 1024),
+    (448, 4096, 4096),
     (512, 256, 1024),
     (512, 8192, 4096),
     (512, 16384, 128),
@@ -309,6 +313,7 @@ def test_cutlass_int8_gemm_output_dtype(
 )
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.parametrize("m", [160, 320, 512])
 @pytest.mark.skipif(
     not current_platform.has_device_capability(89),
     reason="FP8 is not supported on this GPU type.",
@@ -318,9 +323,10 @@ def test_cutlass_fp8_gemm_output_dtype(
     b_scale_group_shape,
     out_dtype: type[torch.dtype],
     use_bias: bool,
+    m: int,
 ):
     cutlass_fp8_gemm_helper(
-        512,
+        m,
         512,
         512,
         a_scale_group_shape,
