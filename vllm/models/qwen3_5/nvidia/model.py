@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -150,6 +151,9 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
     """
     key = get_input_quant_key(linear)
     if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
+        return key
+    # Block-FP8 checkpoints: the norm writes one scale per 128 columns.
+    if key == kFp8Dynamic128Sym and linear.input_size_per_partition % 128 == 0:
         return key
     # The norm writes block scales for exactly K = hidden_size, in whole
     # 4-column scale tiles (weights only require K % 32 == 0).
@@ -257,7 +261,7 @@ class Qwen3_5RMSNorm(nn.Module):
             return None, *self(x, residual)
 
         assert linear is not None
-        if key == kFp8DynamicTokenSym:
+        if key in (kFp8DynamicTokenSym, kFp8Dynamic128Sym):
             scale = None
         elif key == kNvfp4Dynamic:
             scale = linear.input_global_scale_inv

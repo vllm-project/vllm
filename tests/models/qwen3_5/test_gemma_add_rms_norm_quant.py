@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -129,6 +130,80 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     else:
         assert sf is scale
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
+    assert dist.max().item() <= 1
+    assert (dist > 0).float().mean().item() <= 1e-4
+
+
+# 2048 / 4096: Qwen3.6-35B-A3B / Qwen3.5-397B-A17B hidden sizes; 5120: not a
+# power of 2 (40 groups of 128).
+@pytest.mark.parametrize("H", [2048, 4096, 5120])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
+)
+@pytest.mark.parametrize("has_residual", [True, False])
+@torch.inference_mode()
+def test_gemma_add_rms_norm_group128_quant_matches_chain(
+    H: int, num_tokens: int, has_residual: bool
+):
+    """Block-FP8 checkpoints: dynamic per-token-group-128 FP8 with column-major
+    scales, as per_token_group_quant_fp8 writes them for the CUTLASS kernel."""
+    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+    from vllm.models.qwen3_5.nvidia.ops.fused_norm_quant import (
+        gemma_add_rms_norm_quant,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(num_tokens)
+    w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
+    w[:64] = -0.99609375
+    x = torch.randn(num_tokens, H, generator=g, device="cuda").bfloat16()
+    residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).bfloat16()
+    residual[:, 7] *= 50  # outlier channel: one group with a large scale
+
+    ref_res = residual.clone()
+    if has_residual:
+        ref_y = x.clone()
+        gemma_fused_add_rmsnorm(ref_y, ref_res, w, 1e-6)
+    else:
+        ref_y = gemma_rmsnorm(x, w, 1e-6)
+    # Plain fp32 scales (no UE8M0 rounding), as the CUTLASS block-FP8 kernel's
+    # own input quant (QuantFP8(..., use_ue8m0=False)) computes them.
+    ref_q, ref_sf = per_token_group_quant_fp8(
+        ref_y, group_size=128, column_major_scales=True, use_ue8m0=False
+    )
+
+    x_in = x.clone()
+    res = residual.clone()
+    q, sf, y = gemma_add_rms_norm_quant(
+        x_in, res if has_residual else None, w, 1e-6, None, kFp8Dynamic128Sym, True
+    )
+
+    torch.testing.assert_close(x_in, x, rtol=0, atol=0)
+    torch.testing.assert_close(res, ref_res, rtol=0, atol=0)
+    assert (y != ref_y).float().mean().item() <= 1e-4
+    torch.testing.assert_close(y, ref_y, rtol=2**-7, atol=0)
+
+    # Layout: (M, H // 128) fp32, column-major.
+    assert sf.shape == (num_tokens, H // 128) and sf.dtype == torch.float32
+    assert sf.stride() == (1, num_tokens)
+
+    # Quant arithmetic: identical to the standalone kernel on the same input.
+    own_q, own_sf = per_token_group_quant_fp8(
+        y, group_size=128, column_major_scales=True, use_ue8m0=False
+    )
+    torch.testing.assert_close(sf, own_sf, rtol=0, atol=0)
+    assert (_fp8_codes(q) == _fp8_codes(own_q)).all()
+
+    # Against the unfused chain: groups whose normed values match get the same
+    # scale and codes; elsewhere codes differ by at most one step.
+    same_group = (y == ref_y).view(num_tokens, H // 128, 128).all(dim=-1)
+    assert (sf[same_group] == ref_sf[same_group]).all()
+    dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
     assert dist.max().item() <= 1
     assert (dist > 0).float().mean().item() <= 1e-4
 
