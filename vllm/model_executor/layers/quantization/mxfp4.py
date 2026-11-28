@@ -648,8 +648,6 @@ def _moe_weight_override_is_int4() -> bool:
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
-    supports_pre_processed_weights = True
-
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
@@ -1030,15 +1028,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             self.moe_kernel.fused_experts.keep_constants(layer)
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.mxfp4_backend in (
+            Mxfp4MoeBackend.NONE,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.MARLIN,
+            Mxfp4MoeBackend.BATCHED_MARLIN,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 
         if is_weights_pre_processed():
-            if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+            if not self.supports_pre_processed_weights:
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM_MXFP4_MXFP8 "
-                    f"moe backend, got {self.mxfp4_backend}"
+                    "pre-processed weights are not supported with the "
+                    f"{self.mxfp4_backend} MoE backend"
                 )
             self._build_moe_kernel(layer)
             return
