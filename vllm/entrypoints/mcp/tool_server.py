@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 async def list_server_and_tools(server_url: str):
     from mcp import ClientSession
     from mcp.client.sse import sse_client
+    from mcp.types import PaginatedRequestParams
 
     async with (
         sse_client(url=server_url) as streams,
@@ -27,7 +28,21 @@ async def list_server_and_tools(server_url: str):
     ):
         initialize_response = await session.initialize()
         list_tools_response = await session.list_tools()
-        return initialize_response, list_tools_response
+        list_tool_result = list_tools_response
+        seen_cursors = set()
+        while list_tools_response.next_cursor is not None:
+            if list_tools_response.next_cursor in seen_cursors:
+                raise ValueError(
+                    "MCP server returned a duplicate tools/list cursor "
+                    f"{list_tools_response.next_cursor}"
+                )
+            seen_cursors.add(list_tools_response.next_cursor)
+            list_tools_response = await session.list_tools(
+                params=PaginatedRequestParams(cursor=list_tools_response.next_cursor)
+            )
+            list_tool_result.tools.extend(list_tools_response.tools)
+
+        return initialize_response, list_tool_result
 
 
 def trim_schema(schema: dict) -> dict:
