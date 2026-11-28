@@ -42,6 +42,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
+    PREFILL_TILE_MIN_TOKENS,
+    PrefillTileStats,
+    prefill_tile_block_m,
+    prefill_tile_stats,
     unified_attention,
 )
 from vllm.v1.kv_cache_interface import (
@@ -91,6 +95,10 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+
+    # Larger prefill Q tile (sm80/sm89), see _get_prefill_block_m.
+    prefill_tile: bool = True
+    prefill_tile_stats: PrefillTileStats | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -149,6 +157,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # Layers for which unified_attention may use the larger prefill tile.
+        self.prefill_tile_gpu = (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability(80)
+                or current_platform.is_device_capability(89)
+            )
+            and 64 <= self.headdim <= 128
+            and self.num_heads_q // self.num_heads_kv <= 16
+        )
         # On SM120, batches whose 16-segment decode grid under-fills the SMs use
         # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
         # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
@@ -228,6 +246,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
+        # The tile choice depends on each step's batch, which a graph cannot
+        # follow, so full graphs keep the default tile.
+        attn_metadata.prefill_tile = False
         return attn_metadata
 
     def build(
@@ -277,6 +298,25 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
             attn_metadata.softmax_segm_expsum = self.softmax_segm_expsum.view(
                 -1, self.num_heads_q, segments
+            )
+
+        if self.prefill_tile_gpu and num_actual_tokens >= PREFILL_TILE_MIN_TOKENS:
+            block_q = max(
+                prefill_tile_block_m(self.headdim)
+                // (self.num_heads_q // self.num_heads_kv),
+                1,
+            )
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu is None:
+                # No host seq lens: short rows may be as long as max_seq_len,
+                # long rows are at least their query length.
+                query_lens = query_start_loc_cpu[: num_reqs + 1].diff()
+                seq_lens_cpu = torch.where(
+                    query_lens < block_q, max_seq_len, query_lens
+                )
+            attn_metadata.prefill_tile_stats = prefill_tile_stats(
+                query_start_loc_cpu[: num_reqs + 1], seq_lens_cpu, block_q
             )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -748,6 +788,8 @@ class TritonAttentionImpl(AttentionImpl):
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
+            prefill_tile=attn_metadata.prefill_tile,
+            prefill_tile_stats=attn_metadata.prefill_tile_stats,
         )
 
         return output

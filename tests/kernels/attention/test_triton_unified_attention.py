@@ -556,6 +556,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -596,8 +597,13 @@ def ref_paged_attn(
         if soft_cap is not None and soft_cap > 0:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
-        out = torch.einsum("hqk,khd->qhd", attn, v)
+        if sinks is not None:
+            sink = sinks.float()[:, None, None].expand(-1, query_len, 1)
+            attn = torch.cat([attn, sink], dim=-1)
+        attn = torch.softmax(attn, dim=-1)
+        if sinks is not None:
+            attn = attn[..., :-1]
+        out = torch.einsum("hqk,khd->qhd", attn.to(v.dtype), v)
 
         outputs.append(out)
         start_idx += query_len
@@ -1513,3 +1519,325 @@ def test_triton_unified_attn_window_aware_segments(
             sliding_window=sliding_window,
         )
         torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+requires_prefill_tile_gpu = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability(80)
+        or current_platform.is_device_capability(89)
+    ),
+    reason="the larger prefill tile is only used on sm80 and sm89",
+)
+
+
+class _LaunchSpy:
+    """Records the keyword args of each kernel_unified_attention launch."""
+
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.launches: list[dict] = []
+
+    def __getitem__(self, grid):
+        launcher = self.kernel[grid]
+
+        def launch(*args, **kwargs):
+            self.launches.append(kwargs)
+            return launcher(*args, **kwargs)
+
+        return launch
+
+
+def _select_prefill_block_m(
+    query_lens, num_heads, head_size, dtype=torch.bfloat16, kv_lens=None
+):
+    return attention._get_prefill_block_m(
+        head_size,
+        num_heads[0] // num_heads[1],
+        sum(query_lens),
+        len(query_lens),
+        num_heads[1],
+        dtype,
+        _prefill_tile_stats(query_lens, kv_lens, num_heads, head_size)
+        if kv_lens is not None
+        else None,
+    )
+
+
+def _prefill_tile_stats(query_lens, kv_lens, num_heads, head_size):
+    block_m = attention.prefill_tile_block_m(head_size)
+    return attention.prefill_tile_stats(
+        torch.tensor([0] + query_lens, device="cpu").cumsum(0),
+        torch.tensor(kv_lens, device="cpu"),
+        block_m // (num_heads[0] // num_heads[1]),
+    )
+
+
+def test_prefill_tile_stats() -> None:
+    # Rows shorter than one Q block (decode, spec verify) vs the rest; padded
+    # rows (query length 0) are ignored.
+    query_start_loc = torch.tensor([0, 2048, 2049, 2065, 2065], device="cpu")
+    seq_lens = torch.tensor([2048, 32768, 16384, 65536], device="cpu")
+    assert attention.prefill_tile_stats(query_start_loc, seq_lens, 32) == (
+        32768,
+        2,
+        2048,
+        2048 * 1024,
+    )
+    assert attention.prefill_tile_stats(query_start_loc, seq_lens, 16) == (
+        32768,
+        1,
+        2048 + 16,
+        2048 * 1024 + 16 * (16384 - 8),
+    )
+    assert attention.prefill_tile_stats(
+        torch.tensor([0, 4096], device="cpu"), torch.tensor([8192], device="cpu"), 32
+    ) == (0, 0, 4096, 4096 * 6144)
+
+
+@requires_prefill_tile_gpu
+@pytest.mark.parametrize("num_sms", [58, 108])  # L4, A100
+def test_prefill_block_m_selection(monkeypatch, num_sms: int) -> None:
+    monkeypatch.setattr(attention, "num_compute_units", lambda: num_sms)
+    assert _select_prefill_block_m([8192], (64, 8), 64) == 64
+    assert _select_prefill_block_m([8192], (32, 8), 128) == 128
+    # Too few tokens, too few programs to fill the GPU, or decode-heavy.
+    assert _select_prefill_block_m([1024], (64, 8), 64) is None
+    assert _select_prefill_block_m([2048], (8, 8), 128) is None
+    assert _select_prefill_block_m([2048] + [1] * 255, (64, 8), 64) is None
+    # Unsupported head sizes, dtypes and GQA ratios.
+    assert _select_prefill_block_m([8192], (32, 8), 256) is None
+    assert _select_prefill_block_m([8192], (32, 8), 128, torch.float32) is None
+    assert _select_prefill_block_m([8192], (64, 2), 128) is None
+    # A decode or verify row with a longer KV than every prefill row would be
+    # the slowest program with the larger tile.
+    mixed = [2048] + [1] * 4
+    assert _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[2048] + [2048] * 4)
+    assert (
+        _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[2048] + [32768] * 4)
+        is None
+    )
+    verify = [1024, 1024] + [16] * 8
+    assert (
+        _select_prefill_block_m(verify, (32, 8), 128, kv_lens=[1024] * 2 + [32768] * 8)
+        is None
+    )
+    # A chunk deep in a long context keeps the tile, alone or next to decodes
+    # with a shorter context.
+    assert _select_prefill_block_m([2048], (32, 8), 128, kv_lens=[32768]) == 128
+    assert (
+        _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[32768] + [16384] * 4)
+        == 128
+    )
+
+
+@requires_prefill_tile_gpu
+@pytest.mark.parametrize(
+    ("dtype", "num_heads", "head_size", "use_sinks", "sliding_window", "soft_cap"),
+    [
+        (torch.bfloat16, (64, 8), 64, True, None, None),  # gpt-oss
+        (torch.bfloat16, (64, 8), 64, True, 128, None),  # gpt-oss sliding window
+        (torch.float16, (64, 8), 64, True, None, None),
+        (torch.bfloat16, (32, 8), 128, False, None, 50.0),
+        (torch.bfloat16, (56, 8), 128, False, None, None),  # 7 queries per KV head
+        (torch.bfloat16, (48, 4), 96, False, 128, None),  # 12 per KV head, padded
+        (torch.float16, (40, 8), 80, True, None, None),  # 5 per KV head, padded
+        (torch.bfloat16, (32, 16), 128, False, 1024, None),  # Gemma-3 27B
+        (torch.bfloat16, (16, 16), 128, False, None, None),  # MHA
+    ],
+)
+@torch.inference_mode()
+def test_triton_unified_attn_prefill_tile(
+    monkeypatch,
+    dtype: torch.dtype,
+    num_heads: tuple[int, int],
+    head_size: int,
+    use_sinks: bool,
+    sliding_window: int | None,
+    soft_cap: float | None,
+) -> None:
+    """The larger tile is launched only when opted in and matches the reference."""
+    seq_lens = [(3000, 3000), (1500, 3500), (800, 800)]
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    block_size, num_blocks = 16, 2048
+    num_query_heads, num_kv_heads = num_heads
+    scale = head_size**-0.5
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    sinks = torch.randn(num_query_heads, dtype=torch.float32) if use_sinks else None
+    block_tables = torch.randint(
+        0, num_blocks, (len(seq_lens), 3500 // block_size + 1), dtype=torch.int32
+    )
+    spy = _LaunchSpy(attention.kernel_unified_attention)
+    monkeypatch.setattr(attention, "kernel_unified_attention", spy)
+    call = dict(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+            dim=0, dtype=torch.int32
+        ),
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(sliding_window - 1, 0) if sliding_window else (-1, -1),
+        block_table=block_tables,
+        softcap=soft_cap or 0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        sinks=sinks,
+    )
+    unified_attention(out=torch.empty_like(query), **call)
+    assert spy.launches[-1]["BLOCK_M"] == 16
+    output = torch.empty_like(query)
+    unified_attention(out=output, prefill_tile=True, **call)
+    assert spy.launches[-1]["BLOCK_M"] == (64 if head_size <= 64 else 128)
+    assert spy.launches[-1]["num_warps"] == 4
+
+    ref_output = ref_paged_attn(
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        sinks=sinks,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+@requires_prefill_tile_gpu
+@pytest.mark.parametrize(
+    "feature",
+    [
+        "alibi",
+        "non_causal",
+        pytest.param(
+            "fp8_output",
+            marks=pytest.mark.skipif(
+                not current_platform.supports_fp8(), reason="fp8 needs sm89+"
+            ),
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_prefill_tile_skipped_for_untested_features(monkeypatch, feature) -> None:
+    """Untested features keep the default tile even when the caller opts in."""
+    query_lens, kv_lens = [3000, 1500, 800], [3000, 3500, 800]
+    torch.set_default_device(DEVICE_TYPE)
+    query = torch.randn(sum(query_lens), 64, 64, dtype=torch.bfloat16)
+    key_cache = torch.randn(2048, 16, 8, 64, dtype=torch.bfloat16)
+    extra = {}
+    if feature == "alibi":
+        extra["alibi_slopes"] = torch.rand(64, dtype=torch.float32)
+    if feature == "fp8_output":
+        extra["output_scale"] = torch.tensor([1.0])
+    spy = _LaunchSpy(attention.kernel_unified_attention)
+    monkeypatch.setattr(attention, "kernel_unified_attention", spy)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=torch.randn_like(key_cache),
+        out=torch.empty(
+            query.shape,
+            dtype=current_platform.fp8_dtype()
+            if feature == "fp8_output"
+            else query.dtype,
+        ),
+        cu_seqlens_q=torch.tensor([0, 3000, 4500, 5300], dtype=torch.int32),
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=0.125,
+        causal=feature != "non_causal",
+        window_size=(-1, -1),
+        block_table=torch.randint(0, 2048, (3, 3500 // 16 + 1), dtype=torch.int32),
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        prefill_tile=True,
+        **extra,
+    )
+    assert spy.launches[-1]["BLOCK_M"] == 16
+
+
+@requires_prefill_tile_gpu
+@pytest.mark.parametrize(
+    ("rows", "expect_tile"),
+    [
+        # (query_len, kv_len) per row
+        ([(2048, 2048)] + [(1, 12288)] * 8, False),  # prefill + long-context decodes
+        ([(1024, 1024)] * 2 + [(16, 12288)] * 4, False),  # spec verify rows
+        ([(2048, 8192)] + [(1, 4096)] * 8, True),  # chunk in a long context
+    ],
+)
+@torch.inference_mode()
+def test_prefill_tile_mixed_batches(monkeypatch, rows, expect_tile) -> None:
+    """Mixed batches pick the tile from host batch stats and match the reference."""
+    query_lens = [r[0] for r in rows]
+    kv_lens = [r[1] for r in rows]
+    num_heads, head_size, dtype = (32, 8), 128, torch.bfloat16
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    block_size = 16
+    blocks_per_seq = max(kv_lens) // block_size + 1
+    num_blocks = blocks_per_seq * len(rows)
+    query = torch.randn(sum(query_lens), num_heads[0], head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_heads[1], head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32).view(
+        len(rows), blocks_per_seq
+    )
+    spy = _LaunchSpy(attention.kernel_unified_attention)
+    monkeypatch.setattr(attention, "kernel_unified_attention", spy)
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+            dim=0, dtype=torch.int32
+        ),
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        prefill_tile=True,
+        prefill_tile_stats=_prefill_tile_stats(
+            query_lens, kv_lens, num_heads, head_size
+        ),
+    )
+    assert spy.launches[-1]["BLOCK_M"] == (128 if expect_tile else 16)
+    ref_output = ref_paged_attn(
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=head_size**-0.5,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)

@@ -8,7 +8,7 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -36,6 +37,11 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
+# Thresholds for the larger prefill Q tile, see _get_prefill_block_m.
+PREFILL_TILE_MIN_TOKENS = 2048
+PREFILL_TILE_MIN_BLOCKS_PER_SEQ = 6
+PREFILL_TILE_MIN_PROGRAMS_PER_SM = 4
+PREFILL_TILE_MAX_SHORT_ROW_COST = 1.0
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
 # (RDNA3).
@@ -987,6 +993,90 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def prefill_tile_block_m(head_size: int) -> int:
+    return 64 if head_size <= 64 else 128
+
+
+class PrefillTileStats(NamedTuple):
+    """Host-side batch shape for the prefill tile gate, see prefill_tile_stats."""
+
+    short_kv: int  # longest KV of the rows shorter than one Q block
+    num_short: int  # number of such rows (decodes, spec verification)
+    long_tokens: int  # query tokens of the other rows
+    long_work: int  # sum of query_len * mean causal KV length of the other rows
+
+
+def prefill_tile_stats(
+    query_start_loc_cpu: torch.Tensor, seq_lens_cpu: torch.Tensor, block_q: int
+) -> PrefillTileStats:
+    query_lens = query_start_loc_cpu.diff().long()
+    seq_lens = seq_lens_cpu[: query_lens.shape[0]].long()
+    short = (query_lens > 0) & (query_lens < block_q)
+    long = query_lens >= block_q
+    q_long = query_lens[long]
+    return PrefillTileStats(
+        short_kv=int(seq_lens[short].max()) if bool(short.any()) else 0,
+        num_short=int(short.sum()),
+        long_tokens=int(q_long.sum()),
+        long_work=int((q_long * (seq_lens[long] - q_long // 2)).sum()),
+    )
+
+
+def _get_prefill_block_m(
+    head_size: int,
+    num_queries_per_kv: int,
+    num_tokens: int,
+    num_seqs: int,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    stats: PrefillTileStats | None = None,
+    sliding_window: int | None = None,
+) -> int | None:
+    """Larger BLOCK_M for prefill-heavy batches on sm80/sm89, else None.
+
+    The tile wastes rows on decode sequences, so it needs enough tokens, query
+    blocks per sequence and programs to fill the GPU. With ``stats``, it is also
+    skipped when the short-query rows (decodes, spec verification), which still
+    get a whole tile each, would take longer than the prefill rows' work spread
+    over the SMs: one such row with a long KV becomes the slowest program.
+    """
+    if (
+        is_batch_invariant
+        or num_tokens < PREFILL_TILE_MIN_TOKENS
+        or num_queries_per_kv > 16
+        or not 64 <= head_size <= 128
+        or dtype not in (torch.float16, torch.bfloat16)
+        or not current_platform.is_cuda()
+        or not (
+            current_platform.is_device_capability(80)
+            or current_platform.is_device_capability(89)
+        )
+    ):
+        return None
+    block_m = prefill_tile_block_m(head_size)
+    block_q = block_m // num_queries_per_kv
+    if num_tokens < PREFILL_TILE_MIN_BLOCKS_PER_SEQ * num_seqs * block_q:
+        return None
+    num_programs = (num_tokens // block_q + num_seqs) * num_kv_heads
+    if num_programs < PREFILL_TILE_MIN_PROGRAMS_PER_SM * num_compute_units():
+        return None
+    if stats is not None and stats.num_short > 0:
+        num_sms = num_compute_units()
+        short_kv, long_work = stats.short_kv, stats.long_work
+        if sliding_window is not None:
+            short_kv = min(short_kv, sliding_window)
+            long_work = min(long_work, stats.long_tokens * sliding_window)
+        # MMA rows x keys: the short rows' programs vs the long rows' work per SM.
+        short_cost = short_kv * max(1.0, stats.num_short * num_kv_heads / num_sms)
+        num_q_heads = num_queries_per_kv * num_kv_heads
+        if (
+            short_cost * block_m * num_sms
+            > PREFILL_TILE_MAX_SHORT_ROW_COST * long_work * num_q_heads
+        ):
+            return None
+    return block_m
+
+
 def unified_attention(
     q,
     k,
@@ -1039,6 +1129,10 @@ def unified_attention(
     # WINDOW_SEGMENTS). Takes effect only for plain causal sliding windows;
     # False forces the whole-sequence split (for testing and A/B runs).
     window_aware_segments: bool = True,
+    # Larger prefill Q tile; only the TRITON_ATTN backend opts in.
+    prefill_tile: bool = False,
+    # prefill_tile_stats(...) of this batch, see _get_prefill_block_m.
+    prefill_tile_stats: PrefillTileStats | None = None,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1179,6 +1273,37 @@ def unified_attention(
         ):
             BLOCK_M, rdna_prefill_tile, launch_num_warps, launch_num_stages = config
             BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    prefill_block_m = None
+    # Only plain causal attention was tested with the larger tile.
+    if (
+        prefill_tile
+        and kv_quant_mode == KVQuantMode.NONE
+        and not use_td
+        and use_causal
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and output_scale is None
+        and chunk_lookback < 0
+    ):
+        prefill_block_m = _get_prefill_block_m(
+            head_size,
+            num_queries_per_kv,
+            q.shape[0],
+            num_seqs,
+            num_kv_heads,
+            q.dtype,
+            prefill_tile_stats,
+            sliding_window=window_size[0] + 1 if window_size[0] >= 0 else None,
+        )
+    if prefill_block_m is not None:
+        BLOCK_M = prefill_block_m
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 4
+        launch_num_stages = 2
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
