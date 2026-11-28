@@ -942,7 +942,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_fused_gdn_spec_decode = (
             self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
         )
-        if self.speculative_config is not None:
+        if (
+            self.enable_fused_gdn_spec_decode
+            and self.num_spec
+            and self.num_spec + 1 > MAX_FUSED_GDN_MTP_TOKENS
+        ):
+            logger.info_once(
+                "GDN spec decode fallback: verify window %d exceeds "
+                "the fused MTP limit of %d tokens.",
+                self.num_spec + 1,
+                MAX_FUSED_GDN_MTP_TOKENS,
+            )
+        elif self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
         # Cached-decode kernel (reuses the engine-level mamba_* flags). When
         # enabled, the paged GDN page grows to 5 tensors and the non-spec decode

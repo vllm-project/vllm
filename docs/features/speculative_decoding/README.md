@@ -60,6 +60,9 @@ vllm serve Qwen/Qwen3.8-27B \
 
 Set `num_speculative_tokens` to the checkpoint's block size minus one.
 
+The example verifies 16 tokens (15 drafts plus one target token), exceeding
+the fused Qwen GDN kernel's 9-token limit. The startup log reports the fallback.
+
 ## DFlash query layouts
 
 DFlash and DFlash2 drafts default to the fill-in layout: the anchor is the
