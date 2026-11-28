@@ -75,3 +75,28 @@ def test_rotary_embedding_opcheck(
             query.flatten(start_dim=-2),
             key.flatten(start_dim=-2) if key is not None else None,
         )
+
+
+@pytest.mark.parametrize("positions_shape", [(0,), (1, 0)])
+def test_rotary_embedding_empty_batch(positions_shape):
+    """An empty batch is a no-op instead of a 0/0 crash in the host code."""
+    head_size = 64
+    positions = torch.zeros(positions_shape, dtype=torch.long, device="cuda")
+    query = torch.empty(
+        *positions_shape, 4 * head_size, dtype=torch.bfloat16, device="cuda"
+    )
+    key = torch.empty_like(query)
+    cache = torch.empty(16, head_size, dtype=torch.bfloat16, device="cuda")
+
+    torch.ops._C.rotary_embedding(positions, query, key, head_size, cache, True)
+    if positions.dim() == 1:
+        torch.ops._C.rotary_embedding_out(
+            positions,
+            query,
+            key,
+            torch.empty_like(query),
+            torch.empty_like(key),
+            head_size,
+            cache,
+            True,
+        )

@@ -138,6 +138,7 @@ void rotary_embedding(
             (!key.has_value() || key->size(1) == positions.size(1)),
         "query, key and positions must have the same batch_size and seq_len");
   }
+  if (num_tokens == 0) return;
 
   // Make sure head_size is valid for query and key
   // hidden_size = num_heads * head_size
@@ -306,6 +307,7 @@ void rotary_embedding_out(
                       (!key.has_value() ||
                        (key->stride(-1) == 1 && key_out->stride(-1) == 1)),
                   "the last dimension must be contiguous");
+  if (num_tokens == 0) return;
 
   const int query_hidden_size = query.numel() / num_tokens;
   const int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
