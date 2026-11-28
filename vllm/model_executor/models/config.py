@@ -789,9 +789,10 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             vllm_config.diffusion_config.canvas_length = canvas_length
         _parse_diffusion_model_options(vllm_config, DiffusionGemmaDiffusionOptions)
 
-        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
-        # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
-        # Default to 8 when the user didn't pass --max-num-seqs.
+        # Every running request adds a canvas of tokens to each step, so
+        # throughput levels off far below the generic default, and the tiled
+        # logits projection keeps the sampler within the free memory.
+        # Default to 16 when the user didn't pass --max-num-seqs.
         # We can't see the original None here (the engine already filled a generic
         # default), so use >= DEFAULT_MAX_NUM_SEQS as a proxy, (the default is much
         # larger than any deliberate value for this model)
@@ -799,7 +800,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
         sc = vllm_config.scheduler_config
         if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
-            sc.max_num_seqs = 8
+            sc.max_num_seqs = 16
 
         # Remove the model's generation_config.json cap on max_new_tokens
         # (256) so DiffusionGemma behaves like every other model: no

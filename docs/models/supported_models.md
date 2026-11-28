@@ -719,6 +719,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     meta-actions, pass the id of `<|traj_future_start|>` in `stop_token_ids`.
 
 !!! note
+    `DiffusionGemmaForBlockDiffusion` runs at most 16 requests at once unless
+    `--max-num-seqs` is set. Every running request adds a full canvas of tokens to each
+    denoising step, so a higher value mostly makes each step slower and leaves less memory
+    for the KV cache.
+
+!!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
     corresponding modality is enabled via `--limit-mm-per-prompt`. Video inputs are
     decoded into frames and audio, so they require both towers. The checkpoint also
