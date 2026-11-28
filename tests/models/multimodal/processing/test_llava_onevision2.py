@@ -20,7 +20,9 @@ import types
 
 import numpy as np
 import pytest
+from PIL import Image
 
+from vllm.config.scheduler import SchedulerConfig
 from vllm.model_executor.models.llava_onevision2 import (
     _CODEC_VIDEO_MARKER,
     LlavaOnevision2VideoBackend,
@@ -29,7 +31,13 @@ from vllm.model_executor.models.llava_onevision2 import (
     _validate_video_source,
     prepare_codec_video_input,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.video import VideoSourceMetadata, VideoTargetMetadata
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
+
+from ...utils import build_model_context
 
 
 def _model_config(local: str = "", domains=None):
@@ -300,3 +308,142 @@ def test_backend_target_fps_controls_sampling_when_below_cap():
     # fps-derived nframes (2) is below the 128 cap, so fps wins.
     assert len(idx) <= 8
     assert len(idx) % 2 == 0
+
+
+@pytest.mark.parametrize("max_model_len", [8192, 20000, 32768, 65536])
+def test_dummy_video_matches_video_budget(max_model_len: int):
+    ctx = build_model_context(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    budget = processor.info.get_mm_max_tokens_per_item(max_model_len, {"video": 1})
+    assert budget is not None
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert num_embeds == budget["video"]
+
+
+_LARGE_IMAGES = [(2048, 2048), (2560, 1440), (4000, 1000), (2100, 1904)]
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "image_sizes"),
+    [
+        (None, _LARGE_IMAGES),
+        ({"max_pixels": 1003520}, _LARGE_IMAGES),
+        ({"min_pixels": 1605632, "max_pixels": 1605632}, [(560, 560), (540, 960)]),
+        ({"min_pixels": 196, "max_pixels": 196}, [(28, 28), (2, 393)]),
+        ({"max_pixels": 2574656}, [(22988, 116), (116, 22988)]),
+        ({"max_pixels": 50176}, [(5600, 28), (28, 5600)]),
+    ],
+)
+def test_image_budget_covers_largest_images(
+    mm_processor_kwargs: dict | None, image_sizes: list[tuple[int, int]]
+):
+    ctx = build_model_context(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    max_tokens = processor.info.get_mm_max_tokens_per_item(8192, {"image": 1})
+    assert max_tokens is not None
+    budget = max_tokens["image"]
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"]) == budget
+
+    prompt = processor.info.get_tokenizer().encode(
+        "<|vision_start|><|image_pad|><|vision_end|>"
+    )
+    for width, height in image_sizes:
+        inputs = ProcessorInputs(
+            prompt=prompt,
+            mm_data_items=processor.info.parse_mm_data(
+                {"image": Image.new("RGB", (width, height))}
+            ),
+        )
+        real = processor.apply(inputs, TimingContext(enabled=False))
+        num_embeds = sum(p.get_num_embeds() for p in real["mm_placeholders"]["image"])
+        assert num_embeds <= budget
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "num_frames", "width", "height"),
+    [(20000, 4, 2520, 1400), (65536, 12, 3840, 2160)],
+)
+def test_video_budget_covers_videos_that_fit(
+    max_model_len: int, num_frames: int, width: int, height: int
+):
+    ctx = build_model_context(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    max_tokens = processor.info.get_mm_max_tokens_per_item(max_model_len, {"video": 1})
+    assert max_tokens is not None
+
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 1.0,
+        "duration": float(num_frames),
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "llava_onevision2",
+        "do_sample_frames": False,
+    }
+    inputs = ProcessorInputs(
+        prompt=processor.info.get_tokenizer().encode(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+        ),
+        mm_data_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+    )
+    real = processor.apply(inputs, TimingContext(enabled=False))
+    num_embeds = sum(p.get_num_embeds() for p in real["mm_placeholders"]["video"])
+
+    assert len(real["prompt_token_ids"]) <= max_model_len
+    assert num_embeds <= max_tokens["video"]
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "mm_processor_kwargs"),
+    [
+        (4096, None),
+        (8192, None),
+        (4096, {"min_pixels": 1646400, "max_pixels": 1646400}),
+    ],
+)
+def test_video_budget_fits_unchunked_batch(
+    max_model_len: int, mm_processor_kwargs: dict | None
+):
+    ctx = build_model_context(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    max_tokens = processor.info.get_mm_max_tokens_per_item(max_model_len, {"video": 1})
+    assert max_tokens is not None
+    scheduler_config = SchedulerConfig(
+        max_model_len=max_model_len,
+        is_encoder_decoder=False,
+        max_num_batched_tokens=max_model_len,
+        disable_chunked_mm_input=True,
+    )
+
+    assert compute_mm_encoder_budget(
+        scheduler_config, {"video": max_tokens["video"]}
+    ) == (max_model_len, max_model_len)
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    assert (
+        sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+        == max_tokens["video"]
+    )

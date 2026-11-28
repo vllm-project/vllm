@@ -81,7 +81,11 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings as merge_multimodal_embeddings,
 )
-from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.model_executor.models.vision import (
+    get_max_image_size,
+    get_video_size_and_frames_for_budget,
+    get_vit_attn_backend,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
@@ -1344,14 +1348,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = getattr(vision_config, "temporal_patch_size", 1)
         if do_resize:
-            min_pixels = getattr(image_processor, "min_pixels", None)
-            max_pixels = getattr(image_processor, "max_pixels", None)
-            if min_pixels is None or max_pixels is None:
-                size = image_processor.size
-                min_pixels = (
-                    getattr(size, "shortest_edge", None) or size["shortest_edge"]
-                )
-                max_pixels = getattr(size, "longest_edge", None) or size["longest_edge"]
+            min_pixels, max_pixels = self._get_pixel_limits(image_processor)
             rh, rw = smart_resize(
                 height=image_height,
                 width=image_width,
@@ -1383,11 +1380,35 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         )
         return n
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        sz, _ = self._get_vision_info(
-            image_width=1800, image_height=1800, image_processor=None
-        )
-        return sz
+    @staticmethod
+    def _get_pixel_limits(image_processor: Qwen2VLImageProcessor) -> tuple[int, int]:
+        min_pixels = getattr(image_processor, "min_pixels", None)
+        max_pixels = getattr(image_processor, "max_pixels", None)
+        if min_pixels is None or max_pixels is None:
+            size = image_processor.size
+            min_pixels = getattr(size, "shortest_edge", None) or size["shortest_edge"]
+            max_pixels = getattr(size, "longest_edge", None) or size["longest_edge"]
+        return min_pixels, max_pixels
+
+    def get_image_size_with_most_features(
+        self, max_pixels: int | None = None
+    ) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.spatial_merge_size
+        if max_pixels is None:
+            image_processor = self.get_image_processor()
+            min_pixels, max_pixels = self._get_pixel_limits(image_processor)
+            return get_max_image_size(
+                max_pixels,
+                unit,
+                min_pixels=min_pixels,
+                num_tokens=lambda s: self.get_num_image_tokens(
+                    image_width=s.width,
+                    image_height=s.height,
+                    image_processor=image_processor,
+                ),
+            )
+        return get_max_image_size(max_pixels, unit)
 
     def get_max_image_tokens(self) -> int:
         w, h = self.get_image_size_with_most_features()
@@ -1406,7 +1427,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         _, n = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            num_frames=num_frames,
+            num_frames=num_frames + (-num_frames % _OV2_FRAME_FACTOR),
             image_processor=image_processor,
         )
         return n
@@ -1438,18 +1459,47 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         )
         return max(max_frames_per_video, 1)
 
+    def get_video_size_and_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> tuple[ImageSize, int]:
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.spatial_merge_size
+
+        def num_tokens(size: ImageSize, num_frames: int) -> int:
+            return self.get_num_video_tokens(
+                image_width=size.width, image_height=size.height, num_frames=num_frames
+            )
+
+        max_size = self.get_image_size_with_most_features()
+        max_size_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
+        return get_video_size_and_frames_for_budget(
+            seq_len=seq_len,
+            video_tokens=seq_len // max(mm_counts.get("video", 0), 1),
+            max_size=max_size,
+            max_size_frames=max_size_frames,
+            step_frames=_OV2_FRAME_FACTOR,
+            max_frames=_MAX_FRAMES_PER_VIDEO,
+            unit=unit,
+            num_tokens=num_tokens,
+            get_step_size=lambda step_tokens: self.get_image_size_with_most_features(
+                max_pixels=step_tokens // _OV2_FRAME_FACTOR * unit * unit
+            ),
+        )
+
     def get_max_video_tokens(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        w, h = self.get_image_size_with_most_features()
+        size, num_frames = self.get_video_size_and_frames_with_most_features(
+            seq_len, mm_counts
+        )
         return self.get_num_video_tokens(
-            image_width=w,
-            image_height=h,
-            num_frames=self.get_num_frames_with_most_features(
-                seq_len, mm_counts.get("video", 0)
-            ),
+            image_width=size.width, image_height=size.height, num_frames=num_frames
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -1480,10 +1530,16 @@ class LlavaOnevision2DummyInputsBuilder(
         if n_img:
             out["image"] = self._get_dummy_images(width=w, height=h, num_images=n_img)
         if n_vid:
-            # 4 frames per dummy video keeps profiling cheap; the real frame
-            # count is decided by the HF VideoProcessor at apply time.
+            video_size, num_frames = (
+                self.info.get_video_size_and_frames_with_most_features(
+                    seq_len, mm_counts
+                )
+            )
             out["video"] = self._get_dummy_videos(
-                width=w, height=h, num_frames=4, num_videos=n_vid
+                width=video_size.width,
+                height=video_size.height,
+                num_frames=num_frames,
+                num_videos=n_vid,
             )
         return out
 

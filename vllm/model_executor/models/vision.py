@@ -17,8 +17,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.parse import ImageSize
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -202,6 +203,119 @@ def get_num_selected_vision_tokens(
         return num_vision_tokens
 
     raise ValueError(f"Unexpected feature select strategy: {strategy!r}")
+
+
+def get_max_image_size(
+    max_pixels: int,
+    unit: int,
+    *,
+    min_pixels: int = 0,
+    num_tokens: Callable[[ImageSize], int] | None = None,
+) -> ImageSize:
+    max_seq_len = max(max_pixels // (unit * unit), 1)
+
+    def closest_factor_pair(n: int) -> tuple[int, int]:
+        for d in range(math.isqrt(n), 0, -1):
+            if n % d == 0:
+                return d, n // d
+        return 1, n
+
+    height_factor, width_factor = 1, max_seq_len
+    for seq_len in range(max_seq_len, 0, -1):
+        height_factor, width_factor = closest_factor_pair(seq_len)
+        if width_factor / height_factor <= 200:
+            break
+
+    size = ImageSize(width=unit * width_factor, height=unit * height_factor)
+    if num_tokens is None:
+        return size
+
+    candidates = [size]
+    min_seq_len = min_pixels / (unit * unit)
+    for short_side in range(1, math.isqrt(int(min_seq_len)) + 2):
+        low = max(short_side - 1, math.sqrt(min_seq_len / 200))
+        if low == 0:
+            break
+        long_side = math.ceil(min_seq_len / low)
+        high = min(short_side, math.sqrt(min_seq_len))
+        if long_side > 1:
+            high = min(high, min_seq_len / (long_side - 1))
+        if low >= high:
+            continue
+        ratio = low * high / min_seq_len
+        for height in range(1, unit // 2):
+            candidates.append(ImageSize(width=round(height / ratio), height=height))
+        for area_scale in (4, 16, 64):
+            width = max(round(math.sqrt(min_pixels / area_scale / ratio)), 1)
+            candidates.append(
+                ImageSize(width=width, height=max(round(width * ratio), 1))
+            )
+    for height in (unit, 2 * unit):
+        candidates.append(ImageSize(width=200 * height, height=height))
+    for seq_len in range(max_seq_len, height_factor * width_factor, -1):
+        for short_side in range(1, math.isqrt(seq_len) + 1):
+            if seq_len % short_side == 0:
+                height = (2 * short_side + 1) * unit // 2 - 1
+                width = (2 * (seq_len // short_side) - 1) * unit // 2 + 1
+                if width <= 200 * height:
+                    candidates.append(ImageSize(width=width, height=height))
+
+    def score(candidate: ImageSize) -> int:
+        try:
+            return num_tokens(candidate)
+        except ValueError:
+            return -1
+
+    return max(candidates, key=score)
+
+
+def get_video_size_and_frames_for_budget(
+    *,
+    seq_len: int,
+    video_tokens: int,
+    max_size: ImageSize,
+    max_size_frames: int,
+    step_frames: int,
+    max_frames: int,
+    unit: int,
+    num_tokens: Callable[[ImageSize, int], int],
+    get_step_size: Callable[[int], ImageSize],
+) -> tuple[ImageSize, int]:
+    max_step_tokens = num_tokens(max_size, step_frames)
+    min_step_tokens = num_tokens(ImageSize(unit, unit), step_frames)
+
+    num_steps = min(
+        cdiv(video_tokens, max_step_tokens),
+        cdiv(max_frames, step_frames),
+        video_tokens // min_step_tokens,
+    )
+    size, num_frames = max_size, max_size_frames
+    if num_steps > 1:
+        step_tokens = min(video_tokens // num_steps, max_step_tokens)
+        step_size = get_step_size(step_tokens)
+        tokens = num_tokens(step_size, num_steps * step_frames)
+        if num_tokens(max_size, max_size_frames) < tokens <= video_tokens:
+            size, num_frames = step_size, num_steps * step_frames
+
+    tokens = num_tokens(size, num_frames)
+    if tokens > seq_len:
+        step_size = get_step_size(min(seq_len, max_step_tokens))
+        scaled_tokens = {
+            scaled: num_tokens(scaled, step_frames)
+            for scaled in (
+                ImageSize(width=step_size.width * k, height=step_size.height * k)
+                for k in (1, 2, 4, 8)
+            )
+        }
+        fitting = [s for s, n in scaled_tokens.items() if n <= seq_len]
+        if fitting:
+            best = max(fitting, key=scaled_tokens.__getitem__)
+        else:
+            best = min(scaled_tokens, key=scaled_tokens.__getitem__)
+        if scaled_tokens[best] < tokens:
+            return best, step_frames
+
+    return size, num_frames
 
 
 def resolve_visual_encoder_outputs(
