@@ -377,4 +377,4 @@ class ToolParserManager:
     @classmethod
     def import_tool_parser(cls, plugin_path: str) -> None:
         """Import a user-defined tool parser."""
-        import_plugin(plugin_path)
+        import_plugin(plugin_path, namespace="vllm.tool_parsers.plugins.")
