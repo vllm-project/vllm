@@ -99,6 +99,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
+        if vllm_config.cache_config.kv_cache_host_pinned:
+            # Pushes write into the decoder's recycled blocks zero-copy too, but
+            # the release guard (DeferredBlockRelease) is only wired into pull.
+            raise ValueError(
+                "kv_cache_host_pinned is not supported with the NIXL push mode yet."
+            )
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
         # Heartbeat handshakes to a PP-sharded producer must be notif-only,
