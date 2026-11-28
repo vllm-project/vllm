@@ -152,6 +152,10 @@ InTreeMoEBackend = Literal[
     "emulation",
     "rdna3",
     "rdna3_int4_int8",
+    # CPU has two MXFP4 MoE backends now, so the name has to be selectable to
+    # pick between them.
+    "cpu",
+    "zen_cpu",
 ]
 # Out-of-tree platforms add names via `Platform.get_moe_backends`.
 MoEBackend = InTreeMoEBackend | str
