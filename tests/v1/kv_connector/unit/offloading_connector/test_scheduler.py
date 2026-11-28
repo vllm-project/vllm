@@ -118,6 +118,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     StoreTrigger,
+    TierFilter,
     get_offload_block_hash,
     get_offload_group_idx,
     make_offload_key,
@@ -607,6 +608,25 @@ def test_create_req_context_preserves_kv_hints():
     )
 
     assert _create_req_context(request, MagicMock()).kv_hints is kv_hints
+
+
+def test_req_context_keeps_load_tier_filter_positional():
+    load_tier_filter = TierFilter(matchers=())
+    context = ReqContext("req", None, None, load_tier_filter)
+
+    assert context.load_tier_filter is load_tier_filter
+    assert context.session_id is None
+
+
+def test_create_req_context_preserves_session_id():
+    request = MagicMock(
+        request_id="req",
+        kv_transfer_params=None,
+        kv_hints=None,
+        session_id="session-1",
+    )
+
+    assert _create_req_context(request, MagicMock()).session_id == "session-1"
 
 
 def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandler:
