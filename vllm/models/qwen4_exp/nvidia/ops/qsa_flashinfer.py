@@ -17,14 +17,8 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 GROUP_SIZE = 8
 
 
-def get_q_dtype(kv_dtype: torch.dtype) -> torch.dtype:
-    """QSA Q dtype: FP8 with an FP8 (uint8-allocated) cache, else BF16."""
-    return torch.float8_e4m3fn if kv_dtype == torch.uint8 else torch.bfloat16
-
-
 def is_flashinfer_qsa_supported(
     kv_dtype: torch.dtype,
-    q_dtype: torch.dtype,
     block_size: int,
     block_topk: int,
     head_dim: int,
@@ -34,9 +28,8 @@ def is_flashinfer_qsa_supported(
     """Whether FlashInfer 0.7.4 can plan this geometry on this device."""
     return (
         current_platform.is_device_capability_family(100)
-        # An FP8 cache is allocated as uint8 holding e4m3 bytes.
-        and (q_dtype, kv_dtype)
-        in ((torch.bfloat16, torch.bfloat16), (torch.float8_e4m3fn, torch.uint8))
+        # An FP8 cache is allocated as uint8 holding e4m3 bytes; Q matches it.
+        and kv_dtype in (torch.bfloat16, torch.uint8)
         and has_flashinfer()
         and block_size in (4, 8, 16, 32, 64, 128)
         and head_dim in (64, 128, 192, 256)
@@ -56,7 +49,6 @@ def get_workspace_size(
     max_seq_len_kv: int,
     block_size: int,
     block_topk: int,
-    q_dtype: torch.dtype,
     kv_dtype: torch.dtype,
     device: torch.device,
 ) -> int:
@@ -68,7 +60,8 @@ def get_workspace_size(
 
     if kv_dtype == torch.uint8:
         kv_dtype = torch.float8_e4m3fn
-    q = torch.empty((1, 1, 1), dtype=q_dtype, device=device).expand(
+    # Q has the cache's dtype.
+    q = torch.empty((1, 1, 1), dtype=kv_dtype, device=device).expand(
         max_num_tokens, num_heads, head_dim
     )
     k_cache = torch.empty(

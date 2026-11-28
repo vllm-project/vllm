@@ -76,7 +76,6 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_flashinfer import (
     GROUP_SIZE,
-    get_q_dtype,
     get_workspace_size,
     is_flashinfer_qsa_supported,
     qsa_sparse_paged_prefill,
@@ -276,10 +275,8 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        q_dtype = get_q_dtype(kv_cache_spec.dtype)
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
-            q_dtype,
             self.block_size,
             block_topk,
             kv_cache_spec.head_size,
@@ -303,7 +300,6 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             self.max_seq_len_kv,
             self.block_size,
             block_topk,
-            q_dtype,
             kv_cache_spec.dtype,
             device,
         )
@@ -842,12 +838,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
-        self.q_dtype = get_q_dtype(self.kv_cache_torch_dtype)
+        # An FP8 cache (uint8 storage) takes FP8 Q, with unit scale.
+        self.q_dtype = (
+            torch.float8_e4m3fn
+            if self.kv_cache_torch_dtype == torch.uint8
+            else torch.bfloat16
+        )
         self.flashinfer_qsa_supported = (
             index_group is None
             and is_flashinfer_qsa_supported(
                 self.kv_cache_torch_dtype,
-                self.q_dtype,
                 self.indexer.compress_ratio,
                 self.block_topk,
                 self.head_dim,
@@ -973,7 +973,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                         cdiv(cfg.model_config.max_model_len, block_size) * block_size,
                         self.indexer.compress_ratio,
                         self.block_topk,
-                        self.q_dtype,
                         self.kv_cache_torch_dtype,
                         output.device,
                     )

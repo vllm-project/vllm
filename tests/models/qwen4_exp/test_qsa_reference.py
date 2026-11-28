@@ -1520,7 +1520,6 @@ def test_qsa_flashinfer_prefill_correctness(
             max_seq_len_kv,
             ratio,
             budget // ratio,
-            q.dtype,
             torch.uint8 if fp8 else torch.bfloat16,
             torch.device("cuda"),
         ),
