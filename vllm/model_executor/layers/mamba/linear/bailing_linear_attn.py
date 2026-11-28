@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import math
 
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 from transformers.configuration_utils import PreTrainedConfig
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -14,27 +17,76 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.lightning_attn import (
+    lightning_attention,
+    linear_decode_forward_triton,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.linear.base import LinearAttention
-from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
-    MiniMaxText01LinearAttention,
-    MiniMaxText01LinearKernel,
-    linear_attention_decode,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+
+
+def linear_attention_decode(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slope_rate: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    q_start: int = 0,
+    q_end: int | None = None,
+    slot_start: int = 0,
+    slot_end: int | None = None,
+    block_size: int = 32,
+) -> torch.Tensor:
+    q = q[q_start:q_end].unsqueeze(2).contiguous()
+    k = k[q_start:q_end].unsqueeze(2).contiguous()
+    v = v[q_start:q_end].unsqueeze(2).contiguous()
+    slot_id = state_indices_tensor[slot_start:slot_end]
+    return linear_decode_forward_triton(
+        q, k, v, kv_cache, slope_rate, slot_id, block_size
+    )
+
+
+def jit_linear_forward_prefix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_caches: torch.Tensor,
+    slope_rate: torch.Tensor,
+    block_size: int,
+    layer_idx: int | None = None,
+    **kwargs,
+) -> torch.Tensor:
+    slope_rate = slope_rate.to(torch.float32)
+    should_pad_dim = q.dim() == 3
+    if should_pad_dim:
+        q = q.unsqueeze(0)
+        k = k.unsqueeze(0)
+        v = v.unsqueeze(0)
+    b, h, n, d = q.shape
+    e = d
+    kv_history = kv_caches.reshape(1, h, d, e).contiguous()
+    output, kv_history = lightning_attention(
+        q, k, v, slope_rate, block_size=block_size, kv_history=kv_history
+    )
+    kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
+    assert output.shape[0] == 1, "batch size must be 1"
+    return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
 
 def clear_linear_attention_cache_for_new_sequences(
@@ -455,7 +507,7 @@ class BailingMoELinearAttention(LinearAttention):
         )
 
         # Build slope tensor for linear attention decay
-        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
+        slope_rate = self._build_slope_tensor(self.num_heads)
         if self.num_hidden_layers <= 1:
             self.slope_rate = slope_rate * (1 + 1e-5)
         else:
@@ -471,6 +523,26 @@ class BailingMoELinearAttention(LinearAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @staticmethod
+    def _build_slope_tensor(n_attention_heads: int) -> torch.Tensor:
+        def get_slopes(n: int) -> list[float]:
+            def get_slopes_power_of_2(n: int) -> list[float]:
+                start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+                ratio = start
+                return [start * ratio**i for i in range(n)]
+
+            if math.log2(n).is_integer():
+                return get_slopes_power_of_2(n)
+            closest_power_of_2 = 2 ** math.floor(math.log2(n))
+            return (
+                get_slopes_power_of_2(closest_power_of_2)
+                + get_slopes(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
+            )
+
+        return torch.tensor(get_slopes(n_attention_heads), dtype=torch.float32).reshape(
+            n_attention_heads, 1, 1
+        )
 
     def get_attn_backend(self):
         from vllm.v1.attention.backends.linear_attn import (
@@ -615,7 +687,7 @@ class BailingMoELinearAttention(LinearAttention):
             slope_rate=self.tp_slope,
             block_size=self.BLOCK,
             decode_fn=self._decode_infer,
-            prefix_fn=MiniMaxText01LinearKernel.jit_linear_forward_prefix,
+            prefix_fn=jit_linear_forward_prefix,
             layer_idx=self.layer_idx,
         )
 
@@ -664,3 +736,22 @@ class BailingMoELinearAttention(LinearAttention):
             block_size=32,
         )
         return hidden
+
+
+@eager_break_during_capture
+def linear_attention(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward(hidden_states=hidden_states, output=output, positions=positions)
+
+
+direct_register_custom_op(
+    op_name="linear_attention",
+    op_func=linear_attention,
+    mutates_args=["output"],
+)
