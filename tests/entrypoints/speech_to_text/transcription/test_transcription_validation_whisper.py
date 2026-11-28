@@ -86,11 +86,11 @@ async def test_basic_audio(whisper_client, mary_had_lamb):
         model=MODEL_NAME,
         file=mary_had_lamb,
         language="en",
-        response_format="text",
+        response_format="json",
         temperature=0.0,
         extra_body={"vllm_xargs": json.dumps({"frontend_window": 128})},
     )
-    out = json.loads(transcription)
+    out = transcription.model_dump()
     out_text = out["text"]
     out_usage = out["usage"]
     assert "Mary had a little lamb," in out_text
@@ -115,12 +115,12 @@ async def test_basic_audio_batched(mary_had_lamb, winning_call, whisper_client):
     )
     # Await both transcriptions by scheduling coroutines together
     transcription, transcription2 = await asyncio.gather(transcription, transcription2)
-    out = json.loads(transcription)
-    out_text = out["text"]
-    assert "Mary had a little lamb," in out_text
-    out2 = json.loads(transcription2)
-    out_text2 = out2["text"]
-    assert "Edgar Martinez" in out_text2
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    assert "Mary had a little lamb," in transcription
+    assert isinstance(transcription2, str)
+    assert not transcription2.lstrip().startswith("{")
+    assert "Edgar Martinez" in transcription2
 
 
 @pytest.mark.asyncio
@@ -147,10 +147,10 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
         model=MODEL_NAME,
         file=buffer,
         language="en",
-        response_format="text",
+        response_format="json",
         temperature=0.0,
     )
-    out = json.loads(transcription)
+    out = transcription.model_dump()
     out_text = out["text"]
     out_usage = out["usage"]
     counts = out_text.count("Mary had a little lamb")
@@ -280,8 +280,9 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
         response_format="text",
         temperature=0.0,
     )
-    out = json.loads(transcription)["text"]
-    assert prefix in out
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    assert prefix in transcription
     transcription_wprompt = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=mary_had_lamb,
@@ -290,8 +291,9 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
         prompt=prompt,
         temperature=0.0,
     )
-    out_prompt = json.loads(transcription_wprompt)["text"]
-    assert prefix in out_prompt
+    assert isinstance(transcription_wprompt, str)
+    assert not transcription_wprompt.lstrip().startswith("{")
+    assert prefix in transcription_wprompt
 
 
 @pytest.mark.asyncio
@@ -319,12 +321,12 @@ async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
         temperature=0.0,
         extra_body={"max_completion_tokens": 1},
     )
-    out = json.loads(transcription)
-    out_text = out["text"]
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME)
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    out_tokens = tok(transcription, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) == 1
     # max_completion_tokens > max_model_len
     transcription = await whisper_client.audio.transcriptions.create(
@@ -335,9 +337,9 @@ async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
         temperature=0.0,
         extra_body={"max_completion_tokens": int(1e6)},
     )
-    out = json.loads(transcription)
-    out_text = out["text"]
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    out_tokens = tok(transcription, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) < 450  # ~Whisper max output len
 
 
@@ -392,9 +394,10 @@ async def test_whisper_beam_search_single_beam(mary_had_lamb, whisper_client):
         temperature=0.0,
     )
 
-    greedy_res = json.loads(greedy_transcription)["text"]
-    beam_res = json.loads(beam_transcription)["text"]
-    assert greedy_res == beam_res
+    assert isinstance(greedy_transcription, str)
+    assert isinstance(beam_transcription, str)
+    assert not greedy_transcription.lstrip().startswith("{")
+    assert greedy_transcription == beam_transcription
 
 
 @pytest.mark.asyncio
@@ -412,13 +415,10 @@ async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
         ),
     )
 
-    result = json.loads(transcription)
-
-    text = result["text"]
-
-    assert text is not None
-    assert len(text) > 0
-    assert "mary had a little lamb" in text.lower()
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    assert len(transcription) > 0
+    assert "mary had a little lamb" in transcription.lower()
 
 
 @pytest.mark.asyncio
