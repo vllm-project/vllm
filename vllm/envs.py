@@ -169,6 +169,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    VLLM_GEMMA4_HD512_DECODE: bool = False
+    VLLM_GEMMA4_HD512_CHUNK: bool = False
+    VLLM_GEMMA4_HD512_CASCADE: bool = False
+    VLLM_GEMMA4_HD512_CHUNK_PREFIX: int = 7000
+    VLLM_GEMMA4_HD512_CHUNK_SEGS: int = 8
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1326,6 +1331,39 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # gfx942 (MI300X/MI325X): route pure-decode calls of head_size 512
+    # full-attention layers through the split-KV MFMA decode kernel in
+    # vllm.v1.attention.ops.hd512_mfma_decode instead of the stock Triton
+    # unified attention.
+    "VLLM_GEMMA4_HD512_DECODE": lambda: (
+        os.getenv("VLLM_GEMMA4_HD512_DECODE", "False").lower() in ("true", "1")
+    ),
+    # gfx942 (MI300X/MI325X): shared-prefix-group (cascade) extension of the
+    # split-KV MFMA decode kernel: sibling requests share one attention+LSE
+    # pass over their common prefix blocks; each request's private tail goes
+    # through the split-KV kernel and the two partials are LSE-folded.
+    # Requires the same geometry as VLLM_GEMMA4_HD512_DECODE and replaces
+    # that path when set.
+    "VLLM_GEMMA4_HD512_CASCADE": lambda: (
+        os.getenv("VLLM_GEMMA4_HD512_CASCADE", "False").lower() in ("true", "1")
+    ),
+    # gfx942 (MI300X/MI325X): route head_size 512 prefill/chunk rows with a
+    # long-enough prefix through the split-KV MFMA chunk kernel in
+    # vllm.v1.attention.ops.hd512_mfma_chunk instead of the stock Triton
+    # unified attention.
+    "VLLM_GEMMA4_HD512_CHUNK": lambda: (
+        os.getenv("VLLM_GEMMA4_HD512_CHUNK", "False").lower() in ("true", "1")
+    ),
+    # Prefix length (tokens, exact for prefill rows) at/above which a
+    # chunk row goes to the chunk kernel; shorter chunk rows stay on the
+    # stock kernel where its cost is below the noise of the routed set.
+    "VLLM_GEMMA4_HD512_CHUNK_PREFIX": lambda: int(
+        os.getenv("VLLM_GEMMA4_HD512_CHUNK_PREFIX", "7000")
+    ),
+    # Split-KV fan-out of the chunk kernel (segments per request).
+    "VLLM_GEMMA4_HD512_CHUNK_SEGS": lambda: int(
+        os.getenv("VLLM_GEMMA4_HD512_CHUNK_SEGS", "8")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
