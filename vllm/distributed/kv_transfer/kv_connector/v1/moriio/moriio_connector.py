@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 import msgpack
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -177,6 +178,24 @@ def _describe_memory(memory_desc: Any) -> str:
         + ", ".join(f"{name}={getattr(memory_desc, name, '?')}" for name in fields)
         + "}"
     )
+
+
+# input_processor.assign_request_id appends ``-{random_uuid():.8}``.
+_INPUT_PROCESSOR_RID_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
+
+
+def _is_input_processor_request_id(request_id: str, original_rid: str) -> bool:
+    """True if *request_id* is *original_rid* plus the 8-hex randomization.
+
+    A different request whose id merely starts with the owner id must
+    not be treated as the same request.
+    """
+    if not isinstance(request_id, str) or not isinstance(original_rid, str):
+        return False
+    if not request_id.startswith(original_rid):
+        return False
+    extra = request_id[len(original_rid) :]
+    return bool(_INPUT_PROCESSOR_RID_SUFFIX_RE.fullmatch(extra))
 
 
 def get_moriio_remote_tp_rank(
@@ -840,9 +859,20 @@ class MoRIIOConnectorScheduler:
             for i, blocks in enumerate(block_ids)
         ]
 
-    def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
+    def map_request_id(self, request_id: ReqId, transfer_id: TransferId) -> bool:
+        """Bind transfer_id to request_id. False if another live request owns it."""
+        owner = self.transfer_id_to_request_id.get(transfer_id)
+        if owner is not None and owner != request_id:
+            logger.warning(
+                "MoRI-IO keeping transfer_id=%r bound to %r; ignoring request %r",
+                transfer_id,
+                owner,
+                request_id,
+            )
+            return False
         self.transfer_id_to_request_id[transfer_id] = request_id
         self.request_id_to_transfer_id[request_id] = transfer_id
+        return True
 
     def unmap_request_id(
         self, request_id: ReqId, transfer_id: TransferId | None = None
@@ -852,7 +882,7 @@ class MoRIIOConnectorScheduler:
         if request_id in self.request_id_to_transfer_id:
             tid = self.request_id_to_transfer_id[request_id]
             del self.request_id_to_transfer_id[request_id]
-            if tid in self.transfer_id_to_request_id:
+            if self.transfer_id_to_request_id.get(tid) == request_id:
                 del self.transfer_id_to_request_id[tid]
             return
 
@@ -860,6 +890,18 @@ class MoRIIOConnectorScheduler:
         if transfer_id is not None and transfer_id in self.transfer_id_to_request_id:
             original_rid = self.transfer_id_to_request_id[transfer_id]
             if original_rid != request_id:
+                # input_processor appends ``-{8 hex}`` after map. A different
+                # request whose id only starts with the owner id must not
+                # clear the live mapping.
+                if not _is_input_processor_request_id(request_id, original_rid):
+                    logger.debug(
+                        "MoRI-IO unmap skip: rid=%r is not owner of "
+                        "transfer_id=%r (owner=%r)",
+                        request_id,
+                        transfer_id,
+                        original_rid,
+                    )
+                    return
                 logger.debug(
                     "MoRI-IO unmap via transfer_id: %r -> %r", request_id, original_rid
                 )
@@ -1117,7 +1159,8 @@ class MoRIIOConnectorScheduler:
             params, self.kv_transfer_config.kv_connector_extra_config, self.is_producer
         )
         request_id = request.request_id
-        self.map_request_id(request_id, transfer_id)
+        if not self.map_request_id(request_id, transfer_id):
+            return
         if (
             not self.is_producer
             and self.mode == MoRIIOMode.WRITE
