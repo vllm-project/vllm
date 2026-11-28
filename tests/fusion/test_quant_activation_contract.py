@@ -41,7 +41,11 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
@@ -62,6 +66,8 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -70,6 +76,7 @@ from vllm.platforms import current_platform
 # The only backends that consume a pre-quantized activation.
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
+    CutlassFp8BlockScaledMMKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
@@ -114,6 +121,14 @@ def _probe(cls: type):
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
+        )
+    elif issubclass(cls, Fp8BlockScaledMMLinearKernel):
+        obj.config = FP8ScaledMMLinearLayerConfig(
+            weight_quant_key=kFp8Static128BlockSym,
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_shape=(128, 128),
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
         )
     else:
         obj.config = FP8ScaledMMLinearLayerConfig(
