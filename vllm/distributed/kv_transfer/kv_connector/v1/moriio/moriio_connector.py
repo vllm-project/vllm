@@ -296,6 +296,29 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         return False
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        """Prefer a head-major block layout (LBHNC) for non-MLA models.
+
+        With heterogeneous TP (e.g. a TP4 producer feeding a TP1 consumer) each
+        producer rank writes only its own KV heads into the consumer's blocks.
+        In a token-major layout (LBNHC) those heads are interleaved per token,
+        so one block needs block_size RDMA writes of a single head slice each
+        instead of one contiguous write, and long prompts exceed the QP send
+        queue depth ("SQ full"). Same choice as NixlConnector, including its
+        MLA rule: an MLA cache has one latent head replicated on every rank, so
+        the layout does not matter there.
+        """
+        if vllm_config.model_config is None:
+            return None
+        if vllm_config.model_config.use_mla:
+            return None
+        logger.info_once(
+            "MoRIIOConnector setting KV cache layout to LBHNC (head-major blocks: "
+            "one RDMA write per block per head slice)."
+        )
+        return "LBHNC"
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # READ transfers the recurrent-state slot whenever external tokens
