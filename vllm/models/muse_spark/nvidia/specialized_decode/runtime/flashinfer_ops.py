@@ -271,6 +271,11 @@ def bf16_tp_arguments(
 # FP4BlockScaleLauncher::getSupportedTileNums for NVFP4 activations and weights.
 FP4_TILES = (8, 16, 32, 64, 128, 192, 256)
 
+# The coarsest routing tile the decode clamp in nvfp4_plan forces, when the
+# per-GEMM autotuner picks a finer (8) tile. Numerics-identical: the tile only
+# sets the routing-metadata granularity the tail/combine chain re-reads.
+FP4_DECODE_MIN_TILE = 16
+
 # The expert-TP routed GEMMs' tactics as (tile, config), most preferred first,
 # per trtllm-gen batched-GEMM cubin package (FlashInfer's
 # ArtifactPath.TRTLLM_GEN_BMM). Every rank takes the first one valid on all
@@ -892,8 +897,12 @@ class FlashInferOps:
         Collective over `tp`'s CPU group (every rank runs the same FlashInfer
         build, so the same list); nothing is timed, so the same weights and
         FlashInfer build take the same tactic at every start."""
-        self.tp_preferred = self.expert_tp_tactics()
+        self.tp_preferred = ()
         self.tp_tactic = None
+        # The measured preferences are TP8-shaped. TP4 uses the prepared default.
+        if tp.world_size == 4:
+            return
+        self.tp_preferred = self.expert_tp_tactics()
         if not self.tp_preferred:
             from flashinfer.artifacts import ArtifactPath
 
@@ -967,13 +976,99 @@ class FlashInferOps:
                 torch.zeros((b, POOLED // 2), dtype=torch.uint8, device=device),
                 torch.zeros((b, POOLED // 16), device=device).to(torch.float8_e4m3fn),
             )
-            self.routed_experts(layer, inputs, topk)
+            if self.tp_experts:
+                self.routed_experts(layer, inputs, topk)
+            else:
+                # The generic warmup tunes FromLogits; pure-EP decode replays
+                # UnpackedPrecomputed calls, whose profiles need their own winners.
+                from flashinfer.autotuner import autotune
+
+                with autotune(
+                    tune_mode=True,
+                    tuning_buckets=(2, 8, 16),
+                    round_up=True,
+                ):
+                    self.routed_experts(layer, inputs, topk)
+                # The autotuner ranks the isolated per-GEMM tactic, so its tile
+                # choice is timing-noisy (differs per rank) and blind to the
+                # routing/tail/combine chain. Force-prepare a coarse
+                # (tile >= FP4_DECODE_MIN_TILE) body on every rank - the tactic
+                # list is the C++ launcher's, deterministic and rank-identical -
+                # so nvfp4_plan's clamp has a prepared target everywhere.
+                # (batch 16 has no preparable body: routing tops out at
+                # MAX_TOKENS = 8, and decode is a fixed 8-token graph.)
+                self._prepare_coarse_tactics(self.nvfp4_calls[layer], (2, BATCHES[0]))
+                plan = self.nvfp4_plan(layer, inputs, topk)
+                logger.info(
+                    "Muse Spark EP MoE decode tactic: b=%d local_experts=%d %s",
+                    b,
+                    self.nvfp4[layer]["local_num_experts"],
+                    -1 if plan is None else plan.tactic,
+                )
         if self.bf16:
             layer = min(self.bf16)
             device = self.bf16[layer]["gemm1_weights"].device
             x = torch.zeros((b, POOLED), dtype=torch.bfloat16, device=device)
             logits = torch.zeros((b, NUM_EXPERTS), device=device)
             self.routed_experts_bf16(layer, x, logits)
+
+    def _prepare_coarse_tactics(
+        self, call: Nvfp4Call, batches: tuple[int, ...]
+    ) -> None:
+        """Force-prepare the coarse (tile >= FP4_DECODE_MIN_TILE) tactic bodies
+        the op reports valid, for `batches`, and register them, so nvfp4_plan's
+        clamp has a prepared target on every rank.
+
+        The tactic list is `get_valid_tactics` (the C++ launcher's
+        trtllm_get_valid_moe_configs), which is deterministic and rank-identical:
+        nothing is timed, so every rank prepares the same bodies. A body prepare
+        is layout-only (no collective, numerics-neutral); it reuses the same
+        per-tactic path prepare_from_metadata runs."""
+        from flashinfer.fused_moe import core
+
+        device = call.args["gemm1_weights"].device
+        num_local = call.args["local_num_experts"]
+        for b in batches:
+            inputs = ExpertsInput(
+                torch.zeros((b, POOLED // 2), dtype=torch.uint8, device=device),
+                torch.zeros((b, POOLED // 16), device=device).to(torch.float8_e4m3fn),
+            )
+            topk = RoutedTopk(
+                torch.zeros((b, TOP_K), dtype=torch.int32, device=device),
+                torch.zeros((b, TOP_K), dtype=torch.float32, device=device),
+            )
+            runner, flat, _, kwargs = call.prepare(inputs, topk)
+            keys = {
+                tactic_key(t, b, num_local)
+                for t in runner.get_valid_tactics(flat, None)
+            }
+            coarse = sorted(k for k in keys if k[0] >= FP4_DECODE_MIN_TILE)
+            # Register before preparing: the clamp reads valid_tactics[b].
+            self.valid_tactics.setdefault(b, set()).update(coarse)
+            for key in coarse:
+                if key in self.prepared:
+                    continue
+                metadata = self.routing_metadata(call, key[0])
+                fields = runner.forward(
+                    flat,
+                    tactic=list(key),
+                    do_preparation=True,
+                    da_routing_metadata=self.slot(metadata, topk.weights),
+                    **kwargs,
+                )
+                fields = [core._torch_view_of_ffi_tensor(f) for f in fields]
+                if not self.body_workspace:
+                    self.body_workspace = tuple(fields)
+                else:
+                    if [(f.dtype, f.device) for f in fields] != [
+                        (w.dtype, w.device) for w in self.body_workspace
+                    ]:
+                        raise RuntimeError("The expert body workspace differs by tactic.")
+                    self.body_workspace = tuple(
+                        max(w, f, key=torch.numel)
+                        for w, f in zip(self.body_workspace, fields)
+                    )
+                self.prepared.add(key)
 
     # -------------------------------------- NVFP4 experts from routing metadata
     def prepare_from_metadata(self) -> None:
@@ -1086,6 +1181,16 @@ class FlashInferOps:
             _, tactic = AutoTuner.get().choose_one(
                 NVFP4_OP, [runner], tuning_config, flat, **kwargs
             )
+            # Isolated per-GEMM tuning is blind to the routing/tail/combine
+            # chain its tile choice inflates; at decode batches force the
+            # coarsest prepared tile (numerics-identical: metadata layout only).
+            b = inputs.a.shape[0]
+            if isinstance(tactic, (tuple, list)) and int(tactic[0]) < 16:
+                coarse = sorted(
+                    t for t in self.valid_tactics.get(b, ()) if t[0] >= 16
+                )
+                if coarse:
+                    tactic = coarse[0]
         key = tactic_key(tactic, inputs.a.shape[0], call.args["local_num_experts"])
         if key not in self.prepared:
             logger.warning_once(
