@@ -58,9 +58,17 @@ A quantized checkpoint (or `--quantization` / `--quantization-config`) requests 
 MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.
 ```
 
-Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
+Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks due to kernel availability are forbidden the same way.
 
 Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
+
+## MXFP4 Linear Layers with 8-bit Activations
+
+When the Humming backend runs compressed-tensors MXFP4 linear layers with FP8 activations (the default for these checkpoints on Hopper GPUs), it can apply E8M0 weight scales up to 11 binades below the largest scale of the layer's weight tensor on that rank. Fused shards such as q, k, and v count as one tensor. When Humming pads the output size to a multiple of 256, the padding counts as scale 2^0. With INT8 activations and per-channel secondary scales, the range is three binades below the largest scale in each row.
+
+A layer with nonzero weights in blocks outside this range runs with 16-bit activations to keep its weights exact, and vLLM logs a warning that names the layer.
+
+Humming checks the scale range when loading the layer's weights, after kernel selection. This fallback also applies when `VLLM_STRICT_QUANT_SCHEME=1`.
 
 ## Supported Hardware
 
