@@ -18,6 +18,7 @@ import torch
 from torch import nn
 
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.platforms import current_platform
 
 from ..configs import Inkling2ModelConfig
 from ..quant_config import Inkling2QuantConfig
@@ -29,7 +30,7 @@ from .model import (
 from .ops.attn_res import attn_res
 from .ops.linear import linear_k_groups
 from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
-from .ops.loop import blend_rms_norm, pair_rms_norm
+from .ops.loop import blend_rms_norm, pair_rms_norm, project_blend_rms_norm
 from .sconv import conv_metadata
 
 LOOP_STREAMS = ("attn", "k", "v", "mlp")
@@ -129,6 +130,15 @@ class Inkling2LoopDecoderLayer(Inkling2DecoderLayer):
             gain_forget = sm12x_bf16_ll_gemm(hidden, up, out_dtype=torch.float32)
         else:
             hidden = torch.bmm(pair, down.transpose(1, 2))
+            if (
+                769 <= message.shape[1] <= 4096
+                and up.shape[1:] == (4608, 64)
+                and hidden.dtype == up.dtype == torch.bfloat16
+                and current_platform.is_device_capability(120)
+            ):
+                return project_blend_rms_norm(
+                    dest, message, hidden, up, norm_weight, norm_eps
+                )
             gain_forget = torch.bmm(hidden, up.transpose(1, 2), out_dtype=torch.float32)
         return blend_rms_norm(dest, message, gain_forget, norm_weight, norm_eps)
 

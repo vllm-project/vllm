@@ -12,7 +12,85 @@ import torch
 
 from vllm.triton_utils import tl, tldevice, triton
 
-from .norm import rsqrt
+from .norm import rms_norm, rsqrt
+
+
+@triton.jit
+def _project_blend_kernel(
+    Hidden,
+    Up,
+    Dest,
+    Message,
+    Blend,
+    tokens,
+    stride_dest_s,
+    D: tl.constexpr,
+    RANK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    stream = tl.program_id(2).to(tl.int64)
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    rank = tl.arange(0, RANK)
+    hidden = tl.load(
+        Hidden + (stream * tokens + rows[:, None]) * RANK + rank[None, :],
+        rows[:, None] < tokens,
+        other=0.0,
+    )
+    up = Up + (stream * 2 * D + cols[:, None]) * RANK + rank[None, :]
+    gain_w = tl.load(up, cols[:, None] < D, other=0.0)
+    forget_w = tl.load(up + D * RANK, cols[:, None] < D, other=0.0)
+    gain = tldevice.tanh(tl.dot(hidden, tl.trans(gain_w)))
+    forget = tldevice.tanh(tl.dot(hidden, tl.trans(forget_w)))
+    mask = (rows[:, None] < tokens) & (cols[None, :] < D)
+    offset = rows[:, None] * D + cols[None, :]
+    dest = tl.load(Dest + stream * stride_dest_s + offset, mask, other=0.0)
+    message = tl.load(Message + stream * tokens * D + offset, mask, other=0.0)
+    tl.store(
+        Blend + stream * tokens * D + offset,
+        (1.0 - forget) * dest + gain * message,
+        mask,
+    )
+
+
+def project_blend_rms_norm(
+    dest: torch.Tensor,
+    message: torch.Tensor,
+    hidden: torch.Tensor,
+    up: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_eps: float,
+) -> torch.Tensor:
+    """Apply the rank-64 up projection and gates before storing the FP32 blend."""
+    streams, tokens, dim = message.shape
+    rank = hidden.shape[-1]
+    assert hidden.shape == (streams, tokens, rank) and hidden.is_contiguous()
+    assert up.shape == (streams, 2 * dim, rank) and up.is_contiguous()
+    assert message.is_contiguous() and dest.shape == message.shape
+    assert dest.stride(1) == dim and dest.stride(2) == 1
+    blend = torch.empty_like(message)
+    block_m, block_n, warps = (
+        (64, 128, 8) if streams == 3 and tokens >= 2048 else (32, 64, 4)
+    )
+    _project_blend_kernel[
+        (triton.cdiv(tokens, block_m), triton.cdiv(dim, block_n), streams)
+    ](
+        hidden,
+        up,
+        dest,
+        message,
+        blend,
+        tokens,
+        dest.stride(0),
+        D=dim,
+        RANK=rank,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=warps,
+        enable_fp_fusion=False,
+    )
+    return rms_norm(blend, norm_weight, norm_eps, torch.bfloat16)
 
 
 @triton.jit
