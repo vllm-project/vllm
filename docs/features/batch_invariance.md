@@ -169,6 +169,28 @@ the FlashAttention version selector uses FlashAttention 2 in this mode.
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+### Worst-case KV obligation admission
+
+Set `--deterministic-kv-reserve` to reserve capacity for each admitted
+request's prompt and maximum output, up to the engine's model length.
+New requests wait until their full footprint fits after accounting for
+all outstanding reservations. Requests that can never fit receive a
+validation error. The flag defaults to off and works independently of
+the attention split stride.
+
+This policy prevents capacity-driven preemption for admitted requests
+in its supported configuration. It requires FCFS, decoder-only non-multimodal
+generation (`runner_type=generate`), and a fixed pool with one full-attention
+group. It does not support speculative decoding, context parallelism, KV
+transfer, cache-aware admission, or streaming inputs. Larger output budgets
+may reduce admission concurrency and increase queueing latency. Because running
+requests retain their reserved KV blocks until completion or abort,
+`pause_scheduler(mode="keep", clear_cache=True)` and
+`checkpoint_prepare(mode="keep")` refuse upfront before altering pause or
+checkpoint state while requests are running; use `clear_cache=False`, or drain
+(`mode="wait"`) or abort (`mode="abort"`) running requests before clearing
+caches.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
