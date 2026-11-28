@@ -37,6 +37,8 @@ The three supported scoring functions are as illustrated in the figure below.
 
 [Cross-encoder](https://www.sbert.net/examples/applications/cross-encoder/README.html) (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
+For BERT rerankers, pass the query and document separately to `LLM.score` so the tokenizer can assign their segment IDs. Classifying them as a single string can produce a different score even when the token IDs are identical.
+
 --8<-- [start:supported-cross-encoder-models]
 
 #### Text-only Models
