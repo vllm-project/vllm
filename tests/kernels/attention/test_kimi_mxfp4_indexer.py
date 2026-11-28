@@ -403,3 +403,147 @@ def test_prefill_workspace_covers_staged_keys(world, interleave):
         gathered = world * local if world > 1 else 0
         staged = (total + 63) // 64 * 64
         assert 1024**3 + 68 * (local + gathered + staged) <= bound
+
+
+def _layer_norm_affine(dtype):
+    weight = (1 + 0.1 * torch.randn(128, device="cuda")).to(dtype)
+    bias = (0.1 * torch.randn(128, device="cuda")).to(dtype)
+    return weight, bias
+
+
+@pytest.mark.parametrize("heads", [16, 32, 64])
+@pytest.mark.parametrize(
+    "num_queries,num_keys", [(0, 7), (1, 1), (40, 40), (5, 300), (0, 4096)]
+)
+def test_quantize_index_qk_matches_unfused(heads, num_queries, num_keys):
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import (
+        quantize_index_qk,
+        quantize_queries,
+        store_keys,
+    )
+
+    torch.manual_seed(heads + num_queries + num_keys)
+    rows = max(num_queries, num_keys)
+    stride, offset, pages = 46592, 41984, max(8, num_keys // 32)
+    backing = torch.randint(0, 256, (pages, stride), dtype=torch.uint8).cuda()
+    backing = torch.stack([backing, backing])
+    caches = [b[:, offset : offset + 4352].view(pages, 64, 68) for b in backing]
+    hidden = torch.randn((rows, 3808), device="cuda", dtype=torch.bfloat16)
+    q = torch.randn((rows, heads, 128), device="cuda", dtype=torch.bfloat16)
+    raw_k, raw_w = hidden[:, :128], hidden[:, 128 : 128 + heads]
+    slots = torch.randperm(pages * 64, device="cuda")[:num_keys]
+    slots[::3] = -1
+    weight, bias = _layer_norm_affine(torch.bfloat16)
+    scale = (heads**-0.5) * (128**-0.5)
+
+    keys = torch.nn.functional.layer_norm(raw_k, (128,), weight, bias, 1e-5)
+    store_keys(keys[:num_keys].contiguous(), caches[0], slots)
+    payload, q_scales, weights = quantize_index_qk(
+        q, raw_w, num_queries, scale, raw_k, caches[1], slots, (weight, bias, 1e-5)
+    )
+    torch.testing.assert_close(backing[1], backing[0], rtol=0, atol=0)
+    ref_payload, ref_scales = quantize_queries(q[:num_queries])
+    torch.testing.assert_close(payload, ref_payload, rtol=0, atol=0)
+    torch.testing.assert_close(q_scales, ref_scales, rtol=0, atol=0)
+    ref_weights = raw_w[:num_queries].float() * scale
+    torch.testing.assert_close(weights, ref_weights, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("return_scores", [False, True])
+@pytest.mark.parametrize("pad_rows,prefill_rows", [(0, 0), (6, 0), (0, 300)])
+def test_raw_key_indexer_matches_normalized_keys(return_scores, pad_rows, prefill_rows):
+    """The raw-key path stores and selects what the unfused path does, and the
+    call without LayerNorm arguments stays the unfused path."""
+    from types import SimpleNamespace
+
+    from vllm.config import VllmConfig
+    from vllm.forward_context import set_forward_context
+    from vllm.models.kimi_k3.amd import dsa  # noqa: F401
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepSeekV32IndexerDecodeMetadata,
+        DeepseekV32IndexerMetadata,
+    )
+
+    if return_scores and prefill_rows:
+        pytest.skip("score merging is decode-only")
+    torch.manual_seed(5 + pad_rows + prefill_rows)
+    heads, rows_per, k = 32, 5, 2048
+    lengths = [150, 300, 90, 2000, 40, 700, 1, 3000]
+    reqs = len(lengths)
+    decode_rows = reqs * rows_per
+    rows = decode_rows + prefill_rows + pad_rows
+    pages_per = 48
+    pages = reqs * pages_per + 1
+    table = torch.arange(1, pages, device="cuda", dtype=torch.int32).view(reqs, -1)
+    slots = torch.full((rows,), -1, device="cuda", dtype=torch.int64)
+    ends = []
+    for r, length in enumerate(lengths):
+        for j in range(rows_per):
+            pos = length + j
+            slots[r * rows_per + j] = table[r, pos // 64].long() * 64 + pos % 64
+            ends.append(pos + 1)
+    seq_lens = torch.tensor(ends, device="cuda", dtype=torch.int32)
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=table,
+        seq_lens=seq_lens,
+        decode_lens=torch.full((reqs,), rows_per, device="cuda"),
+        requires_padding=False,
+        schedule_metadata=torch.empty(0, device="cuda", dtype=torch.int32),
+        query_start_loc=torch.arange(
+            0, decode_rows + 1, rows_per, device="cuda", dtype=torch.int32
+        ),
+        write_max_decode_len=rows_per,
+    )
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=torch.tensor(lengths, device="cuda", dtype=torch.int32) + rows_per,
+        max_seq_len=max(lengths) + rows_per,
+        slot_mapping=slots,
+        num_decodes=reqs,
+        num_decode_tokens=decode_rows,
+        num_prefills=1 if prefill_rows else 0,
+        num_prefill_tokens=prefill_rows,
+        decode=decode,
+        prefill=SimpleNamespace(chunks=[], plans=[]) if prefill_rows else None,
+        block_table=table,
+    )
+    hidden = torch.randn((rows, 3808), device="cuda", dtype=torch.bfloat16)
+    raw_k, raw_w = hidden[:, :128], hidden[:, 128 : 128 + heads]
+    weight, bias = _layer_norm_affine(torch.bfloat16)
+    keys = torch.nn.functional.layer_norm(raw_k, (128,), weight, bias, 1e-5)
+    q = torch.randn((rows, heads, 128), device="cuda", dtype=torch.bfloat16)
+    context = torch.randn((pages * 64, 128), device="cuda", dtype=torch.bfloat16)
+    caches: list[torch.Tensor] = []
+    outs: list[torch.Tensor] = []
+    scores: list[torch.Tensor | None] = []
+    for _ in range(2):
+        cache = torch.empty((pages, 64, 68), device="cuda", dtype=torch.uint8)
+        dsa.store_keys(context, cache, torch.arange(pages * 64, device="cuda"))
+        caches.append(cache)
+        outs.append(torch.full((rows + 8, k), 777, device="cuda", dtype=torch.int32))
+        scores.append(
+            torch.zeros((rows + 8, k), device="cuda") if return_scores else None
+        )
+    scale = (heads**-0.5) * (128**-0.5)
+    common = ("layer.indexer", 64 * pages_per, 0, 1, 1, scale)
+    with set_forward_context({"layer.indexer": metadata}, VllmConfig()):
+        dsa._fp4_indexer(
+            q, keys, raw_w.contiguous(), caches[0], outs[0], *common, scores[0]
+        )
+        dsa._fp4_indexer(
+            q, raw_k, raw_w, caches[1], outs[1], *common, scores[1], weight, bias, 1e-5
+        )
+    torch.testing.assert_close(caches[1], caches[0], rtol=0, atol=0)
+    # Rows with more than k candidates come back in an unspecified order.
+    torch.testing.assert_close(
+        outs[1][:rows].sort(-1).values, outs[0][:rows].sort(-1).values, rtol=0, atol=0
+    )
+    if return_scores:
+        unfused, fused = scores
+        assert fused is not None and unfused is not None
+        torch.testing.assert_close(
+            fused[:rows].sort(-1).values,
+            unfused[:rows].sort(-1).values,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )

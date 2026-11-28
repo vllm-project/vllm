@@ -25,9 +25,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mla import (
     MLAModules,
@@ -41,6 +43,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     _merge_dcp_topk_global,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerCache
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
@@ -53,7 +56,13 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_fp8_paged_mqa_logits,
 )
 
-from .ops.fp4_indexer import decode_layout, decode_tile_size, score_paged, store_keys
+from .ops.fp4_indexer import (
+    decode_layout,
+    decode_tile_size,
+    quantize_index_qk,
+    score_paged,
+    store_keys,
+)
 from .ops.fp4_indexer_prefill import prefill_chunks, prefill_workspace_bytes
 
 logger = init_logger(__name__)
@@ -109,15 +118,19 @@ class KimiK3DSAIndexerKNorm(nn.Module):
         self.register_buffer("weight_bf16", None, persistent=False)
         self.register_buffer("bias_bf16", None, persistent=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def affine(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         weight, bias = self.weight_bf16, self.bias_bf16
-        if weight is None or weight.dtype != x.dtype:
-            weight = self.weight.to(x.dtype)
-            bias = self.bias.to(x.dtype)
+        if weight is None or bias is None or weight.dtype != dtype:
+            weight = self.weight.to(dtype)
+            bias = self.bias.to(dtype)
             # nn.Module.__setattr__ is expensive, and mutating a buffer during
             # tracing would bake this branch into the captured graph.
             if not torch.compiler.is_compiling():
                 self.weight_bf16, self.bias_bf16 = weight, bias
+        return weight, bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight, bias = self.affine(x.dtype)
         return F.layer_norm(x, self.normalized_shape, weight, bias, self.eps)
 
 
@@ -269,6 +282,9 @@ def _fp4_indexer(
     interleave: int = 1,
     weight_scale: float = 1.0,
     scores: torch.Tensor | None = None,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 0.0,
 ) -> None:
     metadata = get_forward_context().attn_metadata
     if not isinstance(metadata, dict):
@@ -291,13 +307,34 @@ def _fp4_indexer(
         return
     m = metadata[prefix]
     assert isinstance(m, DeepseekV32IndexerMetadata)
-    store_keys(k[: m.slot_mapping.numel()], cache, m.slot_mapping)
-    out[: q.shape[0]].fill_(-1)
+    # Raw keys come with their LayerNorm: one launch then normalizes and stores
+    # them, and quantizes the decode queries with their scaled weights.
+    fused = k_norm_weight is not None
+    quantized = None
+    if fused:
+        assert k_norm_bias is not None
+        quantized = quantize_index_qk(
+            q,
+            weights,
+            m.num_decode_tokens if m.num_decodes else 0,
+            weight_scale,
+            k,
+            cache,
+            m.slot_mapping,
+            (k_norm_weight, k_norm_bias, k_norm_eps),
+        )
+    else:
+        store_keys(k[: m.slot_mapping.numel()], cache, m.slot_mapping)
+    # Decode rows are fully written by the top-k, which pads short rows with -1.
+    if fused and not m.num_prefills:
+        out[m.num_decode_tokens : q.shape[0]].fill_(-1)
+    else:
+        out[: q.shape[0]].fill_(-1)
     if m.num_prefills:
         assert m.prefill is not None
         prefill_chunks(
             q,
-            weights,
+            weights.contiguous(),
             cache,
             out,
             m.prefill,
@@ -334,14 +371,24 @@ def _fp4_indexer(
             end = min(start + tile_rows, m.num_decode_tokens)
             row_ends = ends[start:end]
             rel_starts = starts if start == 0 else starts - start
+            if quantized is None:
+                tile_weights = weights[start:end].float() * weight_scale
+                tile_query = None
+            else:
+                tile_weights = quantized[2][start:end]
+                tile_query = (quantized[0][start:end], quantized[1][start:end])
+            # The query starts are already within [0, rows] for a single tile.
+            if quantized is None or end - start < m.num_decode_tokens:
+                rel_starts = rel_starts.clamp(0, end - start)
             logits = score_paged(
                 q[start:end],
                 cache,
-                weights[start:end].float() * weight_scale,
+                tile_weights,
                 block_table[: starts.numel() - 1],
-                rel_starts.clamp(0, end - start),
+                rel_starts,
                 row_ends,
                 min(end - start, decode.write_max_decode_len or end - start),
+                tile_query,
             )
             selected = out[start:end]
             if score_rows is not None:
@@ -367,6 +414,9 @@ def _fp4_indexer_fake(
     interleave: int = 1,
     weight_scale: float = 1.0,
     scores: torch.Tensor | None = None,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 0.0,
 ) -> None:
     return
 
@@ -596,6 +646,158 @@ class KimiK3DSAIndexer(nn.Module):
             return self.topk_indices_buffer
         return indexer_op.forward_hip(hidden_states, q_fp8, index_k, weights)
 
+    def forward_raw_keys(
+        self, index_q_input: torch.Tensor, raw_k: torch.Tensor, raw_v: torch.Tensor
+    ) -> torch.Tensor:
+        """MXFP4 `forward` from precomputed wk/wv outputs, LayerNorm fused."""
+        assert self.use_fp4 and isinstance(self.k_index_norm, KimiK3DSAIndexerKNorm)
+        index_q = self.wq_index(index_q_input)[0].view(
+            -1, self.index_num_heads, self.index_head_dim
+        )
+        norm = self.k_index_norm
+        norm_weight, norm_bias = norm.affine(raw_k.dtype)
+        dcp = get_dcp_group()
+        torch.ops.vllm.kimi_fp4_indexer(
+            index_q,
+            raw_k,
+            raw_v,
+            self.k_cache.kv_cache,
+            self.topk_indices_buffer,
+            self.k_cache.prefix,
+            self.max_model_len,
+            dcp.rank_in_group,
+            dcp.world_size,
+            self.cp_interleave,
+            self.indexer_weight_scale * self.index_softmax_scale,
+            self.dcp_scores,
+            norm_weight,
+            norm_bias,
+            norm.eps,
+        )
+        return self.topk_indices_buffer
+
+
+def _is_bf16_linear(layer: nn.Module | None) -> bool:
+    return (
+        isinstance(layer, LinearBase)
+        and isinstance(layer.quant_method, UnquantizedLinearMethod)
+        and layer.weight.dtype in (torch.bfloat16, torch.float16)
+    )
+
+
+class KimiK3DSAMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
+    """DSA MLA wrapper whose AITER path fuses the decode prologue.
+
+    One GEMM produces q_a, kv_a, the indexer key and weights and the output gate;
+    the q/kv RMSNorms, the indexer key LayerNorm and quantization, and the gate
+    sigmoid-multiply are each one launch.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._hidden_proj_weight: torch.Tensor | None = None
+        self._hidden_split: list[int] = []
+
+    def _fusion_supported(self) -> bool:
+        indexer = self.indexer
+        attn = self.mla_attn
+        return (
+            rocm_aiter_ops.is_enabled()
+            and self.q_lora_rank is not None
+            and self.rotary_emb is None
+            and not self.dcp_q_replicate
+            and not attn.use_pcp
+            and attn.hisparse_cache is None
+            and isinstance(indexer, KimiK3DSAIndexer)
+            and indexer.use_fp4
+            and isinstance(indexer.k_index_norm, KimiK3DSAIndexerKNorm)
+            and all(
+                _is_bf16_linear(layer)
+                for layer in (
+                    self.fused_qkv_a_proj,
+                    self.g_proj,
+                    indexer.wk_index,
+                    indexer.wv_index,
+                )
+            )
+        )
+
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        if not self._fusion_supported():
+            return
+        indexer = cast(KimiK3DSAIndexer, self.indexer)
+        assert self.g_proj is not None and self.fused_qkv_a_proj is not None
+        assert self.q_lora_rank is not None
+        layers = [
+            self.fused_qkv_a_proj,
+            indexer.wk_index,
+            indexer.wv_index,
+            self.g_proj,
+        ]
+        weight = refill_derived(
+            self,
+            "_hidden_proj_weight",
+            torch.cat([layer.weight for layer in layers]),
+        )
+        start = 0
+        for layer in layers:
+            rows = layer.weight.shape[0]
+            layer.weight.data = weight[start : start + rows]
+            start += rows
+        self._hidden_split = [
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            indexer.index_head_dim,
+            indexer.index_num_heads,
+            self.g_proj.weight.shape[0],
+        ]
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+        skip_o_proj: bool = False,
+    ) -> torch.Tensor:
+        weight = self._hidden_proj_weight
+        if weight is None or llama_4_scaling is not None:
+            return super().forward(
+                positions, hidden_states, llama_4_scaling, skip_o_proj
+            )
+        hidden = torch.ops.vllm.rocm_unquantized_gemm(hidden_states, weight, None)
+        q_c, kv_c, k_pe, raw_k, raw_v, gate = hidden.split(self._hidden_split, -1)
+        q_norm = cast(RMSNorm, self.q_a_layernorm)
+        kv_norm = cast(RMSNorm, self.kv_a_layernorm)
+        q_c, kv_c_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
+            q_c,
+            q_norm.weight,
+            kv_c,
+            kv_norm.weight,
+            q_norm.variance_epsilon,
+            kv_norm.variance_epsilon,
+        )
+        k_pe = k_pe.unsqueeze(1)
+        assert self.q_b_proj is not None
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        if self.indexer is not None and self.is_sparse and not self.skip_topk:
+            cast(KimiK3DSAIndexer, self.indexer).forward_raw_keys(q_c, raw_k, raw_v)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+        from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
+
+        attn_out = fused_sigmoid_mul(attn_out, gate)
+        if skip_o_proj:
+            return attn_out
+        return self.o_proj(attn_out)[0]
+
 
 class KimiK3DSAAttention(nn.Module):
     """Kimi K3.1 DSA (DeepSeek Sparse Attention) inference path on ROCm.
@@ -797,10 +999,10 @@ class KimiK3DSAAttention(nn.Module):
             is_sparse=True,
             topk_indices_buffer=self.topk_indices_buffer,
         )
-        # The plain wrapper, not the AMD KimiK3MultiHeadLatentAttentionWrapper:
-        # its fused decode Q-prep path writes dense 576-wide rows, which the
-        # 656-byte fp8_ds_mla records cannot take.
-        self.mla_attn = MultiHeadLatentAttentionWrapper(
+        # Not the AMD KimiK3MultiHeadLatentAttentionWrapper: its fused decode
+        # Q-prep path writes dense 576-wide rows, which the 656-byte fp8_ds_mla
+        # records cannot take.
+        self.mla_attn = KimiK3DSAMultiHeadLatentAttentionWrapper(
             self.hidden_size,
             self.num_local_heads,
             self.scaling,
