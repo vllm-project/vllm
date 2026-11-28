@@ -88,7 +88,7 @@ void paged_attention(
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type, bool use_interleaved_v_cache);
+    bool use_interleaved_v_cache);
 
 // RDNA3.5 only: Fused Gated Delta Net prefill kernel.
 // Mutates `out` and `final_state` in place.

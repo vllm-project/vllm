@@ -293,7 +293,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
-    VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
@@ -2092,10 +2091,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default off
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
-    ),
-    # If set, use the fp8 mfma in rocm paged attention.
-    "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
-        int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(

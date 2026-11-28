@@ -34,19 +34,9 @@
 #include "core/vec_dtypes/dtype_fp8.cuh"
 #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 
-// ROCm 6.2 compatibility: map OCP fp8 types to FNUZ variants if OCP is absent
-#if !defined(HIP_FP8_TYPE_OCP)
-using __hip_fp8_e4m3 = __hip_fp8_e4m3_fnuz;
-using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
-#endif
-
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
-#endif
-
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
-  #define __HIP__FP8MFMA__
 #endif
 
 #if defined(NDEBUG)
@@ -61,12 +51,6 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
-
-enum class MFMAType {
-  F16 = 0,
-  Fp8 = 1,
-  Fp4 = 2,
-};
 
 // Score masking is insufficient for unwritten V padding: 0 * NaN is NaN.
 template <typename cache_t, typename Vec>
@@ -187,21 +171,6 @@ __device__ __forceinline__ floatx4 gcn_mfma16x16x16_instr(const _B16x4& inpA,
                                                      cbid, blgp);
   } else {
     static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T, int absz, int cbid, int blgp>
-__device__ __forceinline__ floatx4 gcn_mfma16x16x32_instr(const long& inpA,
-                                                          const long& inpB,
-                                                          const floatx4& inpC) {
-  if constexpr (std::is_same<T, __hip_fp8_e4m3>::value) {
-    return __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(inpA, inpB, inpC, absz,
-                                                      cbid, blgp);
-  } else if constexpr (std::is_same<T, __hip_fp8_e5m2>::value) {
-    return __builtin_amdgcn_mfma_f32_16x16x32_bf8_bf8(inpA, inpB, inpC, absz,
-                                                      cbid, blgp);
-  } else {
-    static_assert(false, "unsupported 8b dtype");
   }
 }
 
@@ -349,31 +318,12 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
   return ret;
 }
 
-typedef union u64_cvt {
-  half f16x4[4];
-  int16_t b16x4[4];
-  _B8x8 b8x8;
-  _B16x4 b64;
-  int64_t i64;
-} _T8x8;
-
-// Marked __forceinline__: this header is included by 13 TUs, and a plain
-// __device__ definition would become a duplicate symbol if the TUs are ever
-// built with RDC or device LTO (today -fno-gpu-rdc internalizes it).
-__device__ __forceinline__ float warpReduceMax(float val) {
-  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-    val = max(
-        val, __shfl_down(val, offset, WARP_SIZE));  // Using max() for reduction
-  }
-  return val;
-}
-
 // grid (num_seqs, num_partitions,num_kv_heads)
 // block (256)
 // clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE,
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
           bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
@@ -480,10 +430,6 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
   int kphysical_block_number[TLOOP];
-  #if defined(__HIP__FP8MFMA__)
-  float q_max = 0;
-  float q_scale = 1.0;
-  #endif
 
   // fetch k physical block numbers
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -533,15 +479,6 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
         Qlocal[qkhe_depth][qkratio].xy[i] =
             shared_logits[qkhe_depth][rowid][lane16id % GQA_RATIO]
                          [2 * qkratio + i];
-  #if defined(__HIP__FP8MFMA__)
-        if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto &&
-                      MFMA_TYPE == MFMAType::Fp8) {
-          scalar_t* qptr =
-              reinterpret_cast<scalar_t*>(&Qlocal[qkhe_depth][qkratio].xy[i]);
-          for (int k = 0; k < 4; k++)
-            q_max = fmax(fabs(to_float<scalar_t>(qptr[k])), q_max);
-        }
-  #endif
       }
     }
   }
@@ -674,14 +611,6 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
   if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
     // multiply by k_scale if fp8 kv cache
     scale2 *= *k_scale;
-  #if defined(__HIP__FP8MFMA__)
-    q_max = warpReduceMax(q_max);
-    constexpr float FP8_E4M3_SCALE_TARGET = 224.0f;
-    if constexpr (MFMA_TYPE == MFMAType::Fp8) {
-      q_scale = q_max > 0 ? FP8_E4M3_SCALE_TARGET / q_max : 1.0f;
-      scale2 /= q_scale;
-    }
-  #endif
   }
 
   floatx4 d_out[TLOOP];
@@ -701,41 +630,12 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
         auto Ktmp = Klocal[token_depth][qkhe_depth];
         _B8x16 Ktmp8x16 = *reinterpret_cast<_B8x16*>(&Ktmp);
         for (int qkratio = 0; qkratio < QK_SIZE_RATIO; qkratio++) {
-          if constexpr (MFMA_TYPE == MFMAType::F16) {
-            _B8x8 Ktmp8x8 = Ktmp8x16.xy[qkratio];
-            _B16x8 Klocaltmp = convert_b8x8_custom<scalar_t>(Ktmp8x8);
-            for (int i = 0; i < 2; i++) {
-              d_out[token_depth] = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
-                  Klocaltmp.xy[i], Qlocal[qkhe_depth][qkratio].xy[i],
-                  d_out[token_depth]);
-            }
-          } else {
-  #if defined(__HIP__FP8MFMA__)
-            _T8x8 Ktmp8x8, Qtmp8x8;
-            Ktmp8x8.b8x8 = Ktmp8x16.xy[qkratio];
-
-            for (int n = 0; n < 2; n++) {
-              scalar_t* qptr = reinterpret_cast<scalar_t*>(
-                  &Qlocal[qkhe_depth][qkratio].xy[n]);
-
-              Qtmp8x8.b16x4[n * 2] =
-                  vllm::fp8::scaled_vec_conversion<uint16_t, float2>(
-                      make_float2(to_float<scalar_t>(qptr[0]),
-                                  to_float<scalar_t>(qptr[1])),
-                      q_scale);
-              Qtmp8x8.b16x4[n * 2 + 1] =
-                  vllm::fp8::scaled_vec_conversion<uint16_t, float2>(
-                      make_float2(to_float<scalar_t>(qptr[2]),
-                                  to_float<scalar_t>(qptr[3])),
-                      q_scale);
-            }
-
-            d_out[token_depth] =
-                gcn_mfma16x16x32_instr<__hip_fp8_e4m3, 0, 0, 0>(
-                    Ktmp8x8.i64, Qtmp8x8.i64, d_out[token_depth]);
-  #else
-            UNREACHABLE_CODE
-  #endif
+          _B8x8 Ktmp8x8 = Ktmp8x16.xy[qkratio];
+          _B16x8 Klocaltmp = convert_b8x8_custom<scalar_t>(Ktmp8x8);
+          for (int i = 0; i < 2; i++) {
+            d_out[token_depth] = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
+                Klocaltmp.xy[i], Qlocal[qkhe_depth][qkratio].xy[i],
+                d_out[token_depth]);
           }
         }
       }
@@ -825,36 +725,17 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // disable rtz conversion due to its impact on accuracy.
   constexpr bool LOGITS_RTZ_CONVERSION = false;
 
-  #if defined(__HIP__FP8MFMA__)
-  int rowid_8x8 = rowid / 2;
-  int offset = rowid % 2;
-  #endif
-
   // write logits to shared mem
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     d_out[token_depth] *= inv_sum_scale;
-    if constexpr (MFMA_TYPE != MFMAType::Fp8) {
-      if constexpr (LOGITS_RTZ_CONVERSION) {
-        // use rtz conversion for better performance, with negligible impact on
-        // accuracy
-        shared_logits[warpid][token_depth][lane16id][rowid] =
-            from_floatx4_rtz<scalar_t>(d_out[token_depth]);
-      } else {
-        shared_logits[warpid][token_depth][lane16id][rowid] =
-            from_floatx4<scalar_t>(d_out[token_depth]);
-      }
+    if constexpr (LOGITS_RTZ_CONVERSION) {
+      // use rtz conversion for better performance, with negligible impact on
+      // accuracy
+      shared_logits[warpid][token_depth][lane16id][rowid] =
+          from_floatx4_rtz<scalar_t>(d_out[token_depth]);
     } else {
-  #if defined(__HIP__FP8MFMA__)
-      // cast _B16x4* to _B8x8*
-      _T8x8& logits_8x8 = *reinterpret_cast<_T8x8*>(
-          &shared_logits[warpid][token_depth][lane16id][rowid_8x8]);
-      logits_8x8.b16x4[offset * 2] = __builtin_amdgcn_cvt_pk_fp8_f32(
-          d_out[token_depth][0], d_out[token_depth][1], 0, false);
-      logits_8x8.b16x4[offset * 2 + 1] = __builtin_amdgcn_cvt_pk_fp8_f32(
-          d_out[token_depth][2], d_out[token_depth][3], 0, false);
-  #else
-      UNREACHABLE_CODE
-  #endif
+      shared_logits[warpid][token_depth][lane16id][rowid] =
+          from_floatx4<scalar_t>(d_out[token_depth]);
     }
   }
 
@@ -950,42 +831,19 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
           _B8x16 Vtmp8x16 = *reinterpret_cast<_B8x16*>(&Vtmp);
           for (int j = 0; j < ELEMS16_ELEMS8_RATIO; j++) {
             _B8x8 Vtmp8x8 = Vtmp8x16.xy[j];
-            if constexpr (MFMA_TYPE == MFMAType::F16) {
-              _B16x8 Vlocaltmp = convert_b8x8_custom<scalar_t>(Vtmp8x8);
-              for (int i = 0; i < ELEMS8_ELEMS4_RATIO; i++) {
-                const int offset =
-                    rowid * ELEMS16_ELEMS8_RATIO * ELEMS8_ELEMS4_RATIO +
-                    j * ELEMS8_ELEMS4_RATIO + i;
-                const int offset1 = offset % ROWS_PER_WARP;
-                const int offset2 = offset / ROWS_PER_WARP;
-                // output format is 16 qheads across 16 lanes, 16 head elems
-                // spread across 4 rows
-                tmp_out = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
-                    Vlocaltmp.xy[i],
-                    shared_logits[vtoken_depth][offset2][lane16id][offset1],
-                    tmp_out);
-              }
-            } else {
-  #if defined(__HIP__FP8MFMA__)
-              for (int i = 0; i < ELEMS8_ELEMS4_RATIO / 2; i++) {
-                const int offset =
-                    rowid * ELEMS16_ELEMS8_RATIO * ELEMS8_ELEMS4_RATIO +
-                    j * ELEMS8_ELEMS4_RATIO + i;
-                const int offset1 = (offset % ROWS_PER_WARP) / 2;
-                const int offset2 = offset / ROWS_PER_WARP;
-                // output format is 16 qheads across 16 lanes, 16 head elems
-                // spread across 4 rows
-                tmp_out = gcn_mfma16x16x32_instr<__hip_fp8_e4m3, 0, 0, 0>(
-                    reinterpret_cast<_T8x8*>(&Vtmp8x8)->i64,
-                    reinterpret_cast<_T8x8*>(
-                        &shared_logits[vtoken_depth][offset2][lane16id]
-                                      [offset1])
-                        ->i64,
-                    tmp_out);
-              }
-  #else
-              UNREACHABLE_CODE
-  #endif
+            _B16x8 Vlocaltmp = convert_b8x8_custom<scalar_t>(Vtmp8x8);
+            for (int i = 0; i < ELEMS8_ELEMS4_RATIO; i++) {
+              const int offset =
+                  rowid * ELEMS16_ELEMS8_RATIO * ELEMS8_ELEMS4_RATIO +
+                  j * ELEMS8_ELEMS4_RATIO + i;
+              const int offset1 = offset % ROWS_PER_WARP;
+              const int offset2 = offset / ROWS_PER_WARP;
+              // output format is 16 qheads across 16 lanes, 16 head elems
+              // spread across 4 rows
+              tmp_out = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
+                  Vlocaltmp.xy[i],
+                  shared_logits[vtoken_depth][offset2][lane16id][offset1],
+                  tmp_out);
             }
           }
         }
@@ -1908,7 +1766,6 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE,
           bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
@@ -2689,7 +2546,6 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE,
           bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
@@ -3340,7 +3196,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO, MFMAType MFMA_TYPE,
+          int GQA_RATIO,
           bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
@@ -3415,7 +3271,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 #define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                              \
   paged_attention_ll4mi_QKV_mfma16_kernel<                                     \
       T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
-      GQA_RATIO, MFMA_TYPE, USE_INTERLEAVED_V_CACHE>                           \
+      GQA_RATIO, USE_INTERLEAVED_V_CACHE>                                      \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3444,7 +3300,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
+          bool ALIBI_ENABLED, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher(
     at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
     at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
@@ -3600,7 +3456,7 @@ void paged_attention_custom_launcher(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
+          bool ALIBI_ENABLED, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher_navi(
     at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
     at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
@@ -3785,20 +3641,19 @@ void paged_attention_custom_launcher_navi(
 // use_interleaved_v_cache and is_navi stay runtime branches, see the NOTE
 // below.
 #define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,  \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)              \
+                             PSIZE, ALIBI_ENABLED)                         \
   if (use_interleaved_v_cache) {                                           \
     TORCH_CHECK(!is_navi,                                                  \
                 "Reading interleaved V-cache layout from paged decode "    \
                 "attention not supported on NAVI GPUs");                   \
     paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
-                                    true>(                                 \
+                                    OUTT, PSIZE, ALIBI_ENABLED, true>(     \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
   } else {                                                                 \
     ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, \
-                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)             \
+                              PSIZE, ALIBI_ENABLED)                        \
   }
 
 // The non-interleaved path picks the CDNA or the Navi launcher at runtime. With
@@ -3806,30 +3661,28 @@ void paged_attention_custom_launcher_navi(
 // then never be true, so the Navi set is dead weight and is not instantiated.
 #ifdef VLLM_ROCM_ATTN_NO_NAVI
   #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)  \
+                                    OUTT, PSIZE, ALIBI_ENABLED)             \
     TORCH_CHECK(!is_navi,                                                   \
                 "Navi (gfx11/gfx12) GPUs are not supported by this build: " \
                 "its arch list has no Navi code objects");                  \
     paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
-                                    false>(                                 \
+                                    OUTT, PSIZE, ALIBI_ENABLED, false>(     \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);
 #else
   #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)   \
+                                    OUTT, PSIZE, ALIBI_ENABLED)              \
     if (!is_navi) {                                                          \
       paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
-                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
-                                      false>(                                \
+                                      OUTT, PSIZE, ALIBI_ENABLED, false>(    \
           out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
           num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
           max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
     } else {                                                                 \
       paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,       \
                                            HEAD_SIZE, OUTT, PSIZE,           \
-                                           ALIBI_ENABLED, MFMA_TYPE, false>( \
+                                           ALIBI_ENABLED, false>(            \
           out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
           num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
           max_seq_len, alibi_slopes, k_scale, v_scale);                      \
@@ -3837,33 +3690,31 @@ void paged_attention_custom_launcher_navi(
 #endif
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                   OUTT, PSIZE, MFMA_TYPE)                   \
+                                   OUTT, PSIZE)                              \
   if (alibi_slopes) {                                                        \
     CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, \
-                         true, MFMA_TYPE);                                   \
+                         true);                                              \
   } else {                                                                   \
     CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, \
-                         false, MFMA_TYPE);                                  \
+                         false);                                             \
   }
 
 #if defined(__HIPCC__) && defined(__gfx90a__)
-  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                   MFMA_TYPE)                              \
+  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE)  \
     if (fp8_out_scale) {                                                   \
       TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");          \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
-                                 256, MFMA_TYPE);                          \
+                                 256);                                     \
     }
 #else
-  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                   MFMA_TYPE)                              \
+  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE)  \
     if (fp8_out_scale) {                                                   \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                 uint8_t, 256, MFMA_TYPE);                 \
+                                 uint8_t, 256);                            \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
-                                 256, MFMA_TYPE);                          \
+                                 256);                                     \
     }
 #endif
 
