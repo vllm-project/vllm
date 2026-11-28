@@ -47,6 +47,8 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
+    # Set when each item in the criteria container becomes one option.
+    criteria_container: ClassVar[type[dict] | type[list] | None] = None
     #: The labels of a question's options, in option order.
     label_set: ClassVar[tuple[str, ...]] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
@@ -101,6 +103,13 @@ def get_question_type(name: str) -> QuestionType:
         ) from None
 
 
+def _check_option_limit(qid: str, count: int, limit: int) -> None:
+    if count > limit:
+        raise StructuredDecisionError(
+            f"question {qid!r}: at most {limit} options for this model"
+        )
+
+
 def build_question(
     qid: str,
     type_name: str,
@@ -112,17 +121,18 @@ def build_question(
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
     qtype = get_question_type(type_name)
+    limit = min(max_options, len(qtype.label_set)) if labeled else max_options
+    if qtype.criteria_container is not None and isinstance(
+        criteria, qtype.criteria_container
+    ):
+        _check_option_limit(qid, len(criteria), limit)
     options = qtype.parse_options(qid, criteria)
     if not options:
         raise StructuredDecisionError(f"question {qid!r}: needs at least one option")
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(max_options, len(qtype.label_set)) if labeled else max_options
-    if len(options) > limit:
-        raise StructuredDecisionError(
-            f"question {qid!r}: at most {limit} options for this model"
-        )
+    _check_option_limit(qid, len(options), limit)
     raw_instructions = instructions
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
@@ -154,6 +164,7 @@ class ChoiceQuestion(QuestionType):
     or to null."""
 
     name = "choice"
+    criteria_container = dict
 
     def parse_options(self, qid: str, criteria: Any) -> list[Option]:
         if not isinstance(criteria, dict) or not criteria:
@@ -227,6 +238,7 @@ class ScoreQuestion(QuestionType):
     level names, from the first to the last level of the scale."""
 
     name = "score"
+    criteria_container = list
     # 0-indexed like the answer, so a level's label is its score.
     label_set = tuple(string.digits)
     reply_instruction = "Answer with the number of one level only."

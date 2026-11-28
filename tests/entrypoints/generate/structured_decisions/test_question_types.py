@@ -119,6 +119,22 @@ def test_option_limit():
         choice(criteria={str(i): None for i in range(27)})
 
 
+@pytest.mark.parametrize("kind", ["choice", "score"])
+def test_option_count_is_checked_before_conversion(kind):
+    class UnconvertedOption:
+        def __str__(self) -> str:
+            raise AssertionError("over-limit criteria must not be converted")
+
+    option = UnconvertedOption()
+    criteria = (
+        {"x": option, "y": None, "z": None}
+        if kind == "choice"
+        else [option, "low", "high"]
+    )
+    with pytest.raises(StructuredDecisionError, match="at most 2 options"):
+        build_question("q", kind, "", criteria, max_options=2)
+
+
 def test_noul_labels_and_prompt():
     q = noul()
     assert q.labels == ("yes", "no")
