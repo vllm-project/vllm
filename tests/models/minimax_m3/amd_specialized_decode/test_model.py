@@ -6,7 +6,8 @@ the real per-layer shapes, TP4, with random weights (no checkpoint): layers
 handshake. Engines load dummy weights, so vLLM's real MXFP4 / AITER post-load
 path runs; every rank then overwrites them in place at sensible scales,
 distinct per layer and per TP shard, the experts generated in the checkpoint's
-MXFP4 format and converted by that same path.
+MXFP4 format and converted by that same path. Native's experts run as the
+FP32 A16W4 reference (`_reference.py`) on those weights, routed natively.
 
 - layer: each sparse `MiniMaxM3DecoderLayer`'s FFN half (seam all-reduce and
   residual, post-attention norm, MoE) on captured decode-step inputs, native
@@ -17,6 +18,7 @@ MXFP4 format and converted by that same path.
 - fail-stop: a late rank fault under FULL graphs returns no token."""
 
 import zlib
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -119,9 +121,10 @@ def model_dir(tmp_path_factory):
 
 
 @torch.no_grad()
-def _randomize(worker):
+def _randomize(worker, reference=False):
     """Weights at unit-activation scales; TP shards seeded per rank, replicated
-    tensors (norms, router, bias) alike on every rank."""
+    tensors (norms, router, bias) alike on every rank. `reference`: the sparse
+    layers' experts then run as the FP32 A16W4 reference on those weights."""
     from vllm.distributed import get_tensor_model_parallel_rank
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
@@ -131,6 +134,7 @@ def _randomize(worker):
 
     rank = get_tensor_model_parallel_rank()
     model = worker.model_runner.get_model()
+    worker._expert_codes = {}
 
     def generator(name, sharded=True):
         key = f"{SEED}/{name}/{rank if sharded else 0}"
@@ -166,26 +170,58 @@ def _randomize(worker):
             )
         experts = moe.experts.routed_experts
         g = generator(f"experts.{layer.layer_id}")
-        new = {}
+        codes = {}
         for key in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
-            dst = getattr(experts, key)
             # e8m0 2^-9..2^-7: unit gate/up pre-activations, MoE outputs on the
-            # residual's scale (native's BF16 atomic sums round to its size)
+            # residual's scale
             lo, hi = (118, 121) if "scale" in key else (0, 256)
-            new[key] = torch.nn.Parameter(
-                torch.randint(
-                    lo, hi, dst.shape, dtype=torch.uint8, device="cuda", generator=g
-                ),
-                requires_grad=False,
+            shape = getattr(experts, key).shape
+            codes[key] = torch.randint(
+                lo, hi, shape, dtype=torch.uint8, device="cuda", generator=g
             )
         converted = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             layer=torch.nn.Module(),
-            **new,
+            **{
+                key: torch.nn.Parameter(t.clone(), requires_grad=False)
+                for key, t in codes.items()
+            },
         )
-        for key, src in zip(new, converted):
+        for key, src in zip(codes, converted):
             getattr(experts, key).view(torch.uint8).copy_(src.view(torch.uint8))
+        if reference:
+            worker._expert_codes[experts.w13_weight.data_ptr()] = SimpleNamespace(
+                w13=codes["w13_weight"],
+                w2=codes["w2_weight"],
+                s13=codes["w13_weight_scale"],
+                s2=codes["w2_weight_scale"],
+            )
+            kernel = experts.quant_method.moe_kernel.impl.fused_experts
+            kernel.apply = partial(_reference_apply, worker._expert_codes)
     torch.accelerator.synchronize()
+
+
+def _reference_apply(
+    codes,
+    output,
+    hidden_states,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+    expert_map,
+    apply_router_weight_on_input,
+    **_,
+):
+    """`FusedMoEExpertsModular.apply` as the FP32 A16W4 reference, routed by
+    the layer's own router (the fused shared expert included)."""
+    from tests.models.minimax_m3.amd_specialized_decode._reference import (
+        reference_experts,
+    )
+
+    assert expert_map is None and not apply_router_weight_on_input
+    raw = codes[w1.data_ptr()]
+    output.copy_(reference_experts(hidden_states, raw, topk_ids, topk_weights))
 
 
 def _requests():
@@ -366,9 +402,10 @@ def no_gpu_coredump():
 
 @pytest.fixture(scope="module")
 def native(vllm_runner, model_dir):
-    """Native eager: the reference logprobs and the layer replays."""
+    """Native eager with the reference experts: the reference logprobs and the
+    layer replays."""
     with _engine(vllm_runner, model_dir, mono=False) as runner:
-        runner.llm.collective_rpc(_randomize)
+        runner.llm.collective_rpc(_randomize, args=(True,))
         logprobs = _decode(runner.llm, capture=True)
         layers = runner.llm.collective_rpc(_replay)
     return SimpleNamespace(logprobs=logprobs, layers=layers)
@@ -421,8 +458,8 @@ def test_model_matches_native(vllm_runner, model_dir, native, graphs):
     cos, rows = _logit_errors(logprobs, native.logprobs)
     close = (rows < 3e-2).float().mean().item()
     print(f"cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}")
-    # native's MoE sums in BF16 atomics: native reruns differ by ~1e-2 a row,
-    # and by ~0.2 on the 4-13% of rows where that flips a near-tie expert
+    # rows where the fused launch's rounding flips a near-tie expert differ by
+    # ~0.2
     assert cos > 0.99 and close > 0.8
     assert not any(failed for _, failed in after)
     if graphs:
@@ -563,7 +600,7 @@ def test_eagle3_verify_steps_match_native(
     native_rows = []
     with _engine(vllm_runner, model_dir, mono=False) as runner:
         llm = runner.llm
-        llm.collective_rpc(_randomize)
+        llm.collective_rpc(_randomize, args=(True,))
         for prompts, traces in zip(_spec_requests(), tokens):
             params = [
                 SamplingParams(

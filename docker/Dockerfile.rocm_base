@@ -9,7 +9,7 @@ ARG TRITON_BRANCH="669b31ac" # release/internal/3.8.x as of 09/29/2026
 ARG TRITON_VERSION=3.8.0+git669b31ac.rocm10.1.0
 ARG FA_BRANCH="4a948e9c"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.29.post1"
+ARG AITER_BRANCH="2eb9ef3657777eebc0da3434074f4a67e1151c54"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.2.4"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -204,7 +204,9 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN git clone ${AITER_REPO} \
+    && cd aiter \
+    && git checkout --detach ${AITER_BRANCH}
 RUN --mount=type=cache,target=/root/.cache/pip cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
