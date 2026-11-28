@@ -307,7 +307,12 @@ class ParallelConfig:
     defaults to False if not set. Enabling it explicitly raises when the config
     cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
     least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
-    by implementing `compute_logits_local`."""
+    by implementing `compute_logits_local`.
+
+    On CUDA, the all-to-all exchange uses NCCL point-to-point buffers, which
+    can reduce the memory available for the KV cache. See
+    https://docs.vllm.ai/en/latest/usage/troubleshooting/#batch-sharded-sampling-memory-overhead
+    for `NCCL_MAX_P2P_NCHANNELS` tuning and its latency tradeoff."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
