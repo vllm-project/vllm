@@ -4,10 +4,10 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
-chunks, `OffloadingEventsTracker` builds `BlockStored` from the
-originating request data carried by the raw event. A store may describe multiple
-blocks, and removals still expand to those block hashes using captured
-metadata. Partial tails also use captured metadata. Opt-in via
+chunks, `OffloadingEventsTracker` builds `BlockStored` from the tracked request
+data indexed by the raw event's `req_id` and per-key `positions`. A store may
+describe multiple blocks, and removals still expand to those block hashes using
+captured metadata. Partial tails also use captured metadata. Opt-in via
 `kv_connector_extra_config["self_describing_kv_events"]`; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
@@ -20,6 +20,7 @@ prefix is reusable only up to a boundary where every group has a residency.
 Windowed attention groups keep the legacy placeholder payload.
 """
 
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -50,7 +51,6 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
-    ReqContext,
     get_offload_block_hash,
     get_offload_group_idx,
 )
@@ -71,6 +71,8 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
 
 # The tracker is CPU-primary by construction: the primary tier's residency bit.
 _PRIMARY_RESIDENCY_BIT = 1
+# Cap on retired request contexts kept when manager pending work never clears.
+_MAX_RETIRED_REQUEST_CONTEXTS = 64
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -176,6 +178,7 @@ class OffloadingEventsTracker:
         config: OffloadingKVEventsConfig,
         group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
         num_hash_lookahead_tokens: int = 0,
+        max_retired_request_contexts: int = _MAX_RETIRED_REQUEST_CONTEXTS,
     ):
         self.config = config
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
@@ -187,6 +190,11 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # Active and recently-removed request data, by req_id.
+        self._request_contexts: dict[str, _RequestEventContext] = {}
+        # Removed req_ids whose contexts are kept for later events, oldest first.
+        self._retired_request_contexts: OrderedDict[str, None] = OrderedDict()
+        self._max_retired_request_contexts = max_retired_request_contexts
         # (medium, ownership) -> its bit in active_residencies.
         self._residency_bits: dict[tuple[Medium, str | None], int] = {
             (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
@@ -194,43 +202,57 @@ class OffloadingEventsTracker:
 
     def on_new_request(
         self,
-        req_context: ReqContext,
         request: Request,
         group_configs: tuple["GroupOffloadConfig", ...],
     ) -> None:
         """Retain only the request fields needed for complete-chunk stores."""
-        if self.self_describing_enabled:
-            req_context.set_state(
-                _RequestEventContext(
-                    block_hashes=request.block_hashes,
-                    all_token_ids=request.all_token_ids,
-                    lora_request=request.lora_request,
-                    resumable=request.resumable,
-                    kv_transfer_params=request.kv_transfer_params,
-                    group_configs={
-                        config.group_idx: config for config in group_configs
-                    },
-                )
-            )
+        if not self.self_describing_enabled:
+            return
+        self._retired_request_contexts.pop(request.request_id, None)
+        self._request_contexts[request.request_id] = _RequestEventContext(
+            block_hashes=request.block_hashes,
+            all_token_ids=request.all_token_ids,
+            lora_request=request.lora_request,
+            resumable=request.resumable,
+            kv_transfer_params=request.kv_transfer_params,
+            group_configs={config.group_idx: config for config in group_configs},
+        )
+
+    def on_request_removed(self, req_id: str) -> None:
+        """Mark a removed request's event context eligible for pruning."""
+        if req_id not in self._request_contexts:
+            return
+        self._retired_request_contexts[req_id] = None
+        self._retired_request_contexts.move_to_end(req_id)
+
+    def prune_retired_requests(self) -> None:
+        """Drop every retired request context."""
+        for req_id in self._retired_request_contexts:
+            self._request_contexts.pop(req_id, None)
+        self._retired_request_contexts.clear()
 
     def _metadata_for(
-        self, req_context: ReqContext, key: OffloadKey
+        self,
+        state: _RequestEventContext,
+        key: OffloadKey,
+        boundary: int,
     ) -> _OffloadEventMetadata | None:
-        state = req_context.get_state(_RequestEventContext)
-        if state is None:
-            return None
         group_config = state.group_configs.get(get_offload_group_idx(key))
-        boundary = req_context.get_offload_key_position(key)
         if (
             group_config is None
             or not describes_group(group_config)
-            or boundary is None
+            or boundary <= 0
             or boundary % group_config.tokens_per_chunk != 0
         ):
             return None
         if state.resumable or (state.kv_transfer_params or {}).get("_p_side_truncated"):
             return None
         chunk_idx = boundary // group_config.tokens_per_chunk - 1
+        last_hash_idx = (chunk_idx + 1) * group_config.hashes_per_chunk
+        if last_hash_idx > len(state.block_hashes):
+            return None
+        if state.block_hashes[last_hash_idx - 1] != get_offload_block_hash(key):
+            return None
         return self._build_event_metadata(state, group_config, chunk_idx)
 
     def record_store(
@@ -392,9 +414,15 @@ class OffloadingEventsTracker:
             if meta is not None and not meta.active_residencies:
                 self._pending_event_metadata.pop(key)
 
+        # Cap only after the batch is translated, so a context removed before
+        # this drain still describes the events in it.
+        while len(self._retired_request_contexts) > self._max_retired_request_contexts:
+            oldest_req_id, _ = self._retired_request_contexts.popitem(last=False)
+            self._request_contexts.pop(oldest_req_id, None)
+
     def reset(self) -> None:
-        """Drop all tracked state; pending payloads are stale after a
-        manager cache reset."""
+        """Drop pending key snapshots; keep request contexts for active
+        requests and events drained during cache reset."""
         self._pending_event_metadata.clear()
 
     def _lookahead_tokens(
@@ -530,14 +558,20 @@ class OffloadingEventsTracker:
             residency_bit = self._residency_bits.setdefault(
                 (event.medium, event.ownership), 1 << len(self._residency_bits)
             )
-        for key in event.keys:
+        req_state = (
+            self._request_contexts.get(event.req_id)
+            if self.self_describing_enabled and event.req_id is not None
+            else None
+        )
+        positions = event.positions
+        if positions is not None:
+            assert len(positions) == len(event.keys), (
+                "OffloadingEvent.positions length must match keys length"
+            )
+        for idx, key in enumerate(event.keys):
             meta = self._pending_event_metadata.get(key)
-            if (
-                meta is None
-                and self.self_describing_enabled
-                and event.req_context is not None
-            ):
-                meta = self._metadata_for(event.req_context, key)
+            if meta is None and req_state is not None and positions is not None:
+                meta = self._metadata_for(req_state, key, positions[idx])
                 if meta is not None and event.removal_expected:
                     # Temporary: keep the payload for block-granular removals.
                     # Remove this when removals switch to chunk keys.

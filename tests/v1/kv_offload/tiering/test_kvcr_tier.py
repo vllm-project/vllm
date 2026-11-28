@@ -413,16 +413,13 @@ def test_kvcr_tier_refreshes_processed_prefix(
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
 
-    ctx = ReqContext(req_id="req")
-    if computed is not None:
-
-        class TokenCountContext(ReqContext):
-            num_computed_tokens = computed
-            num_in_flight_tokens = in_flight
-            num_prompt_tokens = 64
-            num_tokens = total_tokens
-
-        ctx = TokenCountContext(req_id="req")
+    ctx = ReqContext(
+        req_id="req",
+        num_computed_tokens=computed,
+        num_in_flight_tokens=in_flight,
+        num_prompt_tokens=64 if computed is not None else None,
+        num_tokens=total_tokens if computed is not None else None,
+    )
     keys = [make_offload_key(bytes([index]), 0) for index in range(5)]
     for position, key in enumerate(keys):
         ctx.set_offload_key_position(key, (position + 1) * 16)
@@ -437,19 +434,23 @@ def test_kvcr_tier_refreshes_processed_prefix(
 
 
 def test_kvcr_tier_batches_consecutive_completions(monkeypatch):
-    """Batch completions without reordering requests that share keys."""
+    """Batch completions by req_id, merging the key positions of each
+    context, without reordering requests that share keys."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     ctx = ReqContext(req_id="req")
+    ctx_next = ReqContext(req_id="req")
     head, middle, tail, future = map(OffloadKey, (b"h", b"m", b"t", b"f"))
-    for key, end_token in ((tail, 48), (head, 16), (middle, 32), (future, 64)):
+    for key, end_token in ((tail, 48), (head, 16), (future, 64)):
         ctx.set_offload_key_position(key, end_token)
+    for key, end_token in ((head, 16), (middle, 32)):
+        ctx_next.set_offload_key_position(key, end_token)
     other = ReqContext(req_id="other")
     other.set_offload_key_position(head, 16)
     tier.submit_store(_job(7, ctx, key=tail))
-    tier.submit_load(_job(8, ctx, key=middle))
+    tier.submit_load(_job(8, ctx_next, key=middle))
     tier.submit_store(_job(9, other, key=head))
-    tier.submit_load(_job(10, ctx, key=middle))
+    tier.submit_load(_job(10, ctx_next, key=middle))
 
     assert [job.job_id for job in tier.get_finished_jobs()] == [7, 8, 9, 10]
     assert kvcr.align_sequence_calls == [

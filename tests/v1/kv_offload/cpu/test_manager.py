@@ -154,13 +154,15 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
-def test_cpu_stored_event_carries_request_context():
+def test_cpu_stored_event_carries_req_id_and_positions():
     manager = CPUOffloadingManager(
-        num_chunks=1,
+        num_chunks=2,
         enable_events=True,
     )
     req_context = make_req_context("writer")
-    keys = to_keys([1])
+    keys = to_keys([1, 2])
+    req_context.set_offload_key_position(keys[0], 16)
+    req_context.set_offload_key_position(keys[1], 32)
     assert (
         manager.prepare_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
         is not None
@@ -168,7 +170,21 @@ def test_cpu_stored_event_carries_request_context():
     manager.complete_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
 
     [event] = manager.take_events()
-    assert event.req_context is req_context
+    assert event.req_id == "writer"
+    assert event.positions == [16, 32]
+
+    unpositioned = make_req_context("no-pos")
+    extra = to_keys([3])
+    assert (
+        manager.prepare_store(extra, unpositioned, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(extra, unpositioned, trigger=StoreTrigger.ON_COMPUTE)
+
+    events = list(manager.take_events())
+    [stored] = [e for e in events if not e.removed]
+    assert stored.req_id == "no-pos"
+    assert stored.positions is None
 
 
 def test_cpu_eviction_removed_precedes_stored():
@@ -1663,6 +1679,41 @@ def test_store_threshold_counts_a_key_once_per_request(store_threshold: int):
     assert manager.counts[cold] == 2
 
 
+def test_store_threshold_counts_again_for_a_reused_request_id():
+    """A finished request's per-request state is gone, so a later request
+    with the same id counts its offers again."""
+    manager = make_cpu_manager(num_chunks=4, store_threshold=2)
+    key = to_key(1)
+    first = make_req_context("req")
+    manager.prepare_store([key], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    output = manager.prepare_store(
+        [key], make_req_context("req"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.keys_to_store == [key]
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_finished_request_id_used_again_warns_unless_restarted(
+    caplog_vllm, restarted: bool
+):
+    """A finished req_id used again without on_new_request is logged."""
+    manager = make_cpu_manager(num_chunks=4)
+    first = make_req_context("req")
+    manager.prepare_store([to_key(1)], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    second = make_req_context("req")
+    if restarted:
+        manager.on_new_request(second)
+    manager.prepare_store([to_key(2)], second, trigger=StoreTrigger.ON_COMPUTE)
+
+    warned = any("after it finished" in r.getMessage() for r in caplog_vllm.records)
+    assert warned is not restarted
+
+
 def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
@@ -2426,6 +2477,29 @@ def test_arc_request_finishing_after_reset_ignores_pre_reset_chunks():
     assert manager.lookup(other_key, other) is LookupResult.HIT
 
 
+def test_arc_reused_request_id_starts_with_clean_running_state():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
+    first_key, second_key = to_keys([1, 2])
+    first = make_req_context("req")
+    first.set_offload_key_position(first_key, 16)
+    assert (
+        manager.prepare_store([first_key], first, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([first_key], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    second = make_req_context("req")
+    second.set_offload_key_position(second_key, 32)
+    assert (
+        manager.prepare_store([second_key], second, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([second_key], second, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(second)
+    assert manager.lookup(second_key, second) is LookupResult.HIT
+
+
 def test_lru_failed_store_retry_preserves_prefix_order():
     manager = make_cpu_manager(num_chunks=2)
     ctx = make_req_context("retry")
@@ -2481,6 +2555,36 @@ def test_lru_reset_discards_unfinished_request_recency():
     assert output.evicted_keys == [other_key]
 
 
+def test_lru_reused_request_id_gets_a_new_rank():
+    manager = make_cpu_manager(num_chunks=2)
+    first = make_req_context("req")
+    old_key, finished_key, running_key = to_keys([1, 2, 3])
+    for ctx, key in ((first, old_key), (make_req_context("other"), finished_key)):
+        ctx.set_offload_key_position(key, 16)
+        assert (
+            manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+        manager.on_request_finished(ctx)
+
+    # Still running, so it ranks newer than the finished request.
+    running = make_req_context("req")
+    running.set_offload_key_position(running_key, 16)
+    output = manager.prepare_store(
+        [running_key], running, trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [old_key]
+    manager.complete_store([running_key], running, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        [to_key(4)], make_req_context("new"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [finished_key]
+
+
 def test_older_lru_request_does_not_demote_a_newer_shared_access():
     manager = make_cpu_manager(num_chunks=3)
     old = make_req_context("old")
@@ -2510,11 +2614,12 @@ def test_older_lru_request_does_not_demote_a_newer_shared_access():
 
 
 def test_lru_incremental_stores_do_not_rescan_the_prefix():
-    class CountingContext(ReqContext):
-        position_lookups = 0
+    position_lookups = 0
 
+    class CountingContext(ReqContext):
         def get_offload_key_position(self, key: OffloadKey) -> int | None:
-            self.position_lookups += 1
+            nonlocal position_lookups
+            position_lookups += 1
             return super().get_offload_key_position(key)
 
     keys = to_keys(list(range(64)))
@@ -2528,7 +2633,7 @@ def test_lru_incremental_stores_do_not_rescan_the_prefix():
         )
         manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
 
-    assert 0 < ctx.position_lookups <= 3 * len(keys)
+    assert 0 < position_lookups <= 3 * len(keys)
 
 
 @pytest.mark.parametrize("ready_on_insert", [False, True])

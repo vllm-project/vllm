@@ -14,7 +14,6 @@ from typing import (
     NamedTuple,
     NewType,
     Protocol,
-    TypeVar,
     runtime_checkable,
 )
 
@@ -49,9 +48,6 @@ def get_offload_block_hash(key: OffloadKey) -> bytes:
 def get_offload_group_idx(key: OffloadKey) -> int:
     """Extract the group index from an `OffloadKey`."""
     return int.from_bytes(key[-4:], "big", signed=False)
-
-
-_T = TypeVar("_T")
 
 
 class Medium(Enum):
@@ -97,53 +93,28 @@ class TierFilter:
 TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ReqContext:
-    """Per-request offloading state with optional token counts.
-
-    Counts are live until the scheduler finishes the request, then frozen.
-    """
+    """Call-scoped request metadata passed to the offloading manager."""
 
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
-    # Per-request scratch space keyed by value type, so a tier can parse
-    # kv_transfer_params and kv_hints once (in on_new_request) and read the
-    # result back on later calls for the same request.
-    _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
+    # Scheduler's computed token count, including in-flight work.
+    num_computed_tokens: int | None = None
+    # Scheduled tokens whose output has not yet been processed.
+    num_in_flight_tokens: int | None = None
+    # Number of prompt tokens.
+    num_prompt_tokens: int | None = None
+    # Number of prompt and output tokens, excluding speculative tokens.
+    num_tokens: int | None = None
     # End-token position for each key in this request. The scheduler records
     # these positions so managers can recover prefix order even when store
     # calls arrive out of order (for example, SWA backfills).
     _offload_key_positions: dict[OffloadKey, int] = field(
-        default_factory=dict, repr=False, init=False
+        default_factory=dict, repr=False, compare=False, kw_only=True
     )
-
-    @property
-    def num_computed_tokens(self) -> int | None:
-        """Scheduler's computed token count, including in-flight work."""
-        return None
-
-    @property
-    def num_in_flight_tokens(self) -> int | None:
-        """Scheduled tokens whose output has not yet been processed."""
-        return None
-
-    @property
-    def num_prompt_tokens(self) -> int | None:
-        """Number of prompt tokens."""
-        return None
-
-    @property
-    def num_tokens(self) -> int | None:
-        """Number of prompt and output tokens, excluding speculative tokens."""
-        return None
-
-    def set_state(self, val: Any) -> None:
-        self._state[type(val)] = val
-
-    def get_state(self, cls: type[_T]) -> _T | None:
-        return self._state.get(cls)
 
     def set_offload_key_position(self, key: OffloadKey, end_token: int) -> None:
         self._offload_key_positions[key] = end_token
@@ -224,8 +195,9 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
-    # Originating request context for a stored event.
-    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
+    # Originating request ID and per-key end-token positions for stored events.
+    req_id: str | None = None
+    positions: list[int] | None = None
 
 
 """

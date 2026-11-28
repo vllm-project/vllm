@@ -110,6 +110,7 @@ def make_job(
     keys: list[OffloadKey],
     chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
+    req_context: ReqContext = _CTX,
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
@@ -118,7 +119,7 @@ def make_job(
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
-        req_context=_CTX,
+        req_context=req_context,
     )
 
 
@@ -1047,7 +1048,10 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     """A completed store job emits one stored event with the job's keys."""
     tier = fs_tier_with_events
     keys = [key(1), key(2)]
-    tier.submit_store(make_job(1, keys, [0, 1]))
+    ctx = ReqContext(req_id="fs-writer")
+    ctx.set_offload_key_position(keys[0], 16)
+    ctx.set_offload_key_position(keys[1], 32)
+    tier.submit_store(make_job(1, keys, [0, 1], req_context=ctx))
     assert all(r.success for r in drain(tier))
 
     events = list(tier.take_events())
@@ -1056,9 +1060,16 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].medium == Medium.STORAGE
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
-    assert events[0].req_context is _CTX
+    assert events[0].req_id == "fs-writer"
+    assert events[0].positions == [16, 32]
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
+
+    tier.submit_store(make_job(2, [key(3)], [2]))
+    assert all(r.success for r in drain(tier))
+    [unpositioned] = list(tier.take_events())
+    assert unpositioned.req_id == _CTX.req_id
+    assert unpositioned.positions is None
 
 
 @pytest.mark.parametrize(
@@ -1212,13 +1223,16 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
     try:
         keys = [key(1), key(2)]
-        manager.on_new_request(_CTX)
+        req_ctx = ReqContext(req_id="cascade")
+        for i, k in enumerate(keys):
+            req_ctx.set_offload_key_position(k, (i + 1) * 16)
+        manager.on_new_request(req_ctx)
         assert (
-            manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+            manager.prepare_store(keys, req_ctx, trigger=StoreTrigger.ON_COMPUTE)
             is not None
         )
         manager.complete_store(
-            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+            keys, req_ctx, trigger=StoreTrigger.ON_COMPUTE
         )  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []
@@ -1231,9 +1245,10 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
 
         fs_events = [e for e in events if e.medium == Medium.STORAGE]
         assert len(fs_events) == 1
-        assert set(fs_events[0].keys) == set(keys)
+        assert fs_events[0].keys == keys
         assert not fs_events[0].removed
-        assert fs_events[0].req_context is _CTX
+        assert fs_events[0].req_id == "cascade"
+        assert fs_events[0].positions == [16, 32]
     finally:
         tier.shutdown()
 

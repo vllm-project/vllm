@@ -47,10 +47,9 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
-    P2PDestInfo,
     P2PSecondaryTierManager,
-    P2PSourceInfo,
-    _annotate_req_context,
+    _parse_dest,
+    _parse_source,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
@@ -109,11 +108,21 @@ def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
     return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
 
-def _req_context(kv_params: dict | None = None) -> ReqContext:
-    ctx = ReqContext(req_id="test", kv_transfer_params=kv_params)
-    # Mirror on_new_request: parse the P2P routing state once and cache it,
-    # so lookup/submit_*/on_request_finished can read it back via get_state.
-    _annotate_req_context(ctx)
+def _req_context(kv_params: dict | None = None, req_id: str = "test") -> ReqContext:
+    return ReqContext(req_id=req_id, kv_transfer_params=kv_params)
+
+
+def _open_request(
+    monkeypatch: pytest.MonkeyPatch,
+    mgr: P2PSecondaryTierManager,
+    kv_params: dict | None = None,
+) -> ReqContext:
+    """Start a request on a stubbed manager whose outbound sessions open."""
+    monkeypatch.setattr(
+        mgr, "_get_or_create_session", lambda peer_id: _FakeSession(peer_id=peer_id)
+    )
+    ctx = _req_context(kv_params)
+    mgr.on_new_request(ctx)
     return ctx
 
 
@@ -145,6 +154,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
+    mgr._fetching = {}
     mgr._sessions = {}
     mgr._reconnect_backoff = {}
     mgr._data_plane_faults = {}
@@ -312,39 +322,45 @@ class TestPeerIdFromParams:
 
 
 class TestLookup:
-    def test_lookup_returns_miss_without_kv_params(self):
+    def test_lookup_returns_miss_without_kv_params(self, monkeypatch):
         mgr = _make_manager()
-        ctx = _req_context(kv_params=None)
+        ctx = _open_request(monkeypatch, mgr, kv_params=None)
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
-    def test_lookup_returns_miss_without_required_fields(self):
+    def test_lookup_returns_miss_without_required_fields(self, monkeypatch):
         mgr = _make_manager()
-        ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
+        ctx = _open_request(
+            monkeypatch, mgr, kv_params={"remote_prefiller": {"remote_host": "x"}}
+        )
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
-    def test_lookup_returns_hit_for_valid_request(self):
+    def test_lookup_returns_hit_for_valid_request(self, monkeypatch):
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_remote_prefiller_kv_params())
+        ctx = _open_request(monkeypatch, mgr, kv_params=_remote_prefiller_kv_params())
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
-    def test_lookup_returns_miss_for_failed_request(self):
+    def test_lookup_returns_miss_for_failed_request(self, monkeypatch):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
+        ctx = _open_request(
+            monkeypatch, mgr, _remote_prefiller_kv_params(kv_request_id="req-1")
+        )
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
-    def test_lookup_returns_hit_for_different_request_id(self):
+    def test_lookup_returns_hit_for_different_request_id(self, monkeypatch):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
+        ctx = _open_request(
+            monkeypatch, mgr, _remote_prefiller_kv_params(kv_request_id="req-2")
+        )
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
-    def test_lookup_returns_miss_without_prefill_key(self):
+    def test_lookup_returns_miss_without_prefill_key(self, monkeypatch):
         """No `remote_prefiller` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
         returns MISS even when a stale `remote_decoder` block is present."""
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_remote_decoder_kv_params())
+        ctx = _open_request(monkeypatch, mgr, kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
 
@@ -644,6 +660,7 @@ class TestSubmitLoad:
             kv_params=params,
         )
         ctx = job.req_context
+        mgr.on_new_request(ctx)
         assert mgr.lookup(OffloadKey(b"prompt"), ctx) is LookupResult.HIT
 
         mgr.submit_load(job)
@@ -654,7 +671,8 @@ class TestSubmitLoad:
         assert mgr.lookup(OffloadKey(b"prompt"), ctx) is expected
         assert mgr.lookup(OffloadKey(b"generated"), ctx) is expected
         # A fresh request has its own handoff, even with the same transfer ID.
-        fresh = _req_context(kv_params=params)
+        fresh = _req_context(kv_params=params, req_id="fresh")
+        mgr.on_new_request(fresh)
         assert mgr.lookup(OffloadKey(b"prompt"), fresh) is LookupResult.HIT
 
     def test_missing_consumer_flag_fails(self):
@@ -893,6 +911,43 @@ class TestOnRequestFinished:
         assert len(results) == 1 and results[0].job_id == 7
         assert not results[0].success
         assert mgr._failed_req_ids == set()
+
+    def test_on_request_finished_drops_fetching_state(self, monkeypatch):
+        """Finished consumer state is removed, so reusing the req_id for a
+        local request does not inherit the old routing state."""
+        mgr = _make_manager()
+        ctx = _open_request(monkeypatch, mgr, kv_params=_remote_prefiller_kv_params())
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
+
+        mgr.on_request_finished(ctx)
+
+        reused = _req_context(kv_params=None, req_id=ctx.req_id)
+        mgr.on_new_request(reused)
+        assert mgr.lookup(OffloadKey(b"key"), reused) is LookupResult.MISS
+
+    def test_submit_store_and_load_after_request_finished(self):
+        """Transfers submitted after on_request_finished still resolve their
+        roles from the job's ReqContext."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id, connected=True)
+        mgr._sessions[peer_id] = session
+
+        store_params = _remote_decoder_kv_params(kv_request_id="store-req")
+        store_job = _job_metadata(job_id=1, kv_params=store_params)
+        mgr.on_new_request(store_job.req_context)
+        mgr.on_request_finished(store_job.req_context)
+        mgr.submit_store(store_job)
+        assert "store-req" in mgr._unbound_stores
+        assert mgr._finished_jobs == []
+
+        load_params = _remote_prefiller_kv_params(kv_request_id="load-req")
+        load_job = _job_metadata(job_id=2, kv_params=load_params)
+        mgr.on_new_request(load_job.req_context)
+        mgr.on_request_finished(load_job.req_context)
+        mgr.submit_load(load_job)
+        assert session.requests == [(2, "load-req")]
+        assert mgr._finished_jobs == []
 
     def _make_with_failed(self) -> P2PSecondaryTierManager:
         mgr = _make_manager()
@@ -1953,7 +2008,7 @@ class TestBidirectionalManager:
                 assert recv_monitor_message(monitor)["event"] == zmq.EVENT_DISCONNECTED
 
             new_ctx = _req_context(
-                _remote_kv_source_kv_params("127.0.0.1", port_b, "req-2")
+                _remote_kv_source_kv_params("127.0.0.1", port_b, "req-2"), "test-2"
             )
             mgr_a.on_new_request(new_ctx)
             poll_until(both_ready)
@@ -3368,7 +3423,6 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
             req_id=kv_request_id,
             kv_transfer_params=_remote_kv_source_kv_params("B", 2, kv_request_id),
         )
-        _annotate_req_context(ctx)
         consumer.on_new_request(ctx)
         for _ in range(3):
             list(consumer.get_finished_jobs())
@@ -3439,7 +3493,6 @@ def _peer_hit(
         req_id="req-peer",
         kv_transfer_params=_remote_kv_source_kv_params(host, port, "req-peer"),
     )
-    _annotate_req_context(ctx)
     consumer.on_new_request(ctx)
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
@@ -3774,8 +3827,7 @@ class TestNonDictRoleParamsRejected:
         ],
     )
     def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
-        ctx = _req_context(kv_params={"remote_prefiller": bad_value})
-        assert ctx.get_state(P2PSourceInfo) is None
+        assert _parse_source({"remote_prefiller": bad_value}) is None
 
     @pytest.mark.parametrize(
         "bad_value",
@@ -3787,8 +3839,7 @@ class TestNonDictRoleParamsRejected:
         ],
     )
     def test_non_dict_remote_decoder_fails_closed(self, bad_value):
-        ctx = _req_context(kv_params={"remote_decoder": bad_value})
-        dest = ctx.get_state(P2PDestInfo)
+        dest = _parse_dest({"remote_decoder": bad_value})
         assert dest is not None
         assert dest.kv_request_id is None
 
@@ -3802,8 +3853,7 @@ class TestNonDictRoleParamsRejected:
         ],
     )
     def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
-        ctx = _req_context(kv_params={"remote_kv_source": bad_value})
-        assert ctx.get_state(P2PSourceInfo) is None
+        assert _parse_source({"remote_kv_source": bad_value}) is None
 
     @pytest.mark.parametrize(
         "bad_params",
@@ -3815,14 +3865,13 @@ class TestNonDictRoleParamsRejected:
         ],
     )
     def test_non_dict_kv_params_treated_as_absent(self, bad_params):
-        ctx = _req_context(kv_params=bad_params)
-        assert ctx.get_state(P2PSourceInfo) is None
-        assert ctx.get_state(P2PDestInfo) is None
+        assert _parse_source(bad_params) is None
+        assert _parse_dest(bad_params) is None
 
     @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
     def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
-        source = _req_context(
-            kv_params={
+        source = _parse_source(
+            {
                 "remote_prefiller": {
                     "remote_host": "host",
                     "remote_port": 8000,
@@ -3830,11 +3879,9 @@ class TestNonDictRoleParamsRejected:
                 }
             }
         )
-        assert source.get_state(P2PSourceInfo) is None
+        assert source is None
 
-        dest = _req_context(
-            kv_params={"remote_decoder": {"kv_request_id": request_id}}
-        ).get_state(P2PDestInfo)
+        dest = _parse_dest({"remote_decoder": {"kv_request_id": request_id}})
         assert dest is not None
         assert dest.kv_request_id is None
 

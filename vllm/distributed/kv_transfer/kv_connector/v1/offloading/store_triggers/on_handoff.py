@@ -100,7 +100,7 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                     continue
 
                 key = req_status.register_boundary_key(group_idx, boundary)
-                store_output = sink.prepare_store([key], req_status.req_context)
+                store_output = sink.prepare_store([key], req_status.make_req_context())
                 if store_output is None:
                     continue
                 if store_output.keys_to_retry:
@@ -202,7 +202,7 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
-            store_output = sink.prepare_store(keys, req_status.req_context)
+            store_output = sink.prepare_store(keys, req_status.make_req_context())
             if store_output is None:
                 continue
             if store_output.keys_to_retry:
