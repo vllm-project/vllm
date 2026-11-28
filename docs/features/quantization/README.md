@@ -48,7 +48,7 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
       vllm serve <model> --quantization humming
     ```
 
-    Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
+    Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically. For compressed-tensors INT4 weights with INT8 activations that kernel is Humming; `--linear-backend marlin` runs them as W4A16 instead.
 
 ## Activation Quantization Fallbacks
 

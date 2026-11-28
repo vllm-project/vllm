@@ -1004,7 +1004,9 @@ def init_int8_linear_kernel(
 
 
 def choose_mp_linear_kernel(
-    config: MPLinearLayerConfig, compute_capability: int | None = None
+    config: MPLinearLayerConfig,
+    compute_capability: int | None = None,
+    activation_quant_key: QuantKey | None = None,
 ) -> type[MPLinearKernel]:
     """Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of
@@ -1016,6 +1018,8 @@ def choose_mp_linear_kernel(
         compute_capability (Optional[int], optional): The compute capability of
             the target device, if None uses `current_platform` to get
             the compute capability. Defaults to None.
+        activation_quant_key: Activation quantization the layer requests.
+            Kernels that run it are tried first.
 
     Raises:
         ValueError: If no kernel can implement the given config.
@@ -1044,6 +1048,13 @@ def choose_mp_linear_kernel(
         quantization="mixed_precision",
         compute_capability=compute_capability,
     )
+    if activation_quant_key is not None:
+        platform_kernels = sorted(
+            platform_kernels,
+            key=lambda k: (
+                k.executed_activation_key(activation_quant_key) != activation_quant_key
+            ),
+        )
 
     failure_reasons = []
     for kernel in platform_kernels:
@@ -1058,13 +1069,16 @@ def choose_mp_linear_kernel(
             continue
 
         can_implement, failure_reason = kernel.can_implement(config)
-        if can_implement:
-            logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
-            return kernel
-        else:
+        if not can_implement:
             failure_reasons.append(
                 f" {kernel.__name__} cannot implement due to: {failure_reason}"
             )
+            continue
+        if reason := _check_activation_fallback(kernel, activation_quant_key):
+            failure_reasons.append(reason)
+            continue
+        logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
+        return kernel
 
     raise ValueError(
         "Failed to find a kernel that can implement the "

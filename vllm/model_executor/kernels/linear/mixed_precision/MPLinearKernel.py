@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import retire_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
@@ -55,6 +56,13 @@ class MPLinearKernel(LinearKernel[MPLinearLayerConfig]):
                 f" capability is {compute_capability}"
             )
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        # Activations are quantized only as config.act_type says.
+        return None
 
     def __init__(
         self,
