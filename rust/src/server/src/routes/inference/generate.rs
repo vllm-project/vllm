@@ -39,7 +39,9 @@ use self::types::{
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, engine_error, server_error, text_request_error};
+use crate::error::{
+    ApiError, bail_invalid_request, engine_error, server_error, text_request_error,
+};
 use crate::routes::openai::utils::choices::{
     ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
 };
@@ -69,6 +71,14 @@ pub async fn generate(
 
     let mut media = MultimodalInput::default();
     if let Some(features) = body.features.take() {
+        if features.has_metadata_only_items()
+            && body.ec_transfer_params.as_ref().is_none_or(HashMap::is_empty)
+        {
+            bail_invalid_request!(
+                param = "ec_transfer_params",
+                "metadata-only multimodal items require ec_transfer_params"
+            );
+        }
         media.preprocessed = features.into_prepared()?;
     }
     media.raw = body.content_parts.take().unwrap_or_default();

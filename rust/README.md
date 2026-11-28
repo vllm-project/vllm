@@ -158,10 +158,14 @@ its 32 MiB default to accept them; the same limit applies to gRPC request
 messages. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
-be sent to generate. Pass `--language-model-only` to skip multimodal
-processing, and set `--limit-mm-per-prompt` to the engine's limits so that
-render enforces the same item counts. The `VLLM_MAX_MEDIA_PREPROCESSING_BYTES`
-setting applies to supported Python processors.
+be sent to generate. `"mm_payload": "metadata"` drops the processed tensors but
+keeps each item's `keep_on_cpu` fields as `mm_metadata`, for prefill that loads
+the embeddings through the EC connector: generate accepts such features only
+with `ec_transfer_params`, and render returns a 400 if a modality has no such
+field. Pass `--language-model-only` to skip multimodal processing, and set
+`--limit-mm-per-prompt` to the engine's limits so that render enforces the same
+item counts. The `VLLM_MAX_MEDIA_PREPROCESSING_BYTES` setting applies to
+supported Python processors.
 
 Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is
