@@ -334,6 +334,20 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        # cpu_bytes_to_use smaller than one aligned chunk leaves zero
+        # chunks, which dies in the segment calculation (range() gets a
+        # zero step); fail fast here with a clear configuration error
+        # instead of surfacing an opaque error from SharedOffloadRegion
+        # in get_manager()/create_worker().
+        if self.kv_bytes_per_chunk > 0 and self.num_chunks == 0:
+            raise ValueError(
+                "cpu_bytes_to_use must be at least one aligned chunk for "
+                "TieringOffloadingSpec: got cpu_bytes_to_use="
+                f"{self.extra_config.get('cpu_bytes_to_use')} bytes with an "
+                f"aligned chunk size of {self.kv_bytes_per_chunk} bytes, so "
+                "no chunks fit. Increase cpu_bytes_to_use to at least "
+                f"{self.kv_bytes_per_chunk} bytes."
+            )
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
         if self.async_init:

@@ -2210,6 +2210,18 @@ def test_spec_rejects_invalid_access_mode():
         )
 
 
+# Tiering needs at least one CPU chunk to back its shared region.
+def test_spec_rejects_cpu_bytes_to_use_smaller_than_one_chunk():
+    with pytest.raises(ValueError, match="at least one aligned chunk"):
+        TieringOffloadingSpec(
+            make_offloading_config(
+                spec_name="TieringOffloadingSpec",
+                cpu_bytes_to_use=1 * 1024 * 1024,
+                worker_kv_bytes_per_block=2 * 1024 * 1024,
+            )
+        )
+
+
 def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
     """The scheduler maps the workers' segments without pre-faulting or pinning
     them, and releasing its mapping leaves the workers' files in place."""
