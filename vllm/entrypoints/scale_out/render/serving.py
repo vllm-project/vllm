@@ -332,7 +332,11 @@ class ServingRender(BaseServing):
                     return_token_ids=request.return_token_ids,
                     cache_salt=request.cache_salt,
                     priority=request.priority,
-                    token_offsets=engine_input.get("prompt_token_offsets"),
+                    token_offsets=(
+                        engine_input.get("prompt_token_offsets")
+                        if request.return_token_offsets
+                        else None
+                    ),
                 )
             )
 

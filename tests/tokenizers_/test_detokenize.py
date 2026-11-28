@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Generator
 from typing import Any, cast
 
+import pybase64 as base64
 import pytest
+from tokenizers import AddedToken, Tokenizer, decoders, models
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
+from transformers.convert_slow_tokenizer import bytes_to_unicode
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import (
     convert_ids_list_to_tokens,
     convert_prompt_ids_to_tokens,
+    decode_token_ids_with_offsets,
     detokenize_incrementally,
 )
+from vllm.tokenizers.hf import (
+    batch_decode_singleton_tokens,
+    get_cached_tokenizer,
+    maybe_make_thread_pool,
+)
+from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.repo_utils import with_retry
@@ -50,6 +61,154 @@ TOKENIZERS = [
     "codellama/CodeLlama-7b-hf",
     "mistralai/Pixtral-12B-2409",
 ]
+
+
+def _byte_tokenizer(byte_fallback=False):
+    pieces = (
+        [f"<0x{b:02X}>" for b in range(256)]
+        if byte_fallback
+        else [bytes_to_unicode()[b] for b in range(256)]
+    )
+    backend = Tokenizer(
+        models.BPE(vocab={p: i for i, p in enumerate(pieces)}, merges=[])
+    )
+    backend.decoder = (
+        decoders.Sequence([decoders.ByteFallback(), decoders.Fuse()])
+        if byte_fallback
+        else decoders.ByteLevel()
+    )
+    return TokenizersBackend(tokenizer_object=backend)
+
+
+@pytest.mark.parametrize(
+    "byte_fallback,wrap_bytelevel",
+    [(False, False), (False, True), (True, False)],
+    ids=["bytelevel", "bytelevel-fuse", "fallback"],
+)
+@pytest.mark.parametrize(
+    "raw,expected,starts",
+    [
+        (b"\xc3\xa9x", "éx", [0, 0, 1]),
+        (b"\xf0\x90\x8d\x88x", "𐍈x", [0, 0, 0, 0, 1]),
+        (b"\xef\xbf\xbdx", "�x", [0, 0, 0, 1]),
+        (b"x\xc3\xa9", "xé", [0, 1, 1]),
+        (b"", "", []),
+    ],
+)
+def test_decode_offsets_for_split_unicode(
+    byte_fallback, wrap_bytelevel, raw, expected, starts
+):
+    tokenizer = _byte_tokenizer(byte_fallback)
+    if wrap_bytelevel:
+        backend = tokenizer.backend_tokenizer
+        backend.decoder = decoders.Sequence([backend.decoder, decoders.Fuse()])
+    ids = list(raw)
+    assert tokenizer.decode(ids) == expected
+    assert decode_token_ids_with_offsets(tokenizer, ids) == (expected, starts)
+
+
+def test_decode_offsets_preserve_added_tokens_and_special_slots():
+    tokenizer = _byte_tokenizer()
+    tokenizer.add_tokens([AddedToken("🦄")])
+    tokenizer.add_special_tokens({"bos_token": "<s>", "eos_token": "</s>"})
+    added = tokenizer.convert_tokens_to_ids("🦄")
+    ids = [tokenizer.bos_token_id, 195, 169, added, 120, tokenizer.eos_token_id]
+    assert tokenizer.decode(ids, skip_special_tokens=True) == "é🦄x"
+    assert decode_token_ids_with_offsets(tokenizer, ids, skip_special_tokens=True) == (
+        "é🦄x",
+        [0, 0, 0, 1, 2, 3],
+    )
+
+
+@pytest.mark.parametrize("bpe", [False, True])
+@pytest.mark.parametrize(
+    "cleanup,force_bpe", [(False, False), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("pooled", [False, True])
+def test_batch_decode_singleton_tokens_preserves_hf_policies(
+    bpe, cleanup, force_bpe, pooled
+):
+    backend = (
+        _byte_tokenizer().backend_tokenizer
+        if bpe
+        else Tokenizer(models.WordLevel({"é": 0, " .": 1}))
+    )
+    bpe_option = (
+        "clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output"
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        clean_up_tokenization_spaces=cleanup,
+        **{bpe_option: force_bpe},
+    )
+    tokenizer.add_tokens([AddedToken(" .")])
+    tokenizer.add_special_tokens({"bos_token": "<s>"})
+    ids = [*tokenizer.get_vocab().values()]
+    expected = [tokenizer.decode([token_id]) for token_id in ids]
+    tokenizer = get_cached_tokenizer(tokenizer)
+    if pooled:
+        tokenizer = maybe_make_thread_pool(tokenizer)
+    assert batch_decode_singleton_tokens(tokenizer, ids) == expected
+
+
+def test_decode_offsets_leave_unknown_decoder_unsupported():
+    backend = Tokenizer(models.WordPiece(vocab={"[UNK]": 0, "x": 1}))
+    backend.decoder = decoders.WordPiece()
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    assert decode_token_ids_with_offsets(tokenizer, [1]) is None
+
+
+@pytest.mark.parametrize("byte_fallback", [False, True])
+def test_decode_offsets_respect_invalid_byte_runs(byte_fallback):
+    tokenizer = _byte_tokenizer(byte_fallback)
+    ids = [0xE4, 0xBD]
+    expected = "��" if byte_fallback else "�"
+    starts = [0, 1] if byte_fallback else [0, 0]
+    assert tokenizer.decode(ids) == expected
+    assert decode_token_ids_with_offsets(tokenizer, ids) == (expected, starts)
+
+
+@pytest.mark.parametrize("skip_special_tokens", [False, True])
+@pytest.mark.parametrize(
+    "raw,text,starts",
+    [
+        (b"\xf0\x90\x8d\x88x", "𐍈x", [0, 0, 0, 0, 1]),
+        (b"\xef\xbf\xbdx", "�x", [0, 0, 0, 1]),
+        (b"\xe4\xbd", "�", [0, 0]),
+        (b"", "", []),
+    ],
+)
+def test_decode_offsets_kimi_audio(tmp_path, raw, text, starts, skip_special_tokens):
+    prefix, suffix = "<|im_kimia_user_msg_start|>", "<|im_kimia_assistant_msg_start|>"
+    (tmp_path / "tiktoken.model").write_text(
+        "".join(f"{base64.b64encode(bytes([i])).decode()} {i}\n" for i in range(256))
+    )
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "added_tokens_decoder": {
+                    "151670": {"content": prefix},
+                    "151671": {"content": suffix},
+                }
+            }
+        )
+    )
+    tokenizer = KimiAudioTokenizer.from_pretrained(tmp_path)
+    ids = [151670, *raw, 151671]
+    if skip_special_tokens:
+        expected = text, [0, *starts, len(text)]
+    else:
+        expected = (
+            prefix + text + suffix,
+            [0, *(len(prefix) + start for start in starts), len(prefix) + len(text)],
+        )
+    assert tokenizer.decode(ids, skip_special_tokens=skip_special_tokens) == expected[0]
+    assert (
+        decode_token_ids_with_offsets(
+            tokenizer, ids, skip_special_tokens=skip_special_tokens
+        )
+        == expected
+    )
 
 
 def _run_incremental_decode(
@@ -303,8 +462,6 @@ class _MockBackend:
     """Fake backend_tokenizer that exposes pre_tokenizer config."""
 
     def __init__(self, pre_tokenizer_type, replacement=None):
-        import json
-
         pre: dict = {"type": pre_tokenizer_type}
         if replacement is not None:
             pre["replacement"] = replacement

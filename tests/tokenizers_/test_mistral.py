@@ -61,6 +61,17 @@ def mistral_tokenizer(request) -> MistralTokenizer:
     indirect=True,
 )
 class TestMistralTokenizer:
+    @pytest.mark.parametrize("text", ["𐍈x", "a�x", "你x"])
+    def test_contextual_prompt_offsets(self, mistral_tokenizer, text):
+        ids = mistral_tokenizer.encode(text, add_special_tokens=False)
+        decoded = mistral_tokenizer.decode_prompt_with_offsets(ids)
+        assert decoded is not None
+        actual, offsets = decoded
+        assert actual == text
+        assert len(offsets) == len(ids)
+        assert offsets[-1] == len(text) - 1
+        assert offsets == sorted(offsets)
+
     def test_all_special_tokens(self, mistral_tokenizer: MistralTokenizer):
         if mistral_tokenizer.is_tekken:
             assert mistral_tokenizer.all_special_tokens == [
