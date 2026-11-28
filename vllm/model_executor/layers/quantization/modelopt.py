@@ -33,6 +33,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -919,8 +920,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         moe_config: FusedMoEConfig,
         scale_encoding: str | None = None,
     ) -> None:
+        """Configure the NVFP4 backend and its checkpoint-group shard alignment."""
         super().__init__(moe_config)
         self.quant_config = quant_config
+        self.intermediate_size_per_partition_alignment = quant_config.group_size
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         if scale_encoding is None:
             scale_encoding = quant_config.weight_scale_encoding
@@ -969,6 +972,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         if self.csf_scales:
             logger.info_once("Keeping CSF-compressed NVFP4 MoE scales on the GPU.")
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        """Align each expert partition to complete checkpoint quantization groups."""
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        alignment = self.intermediate_size_per_partition_alignment
+        intermediate_size_per_partition = (
+            (intermediate_size_per_partition + alignment - 1) // alignment * alignment
+        )
+        return hidden_size, intermediate_size_per_partition
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
