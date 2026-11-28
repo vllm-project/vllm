@@ -48,6 +48,13 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
         # --quantization fp8 with a bf16 checkpoint.
         if not spec.quantization:
             spec.quantization = target.quantization
+        # The MTP draft is the target checkpoint itself, so resolve its
+        # config and weights from the target's revision. Inherit
+        # revision/code_revision unless explicitly overridden here.
+        if spec.revision is None:
+            spec.revision = target.revision
+        if spec.code_revision is None:
+            spec.code_revision = target.code_revision
         # Use the draft model from the same model. Use model_weights if set
         # (e.g. runai_streamer replaces model with a local cache dir but keeps
         # the original path in model_weights), so the draft model can load
