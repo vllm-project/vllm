@@ -47,7 +47,8 @@ def test_gauge_metric(test_registry, num_engines):
 
 
 @pytest.mark.parametrize("num_engines", [1, 4])
-def test_counter_metric(test_registry, num_engines):
+@pytest.mark.parametrize("increment", [19, 0.125, 1.75])
+def test_counter_metric(test_registry, num_engines, increment):
     c = prometheus_client.Counter(
         "vllm:test_counter",
         "Test counter metric",
@@ -55,7 +56,7 @@ def test_counter_metric(test_registry, num_engines):
         registry=test_registry,
     )
     for i in range(num_engines):
-        c.labels(model="bar", engine_index=str(i)).inc(19)
+        c.labels(model="bar", engine_index=str(i)).inc(increment)
 
     metrics = get_metrics_snapshot()
     assert len(metrics) == num_engines
@@ -63,7 +64,8 @@ def test_counter_metric(test_registry, num_engines):
     for m in metrics:
         assert isinstance(m, Counter)
         assert m.name == "vllm:test_counter"
-        assert m.value == 19
+        # Duration counters must retain subsecond values, just like /metrics.
+        assert m.value == increment
         assert m.labels["model"] == "bar"
         assert m.labels["engine_index"] in engine_labels
         engine_labels.remove(m.labels["engine_index"])
