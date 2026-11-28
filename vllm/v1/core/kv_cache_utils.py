@@ -245,6 +245,23 @@ class KVCacheBlockCopy(NamedTuple):
     dst_block_id: int
 
 
+@dataclass(slots=True)
+class PinnedBlockSet:
+    """GPU blocks reserved for KV that is loaded before its request exists.
+
+    One set covers one KV cache group and is aligned with `block_hashes`: the
+    i-th block is meant to hold the KV of the i-th hash. The blocks are held
+    with `ref_cnt == 1`, exactly like an allocation, but they belong to no
+    request and carry no hash, so prefix caching cannot hit them until
+    `BlockPool.publish_pinned_hashes` runs.
+    """
+
+    kv_cache_group_id: int
+    block_hashes: list[BlockHash]
+    blocks: list[KVCacheBlock]
+    block_size: int
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
