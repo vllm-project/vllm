@@ -61,6 +61,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend impo
     TransferOp,
     TransferState,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.factory import (
+    create_transfer_backend,
+    resolve_transfer_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
     TransferEngineBackend,
 )
@@ -117,15 +121,25 @@ _PULL_LOST_EVENTS: Final[int] = zmq.EVENT_DISCONNECTED | zmq.EVENT_CONNECT_RETRI
 _PULL_HEARTBEAT_IVL_MS: Final[int] = 2000
 _PULL_HEARTBEAT_TIMEOUT_MS: Final[int] = 10000
 
-try:
-    from mooncake.engine import TransferEngine
-except ImportError:
-    logger.warning(
-        "Please install mooncake by following the instructions at "
-        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
-        "to run VLLM with MooncakeTransferEngine."
-    )
-    TransferEngine = None
+
+def _load_transfer_engine() -> type | None:
+    """Imports the classic engine only when the TE backend is selected.
+
+    The TENT module and the engine bundled with older Mooncake releases link
+    different asio builds, so loading the classic engine on a TENT worker can
+    make `import tent` fail with an undefined symbol.
+    """
+    try:
+        from mooncake.engine import TransferEngine
+    except ImportError:
+        logger.warning(
+            "Please install mooncake by following the instructions at "
+            "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
+            "to run VLLM with MooncakeTransferEngine."
+        )
+        return None
+    return TransferEngine
+
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -1376,9 +1390,6 @@ class MooncakeConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        if TransferEngine is None:
-            logger.error("Mooncake is not available")
-            raise RuntimeError("Mooncake is not available")
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
@@ -1425,14 +1436,28 @@ class MooncakeConnectorWorker:
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )
+        self._transfer_engine = resolve_transfer_engine(
+            kv_transfer_config.kv_connector_extra_config
+        )
+        engine_cls = _load_transfer_engine() if self._transfer_engine == "te" else None
+        if self._transfer_engine == "te" and engine_cls is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        self.transfer_backend: TransferBackend = TransferEngineBackend(
-            engine_cls=TransferEngine,
+        logger.info("The Mooncake connector is using %s.", self._transfer_engine)
+        self.transfer_backend: TransferBackend = create_transfer_backend(
+            self._transfer_engine,
+            engine_cls=engine_cls,
             hostname=self.hostname,
             protocol=protocol,
             device_name=device_name,
+            transfer_timeout_s=kv_transfer_config.kv_connector_extra_config.get(
+                "transfer_timeout_s"
+            ),
+            enable_sleep_mode=vllm_config.model_config.enable_sleep_mode,
+            overrides=kv_transfer_config.kv_connector_extra_config.get("tent_config"),
         )
         self.rpc_port = self.transfer_backend.rpc_port
 
@@ -1942,77 +1967,84 @@ class MooncakeConnectorWorker:
                 else MooncakeXferResponseStatus.FINISH
             )
             ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            for task in done:
-                d_req_id, send_meta = task.result()
-                del pending_reqs[d_req_id]
-                # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
-                    # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
-                    if not send_meta.need_send:
-                        self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
+            try:
+                for task in done:
+                    d_req_id, send_meta = task.result()
+                    del pending_reqs[d_req_id]
+                    # Do we still in reqs_need_send (not expired)?
+                    if send_meta.transfer_id in self.reqs_need_send:
+                        # Mark it sending to avoid expiration.
+                        send_meta.sending += 1
+                        ready_reqs.append((d_req_id, send_meta))
+                        if not send_meta.need_send:
+                            self.resolve_need_send(
+                                send_meta, remote_tp_ranks, meta.remote_pp_size
+                            )
+                    else:
+                        # Otherwise (expired, very unlikely), just forget it.
+                        logger.warning(
+                            "Request %s expired before sending on P side.", d_req_id
                         )
-                    ready_reqs.append((d_req_id, send_meta))
-                else:
-                    # Otherwise (expired, very unlikely), just forget it.
-                    logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
-                    )
 
-            (
-                src_ptrs,
-                dst_ptrs,
-                lengths,
-                err_reqs,
-                err_msg,
-            ) = await self._build_transfer_params(
-                ready_reqs,
-                meta,
-                local_regions,
-                remote_regions,
-            )
-            err_req_set = set(err_reqs)
-            ok_ready_reqs = [
-                (d_req_id, send_meta)
-                for d_req_id, send_meta in ready_reqs
-                if d_req_id not in err_req_set
-            ]
-
-            if len(src_ptrs):
-                remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                transfer_err_msg = await self.sender_loop.run_in_executor(
-                    self._sender_executor,
-                    self._send_blocks,
-                    remote_session,
+                (
                     src_ptrs,
                     dst_ptrs,
                     lengths,
+                    err_reqs,
+                    err_msg,
+                ) = await self._build_transfer_params(
+                    ready_reqs,
+                    meta,
+                    local_regions,
+                    remote_regions,
                 )
-                if transfer_err_msg is not None:
-                    err_msg = (
-                        transfer_err_msg
-                        if err_msg is None
-                        else f"{err_msg}; {transfer_err_msg}"
+                err_req_set = set(err_reqs)
+                ok_ready_reqs = [
+                    (d_req_id, send_meta)
+                    for d_req_id, send_meta in ready_reqs
+                    if d_req_id not in err_req_set
+                ]
+
+                if len(src_ptrs):
+                    remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                    transfer_err_msg = await self.sender_loop.run_in_executor(
+                        self._sender_executor,
+                        self._send_blocks,
+                        remote_session,
+                        src_ptrs,
+                        dst_ptrs,
+                        lengths,
                     )
-                    err_reqs = list(err_reqs)
-                    for d_req_id, _ in ok_ready_reqs:
-                        err_reqs.append(d_req_id)
-                        err_req_set.add(d_req_id)
-                    ok_ready_reqs = []
+                    if transfer_err_msg is not None:
+                        err_msg = (
+                            transfer_err_msg
+                            if err_msg is None
+                            else f"{err_msg}; {transfer_err_msg}"
+                        )
+                        err_reqs = list(err_reqs)
+                        for d_req_id, _ in ok_ready_reqs:
+                            err_reqs.append(d_req_id)
+                            err_req_set.add(d_req_id)
+                        ok_ready_reqs = []
 
-            for d_req_id, send_meta in ready_reqs:
-                send_meta.sending -= 1
+                for d_req_id, send_meta in ready_reqs:
+                    if d_req_id in err_req_set:
+                        continue
 
-                if d_req_id in err_req_set:
-                    continue
-
-                send_meta.sent += 1
-                if (
-                    send_meta.sent == send_meta.need_send
-                    and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
-                ):
-                    self.finished_sending_reqs.add(send_meta.p_req_id)
+                    send_meta.sent += 1
+                    if (
+                        send_meta.sent == send_meta.need_send
+                        and self.reqs_need_send.pop(send_meta.transfer_id, None)
+                        is not None
+                    ):
+                        self.finished_sending_reqs.add(send_meta.p_req_id)
+            except BaseException:
+                for task in wait_tasks:
+                    task.cancel()
+                raise
+            finally:
+                for _, send_meta in ready_reqs:
+                    send_meta.sending -= 1
 
             response = MooncakeXferResponse(
                 status=response_status,
