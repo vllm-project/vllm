@@ -292,6 +292,67 @@ def test_dummy_run_requests_fit_in_budget(
     assert scheduled == [expected]
 
 
+@pytest.mark.parametrize(
+    "max_num_tokens,max_num_reqs,decode_query_len,draft_slots,expected",
+    [
+        # One logits row per request without a speculator.
+        (2048, 256, 1, 0, (256, 1)),
+        # Verify steps: decode_query_len rows per request, up to the budget.
+        (2048, 256, 8, 0, (256, 8)),
+        (2048, 512, 8, 0, (256, 8)),
+        (64, 256, 4, 0, (16, 4)),
+        # Draft-model slots also take budget.
+        (2048, 512, 4, 1, (409, 4)),
+    ],
+)
+def test_dummy_sampler_run_profiles_verify_logits(
+    max_num_tokens, max_num_reqs, decode_query_len, draft_slots, expected
+):
+    """With spec decoding, the profiled logits and sampler must cover a verify
+    step's num_reqs * decode_query_len rows, which warmup_kernels runs after
+    the KV cache is sized; one row per request under-reserves and OOMs."""
+    hidden_size = 16
+    logits_rows = []
+    sampled = []
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_num_tokens = max_num_tokens
+    runner.max_num_reqs = max_num_reqs
+    runner.decode_query_len = decode_query_len
+    runner.input_buffers = InputBuffers(
+        max_num_reqs=max_num_reqs,
+        max_num_tokens=max_num_tokens,
+        device=torch.device("cpu"),
+    )
+    runner.model_state = SimpleNamespace(dummy_sampler_run=lambda *args: False)
+
+    def compute_logits(hidden_states):
+        logits_rows.append(hidden_states.shape[0])
+        return hidden_states.new_zeros((hidden_states.shape[0], 32))
+
+    runner.model = SimpleNamespace(compute_logits=compute_logits)
+
+    def record(logits, input_batch, *args):
+        assert logits.shape[0] == input_batch.cu_num_logits_np[-1]
+        sampled.append((input_batch.num_reqs, logits.shape[0] // input_batch.num_reqs))
+
+    runner.sampler = Mock(side_effect=record)
+    runner.rejection_sampler = None
+    runner.speculator = None
+    if decode_query_len > 1:
+        runner.rejection_sampler = Mock(side_effect=record)
+        runner.speculator = SimpleNamespace(draft_logits=None)
+        runner.speculative_config = SimpleNamespace(
+            max_num_new_slots_for_drafting=draft_slots
+        )
+
+    num_reqs = min(max_num_reqs, max_num_tokens)
+    runner._dummy_sampler_run(torch.zeros(num_reqs, hidden_size))
+
+    num_rows = expected[0] * expected[1]
+    assert logits_rows == [num_rows]
+    assert sampled and set(sampled) == {expected}
+
+
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144

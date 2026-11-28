@@ -62,6 +62,25 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Requires CUDA/ROCm top-k."
 )
+def test_make_dummy_spec_decode_logits():
+    """num_logits_per_req > 1 gives the verify shape: each request's last
+    num_logits_per_req tokens produce logits, mapped back to the request."""
+    num_reqs, num_tokens, per_req = 3, 13, 4
+    buffers = InputBuffers(
+        max_num_reqs=num_reqs, max_num_tokens=num_tokens, device=torch.device(DEVICE)
+    )
+    batch = InputBatch.make_dummy(
+        num_reqs, num_tokens, buffers, num_logits_per_req=per_req
+    )
+
+    # Requests get 4, 4 and 5 tokens.
+    assert batch.logits_indices.tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12]
+    assert batch.cu_num_logits_np.tolist() == [0, 4, 8, 12]
+    assert batch.cu_num_logits.tolist() == [0, 4, 8, 12]
+    assert batch.expanded_idx_mapping.tolist() == [0] * 4 + [1] * 4 + [2] * 4
+    assert batch.expanded_local_pos.tolist() == [0, 1, 2, 3] * 3
+
+
 @pytest.mark.parametrize("is_padding", [True, False])
 def test_make_dummy_padding_controls_moe_routing(monkeypatch, is_padding: bool):
     """Dummy tokens marked as padding are dropped by the MoE router (top-k id
