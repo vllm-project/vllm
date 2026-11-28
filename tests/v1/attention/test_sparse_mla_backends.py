@@ -100,6 +100,7 @@ if current_platform.is_cuda():
     )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
+    FlashInferMLASparseSM120Backend,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
@@ -2072,7 +2073,7 @@ PREFILL_BATCH_SPECS = {
 
 @pytest.mark.skipif(
     current_platform.is_cuda() and torch.cuda.get_device_capability()[0] < 10,
-    reason="Sparse MLA forward_mha requires FA4 (SM100+)",
+    reason="Sparse MLA forward_mha requires SM100+ on CUDA",
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
 @pytest.mark.parametrize(
@@ -2099,15 +2100,23 @@ def test_sparse_backend_prefill_correctness(
     monkeypatch,
 ):
     """Test the normal dense forward_mha path for sparse MLA short prefill."""
-    backend_cls = (
-        ROCMAiterMLASparseBackend
-        if current_platform.is_rocm()
-        else FlashMLASparseBackend
+    is_sm120 = current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(120)
     )
+    if current_platform.is_rocm():
+        backend_cls = ROCMAiterMLASparseBackend
+    elif is_sm120:
+        backend_cls = FlashInferMLASparseSM120Backend
+    else:
+        backend_cls = FlashMLASparseBackend
     if current_platform.is_rocm() and (
         batch_name.startswith("masked_mha") or qk_nope_head_dim != 128
     ):
         pytest.skip("ROCm dense prefill requires the DeepSeek MLA layout")
+    if is_sm120 and batch_name.startswith("masked_mha"):
+        pytest.skip("SM120 sparse MLA does not support masked-MHA prefill")
+    if is_sm120 and qk_rope_head_dim == 0:
+        pytest.skip("SM120 compact NoPE cache rows do not support dense prefill")
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
     device = torch.device(DEVICE_TYPE)
@@ -2117,7 +2126,7 @@ def test_sparse_backend_prefill_correctness(
     kv_lora_rank = 512
     head_size = kv_lora_rank + qk_rope_head_dim
     masked_mha = batch_name.startswith("masked_mha")
-    topk_tokens = 200 if masked_mha else 512
+    topk_tokens = 2048 if is_sm120 else (200 if masked_mha else 512)
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
@@ -2163,6 +2172,9 @@ def test_sparse_backend_prefill_correctness(
         model_config, "get_sliding_window", MethodType(lambda self: None, model_config)
     )
 
+    if is_sm120:
+        kv_cache_dtype = "fp8_ds_mla"
+        vllm_config.cache_config.cache_dtype = kv_cache_dtype
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     scale = 1.0 / math.sqrt(qk_nope_head_dim + qk_rope_head_dim)
 
@@ -2250,7 +2262,8 @@ def test_sparse_backend_prefill_correctness(
     k_pe_cat = torch.cat(all_k_pe_new, dim=0)
     ref_output = torch.cat(reference_outputs, dim=0)
 
-    vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    if not is_sm120:
+        vllm_config.cache_config.cache_dtype = kv_cache_dtype
     vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
