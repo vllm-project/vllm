@@ -258,7 +258,7 @@ def test_attn_res_without_norm_returns_fp32_mix(num_stack, with_addend, tokens):
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
 
 
-@pytest.mark.parametrize("tokens", [1, 300])
+@pytest.mark.parametrize("tokens", [1, 8, 300])
 def test_loop_blend_matches_per_stream_controllers(tokens):
     """The stream-batched controllers (shared `dest` and norm weight, as a
     local layer's q/k/v) equal each stream's reference controller followed by
@@ -559,6 +559,9 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
     cache_dtype,
 ):
     """Known convolutions store normalized K/V and preserve empty slots."""
+    fp8 = cache_dtype is torch.float8_e4m3fn
+    if fp8 and not current_platform.has_device_capability(90):
+        pytest.skip("fp8 KV stores need SM90+ (SM8x serves a BF16 KV cache)")
     heads, dim, tokens = 2, 128, 3
     q = torch.zeros(tokens, 6, dim, device=DEVICE).bfloat16()
     kv_input = torch.full((tokens, heads * dim), 2.0, device=DEVICE).bfloat16()
@@ -608,9 +611,27 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
     torch.testing.assert_close(kv.float(), expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize(
-    "tokens", [1, 4, 8, 16] if current_platform.is_device_capability_family(120) else []
+_LL_GEMM_TOKENS = (
+    [1, 4, 8, 16]
+    if current_platform.is_device_capability_family(120)
+    or current_platform.is_device_capability_family(80)
+    else []
 )
+
+
+def _assert_fp32_accumulation_bound(out, x, weight, bias, dtype):
+    """Allow fp32 accumulation error, which can also move an output to the
+    neighboring value of `dtype` (SM8x cuBLAS sums in another order)."""
+    reference = x.double() @ weight.double().T
+    if bias is not None:
+        reference = reference + bias.double()
+    rounding = (reference.to(dtype).double() - reference).abs()
+    magnitude = x.double().abs() @ weight.double().abs().T
+    accumulation = x.shape[-1] ** 0.5 * 2**-24 * magnitude
+    assert ((out.double() - reference).abs() <= rounding + 2 * accumulation).all()
+
+
+@pytest.mark.parametrize("tokens", _LL_GEMM_TOKENS)
 @pytest.mark.parametrize("shape", [(131, 130), (6552, 2304)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
@@ -629,13 +650,15 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
         return sm12x_bf16_ll_gemm(x, weight, bias, out=out)
 
     def check():
-        if k == 2304:
+        if k == 2304 and current_platform.is_device_capability_family(120):
             # Match the existing tensor-core accumulation, including its
             # rounding. Four rows select that path for the one-row reference.
             inputs = x.repeat(4, 1) if tokens == 1 else x
             reference = torch.mm(inputs, weight.t(), out_dtype=torch.float32)
             reference = (reference[:tokens] + bias.float()).to(dtype)
             torch.testing.assert_close(out, reference, atol=0, rtol=0)
+        elif k == 2304:
+            _assert_fp32_accumulation_bound(out, x, weight, bias, dtype)
         else:
             reference = x.double() @ weight.double().T + bias.double()
             rounding = (reference.to(dtype).double() - reference).abs()
@@ -653,6 +676,52 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
         graph.replay()
         torch.testing.assert_close(out, expected, atol=0, rtol=0)
         check()
+
+
+@pytest.mark.parametrize("tokens", _LL_GEMM_TOKENS)
+def test_qkv_bmm_matches_split_projections(tokens):
+    """One launch over Inkling's q-side / k / v rows (TP2 shapes, segment
+    boundaries inside a tile) matches the three projections, and its rows do
+    not depend on M (the same output rows for any M <= 16)."""
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import qkv_bmm
+
+    torch.manual_seed(0)
+    n, k, k_start, v_start = 4304, 2304, 3276, 3788
+    xs = [torch.randn(tokens, k, device=DEVICE).bfloat16() for _ in range(3)]
+    weight = (torch.randn(n, k, device=DEVICE) * 0.05).bfloat16()
+    out = qkv_bmm(xs[0], xs[1], xs[2], weight, k_start, v_start)
+    for x, (lo, hi) in zip(xs, ((0, k_start), (k_start, v_start), (v_start, n))):
+        _assert_fp32_accumulation_bound(
+            out[:, lo:hi], x, weight[lo:hi], None, torch.bfloat16
+        )
+    one = qkv_bmm(xs[0][:1], xs[1][:1], xs[2][:1], weight, k_start, v_start)
+    torch.testing.assert_close(one, out[:1], atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(80),
+    reason="SM8x compiles the low-M GEMM once for every row count",
+)
+def test_ll_gemm_compiles_once_for_every_row_count(monkeypatch):
+    """The LM head runs on every number of sampled rows outside CUDA graphs,
+    so a row count the warmup missed must not compile a new kernel."""
+    from triton import knobs
+
+    from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm
+
+    x = torch.randn(16, 2304, device=DEVICE).bfloat16()
+    weight = torch.randn(4096, 2304, device=DEVICE).bfloat16()
+    sm12x_bf16_ll_gemm(x, weight, out_dtype=torch.float32)
+    compiled: list[str] = []
+    monkeypatch.setattr(
+        knobs.runtime,
+        "jit_post_compile_hook",
+        lambda **kwargs: compiled.append(kwargs["fn"].name),
+    )
+    for rows in range(1, 16):
+        sm12x_bf16_ll_gemm(x[:rows], weight, out_dtype=torch.float32)
+    torch.accelerator.synchronize()
+    assert "_ll_gemm_kernel" not in compiled
 
 
 def test_sm12x_linear_large_batch_fallback():

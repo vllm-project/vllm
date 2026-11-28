@@ -18,10 +18,11 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .activation import _situ
-from .linear import k_group_partials
-from .moe import _load_bias, _local_experts, _select_experts
+from .linear import _k_group_tile, _prefetch_k_group_tile, k_group_partials
+from .moe import _load_bias, _local_experts, _select_experts, _spin_until
 
 if TYPE_CHECKING:
     from vllm.utils.humming import HummingInputSchema
@@ -106,6 +107,270 @@ def select_experts(
         num_warps=4 if tokens <= 256 else 1,
     )
     return ids, weights, src2dst
+
+
+# Batches up to this many tokens route and align in one launch.
+ALIGNED_ROUTING_MAX_TOKENS = 32
+# Completion counters (`Inkling2Gate.counters`), one 128-byte line apart.
+_ROUTERS_DONE = tl.constexpr(0)
+_TOKENS_DONE = tl.constexpr(32)
+
+
+@triton.jit
+def _align_rows(
+    Ids,
+    SortedIds,
+    ExpertIds,
+    NumPadded,
+    numel,
+    max_padded,
+    max_blocks,
+    NUM_LOCAL: tl.constexpr,
+    LOCAL_POW2: tl.constexpr,
+    ROWS_POW2: tl.constexpr,
+    BLOCKS_POW2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    STRIDE: tl.constexpr,
+):
+    """`moe_align_block_size` (its one-block small-batch kernel, invalid ids
+    ignored) of the local expert ids `Ids` [numel], bitwise: each expert's
+    rows padded to `BLOCK_SIZE`, in the order that kernel's `STRIDE`
+    counting threads give them (row i goes to thread i % STRIDE)."""
+    rows = tl.arange(0, ROWS_POW2)
+    experts = tl.arange(0, LOCAL_POW2)
+    ids = tl.load(Ids + rows, rows < numel, other=-1, cache_modifier=".cg")
+    valid = (ids >= 0) & (ids < NUM_LOCAL)
+    counts = tl.sum(
+        ((ids[None, :] == experts[:, None]) & valid[None, :]).to(tl.int32), 1
+    )
+    padded = (counts + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE
+    ends = tl.cumsum(padded, 0)
+    total = tl.sum(padded)
+    # Padding before each expert's rows: its padded start minus its dense one.
+    pad_before = (ends - padded) - (tl.cumsum(counts, 0) - counts)
+    # Rows sorted by (expert, counting thread, iteration); invalid rows last.
+    key = (rows % STRIDE) * ROWS_POW2 + rows // STRIDE
+    expert_key = tl.where(valid, ids, LOCAL_POW2)
+    order = tl.sort(expert_key * (STRIDE * ROWS_POW2) + key)
+    sorted_expert = order // (STRIDE * ROWS_POW2)
+    sorted_key = order % (STRIDE * ROWS_POW2)
+    sorted_row = (sorted_key % ROWS_POW2) * STRIDE + sorted_key // ROWS_POW2
+    dense = sorted_expert < NUM_LOCAL
+    shift = tl.gather(pad_before, tl.where(dense, sorted_expert, 0), 0)
+    for start in range(0, max_padded, ROWS_POW2):
+        offs = start + rows
+        tl.store(SortedIds + offs, numel, offs < max_padded)
+    tl.debug_barrier()
+    tl.store(SortedIds + rows + shift, sorted_row, dense)
+    blocks = tl.arange(0, BLOCKS_POW2)
+    block_expert = tl.sum(
+        (ends[None, :] <= blocks[:, None] * BLOCK_SIZE).to(tl.int32), 1
+    )
+    block_expert = tl.where(blocks * BLOCK_SIZE < total, block_expert, -1)
+    tl.store(ExpertIds + blocks, block_expert, blocks < max_blocks)
+    tl.store(NumPadded, total)
+
+
+@triton.jit
+def _route_align_kernel(
+    X,
+    GateWeight,
+    Bias,
+    Partials,
+    ExpertBounds,
+    IsPadding,
+    Counters,
+    Ids,
+    Weights,
+    Src2Dst,
+    SortedIds,
+    ExpertIds,
+    NumPadded,
+    T,
+    route_scale,
+    max_padded,
+    max_blocks,
+    H: tl.constexpr,
+    E: tl.constexpr,
+    E_POW2: tl.constexpr,
+    GROUPS: tl.constexpr,
+    TOPK: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    M_TILES: tl.constexpr,
+    NUM_LOCAL: tl.constexpr,
+    LOCAL_POW2: tl.constexpr,
+    ROWS_POW2: tl.constexpr,
+    BLOCKS_POW2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    STRIDE: tl.constexpr,
+):
+    # Programs [0, ROUTERS) compute the router K-group partials (the tiles
+    # of `k_group_partials`). Program ROUTERS + t waits for them and selects
+    # token t's experts (`_select_kernel`); the last token program to finish
+    # aligns all rows for the expert GEMMs (`moe_align_block_size`) and
+    # resets the counters. All programs of a launch are resident at once.
+    pid = tl.program_id(0)
+    N_TILES: tl.constexpr = (E + BN - 1) // BN
+    ROUTERS: tl.constexpr = N_TILES * M_TILES * GROUPS
+    if pid < ROUTERS:
+        pid_n = pid % N_TILES
+        pid_m = (pid // N_TILES) % M_TILES
+        pid_k = pid // (N_TILES * M_TILES)
+        if GROUPS > 1 and pid_m == 0:
+            _prefetch_k_group_tile(GateWeight, E, H, BN, pid_n, pid_k)
+        _k_group_tile(
+            X, GateWeight, Partials, T, E, H, BM, BN, GROUPS > 1, pid_n, pid_m, pid_k
+        )
+        tl.debug_barrier()
+        tl.atomic_add(Counters + _ROUTERS_DONE, 1, sem="release")
+    else:
+        token = (pid - ROUTERS) + tl.arange(0, 1)
+        bias = _load_bias(Bias, E, E_POW2)
+        padding = None
+        if IsPadding is not None:
+            padding = tl.load(IsPadding + token)
+        lo = tl.load(ExpertBounds)
+        hi = tl.load(ExpertBounds + 1)
+        _spin_until(Counters + _ROUTERS_DONE, ROUTERS)
+        ids, weights = _select_experts(
+            Partials, bias, token, T, route_scale, E, E_POW2, GROUPS, TOPK, True
+        )
+        local = _local_experts(ids, lo, hi, padding)
+        rows = token[:, None] * TOPK + tl.arange(0, TOPK)[None, :]
+        tl.store(Ids + rows, local)
+        tl.store(Weights + rows, weights)
+        tl.store(Src2Dst + rows, tl.where(local >= 0, rows, -1))
+        tl.debug_barrier()
+        if tl.atomic_add(Counters + _TOKENS_DONE, 1, sem="acq_rel") == T - 1:
+            _align_rows(
+                Ids,
+                SortedIds,
+                ExpertIds,
+                NumPadded,
+                T * TOPK,
+                max_padded,
+                max_blocks,
+                NUM_LOCAL,
+                LOCAL_POW2,
+                ROWS_POW2,
+                BLOCKS_POW2,
+                BLOCK_SIZE,
+                STRIDE,
+            )
+            tl.store(Counters + _ROUTERS_DONE, 0)
+            tl.store(Counters + _TOKENS_DONE, 0)
+
+
+def use_aligned_routing(
+    tokens: int, experts: int, hidden: int, device: torch.device
+) -> bool:
+    """Whether `select_experts_aligned` serves `tokens`: few enough, and its
+    programs (which wait for each other, launched cooperatively) all fit on
+    `device` at once."""
+    if not 0 < tokens <= ALIGNED_ROUTING_MAX_TOKENS:
+        return False
+    block_n = 32 if tokens <= 16 else 64
+    routers = (
+        triton.cdiv(experts, block_n)
+        * triton.cdiv(tokens, 16)
+        * triton.cdiv(hidden, 1024)
+    )
+    return routers + tokens <= num_compute_units(device.index or 0)
+
+
+def align_sizes(rows: int, num_local: int, block_size: int) -> tuple[int, int]:
+    """`moe_align_block_size`'s `sorted_ids` and `expert_ids` lengths."""
+    max_padded = rows + num_local * (block_size - 1)
+    if rows < num_local:
+        max_padded = min(rows * block_size, max_padded)
+    return max_padded, triton.cdiv(max_padded, block_size)
+
+
+def select_experts_aligned(
+    x: torch.Tensor,
+    gate_weight: torch.Tensor,
+    bias: torch.Tensor,
+    topk: int,
+    route_scale: float,
+    expert_bounds: torch.Tensor,
+    num_local: int,
+    counters: torch.Tensor,
+    block_size: int,
+    is_padding: torch.Tensor | None = None,
+) -> tuple[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+]:
+    """`select_experts` and `moe_align_block_size(ids, block_size,
+    num_local, ignore_invalid_experts=True)` of its local ids in one
+    launch, where `use_aligned_routing`, for the `num_local` experts of
+    `expert_bounds`. The selection is bitwise that of `select_experts`, and
+    the layout bitwise that of `moe_align_block_size` for up to 64 local
+    experts (its one-block kernel). With more, `moe_align_block_size`
+    places rows by atomics: the expert of each block, the padded count and
+    each expert's set of rows are the same; their order, and so which of
+    the expert's blocks holds a row, may differ. `counters`
+    (`Inkling2Gate`) must be zero; the launch leaves them zero."""
+    tokens, hidden = x.shape
+    experts = gate_weight.shape[0]
+    assert use_aligned_routing(tokens, experts, hidden, x.device)
+    assert x.is_contiguous()
+    rows = tokens * topk
+    device = x.device
+    # The tiles of `k_group_partials` (split K) for this many tokens.
+    block_m, block_n = 16, 32 if tokens <= 16 else 64
+    groups = triton.cdiv(hidden, 1024)
+    partials = torch.empty(
+        (groups, tokens, experts), dtype=torch.float32, device=device
+    )
+    ids = torch.empty((tokens, topk), dtype=torch.int32, device=device)
+    weights = torch.empty(rows, dtype=torch.float32, device=device)
+    src2dst = torch.empty(rows, dtype=torch.int32, device=device)
+    max_padded, max_blocks = align_sizes(rows, num_local, block_size)
+    sorted_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
+    expert_ids = torch.empty(max_blocks, dtype=torch.int32, device=device)
+    num_padded = torch.empty(1, dtype=torch.int32, device=device)
+    m_tiles = triton.cdiv(tokens, block_m)
+    routers = triton.cdiv(experts, block_n) * m_tiles * groups
+    _route_align_kernel[(routers + tokens,)](
+        x,
+        gate_weight,
+        bias,
+        partials,
+        expert_bounds,
+        is_padding,
+        counters,
+        ids,
+        weights,
+        src2dst,
+        sorted_ids,
+        expert_ids,
+        num_padded,
+        tokens,
+        route_scale,
+        max_padded,
+        max_blocks,
+        H=hidden,
+        E=experts,
+        E_POW2=triton.next_power_of_2(experts),
+        GROUPS=groups,
+        TOPK=topk,
+        BM=block_m,
+        BN=block_n,
+        M_TILES=m_tiles,
+        NUM_LOCAL=num_local,
+        LOCAL_POW2=triton.next_power_of_2(num_local),
+        ROWS_POW2=max(triton.next_power_of_2(rows), 16),
+        BLOCKS_POW2=max(triton.next_power_of_2(max_blocks), 16),
+        BLOCK_SIZE=block_size,
+        STRIDE=max(num_local, 32),
+        num_warps=4,
+        num_stages=2,
+        enable_fp_fusion=False,
+        launch_cooperative_grid=True,
+    )
+    return (ids, weights, src2dst), (sorted_ids, expert_ids, num_padded)
 
 
 @triton.jit
@@ -243,6 +508,19 @@ class HummingExperts:
         )
         self.locks = torch.zeros(2048, dtype=torch.int32, device=weight.device)
 
+    def _valid_rows(self, rows: int, num_global_experts: int) -> int:
+        """Expected local rows, which pick the kernel configs."""
+        return -(-rows * self.num_experts // num_global_experts)
+
+    def block_size(
+        self, ids_shape: tuple[int, int], num_global_experts: int
+    ) -> int | None:
+        """The row block size of both projections for `ids` of this shape,
+        or None when they differ."""
+        valid_rows = self._valid_rows(ids_shape[0] * ids_shape[1], num_global_experts)
+        sizes = {self._block_m(name, valid_rows) for name in ("w13", "w2")}
+        return sizes.pop() if len(sizes) == 1 else None
+
     def _block_m(self, name: str, rows: int) -> int:
         for lower, upper, config in self.tunings[name]:
             if lower < rows <= upper:
@@ -292,20 +570,28 @@ class HummingExperts:
         num_global_experts: int,
         gate_cap: float,
         up_cap: float,
+        alignment: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """bf16 `[T * topk, H]` down-projection rows of the local slots of
-        `ids` (`select_experts`); the other rows are left unset."""
+        `ids` (`select_experts`); the other rows are left unset. `alignment`
+        is their `moe_align_block_size` for `block_size` when the caller
+        has it (`select_experts_aligned`)."""
         tokens, topk = ids.shape
         rows = tokens * topk
-        # Expected local rows, which pick the kernel configs.
-        valid_rows = -(-rows * self.num_experts // num_global_experts)
+        valid_rows = self._valid_rows(rows, num_global_experts)
         block_m = {name: self._block_m(name, valid_rows) for name in ("w13", "w2")}
-        alignments = {
-            size: moe_align_block_size(
-                ids, size, self.num_experts, ignore_invalid_experts=True
-            )[:3]
-            for size in set(block_m.values())
-        }
+        if alignment is not None:
+            assert set(block_m.values()) == {
+                self.block_size(ids.shape, num_global_experts)
+            }
+            alignments = {size: alignment for size in block_m.values()}
+        else:
+            alignments = {
+                size: moe_align_block_size(
+                    ids, size, self.num_experts, ignore_invalid_experts=True
+                )[:3]
+                for size in set(block_m.values())
+            }
         gate_up = self._gemm(
             "w13", x, rows, alignments[block_m["w13"]], topk, valid_rows
         )
