@@ -412,3 +412,96 @@ class TestGemma4ChatTemplate:
         assert "<|image|>" in result
         assert "<|audio|>" in result
         assert "<|video|>" in result
+
+
+EMPTY_THOUGHT = "<|channel>thought\n<channel|>"
+
+
+def _tool_call(call_id):
+    return {
+        "id": call_id,
+        "function": {"name": "get_weather", "arguments": {"city": "Paris"}},
+    }
+
+
+_CONVERSATIONS = {
+    "single_turn": [{"role": "user", "content": "Hello"}],
+    "multi_turn": [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
+        {"role": "user", "content": "How are you?"},
+    ],
+    "after_tool_response": [
+        {"role": "user", "content": "Weather in Paris?"},
+        {"role": "assistant", "content": "", "tool_calls": [_tool_call("call_0")]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "Sunny"},
+    ],
+}
+
+
+@pytest.mark.parametrize("messages", _CONVERSATIONS.values(), ids=_CONVERSATIONS)
+def test_empty_thought_channel_can_be_disabled(gemma4_template, messages):
+    """E2B/E4B recipes disable the empty thought channel that 12B/26B/31B
+    use to suppress thinking."""
+    result = _render(
+        gemma4_template,
+        messages,
+        add_generation_prompt=True,
+        empty_thought_channel=False,
+    )
+    assert EMPTY_THOUGHT not in result
+
+
+def test_empty_thought_channel_is_on_by_default(gemma4_template):
+    result = _render(
+        gemma4_template, _CONVERSATIONS["multi_turn"], add_generation_prompt=True
+    )
+    assert result.count(EMPTY_THOUGHT) == 2
+
+
+def test_disabling_empty_thought_channel_keeps_thinking_mode(gemma4_template):
+    result = _render(
+        gemma4_template,
+        _CONVERSATIONS["after_tool_response"],
+        add_generation_prompt=True,
+        enable_thinking=True,
+        empty_thought_channel=False,
+    )
+    assert "<|think|>" in result
+    assert result.endswith("<|channel>thought\n")
+
+
+@pytest.mark.parametrize("follow_up_role", ["user", "system"])
+@pytest.mark.parametrize("tool_responses", [1, 2])
+def test_model_turn_closed_before_next_turn_after_tool_response(
+    gemma4_template, follow_up_role, tool_responses
+):
+    """A non-tool message right after tool responses starts a new turn, as in
+    Google's chat_template.jinja."""
+    call_ids = [f"call_{i}" for i in range(tool_responses)]
+    messages = [
+        {"role": "user", "content": "Weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_tool_call(call_id) for call_id in call_ids],
+        },
+        *(
+            {"role": "tool", "tool_call_id": call_id, "content": "Sunny"}
+            for call_id in call_ids
+        ),
+        {"role": follow_up_role, "content": "Next"},
+    ]
+    result = _render(gemma4_template, messages)
+    assert f"<tool_response|><turn|>\n<|turn>{follow_up_role}\nNext" in result
+
+
+@pytest.mark.parametrize("add_generation_prompt", [False, True])
+def test_conversation_ending_in_tool_response_keeps_model_turn_open(
+    gemma4_template, add_generation_prompt
+):
+    messages = _CONVERSATIONS["after_tool_response"]
+    result = _render(
+        gemma4_template, messages, add_generation_prompt=add_generation_prompt
+    )
+    assert result.endswith("<tool_response|>")
