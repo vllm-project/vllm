@@ -366,7 +366,7 @@ def test_manager_get_stats_gauges_and_info_labels() -> None:
     sched = fixture.scheduler
 
     sched._store_event_to_blocks[0] = TransferMeta([10], [11])
-    sched._pending_finished_stores.append(TransferMeta([12], [13]))
+    sched._pending_finished_stores["req"] = TransferMeta([12], [13])
     sched._abandoned_store_event_to_blocks[1] = TransferMeta([14], [15])
 
     stats = sched.get_stats()

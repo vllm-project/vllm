@@ -138,6 +138,7 @@ def build_weight_cache_key(
     dp_size, dp_rank = get_engine_dp_placement(
         vllm_config, parallel_config.data_parallel_rank
     )
+    engram_config = vllm_config.engram_config
     return WeightCacheKey.from_model_config(
         model_config,
         cache_config=vllm_config.cache_config,
@@ -151,6 +152,11 @@ def build_weight_cache_key(
         enable_expert_parallel=parallel_config.enable_expert_parallel,
         expert_placement_strategy=parallel_config.expert_placement_strategy,
         kernel_config=vllm_config.kernel_config,
+        engram_cpu_offload=bool(engram_config and engram_config.cpu_offload),
+        engram_embedding_across_dp=bool(
+            engram_config and engram_config.embedding_across_dp
+        ),
+        indexer_kv_dtype=vllm_config.attention_config.indexer_kv_dtype,
     )
 
 

@@ -240,6 +240,29 @@ def test_offline_scoring_uses_default_template_unless_overridden(
 
 
 @pytest.mark.parametrize(
+    "request_kwargs,expected",
+    [(None, "a a bc"), ({"instruction": "bc"}, "bc a bc")],
+)
+def test_scoring_uses_default_chat_template_kwargs_unless_overridden(
+    llm_reranker_processor, request_kwargs, expected
+):
+    """`--default-chat-template-kwargs` reaches `/score` and `/rerank` templates,
+    and request-level `chat_template_kwargs` still take precedence."""
+    processor = llm_reranker_processor
+    processor.template_kwargs = {"instruction": "a"}
+    text, _ = processor.get_score_prompt(
+        "a",
+        "bc",
+        {},
+        chat_template="{{ instruction }} {{ messages[0].content }} "
+        "{{ messages[1].content }}",
+        chat_template_kwargs=request_kwargs,
+    )
+
+    assert text == expected
+
+
+@pytest.mark.parametrize(
     "truncate_prompt_tokens,max_total_tokens,truncation_side",
     [(4, 32, None), (-1, 8, None), (4, 32, "right")],
 )

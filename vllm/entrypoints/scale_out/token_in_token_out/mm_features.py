@@ -15,6 +15,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     encode_mm_kwargs_item,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    MMTensorReference,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -92,25 +93,60 @@ def _encode_mm_metadata(
 
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
+    *,
+    reference_loader: (
+        Callable[[str, MMTensorReference], MultiModalKwargsItem] | None
+    ) = None,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
-    """Deserialize `features` into per-modality kwargs for `mm_input`."""
+    """Deserialize `features` into per-modality kwargs for `mm_input`.
+
+    `reference_loader(modality, reference)` loads each `kwargs_refs` item.
+    """
     mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
     kwargs_data = features.kwargs_data or {}
+    kwargs_refs = features.kwargs_refs or {}
     mm_metadata = features.mm_metadata or {}
     for modality, hashes in features.mm_hashes.items():
         n = len(hashes)
-        kwargs_items = [
-            decode_mm_kwargs_item(item) if item is not None else None
-            for item in kwargs_data.get(modality, [None] * n)
-        ]
+        kwargs_items: list[MultiModalKwargsItem | None] = []
+        for item, ref in zip(
+            kwargs_data.get(modality, [None] * n),
+            kwargs_refs.get(modality, [None] * n),
+            strict=True,
+        ):
+            if item is not None:
+                kwargs_items.append(decode_mm_kwargs_item(item))
+            elif ref is not None:
+                if reference_loader is None:
+                    raise ValueError("kwargs_refs require a reference loader")
+                kwargs_items.append(reference_loader(modality, ref))
+            else:
+                kwargs_items.append(None)
         metadata_items = [
             decode_mm_kwargs_item(item) if item is not None else None
             for item in mm_metadata.get(modality, [None] * n)
         ]
+        # A referenced item was validated against the model as loaded, so
+        # metadata may only repeat its fields, and the loaded item is kept
+        # as is (element equality doesn't compare field settings).
+        refs = kwargs_refs.get(modality, [None] * n)
+        for i, (ref, kwargs_item, metadata_item) in enumerate(
+            zip(refs, kwargs_items, metadata_items)
+        ):
+            if ref is None or kwargs_item is None or metadata_item is None:
+                continue
+            for key, elem in metadata_item.items():
+                if kwargs_item.get(key) != elem:
+                    raise ValueError(
+                        f"mm_metadata field {key!r} of {modality} item {i} "
+                        "doesn't match its kwargs_refs object"
+                    )
         mm_kwargs[modality] = [
-            merge_mm_kwargs_items(kwargs_item, metadata_item)
-            for kwargs_item, metadata_item in zip(
-                kwargs_items, metadata_items, strict=True
+            kwargs_item
+            if ref is not None
+            else merge_mm_kwargs_items(kwargs_item, metadata_item)
+            for ref, kwargs_item, metadata_item in zip(
+                refs, kwargs_items, metadata_items, strict=True
             )
         ]
     return mm_kwargs

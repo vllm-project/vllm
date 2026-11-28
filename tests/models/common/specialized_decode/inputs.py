@@ -14,6 +14,7 @@ device side, which is the only part that needs FlyDSL, is in `harness.py`.
 """
 
 import math
+from typing import NamedTuple
 
 import torch
 
@@ -50,6 +51,36 @@ def _log_uniform(
     return x.float()
 
 
+# Generators take a seed and draw all of a call site's operands in one call,
+# so that two operands can't accidentally come from the same seed.
+def log_uniform(
+    count: int,
+    low_exponent: float,
+    high_exponent: float,
+    seed: int,
+    signed: bool = True,
+) -> torch.Tensor:
+    """`count` float32 with exponents uniform on [low_exponent,
+    high_exponent], so every binade is sampled equally."""
+    return _log_uniform(count, low_exponent, high_exponent, _gen(seed), signed)
+
+
+def mixed_floats(
+    count: int,
+    low: float,
+    high: float,
+    log_exponents: tuple[float, float],
+    seed: int,
+) -> torch.Tensor:
+    """Half of `count` uniform on [`low`, `high`] (the range a helper is used
+    over), half log-uniform over +-2^`log_exponents` (to reach small
+    magnitudes)."""
+    g = _gen(seed)
+    uniform = torch.empty(count // 2, device=DEV).uniform_(low, high, generator=g)
+    rest = _log_uniform(count - count // 2, log_exponents[0], log_exponents[1], g)
+    return torch.cat([uniform, rest])
+
+
 def edge_floats() -> torch.Tensor:
     """Every f32 exponent field with the mantissas next to the code / rounding
     boundaries, positive."""
@@ -82,7 +113,7 @@ def fp8_domain(fnuz: bool) -> torch.Tensor:
     midpoints = (magnitudes[1:] + magnitudes[:-1]) / 2
     past_max = torch.tensor([464.0, 480, 1e6, 3e38], device=DEV)
     values = neighbours(torch.cat([magnitudes, midpoints, past_max]).float())
-    random_values = _log_uniform(1 << 20, -14, 10, _gen(0))
+    random_values = log_uniform(1 << 20, -14, 10, seed=0)
     infinities = torch.tensor([math.inf, -math.inf], device=DEV)
     values = torch.cat([values, -values, random_values, infinities])
     return torch.cat([values, values.new_tensor([1e-40, -1e-40])])
@@ -106,6 +137,132 @@ def e2m1_bytes(codes: torch.Tensor) -> torch.Tensor:
     """E2M1 values of the 8 nibbles of int32 words, low nibble first."""
     nib = (codes.long()[:, None] >> (4 * torch.arange(8, device=DEV))) & 0xF
     return R.E2M1_VALUES.to(DEV)[nib]
+
+
+# ------------------------------------------------- MFMA operands and layouts
+# Lane layouts of the CDNA MFMA operands, as documented in the ISA.
+
+# Operand format codes of the f8f6f4 MFMA (CDNA4 ISA).
+MX_FP8, MX_FP4 = 0, 4
+
+
+def mfma_lanes(tile: torch.Tensor, per_lane: int) -> torch.Tensor:
+    """[tiles, 16, K] -> the [tiles 64, per_lane] lane operands of a 16 x 16
+    MFMA: lane l holds row l % 16, K per_lane (l / 16) .. + per_lane."""
+    tiles = tile.shape[0]
+    return (
+        tile.view(tiles, 16, 4, per_lane)
+        .permute(0, 2, 1, 3)
+        .reshape(tiles * 64, per_lane)
+    )
+
+
+def acc_lanes(acc: torch.Tensor) -> torch.Tensor:
+    """[tiles, 16, 16] accumulator -> the [tiles 64, 4] lane operands: lane l
+    holds rows 4 (l / 16) .. + 3 of column l % 16."""
+    return acc.view(-1, 4, 4, 16).transpose(2, 3).reshape(-1, 4)
+
+
+def from_acc_lanes(lanes: torch.Tensor) -> torch.Tensor:
+    """`acc_lanes` undone: [tiles 64, 4] -> [tiles, 16, 16]."""
+    return lanes.view(-1, 4, 16, 4).transpose(2, 3).reshape(-1, 16, 16)
+
+
+def _fp8_mfma_lanes(quantized: torch.Tensor) -> torch.Tensor:
+    """[tiles, 16, 128] E4M3 -> the f8f6f4 MFMA's lane operands: lane l holds
+    row l % 16, K 16 j .. + 16 and 64 + 16 j .. + 16, for j = l / 16."""
+    tiles = quantized.shape[0]
+    halves = quantized.view(tiles, 16, 2, 4, 16).permute(0, 3, 1, 2, 4)
+    return halves.reshape(tiles * 64, 32).contiguous()
+
+
+class Bf16MfmaOperands(NamedTuple):
+    """Operands of a 16 x 16 x 32 bf16 MFMA, as matrices rather than lanes."""
+
+    a: torch.Tensor  # [tiles, 16, 32] bfloat16
+    b: torch.Tensor  # [tiles, 16, 32] bfloat16
+    acc: torch.Tensor  # [tiles, 16, 16] float32
+
+
+def _wide_bf16(
+    shape: tuple[int, ...], exponents: tuple[int, int], g: torch.Generator
+) -> torch.Tensor:
+    x = torch.randn(shape, device=DEV, generator=g)
+    spread = torch.exp2(torch.randint(*exponents, shape, device=DEV, generator=g))
+    return (x * spread).bfloat16()
+
+
+def wide_bf16(
+    shape: tuple[int, ...], exponents: tuple[int, int], seed: int
+) -> torch.Tensor:
+    """bf16 normals of `shape` scaled by random powers of two in `exponents`,
+    so that a float32 accumulation of them actually rounds."""
+    return _wide_bf16(shape, exponents, _gen(seed))
+
+
+def bf16_mfma_operands(tiles: int, seed: int) -> Bf16MfmaOperands:
+    """A, B and C for a 16 x 16 x 32 bf16 MFMA."""
+    g = _gen(seed)
+    a, b = (_wide_bf16((tiles, 16, 32), (-20, 20), g) for _ in range(2))
+    return Bf16MfmaOperands(a, b, torch.randn(tiles, 16, 16, device=DEV, generator=g))
+
+
+class MxMfmaOperands(NamedTuple):
+    """Operands of a 16 x 16 x 128 scaled (f8f6f4) MFMA. The `*_values` are
+    the exact unscaled operands in float64."""
+
+    a_words: torch.Tensor  # [tiles 64, n] int32 lane operands
+    b_words: torch.Tensor
+    a_values: torch.Tensor  # [tiles, 16, 128] float64
+    b_values: torch.Tensor
+    scale_words: torch.Tensor  # [2, tiles 64] int32, four E8M0 codes a word
+    scale_codes: torch.Tensor  # [2, tiles 64, 4], the codes those words hold
+    acc: torch.Tensor  # [tiles, 16, 16] float32
+
+
+def _mx_operand(
+    tiles: int, fmt: int, g: torch.Generator
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Random MXFP8 (no NaN) or MXFP4 `[tiles, 16, 128]` -> (lane words,
+    unscaled float64 values)."""
+    assert fmt in (MX_FP8, MX_FP4), f"unknown f8f6f4 operand format {fmt}"
+    if fmt == MX_FP8:
+        quantized = torch.randint(0, 256, (tiles, 16, 128), device=DEV, generator=g)
+        quantized = torch.where((quantized & 0x7F) == 0x7F, 0, quantized)
+        quantized = quantized.to(torch.uint8)
+        values = quantized.view(torch.float8_e4m3fn).double()
+        return _fp8_mfma_lanes(quantized).view(I32), values
+    packed = torch.randint(
+        0, 256, (tiles, 16, 64), device=DEV, generator=g, dtype=torch.uint8
+    )
+    # E8M0 code 127 is a scale of 1.
+    unscaled = packed.new_full((tiles, 16, 4), 127)
+    words = mfma_lanes(packed, 16).contiguous().view(I32)
+    return words, R.dequant_mxfp4(packed, unscaled)
+
+
+def mx_mfma_operands(tiles: int, formats: tuple[int, int], seed: int) -> MxMfmaOperands:
+    """A, B, their E8M0 scale words and C for a 16 x 16 x 128 scaled MFMA.
+
+    Scale codes span 100 .. 154 so that selecting the wrong byte of a scale
+    word changes the result.
+    """
+    g = _gen(seed)
+    (a_words, a_values), (b_words, b_values) = (
+        _mx_operand(tiles, fmt, g) for fmt in formats
+    )
+    codes = torch.randint(100, 155, (2, tiles * 64, 4), device=DEV, generator=g)
+    # Reinterpret the four bytes as one int32 word.
+    words = codes.to(torch.uint8).contiguous().view(I32).squeeze(-1)
+    return MxMfmaOperands(
+        a_words,
+        b_words,
+        a_values,
+        b_values,
+        words,
+        codes,
+        torch.randn(tiles, 16, 16, device=DEV, generator=g),
+    )
 
 
 def assert_bit_exact(

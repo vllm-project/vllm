@@ -12,7 +12,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import MoEBackend, validate_moe_backend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import (
@@ -83,6 +83,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "nemotron3_5_transcribe_mtp",
+    "nemotron_shortcut_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -168,28 +169,6 @@ def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
 
 
 _MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
-_MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
-
-
-def _get_minimax_m3_dspark_draft(
-    target_model_config: ModelConfig, cache_dir: str | None
-) -> str:
-    """MiniMax-M3 checkpoints ship the DSpark draft as a standalone checkpoint
-    in their `dspark/` subfolder."""
-    draft = get_subfolder_path(
-        target_model_config.model,
-        _MINIMAX_M3_DSPARK_SUBFOLDER,
-        revision=target_model_config.revision,
-        cache_dir=cache_dir,
-    )
-    if not os.path.isfile(os.path.join(draft, "config.json")):
-        raise ValueError(
-            f"MiniMax-M3 DSpark found no draft checkpoint in the "
-            f"'{_MINIMAX_M3_DSPARK_SUBFOLDER}/' subfolder of "
-            f"{target_model_config.model}. Set speculative_config.model to the "
-            "draft checkpoint."
-        )
-    return draft
 
 
 def _get_attention_head_dim(config: Any) -> int | None:
@@ -471,6 +450,12 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
+    subfolder: str | None = None
+    """The subfolder of the target model that holds the draft checkpoint, e.g.
+    `"eagle3"` for a target that ships its EAGLE-3 draft in `eagle3/`. Only
+    this subfolder is downloaded from the Hugging Face Hub. Cannot be combined
+    with `model`. If neither is given, a draft method that needs a checkpoint
+    looks for one in the target's subfolder named after the method."""
     method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -546,8 +531,9 @@ class SpeculativeConfig:
     # Advanced control
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
-    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
-    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    and DeepSeek-V4/V4.1 DSpark), or, with "fp8", the Muse Spark DSpark
+    drafter's own lm_head and Markov head on ROCm. "fp8" uses per-row weight
+    and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
@@ -737,6 +723,7 @@ class SpeculativeConfig:
             "enforce_eager",
             "num_speculative_tokens",
             "model",
+            "subfolder",
             "method",
             "draft_tensor_parallel_size",
             "tensor_parallel_size",
@@ -1001,6 +988,36 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
+            )
+
+        if (
+            hf_config.model_type == "nemotron4"
+            and getattr(hf_config.get_text_config(), "num_nextn_predict_layers", 0) > 0
+        ):
+            # The MTP head reads the language model's fields; the quant config
+            # lives only at the top level of the VL checkpoint.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.get_text_config()
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if (
+            hf_config.model_type == "nemotron4_text"
+            and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
+        ):
+            hf_config.model_type = "nemotron_shortcut_mtp"
+        if hf_config.model_type == "nemotron_shortcut_mtp":
+            # With mtp_use_repeated_layer one physical block serves every draft
+            # step, so the drafter sees a single module and any draft length.
+            n_predict = (
+                1
+                if getattr(hf_config, "mtp_use_repeated_layer", False)
+                else getattr(hf_config, "num_nextn_predict_layers", 1)
+            )
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronShortcutMTPModel"]}
             )
 
         if hf_config.architectures[0] in (
@@ -1431,6 +1448,27 @@ class SpeculativeConfig:
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
+    def get_subfolder_checkpoint(
+        self, subfolder: str, required: bool = True
+    ) -> str | None:
+        """The local path of the draft checkpoint in `subfolder` of the target
+        model. If there is none, raises if `required`, else returns `None`."""
+        if (target := self.target_model_config) is not None:
+            load_config = self.draft_load_config
+            cache_dir = load_config.download_dir if load_config else None
+            path = get_subfolder_path(
+                target.model, subfolder, target.revision, cache_dir
+            )
+            if os.path.isfile(os.path.join(path, "config.json")):
+                return path
+        if required:
+            raise ValueError(
+                f"Found no draft checkpoint in the '{subfolder}/' subfolder of "
+                f"the target model. Set speculative_config.model to the draft "
+                "checkpoint."
+            )
+        return None
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -1439,6 +1477,14 @@ class SpeculativeConfig:
         # will be detected automatically if possible. If the speculative method
         # can not be detected, it will be considered as the "draft_model" by
         # default.
+
+        if self.subfolder is not None:
+            if self.model is not None:
+                raise ValueError(
+                    "speculative_config.subfolder is a subfolder of the target "
+                    "model, so it cannot be combined with model."
+                )
+            self.model = self.get_subfolder_checkpoint(self.subfolder)
 
         # infer method from user args
         if (custom_cls := get_custom_speculator_config_class(self.method)) is not None:
@@ -1873,6 +1919,13 @@ class SpeculativeConfig:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return self.apply_draft_eplb_overrides(vllm_config)
+
+    @field_validator("moe_backend")
+    @classmethod
+    def _validate_moe_backend(cls, value: str | None) -> str | None:
+        if value is not None:
+            validate_moe_backend(value)
+        return value
 
     @field_validator("method")
     @classmethod

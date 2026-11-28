@@ -268,11 +268,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @property
     def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
-        return self._media_io_kwargs or (
-            self._model_config.multimodal_config.media_io_kwargs
-            if self._model_config.multimodal_config
-            else None
-        )
+        return self._media_io_kwargs
 
     @cached_property
     def video_io_defaults(self) -> dict[str, Any]:
@@ -367,7 +363,11 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             # Embeddings bypass limit when enable_mm_embeds=True
             skip_validation = mm_config.get_limit_per_prompt(input_modality) == 0
         if not skip_validation:
-            self.mm_processor.info.validate_num_items(input_modality, num_items)
+            self.mm_processor.info.validate_num_input_items(
+                input_modality,
+                num_items,
+                is_embedding=original_modality.endswith("_embeds"),
+            )
 
         return input_modality, original_modality, use_vision_chunk, num_items
 
@@ -567,6 +567,8 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         # needlessly adds their latency.
         # Keep the original group and item order when rebuilding the result.
         item_groups = list(self._items_by_modality.items())
+        # Break the parser <-> tracker reference cycle once items are snapshotted.
+        self._items_by_modality.clear()
         items = [item for _, group in item_groups for item in group]
         results = await asyncio.gather(
             *(item() for item in items), return_exceptions=True

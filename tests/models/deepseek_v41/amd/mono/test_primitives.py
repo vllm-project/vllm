@@ -6,7 +6,9 @@ helper at a time, from a test kernel that calls the helper itself on every
 lane.
 
 Roundings, packings, scale codes and data movement are bit-exact: there is a
-closed form for each, so a tolerance would only hide a wrong one.
+closed form for each, so a tolerance would only hide a wrong one. Hardware
+transcendentals, helpers built on them, and MFMAs are held to the error
+bounds in `bounds.py` instead.
 
 This is the primitive tier (T1) of #68016, a debugging aid that reaches into
 this model's internals on purpose. It is not the numerical contract; that is
@@ -23,11 +25,13 @@ it.
 
 The machinery is in `tests/models/common/specialized_decode/`: `harness.py`
 runs a device helper, `inputs.py` builds what makes a rounding rule
-observable. Another model's helpers belong in a file under its own
+observable, `bounds.py` bounds the helpers that cannot be exact. Another
+model's helpers belong in a file under its own
 `tests/models/<model>/` directory, over its own imports."""
 
+import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -50,13 +54,14 @@ pytest.importorskip("aiter")
 
 import flydsl.expr as fx  # noqa: E402
 
+from tests.models.common.specialized_decode import bounds as B  # noqa: E402
 from tests.models.common.specialized_decode import harness as H  # noqa: E402
 from tests.models.common.specialized_decode import inputs as I  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.attention import device as attn  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common import gfx942 as gfx  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common import mx, ops  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942  # noqa: E402
-from vllm.models.deepseek_v41.amd.mono.stages import moe  # noqa: E402
+from vllm.models.deepseek_v41.amd.mono.stages import moe, seam  # noqa: E402
 
 _PKG = "vllm.models.deepseek_v41.amd.mono"
 DEV, F32, I32 = I.DEV, I.F32, I.I32
@@ -220,6 +225,412 @@ def test_scale_codes(lib: str) -> None:
         assert torch.equal(got[:, -2].view(F32).double(), R.e8m0(code))
     assert torch.equal(got[:, -1].view(F32).double(), 1 / R.e8m0(code))
     assert (v == 0).any() and ((v > 0) & (v < R.FLT_MIN)).any()
+
+
+# ---------------------------------------------------------------- transcendentals
+# Each helper's roundings, written out through a `RoundingModel`. Plain f32
+# ops, `/` and `fmath.sqrt` are correctly rounded (one `B.F32_ROUNDOFF`); a
+# product with a rounded constant is two roundings.
+def _sigmoid_rounding(rounding: B.RoundingModel, logit: torch.Tensor) -> torch.Tensor:
+    """`stages/seam.py` sigmoid: 1 / (1 + hw_exp2(z * RN_f32(-log2 e)))."""
+    exponent = rounding(logit * -math.log2(math.e), 2 * B.F32_ROUNDOFF)
+    denominator = rounding(1 + rounding.transcendental(torch.exp2(exponent)))
+    return rounding(1 / denominator)
+
+
+def _score_rounding(rounding: B.RoundingModel, logit: torch.Tensor) -> torch.Tensor:
+    """`stages/moe.py` _score, squared:
+    hw_log2(1 + hw_exp2(x * RN_f32(log2 e))) * RN_f32(ln 2), or x above 20.
+    The score is compared squared, so the final sqrt contributes 2^-23."""
+    exponent = rounding(logit * math.log2(math.e), 2 * B.F32_ROUNDOFF)
+    grown = rounding.transcendental(torch.exp2(exponent))
+    # No flush term: the argument is >= 1, so the result is never denormal.
+    log2 = rounding(torch.log2(rounding(1 + grown)), B.TRANSCENDENTAL_RELATIVE)
+    softplus = rounding(log2 * math.log(2), 2 * B.F32_ROUNDOFF)
+    return rounding(torch.where(logit > 20, logit, softplus), 2 * B.F32_ROUNDOFF)
+
+
+class _Transcendental(NamedTuple):
+    """A helper that cannot be exact, and how it is checked."""
+
+    # (count, seed) -> one input column per helper argument.
+    inputs: Callable[[int, int], list[torch.Tensor]]
+    # Float64 definition.
+    reference: Callable[..., torch.Tensor]
+    # The helper's roundings, or None for a bare instruction (held to 1 ulp).
+    rounding: Callable[[B.RoundingModel, torch.Tensor], torch.Tensor] | None
+    # Implementations to check, by test id.
+    copies: dict[str, H.DeviceFn]
+    # Applied to both result and reference before comparing.
+    measured: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+
+# Exponent range of the log-uniform half of `I.mixed_floats`.
+_SMALL = (-30.0, 6.0)
+_TRANSCENDENTALS: dict[str, _Transcendental] = {
+    "hw_exp2": _Transcendental(
+        # Below -126 the result is denormal, which exercises the flush.
+        inputs=lambda count, seed: [I.mixed_floats(count, -150, 127, _SMALL, seed)],
+        reference=torch.exp2,
+        rounding=None,
+        copies={"dsv41": ops.hw_exp2, "dsv41_attn": attn.hw_exp2},
+    ),
+    "hw_rcp": _Transcendental(
+        inputs=lambda count, seed: [I.log_uniform(count, -126, 126, seed)],
+        reference=torch.reciprocal,
+        rounding=None,
+        copies={"dsv41": ops.hw_rcp, "dsv41_attn": attn.hw_rcp},
+    ),
+    "hw_rsq": _Transcendental(
+        inputs=lambda count, seed: [
+            I.log_uniform(count, -126, 127, seed, signed=False)
+        ],
+        reference=torch.rsqrt,
+        rounding=None,
+        copies={"dsv41": ops.hw_rsq, "dsv41_attn": attn.hw_rsq},
+    ),
+    "sigmoid": _Transcendental(
+        inputs=lambda count, seed: [I.mixed_floats(count, -80, 80, _SMALL, seed)],
+        reference=torch.sigmoid,
+        rounding=_sigmoid_rounding,
+        copies={"dsv41": seam.sigmoid},
+    ),
+    "_score": _Transcendental(
+        # 20 and its neighbours: where softplus switches to returning x.
+        inputs=lambda count, seed: [
+            torch.cat(
+                [
+                    I.mixed_floats(count - 3, -40, 40, _SMALL, seed),
+                    I.neighbours(torch.full((1,), 20.0, device=DEV)),
+                ]
+            )
+        ],
+        reference=R.sqrt_softplus_score,
+        rounding=_score_rounding,
+        copies={"dsv41": moe._score},
+        measured=torch.square,
+    ),
+}
+
+
+def _transcendental_cases() -> list[Any]:
+    return [
+        pytest.param(lib, name, id=f"{lib}-{name}")
+        for name, case in _TRANSCENDENTALS.items()
+        for lib in case.copies
+    ]
+
+
+def _transcendental_error(lib: str, name: str, seed: int, count: int) -> float:
+    """The largest error of helper `name` of `lib` over `count` inputs, as a
+    fraction of its bound."""
+    case = _TRANSCENDENTALS[name]
+    helper = case.copies[lib]
+    columns = case.inputs(count, seed)
+    got = _run(
+        f"t_{lib}_{name}", lambda *w: [H.i32(helper(*map(H.f32, w)))], 1, *columns
+    )
+    result = got.view(F32)[:, 0].double()
+    exact = [column.double() for column in columns]
+    reference = case.reference(*exact)
+    if case.measured is not None:
+        result, reference = case.measured(result), case.measured(reference)
+    if case.rounding is None:
+        return (
+            ((result - reference).abs() / B.transcendental_bound(reference))
+            .max()
+            .item()
+        )
+    rounding = B.RoundingModel()
+    modelled = case.rounding(rounding, *exact)
+    # The bound is the rounding error plus the gap between the helper's exact
+    # formula and the reference, which are different expressions.
+    rounding_bound = rounding.bound(modelled)
+    formula_gap = (modelled.detach() - reference).abs()
+    # Keep the formula gap negligible (checked per element) so it can't hide
+    # a wrong rounding model. Measured on gfx950: ~2e-9.
+    worst = (formula_gap / rounding_bound).nan_to_num().max()
+    assert worst <= 1e-3, (
+        f"{name}: the modelled formula is {worst:.3g} of the rounding bound "
+        f"from the reference, which is too much of it to stay negligible"
+    )
+    bound = formula_gap + rounding_bound
+    # Exact results pass even where the bound is zero.
+    error = torch.where(result == reference, 0.0, (result - reference).abs() / bound)
+    return error.max().item()
+
+
+@pytest.mark.parametrize(("lib", "name"), _transcendental_cases())
+def test_transcendentals(lib: str, name: str) -> None:
+    """Hardware transcendentals within 1 ulp of float64 torch, and helpers
+    built on them within their rounding bound, over 2^22 inputs."""
+    error = _transcendental_error(lib, name, seed=0, count=1 << 22)
+    assert error <= 1, f"{name}: {error:.3g} of its bound"
+
+
+_DIV_RN: dict[str, H.DeviceFn] = {"dsv41": ops.div_rn, "dsv41_attn": attn.div_rn}
+
+
+@pytest.mark.parametrize("lib", _DIV_RN)
+def test_div_rn(lib: str) -> None:
+    """div_rn(x, d, RN(1 / d)) returns the correctly rounded quotient."""
+    div_rn = _DIV_RN[lib]
+    count = 1 << 22
+    # One draw split in two, so numerator and denominator differ.
+    drawn = I.log_uniform(2 * count, -60, 60, seed=3)
+    numerator, denominator = drawn[:count], drawn[count:]
+    # Rounding the f64 quotient to f32 is exact here (53 >= 2 * 24 + 2 bits).
+    reciprocal = 1 / denominator
+    got = _run(
+        f"div_{lib}",
+        lambda *w: [H.i32(div_rn(*map(H.f32, w)))],
+        1,
+        numerator,
+        denominator,
+        reciprocal,
+    )
+    quotient = R.f32_rne(numerator.double() / denominator.double())
+    I.assert_bit_exact(got[:, 0], I.bits(quotient), "div_rn", numerator)
+
+
+# ---------------------------------------------------------------- reductions
+_BUTTERFLY: dict[str, H.DeviceFn] = {
+    "dsv41": ops.butterfly,
+    "dsv41_attn": attn.butterfly,
+}
+_BUTTERFLY_OPS: dict[str, Callable[[Any, Any], Any]] = {
+    "add": lambda a, b: a + b,
+    "max": fx.max,
+}
+
+
+@pytest.mark.parametrize("op", ["add", "max"])
+@pytest.mark.parametrize("offsets", [(32, 16, 8, 4, 2, 1), (16, 8, 4, 2, 1)])
+@pytest.mark.parametrize("lib", _BUTTERFLY)
+def test_butterfly(lib: str, offsets: tuple[int, ...], op: str) -> None:
+    """butterfly(v, offsets, op) reduces in exactly the documented order."""
+    butterfly = _BUTTERFLY[lib]
+    combine = _BUTTERFLY_OPS[op]
+    values = I.log_uniform(R.WAVE * 4096, -20, 20, seed=4)
+    got = _run(
+        f"bfly_{lib}_{''.join(map(str, offsets))}_{op}",
+        lambda w: [H.i32(butterfly(H.f32(w), offsets, combine))],
+        1,
+        values,
+    )
+    folded = R.wave_butterfly(values, offsets, op)
+    I.assert_bit_exact(got[:, 0], folded.view(I32), "butterfly", values)
+    if op == "add":
+        # The inputs must be sensitive to the order for the test to check it.
+        other_order = R.wave_butterfly(values, offsets[::-1], op)
+        assert not torch.equal(folded, other_order), "inputs blind to the order"
+
+
+_SUM_PARTIALS: dict[str, H.DeviceFn] = {"dsv41": ops.sum_partials}
+
+
+@pytest.mark.parametrize("tp", [2, 4, 8])
+@pytest.mark.parametrize("lib", _SUM_PARTIALS)
+def test_sum_partials(lib: str, tp: int) -> None:
+    """sum_partials sums the ranks' bf16 pair partials in float32 in rank
+    order, bit for bit. The order check needs `tp >= 3`."""
+    sum_partials = _SUM_PARTIALS[lib]
+    partials = I.wide_bf16((1 << 16, tp, 2), (-8, 8), seed=5)
+
+    def body(*words: Any) -> list[Any]:
+        polled = [[words[rank]] for rank in range(tp)]
+        return [
+            H.i32(x) for x in sum_partials(lambda reqs: polled, None, lambda s: s, tp)
+        ]
+
+    got = _run(f"sp_{lib}_{tp}", body, 2, partials.view(-1, tp * 2).view(I32))
+    in_order = partials[:, 0].float()
+    for rank in range(1, tp):
+        in_order = in_order + partials[:, rank].float()
+    I.assert_bit_exact(got.view(F32), in_order, "sum_partials", partials.float().sum(1))
+    backwards = partials.float().flip(1)
+    reversed_order = backwards[:, 0]
+    for rank in range(1, tp):
+        reversed_order = reversed_order + backwards[:, rank]
+    assert tp == 2 or not torch.equal(in_order, reversed_order), (
+        "inputs blind to the rank order"
+    )
+
+
+# ---------------------------------------------------------------- MFMA
+def _mfma_error(
+    lanes: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    acc: torch.Tensor,
+    block: int | None = None,
+) -> float:
+    """Error of the MFMA result `lanes` for `D = C + A B^T`, as a fraction of
+    `B.mfma_accumulation_bound`."""
+    product = I.from_acc_lanes(lanes.view(F32).double())
+    reference = acc + a @ b.transpose(1, 2)
+    bound = B.mfma_accumulation_bound(a, b, acc, block)
+    return ((product - reference).abs() / bound).max().item()
+
+
+_MFMA_BF16: dict[str, H.DeviceFn] = {
+    "dsv41": ops.mfma_bf16,
+    "dsv41_attn": attn.mfma_bf16,
+    # gfx942 emulation from two 16 x 16 x 16 MFMAs.
+    "dsv41-k32": gfx.mfma_bf16_k32,
+}
+
+
+@pytest.mark.parametrize("variant", _MFMA_BF16)
+def test_mfma_bf16(variant: str) -> None:
+    """The 16 x 16 x 32 bf16 MFMA against the float64 product."""
+    mfma = _MFMA_BF16[variant]
+    a, b, acc = I.bf16_mfma_operands(256, seed=7)
+
+    def body(*words: Any) -> list[Any]:
+        operands = [
+            fx.Vector.from_elements(list(words[i : i + 4]), fx.Int32) for i in (0, 4)
+        ]
+        accumulator = fx.Vector.from_elements([H.f32(w) for w in words[8:]], fx.Float32)
+        d = mfma(
+            operands[0].bitcast(fx.BFloat16),
+            operands[1].bitcast(fx.BFloat16),
+            accumulator,
+        )
+        return [H.i32(d[i]) for i in range(4)]
+
+    lanes = [I.mfma_lanes(t, 8).contiguous().view(I32) for t in (a, b)]
+    # Kernel names cannot contain "-".
+    got = _run(f"mfma_{variant.replace('-', '_')}", body, 4, *lanes, I.acc_lanes(acc))
+    error = _mfma_error(got, a.double(), b.double(), acc.double())
+    assert error <= 1, f"{error:.3g} of the fp32 accumulation bound"
+
+
+class _ScaledMfma(NamedTuple):
+    """A scaled MFMA implementation and the cases to test it on."""
+
+    mfma: H.DeviceFn
+    # (A, B) operand formats used by callers.
+    formats: tuple[tuple[int, int], ...]
+    # Scale-word byte for A and for B.
+    selectors: tuple[tuple[int, int], ...]
+    # False if the wrapper hard-codes byte 0 and takes no selector arguments.
+    takes_selectors: bool
+
+
+_MFMA_SCALED: dict[str, _ScaledMfma] = {
+    "dsv41": _ScaledMfma(
+        mfma=mx.mfma_scaled,
+        formats=((mx.FP8, mx.FP8), (mx.FP4, mx.FP8), (mx.FP4, mx.FP4)),
+        selectors=((0, 0), (1, 2), (3, 1)),
+        takes_selectors=True,
+    ),
+    "dsv41_attn": _ScaledMfma(
+        mfma=attn.mfma_scaled,
+        formats=((attn.FP8, attn.FP8),),
+        selectors=((0, 0),),
+        takes_selectors=False,
+    ),
+}
+
+# The same check for the bounded helpers.
+for _copies in (
+    *(case.copies for case in _TRANSCENDENTALS.values()),
+    _DIV_RN,
+    _BUTTERFLY,
+    _MFMA_BF16,
+    {lib: spec.mfma for lib, spec in _MFMA_SCALED.items()},
+):
+    if "dsv41_attn" in _copies:
+        assert _copies["dsv41"] is not _copies["dsv41_attn"], (
+            "the two copies now share a helper"
+        )
+
+
+def _scaled_cases() -> list[Any]:
+    out = []
+    for lib, spec in _MFMA_SCALED.items():
+        for formats in spec.formats:
+            names = "x".join("fp4" if fmt else "fp8" for fmt in formats)
+            for selector in spec.selectors:
+                out.append(
+                    pytest.param(lib, formats, selector, id=f"{lib}-{names}-{selector}")
+                )
+    return out
+
+
+def _scaled_mfma_error(
+    lib: str,
+    formats: tuple[int, int],
+    selector: tuple[int, int],
+    seed: int,
+    tiles: int,
+) -> tuple[float, float]:
+    """Run the scaled MFMA of `lib` on random operands. Returns the error as a
+    fraction of the full bound and of the fp32-only bound."""
+    spec = _MFMA_SCALED[lib]
+    operands = I.mx_mfma_operands(tiles, formats, seed)
+    a_words, b_words = operands.a_words, operands.b_words
+    a_count, b_count = a_words.shape[1], b_words.shape[1]
+    extra = selector if spec.takes_selectors else ()
+
+    def body(*words: Any) -> list[Any]:
+        a = fx.Vector.from_elements(list(words[:a_count]), fx.Int32)
+        b = fx.Vector.from_elements(list(words[a_count : a_count + b_count]), fx.Int32)
+        accumulator = fx.Vector.from_elements(
+            [H.f32(w) for w in words[a_count + b_count : -2]], fx.Float32
+        )
+        d = spec.mfma(a, b, accumulator, words[-2], words[-1], *formats, *extra)
+        return [H.i32(d[i]) for i in range(4)]
+
+    got = _run(
+        f"mfs_{lib}_{formats[0]}{formats[1]}_{selector[0]}{selector[1]}",
+        body,
+        4,
+        a_words,
+        b_words,
+        I.acc_lanes(operands.acc),
+        operands.scale_words[0],
+        operands.scale_words[1],
+    )
+
+    def scaled(values: torch.Tensor, side: int) -> torch.Tensor:
+        """`values` `[tiles, 16, 128]` times its selected K-block scale."""
+        code = operands.scale_codes[side, :, selector[side]]
+        scale = R.e8m0(code.view(tiles, 4, 16).transpose(1, 2))
+        return values * scale.repeat_interleave(32, -1)
+
+    a = scaled(operands.a_values, 0)
+    b = scaled(operands.b_values, 1)
+    # FP4 x FP4 products span at most 12^2 = 144, so the block sum loses
+    # nothing and needs no block term.
+    block = None if formats == (I.MX_FP4, I.MX_FP4) else 32
+    acc = operands.acc.double()
+    return _mfma_error(got, a, b, acc, block), _mfma_error(got, a, b, acc)
+
+
+@pytest.mark.skipif(GFX942, reason="the scaled f8f6f4 MFMA is gfx950 only")
+@pytest.mark.parametrize(("lib", "formats", "selector"), _scaled_cases())
+def test_mfma_scaled(
+    lib: str, formats: tuple[int, int], selector: tuple[int, int]
+) -> None:
+    """The 16 x 16 x 128 scaled MFMA (f8f6f4) against the float64 product of
+    the dequantized operands.
+
+    The FP8 bound is dominated by the empirical `B._FP8_BLOCK_PRECISION`, so
+    this checks the instruction is wired correctly rather than its precision.
+    """
+    error, fp32_only = _scaled_mfma_error(lib, formats, selector, seed=8, tiles=256)
+    assert error <= 1, f"{error:.3g} of the bound"
+    if formats != (I.MX_FP4, I.MX_FP4):
+        # The block term must be needed: the error should far exceed the
+        # fp32-only bound (25-49x on gfx950).
+        assert fp32_only > 10, (
+            f"the error is only {fp32_only:.3g}x an fp32-only accumulation "
+            f"bound, so this instruction may now be accumulating a K block in "
+            f"fp32; if so the 2^-14 block envelope is no longer justified and "
+            f"`B._FP8_BLOCK_PRECISION` should go rather than be loosened"
+        )
 
 
 # ---------------------------------------------------------------- conversions

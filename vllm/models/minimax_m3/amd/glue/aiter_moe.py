@@ -512,31 +512,3 @@ class AiterMoe:
         return self.run_sorted(
             md, q, a1, sorted7, ids, w, a1=a1, a1_scale=a1_scale, scatter=scatter
         )
-
-    def run_fused_prequant(self, fp4, scale, ids, w) -> torch.Tensor:
-        """SP, cross-check variant: aiter.fused_moe on the prequantized rows and
-        their unsorted scales (its MoRI-dispatch input path)."""
-        from aiter import dtypes
-        from aiter.fused_moe import fused_moe
-
-        return fused_moe(
-            fp4.view(dtypes.fp4x2),
-            self.w1,
-            self.w2,
-            w,
-            ids,
-            None,
-            self.activation,
-            self.quant_type,
-            False,
-            self.w1_scale,
-            self.w2_scale,
-            scale.view(dtypes.fp8_e8m0),
-            None,
-            moe_sorting_dispatch_policy=self.dispatch_policy,
-            dtype=H_DTYPE,
-            hidden_pad=self.hidden_pad,
-            intermediate_pad=self.intermediate_pad,
-            swiglu_limit=self.swiglu_limit,
-            gate_mode=self.gate_mode.value,
-        )

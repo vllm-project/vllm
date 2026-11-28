@@ -656,6 +656,10 @@ class CudaPlatformBase(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
+    def is_current_stream_capturing(cls) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
+    @classmethod
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
@@ -753,6 +757,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 

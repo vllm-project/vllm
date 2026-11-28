@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn numeric_effort_rejects_non_finite_values() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(EffortValue::try_from(value).unwrap_err().is_request_validation_error());
+            assert!(EffortValue::try_from(value).unwrap_err().kind().is_invalid_request());
         }
     }
 
@@ -363,7 +363,8 @@ mod tests {
                     "thinking": value, "enable_thinking": true
                 })))
                 .unwrap_err()
-                .is_request_validation_error()
+                .kind()
+                .is_invalid_request()
             );
         }
     }
@@ -380,7 +381,7 @@ mod tests {
                 if toggle == Some(false) {
                     assert_eq!(control.unwrap(), ReasoningControl::Disabled);
                 } else {
-                    assert!(control.unwrap_err().is_request_validation_error());
+                    assert!(control.unwrap_err().kind().is_invalid_request());
                 }
             }
 

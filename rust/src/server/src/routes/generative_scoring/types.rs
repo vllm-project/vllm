@@ -2,16 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 use vllm_text::Prompt;
 
-use crate::routes::openai::utils::types::{Normalizable, Usage, default_true};
+use crate::routes::openai::utils::types::{Usage, default_true};
 
 /// `POST /generative_scoring` request body.
 ///
 /// Original Python definition: `GenerativeScoringRequest` in
 /// `vllm/entrypoints/generate/generative_scoring/serving.py`.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GenerativeScoringRequest {
     pub model: Option<String>,
     /// The query text or pre-tokenized query token IDs.
@@ -41,8 +40,6 @@ pub struct GenerativeScoringRequest {
     pub priority: i32,
     pub request_id: Option<String>,
 }
-
-impl Normalizable for GenerativeScoringRequest {}
 
 /// `POST /generative_scoring` response body.
 #[derive(Debug, Clone, Serialize)]

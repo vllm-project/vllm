@@ -23,7 +23,7 @@ from vllm.entrypoints.serve.lora.protocol import (
 from vllm.exceptions import VLLMNotFoundError
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = "Success: LoRA adapter '{lora_name}' added successfully."
 LORA_UNLOADING_SUCCESS_MESSAGE = (

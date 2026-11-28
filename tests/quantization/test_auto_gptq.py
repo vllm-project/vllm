@@ -177,7 +177,7 @@ def test_moe_layer_quantized_only_when_its_experts_are_in_the_checkpoint():
     assert is_moe_layer_gptq_quantized(
         "mtp.layers.0.mlp.experts", ["mtp.layers.0.self_attn.q_proj"]
     )
-    # The runtime prefix may be the experts' parent (DBRX's `...ffn`).
+    # The runtime prefix may be the experts' parent.
     assert is_moe_layer_gptq_quantized(
         "transformer.blocks.0.ffn", ["transformer.blocks.0.ffn.experts.mlp.w1"]
     )

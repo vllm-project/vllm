@@ -26,6 +26,51 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Rust raw-JSON gRPC rendering
+
+The experimental Rust frontend can render a raw OpenAI Chat Completions JSON
+request without running inference. Start the Rust render server with
+`vllm-rs render <model> --grpc-port 50051` to enable the `vllm.Render` gRPC
+service alongside its HTTP render endpoints. The gRPC service is disabled
+unless `--grpc-port` is set.
+
+Call `Render.Render` with `api = API_CHAT` and the UTF-8 JSON request in the
+`body` bytes field. Only Chat Completions are supported by this raw RPC;
+Completions, Anthropic Messages, Responses, and an unspecified API are rejected.
+For example, this protobuf text-format request supplies the raw body:
+
+```protobuf
+api: API_CHAT
+body: "{\"model\":\"<model>\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+mm_payload: MM_PAYLOAD_TENSORS
+```
+
+Choose returned multimodal data with the **proto `mm_payload` field**:
+
+| Value | Returned media |
+| --- | --- |
+| `MM_PAYLOAD_UNSPECIFIED` (default) | Same as `MM_PAYLOAD_TENSORS`. |
+| `MM_PAYLOAD_TENSORS` | Preprocessed inline tensors, hashes, and placeholder ranges. |
+| `MM_PAYLOAD_NONE` | Hashes and placeholder ranges, without inline tensors. |
+
+The JSON body's `mm_payload` and `return_mm_kwargs` fields do not select the
+gRPC output mode. `MM_PAYLOAD_NONE` is useful for routing on the prompt layout;
+its media cannot be forwarded directly to `Inference.Generate` without tensor
+data. Metadata-only mode is currently available on the Python HTTP render routes
+([#65018](https://github.com/vllm-project/vllm/pull/65018)). The Rust gRPC
+service rejects unknown enum values. The existing typed `Render.RenderChat` RPC keeps its
+`omit_media_kwargs` boolean unchanged.
+
+The response returns prompt token IDs, an effective structured-output
+constraint, a reasoning gate, and preprocessed media. **It does not yet return
+lowered sampling or stopping parameters**, including temperature, max_tokens,
+stop, bad_words, or n. To preserve the request's generation behavior, supply
+equivalent generation parameters separately when constructing the
+`Inference.Generate` request. Copying only the render response is insufficient;
+for example, a temperature and multiple samples requested in JSON would not be
+preserved by those fields alone. This remaining contract work is tracked in
+[#65503](https://github.com/vllm-project/vllm/issues/65503).
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

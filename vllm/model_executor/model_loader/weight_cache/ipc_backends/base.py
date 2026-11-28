@@ -45,6 +45,7 @@ def rebuild_entries(
         for entry in entries:
             records.append(entry.rebuild(device_index, cache))
     except BaseException:
+        records.clear()
         for base in cache.values():
             close = getattr(base.owner, "close", None)
             if close is not None:
@@ -57,9 +58,9 @@ def rebuild_entries(
 class IPCBackendBase(ABC):
     """Materialize shared storage and export rebuildable entries."""
 
+    @abstractmethod
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        """Return records for the canonical storages after warmup."""
-        return [StorageRecord(owner=storage, storage=storage) for storage in storages]
+        """Return records in manifest order. Copied inputs may be replaced in place."""
 
     @abstractmethod
     def export_storage(self, record: StorageRecord) -> StorageEntry:

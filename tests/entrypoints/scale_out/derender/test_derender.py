@@ -23,7 +23,7 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
@@ -442,6 +442,7 @@ async def test_derender_chat_metrics_passthrough(client):
     actual = response.json()["metrics"]
     assert set(actual) == {
         "time_to_first_token_ms",
+        "time_to_first_content_token_ms",
         "generation_time_ms",
         "queue_time_ms",
         "mean_itl_ms",

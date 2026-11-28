@@ -30,6 +30,88 @@ from vllm.platforms import current_platform
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
 
+def test_async_eplb_worker_stops_before_model_teardown(
+    tmp_path,
+    vllm_runner,
+    enable_pickle,
+):
+    """Worker shutdown must not leave EPLB accessing released model resources."""
+    import psutil
+    from transformers import Qwen3MoeConfig
+
+    from vllm import SamplingParams
+
+    def worker_lifecycle(worker) -> tuple[bool, bool, int | None, bool]:
+        state = worker.model_runner.eplb_state
+        process = state.policy_process
+        return (
+            hasattr(worker.model_runner, "model"),
+            state.async_worker is not None and state.async_worker.is_alive(),
+            None if process is None else process._process.pid,
+            all(ms.eplb_stats is not None for ms in state.model_states.values()),
+        )
+
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        num_hidden_layers=2,
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_experts=8,
+        num_experts_per_tok=2,
+        vocab_size=1024,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config={
+            "use_async": True,
+            "step_interval": 4,
+            "window_size": 2,
+            "num_redundant_experts": 2,
+        },
+        kernel_config={"moe_backend": "triton", "enable_jit_warmup": False},
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+    ) as runner:
+        outputs = runner.llm.generate(
+            [{"prompt_token_ids": [10, 20, 30]}],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                detokenize=False,
+            ),
+            use_tqdm=False,
+        )
+        assert len(outputs[0].outputs[0].token_ids) == 8
+        before = runner.llm.collective_rpc(worker_lifecycle, timeout=30)
+        planner_pids = [pid for _, _, pid, _ in before]
+        assert [(m, w, s) for m, w, _, s in before] == [(True, True, True)] * 2
+        assert all(pid is not None and psutil.pid_exists(pid) for pid in planner_pids)
+        assert len(set(planner_pids)) == 2
+
+        runner.llm.collective_rpc("shutdown", timeout=30)
+
+        assert (
+            runner.llm.collective_rpc(worker_lifecycle, timeout=30)
+            == [(False, False, None, True)] * 2
+        )
+        assert all(not psutil.pid_exists(pid) for pid in planner_pids if pid)
+
+
 @pytest.mark.parametrize("dtype", [torch.float8_e8m0fnu, torch.float4_e2m1fn_x2])
 def test_set_eplb_state_registers_byte_dtypes_as_uint8_views(dtype):
     """NCCL lacks these dtypes, so EPLB must see their bytes as uint8 views
