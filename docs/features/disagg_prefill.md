@@ -49,6 +49,21 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+## Hybrid models
+
+Hybrid SSM/Mamba models require the
+[hybrid KV cache manager](../design/hybrid_kv_cache_manager.md) (HMA).
+Choose a connector that implements the `SupportsHMA` capability, such as
+`NixlConnector` or `MooncakeConnector`. With `MultiConnector`, **every configured
+child connector** must support HMA.
+
+By default, vLLM disables HMA when the connector configuration does not support
+it. Hybrid SSM models then fail at startup; sliding-window attention models
+can run with reduced performance. Declaring HMA support does not establish
+support for every model or transfer configuration, so check the selected
+connector's documentation. For NixlConnector, also follow the
+[hybrid SSM/Mamba setup requirements](nixl_connector_usage.md#hybrid-ssmmamba-models).
+
 ## Reusing prefill token ids on decode
 
 !!! note
