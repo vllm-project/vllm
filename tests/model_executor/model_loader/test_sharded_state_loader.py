@@ -4,7 +4,9 @@
 import fnmatch
 import multiprocessing as mp
 import os
+import queue as pyqueue
 import shutil
+import time
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,6 +19,30 @@ from vllm import LLM, SamplingParams
 from vllm.config import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.transformers_utils.repo_utils import hf_api
+
+
+def _result_from_child(result_queue, proc, timeout_s: float = 1200.0):
+    """Wait for the child's output, failing fast if the child dies first.
+
+    A bare queue.get() blocks forever when the child crashes (e.g. a GPU
+    hang kills its engine), and the test then sits until pytest's timeout.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            return result_queue.get(timeout=10)
+        except pyqueue.Empty:
+            if not proc.is_alive():
+                raise RuntimeError(
+                    f"generate subprocess exited with code {proc.exitcode} "
+                    "before producing output"
+                ) from None
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise TimeoutError(
+                    f"generate subprocess produced no output in {timeout_s}s"
+                ) from None
+
 
 prompts = [
     "Hello, my name is",
@@ -512,7 +538,7 @@ def test_sharded_state_loader(
         # the child process may block while writing to the queue and never
         # terminate, causing the parent to wait indefinitely on p.join().
         # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
-        out_before = queue.get()
+        out_before = _result_from_child(queue, p)
         p.join()
         queue.close()
         queue.join_thread()
@@ -536,7 +562,7 @@ def test_sharded_state_loader(
         # the child process may block while writing to the queue and never
         # terminate, causing the parent to wait indefinitely on p.join().
         # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
-        out_after = queue.get()
+        out_after = _result_from_child(queue, p)
         p.join()
         queue.close()
         queue.join_thread()
@@ -620,7 +646,7 @@ def _run_sharded_state_round_trip(
         # the child process may block while writing to the queue and never
         # terminate, causing the parent to wait indefinitely on p.join().
         # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
-        out_before = queue.get()
+        out_before = _result_from_child(queue, p)
         p.join()
         assert p.exitcode == 0, f"generate process failed with exit code {p.exitcode}"
         queue.close()
@@ -639,7 +665,7 @@ def _run_sharded_state_round_trip(
             ),
         )
         p.start()
-        out_after = queue.get()
+        out_after = _result_from_child(queue, p)
         p.join()
         assert p.exitcode == 0, f"generate process failed with exit code {p.exitcode}"
         queue.close()
