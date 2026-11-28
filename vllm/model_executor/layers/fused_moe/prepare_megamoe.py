@@ -89,6 +89,7 @@ def _store_topk(
     logical_to_physical,
     replica_count,
     expert_load,
+    physical_load,
     record_enabled,
     num_unpadded_tokens,
     num_logical,
@@ -136,6 +137,7 @@ def _store_topk(
             num_logical,
             map_stride,
             expert_load,
+            physical_load,
             num_physical,
             record_enabled,
             num_unpadded_tokens,
@@ -179,6 +181,7 @@ def _prepare_megamoe_inputs_kernel(
     logical_to_physical,
     replica_count,
     expert_load,
+    physical_load,
     record_enabled,
     num_unpadded_tokens,
     num_logical,
@@ -292,6 +295,7 @@ def _prepare_megamoe_inputs_kernel(
             logical_to_physical,
             replica_count,
             expert_load,
+            physical_load,
             record_enabled,
             num_unpadded_tokens,
             num_logical,
@@ -328,6 +332,7 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
     logical_to_physical,
     replica_count,
     expert_load,
+    physical_load,
     record_enabled,
     num_unpadded_tokens,
     num_logical,
@@ -389,6 +394,7 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
             logical_to_physical,
             replica_count,
             expert_load,
+            physical_load,
             record_enabled,
             num_unpadded_tokens,
             num_logical,
@@ -510,10 +516,11 @@ def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bo
 def _eplb_kernel_args(eplb_state: EplbLayerState | None) -> tuple:
     """Replica-map and load-recording kernel args; inert without EPLB."""
     if eplb_state is None or eplb_state.logical_to_physical_map is None:
-        return (None,) * 5 + (0,) * 3
+        return (None,) * 6 + (0,) * 3
     mapping = eplb_state.logical_to_physical_map
     replicas = eplb_state.logical_replica_count
     load = eplb_state.expert_load_view
+    physical_load = eplb_state.physical_load_view
     record = eplb_state.should_record_tensor
     unpadded = eplb_state.num_unpadded_tokens_tensors
     assert replicas is not None and load is not None and record is not None
@@ -522,11 +529,12 @@ def _eplb_kernel_args(eplb_state: EplbLayerState | None) -> tuple:
         mapping,
         replicas,
         load,
+        physical_load,
         record,
         unpadded[dbo_current_ubatch_id()],
         mapping.shape[0],
         mapping.stride(0),
-        load.numel(),
+        physical_load.numel() if physical_load is not None else 0,
     )
 
 
