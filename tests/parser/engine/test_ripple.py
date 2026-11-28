@@ -156,3 +156,46 @@ def test_structured_output_applies_from_first_token(tokenizer):
     # "</think>" the model may never emit.
     parser = RippleParser(tokenizer)
     assert parser.is_reasoning_end([1, ord("u"), 2, 1])
+
+
+# Prose that merely mentions the tool-call marker must not switch parser
+# state: the chat template always frames markers with a trailing newline,
+# so an inline mention stays literal text (issue #69243).
+PROSE_CASES = {
+    "mentions_tool_call": (
+        "The parser looks for the literal <tool_call> marker in output. DONE",
+        "The parser looks for the literal <tool_call> marker in output. DONE",
+    ),
+    "mentions_tool_call_in_backticks": (
+        "Never write `<tool_call>` in prose; use a placeholder instead. DONE",
+        "Never write `<tool_call>` in prose; use a placeholder instead. DONE",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", PROSE_CASES)
+def test_prose_marker_mentions_stay_content(parser_cls, tokenizer, case):
+    text, content = PROSE_CASES[case]
+    parsed_reasoning, parsed_content, tool_calls = parser_cls(tokenizer).parse(
+        text, _test_request(TOOLS), enable_auto_tools=True
+    )
+    assert not parsed_reasoning
+    assert parsed_content == content
+    assert not tool_calls
+
+
+@pytest.mark.parametrize("case", PROSE_CASES)
+def test_prose_marker_mentions_stay_content_streaming(parser_cls, tokenizer, case):
+    text, content = PROSE_CASES[case]
+    output = collect_output(
+        replay_streaming(
+            parser_cls(tokenizer),
+            [(ord(ch), ch) for ch in text],
+            chunk_size=1,
+            finished_on_last=True,
+            tools=TOOLS,
+        )
+    )
+    assert not output.reasoning
+    assert output.content == content
+    assert not output.tool_calls
