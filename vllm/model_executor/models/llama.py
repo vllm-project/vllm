@@ -264,6 +264,22 @@ class LlamaDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        # Size the RoPE cos/sin cache to at least max_model_len, so that
+        # positions up to max_model_len-1 are in bounds.  Without this,
+        # VLLM_ALLOW_LONG_MAX_MODEL_LEN (max_model_len > max_position_embeddings)
+        # crashes in compile/graph mode: the compiled index_select asserts
+        # bounds against the native max_position_embeddings.  (AICE-1203)
+        #
+        # Restricted to unscaled RoPE (rope_type == "default").  Scaled
+        # variants (longrope, dynamic, linear, yarn, etc.) treat
+        # max_position_embeddings as the pre-scaling length and derive
+        # inv_freq / mscale / cache stride from it, so inflating it there
+        # would silently change RoPE values at every position.
+        max_model_len = vllm_config.model_config.max_model_len
+        _rope_params = getattr(config, "rope_parameters", None)
+        _rope_type = (_rope_params or {}).get("rope_type", "default")
+        if max_model_len is not None and _rope_type == "default":
+            max_position_embeddings = max(max_position_embeddings, max_model_len)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
