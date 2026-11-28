@@ -95,6 +95,10 @@ from vllm.models.muse_spark.nvidia.ops.cute_dsl.moe_finalize_rmsnorm import (
     moe_finalize_with_rmsnorm,
     supports_moe_finalize,
 )
+from vllm.models.muse_spark.nvidia.ops.hopper_nvfp4_moe import (
+    MuseSparkHopperNvFp4Experts,
+    try_process_hopper_nvfp4_weights,
+)
 from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     maybe_create_moe_finalize_all_reduce,
     tp_group_spans_nodes,
@@ -602,6 +606,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
     """
 
     muse_post_expert_finalize: MusePostExpertFinalize
+    supports_pre_processed_weights = False
 
     def __init__(
         self,
@@ -609,17 +614,23 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         moe_config: FusedMoEConfig,
     ) -> None:
         super().__init__(quant_config, moe_config)
-        self.use_route_major = (
+        self._try_hopper_nvfp4_moe = moe_config.moe_backend == "auto"
+        is_hopper = current_platform.is_device_capability_family(90)
+        if is_hopper and (
             self.nvfp4_backend == NvFp4MoeBackend.MARLIN
-            and current_platform.is_device_capability_family(90)
-        )
+            or (
+                self._try_hopper_nvfp4_moe
+                and self.nvfp4_backend == NvFp4MoeBackend.HUMMING
+            )
+        ):
+            self.nvfp4_backend = NvFp4MoeBackend.MARLIN
+            self.use_route_major = True
+        else:
+            self.use_route_major = False
         if self.use_route_major:
             _validate_route_major_deployment(moe_config)
             if not self.moe.is_act_and_mul:
                 raise NotImplementedError("MuseSpark Marlin requires SwiGLU.")
-            logger.info_once(
-                "MuseSpark NVFP4: Marlin W4A16 GEMMs with Triton finalization."
-            )
             self.experts_cls = MarlinExperts
             return
         if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -641,6 +652,10 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
 
     def process_weights_after_loading(self, layer: "MuseSparkRoutedExperts") -> None:
         if self.use_route_major:
+            if self._try_hopper_nvfp4_moe and try_process_hopper_nvfp4_weights(
+                self, layer
+            ):
+                return
             self._process_hopper_marlin_weights(layer)
             _attach_post_expert_finalize(self)
             return
@@ -714,6 +729,9 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _process_hopper_marlin_weights(self, layer: "MuseSparkRoutedExperts") -> None:
+        logger.info_once(
+            "MuseSpark NVFP4: Marlin W4A16 GEMMs with Triton finalization."
+        )
         # Keep the SiLU gate input exact; the up-side gain is compensated in
         # GEMM2, not left to RMSNorm's approximate scale invariance.
         scales = layer.w13_weight_scale_2.data
@@ -760,6 +778,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
         )
+        self.experts_cls = MarlinExperts
         self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
@@ -980,6 +999,15 @@ class MuseMoERunner(MoERunner):
                 self.layer_name,
                 quant_method.nvfp4_backend.value,
             )
+        elif (
+            isinstance(quant_method, MuseSparkModelOptNvFp4FusedMoE)
+            and quant_method.moe_kernel is not None
+            and isinstance(
+                quant_method.moe_kernel.fused_experts,
+                MuseSparkHopperNvFp4Experts,
+            )
+        ):
+            quant_method.moe_kernel.fused_experts.refresh_post_norm(self.routed_experts)
 
     @property
     def _prepared_nvfp4_experts(self) -> MuseSparkTrtLlmNvFp4Experts | None:
