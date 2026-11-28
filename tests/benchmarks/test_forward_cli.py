@@ -14,7 +14,11 @@ import torch
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.capture import write_input_ids
-from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
+from vllm.benchmarks.forward.kv_init import (
+    _block_dim,
+    touched_kv_views,
+    zero_kv_blocks,
+)
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
@@ -630,6 +634,74 @@ def test_padded_page_spreads_kernel_blocks():
     manager_view = group.map_kv_cache_to_manager_blocks(kernel_view, 4)
     assert manager_view[:, 0, 0, 0].tolist() == [0, 60, 120, 180]
     assert manager_view[0].numel() >= 3 * 12 + 8
+
+
+def test_block_dim_uncommitted_capacity():
+    """The extensible KV cache commits a prefix of its planned capacity, so
+    a layer view's block dim need not equal or divide num_blocks; allocator
+    blocks stay a linear prefix of the rows."""
+    # A group's fixed layout wins over the row count: 16 committed of 21
+    # planned rows is a plain layout, one row per block.
+    assert _block_dim(torch.empty(21, 4, 8), 16, 1) == (0, 1)
+    # A planned capacity that happens to be an integer multiple of the
+    # committed count is not a kernel split.
+    assert _block_dim(torch.empty(32, 4, 8), 16, 1) == (0, 1)
+    # A 4-way unpacked kernel-block split of the same reservation.
+    assert _block_dim(torch.empty(64, 4, 8), 16, 4) == (0, 4)
+    assert _block_dim(torch.empty(80, 4, 8), 16, 4) == (0, 4)
+    # 69 rows is not a whole number of 4-row allocator blocks.
+    with pytest.raises(ValueError):
+        _block_dim(torch.empty(69, 4, 8), 16, 4)
+    # 12 allocator blocks cannot hold 16 committed ones.
+    with pytest.raises(ValueError):
+        _block_dim(torch.empty(48, 4, 8), 16, 4)
+    with pytest.raises(ValueError):
+        _block_dim(torch.empty(15, 4, 8), 16, 1)
+    # Storage a spec lays out itself keeps the shape heuristic.
+    assert _block_dim(torch.empty(16, 4, 8), 16) == (0, 1)
+    assert _block_dim(torch.empty(64, 4, 8), 16) == (0, 4)
+    assert _block_dim(torch.empty(4, 16, 8), 16) == (1, 1)
+    with pytest.raises(ValueError):
+        _block_dim(torch.empty(15, 4, 8), 16)
+
+
+@pytest.mark.parametrize("planned_rows", [21, 32])
+def test_zero_kv_blocks_skips_uncommitted_capacity(planned_rows):
+    """Zeroing and the state-reset views touch only the batch's blocks; the
+    extensible KV cache's uncommitted capacity is never in a block table."""
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        tokens_per_state=4,
+    )
+    group = AttentionGroup(CPUMLABackend, ["cache"], spec, 0)
+    num_blocks = 16
+    batch = build_batch(
+        parse_case("decode=1@129"),
+        [new_kv_cache_group(["cache"], spec)],
+        num_blocks,
+        1000,
+        np.random.default_rng(0),
+    )
+    num_rows = planned_rows  # the reservation: committed blocks, then a tail
+    allocated = torch.zeros(num_rows, dtype=torch.bool)
+    for begin, end in batch.group_block_ranges[0]:
+        allocated[begin:end] = True
+
+    kv = torch.ones(num_rows, 1, 4, 8)
+    zero_kv_blocks({"cache": kv}, [group], batch, num_blocks)
+    assert not kv[allocated].count_nonzero()
+    assert (kv[~allocated] == 1).all()
+
+    kv = torch.ones(num_rows, 1, 4, 8)
+    views = touched_kv_views({"cache": kv}, [group], batch, num_blocks, 1)
+    row = kv[0].numel()
+    for view in views:
+        assert view.storage_offset() // row + view.shape[0] <= num_blocks
+        view.zero_()
+    assert (kv[num_blocks:] == 1).all()
 
 
 def test_bench_speculative_mamba_blocks():
