@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -23,9 +24,24 @@ from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    is_complete_json,
+    is_json_finite,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
+
+
+def _load_json_body(text: str) -> Any:
+    """Parse JSON, keeping numbers that JSON cannot hold as their source text."""
+
+    def parse_float(literal: str) -> float | str:
+        number = float(literal)
+        return number if math.isfinite(number) else literal
+
+    return json.loads(text, parse_float=parse_float, parse_constant=str)
 
 
 class DotsToolParser(ToolParser):
@@ -97,18 +113,15 @@ class DotsToolParser(ToolParser):
             except (TypeError, ValueError):
                 return value
         if param_type in {"number", "float"}:
-            try:
-                number = float(value)
-                return int(number) if number.is_integer() else number
-            except (TypeError, ValueError):
-                return value
+            return coerce_to_schema_type(value, "number")
         if param_type in {"boolean", "bool"}:
             return value.lower() in {"true", "1"}
 
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except (json.JSONDecodeError, TypeError, ValueError):
             return value
+        return parsed if is_json_finite(parsed) else value
 
     def _resolve_param_type(
         self,
@@ -191,7 +204,7 @@ class DotsToolParser(ToolParser):
                 for match in self._invoke_regex.finditer(content)
             ]
 
-        parsed = json.loads(content)
+        parsed = _load_json_body(content)
         if not isinstance(parsed, dict):
             raise TypeError("Dots JSON tool call must be an object")
         return [parsed]
@@ -289,7 +302,7 @@ class DotsToolParser(ToolParser):
             return
 
         try:
-            parsed = json.loads(content)
+            parsed = _load_json_body(content)
         except (json.JSONDecodeError, TypeError, ValueError):
             return
         if not isinstance(parsed, dict):

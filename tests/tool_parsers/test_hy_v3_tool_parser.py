@@ -273,3 +273,53 @@ class TestHYV3ExtractToolCallsStreaming:
         tc = _collect_streaming_tool_calls(results)
         assert len(tc) == 1 and tc[0]["name"] == "get_current_date"
         assert json.loads(tc[0]["arguments"]) == {}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    ("value_type", "raw"),
+    [
+        ("number", "1e400"),
+        ("number", "NaN"),
+        ("array", "[1e400]"),
+        ("object", '{"x": Infinity}'),
+        ("object", "{'x': 1e400}"),
+    ],
+)
+def test_non_finite_number_is_kept_as_raw_string(
+    hy_v3_tool_parser, streaming, value_type, raw
+):
+    """`Infinity` and `NaN` are not valid JSON, so the raw text is kept."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="record",
+                    parameters={
+                        "type": "object",
+                        "properties": {"x": {"type": value_type}},
+                    },
+                ),
+            )
+        ],
+    )
+    deltas = [
+        "<tool_calls><tool_call>record<tool_sep>",
+        "<arg_key>x</arg_key>",
+        f"<arg_value>{raw}</arg_value>",
+        "</tool_call></tool_calls>",
+    ]
+
+    if streaming:
+        results = _simulate_streaming(hy_v3_tool_parser, deltas, request)
+        arguments = _collect_streaming_tool_calls(results)[0]["arguments"]
+    else:
+        result = hy_v3_tool_parser.extract_tool_calls("".join(deltas), request)
+        arguments = result.tool_calls[0].function.arguments
+
+    def reject(constant: str):
+        raise ValueError(f"invalid JSON constant: {constant}")
+
+    assert json.loads(arguments, parse_constant=reject) == {"x": raw}
