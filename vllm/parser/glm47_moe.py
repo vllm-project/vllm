@@ -19,8 +19,6 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -348,12 +346,3 @@ class Glm47MoeParser(ParserEngine):
         if 0 <= idx < len(self._tool_slots):
             self._tool_slots[idx].name = self._tool_slots[idx].name.strip()
         super()._handle_tool_end(event, deltas)
-
-    def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
-            return None, model_output
-        return super().extract_reasoning(model_output, request)

@@ -784,3 +784,66 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+
+class _Qwen3ReasoningOnlyParser(DelegatingParser):
+    reasoning_parser_cls = Qwen3ParserReasoningAdapter
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("thinking", "prompt_ids", "output_ids", "expected_reasoning"),
+    [
+        (
+            True,
+            [_IM_START_ID, _TEXT_ID],
+            [_THINK_START_ID, ord("o"), ord("k"), _THINK_END_ID, ord("a")],
+            "ok",
+        ),
+        (
+            False,
+            [_IM_START_ID, _THINK_START_ID, _THINK_END_ID],
+            [ord("a")],
+            None,
+        ),
+    ],
+    ids=["thinking", "no_thinking"],
+)
+def test_reasoning_only_drops_special_tokens_from_content(
+    mock_tokenizer,
+    mock_request,
+    stream,
+    thinking,
+    prompt_ids,
+    output_ids,
+    expected_reasoning,
+):
+    """Without a tool parser, special tokens that `adjust_request` keeps in
+    the text (gh-70373) are dropped from content as with a tool parser."""
+    output_ids = [*output_ids, _IM_END_ID, ord("b")]
+    parser = _Qwen3ReasoningOnlyParser(
+        mock_tokenizer, chat_template_kwargs={"enable_thinking": thinking}
+    )
+    if stream:
+        reasoning, content = "", ""
+        for i, token_id in enumerate(output_ids):
+            delta = parser.parse_delta(
+                mock_tokenizer.decode([token_id]),
+                [token_id],
+                mock_request,
+                prompt_token_ids=prompt_ids,
+                finished=i == len(output_ids) - 1,
+            )
+            if delta is not None:
+                reasoning += delta.reasoning or ""
+                content += delta.content or ""
+        assert reasoning == (expected_reasoning or "")
+    else:
+        parser.set_prompt_token_ids(prompt_ids)
+        reasoning, content, _ = parser.parse(
+            mock_tokenizer.decode(output_ids),
+            mock_request,
+            model_output_token_ids=output_ids,
+        )
+        assert reasoning == expected_reasoning
+    assert content == "ab"

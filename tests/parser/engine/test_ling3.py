@@ -56,7 +56,7 @@ def test_ling3_disable_thinking_keeps_reasoning_as_content():
     )
 
     assert reasoning is None
-    assert content == "<think>reason</think>answer"
+    assert content == "reasonanswer"
 
 
 @pytest.mark.parametrize("model_output", ["only reasoning", "<think>only reasoning"])

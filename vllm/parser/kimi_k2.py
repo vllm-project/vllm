@@ -31,10 +31,6 @@ from vllm.parser.engine.parser_engine_config import (
 )
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -252,15 +248,6 @@ class KimiK2Parser(ParserEngine):
             return input_ids[section_idx:]
 
         return []
-
-    def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
-            return None, model_output
-        return super().extract_reasoning(model_output, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if not self.thinking_enabled:

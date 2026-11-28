@@ -12,8 +12,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.glm47_moe import (
@@ -62,16 +60,6 @@ class Ling3Parser(Glm47MoeParser):
     @property
     def reasoning_end_str(self) -> str:
         return THINK_END
-
-    def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
-            return None, model_output
-
-        return super().extract_reasoning(model_output, request)
 
 
 (
