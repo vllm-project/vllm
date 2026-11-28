@@ -32,10 +32,15 @@ if TYPE_CHECKING:
 
 
 def retained_objects(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    *,
+    include_active: bool = False,
 ) -> tuple[int, int]:
-    """Number of hash-block objects whose routed experts the scheduler retains
-    and the worker stores, and the tokens per object."""
+    """Return the number of hash-block objects and tokens per object.
+
+    The worker's default arena also reserves space for requests in flight.
+    """
     block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
     )
@@ -48,6 +53,8 @@ def retained_objects(
     num_blocks = kv_cache_config.num_blocks
     if vllm_config.kv_transfer_config is not None:
         num_blocks *= 2
+    if include_active:
+        num_blocks += kv_cache_config.num_blocks
     return num_blocks * (block_size // hash_block_size), hash_block_size
 
 

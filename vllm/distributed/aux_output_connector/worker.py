@@ -120,7 +120,9 @@ class AuxOutputWorkerConnector:
         vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
-        num_objects, hash_block_size = retained_objects(vllm_config, kv_cache_config)
+        num_objects, hash_block_size = retained_objects(
+            vllm_config, kv_cache_config, include_active=True
+        )
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = num_objects * block_nbytes
         self._store = BackgroundBlockObjectStore(
