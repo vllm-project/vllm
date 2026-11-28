@@ -4,7 +4,9 @@
 
 import torch
 
-RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+# Matches vllm.model_executor.layers.indexer_topk (cooperative_topk needs
+# 16 KiB per SM above 64 rows).
+RADIX_TOPK_WORKSPACE_SIZE = 4 * 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32

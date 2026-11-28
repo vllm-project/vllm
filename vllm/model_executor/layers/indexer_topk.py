@@ -16,16 +16,17 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
-RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+# persistent_topk and cooperative_topk scratch. cooperative_topk takes 16 KiB
+# per row up to 64 rows and 16 KiB per SM above (up to 256 SMs).
+RADIX_TOPK_WORKSPACE_SIZE = 4 * 1024 * 1024
 
 # Prefill chunks with fewer rows run faster on top_k_per_row_prefill (GB300),
 # and their many distinct small shapes would JIT-compile gvr_2 mid-serving.
 GVR2_PREFILL_MIN_ROWS = 1024
 
-# cooperative_topk's hard row limit: one cluster wave covers at most this many
-# rows. "auto" uses cooperative_topk for every batch within the limit and falls
-# back to persistent_topk past it; explicit ``cooperative`` requests are
-# validated against the same bound.
+# cooperative_topk runs up to this many rows in one wave of clusters. Larger
+# batches launch one cluster per row, started by the hardware as earlier ones
+# finish, so "auto" takes cooperative_topk for any row count.
 AUTO_COOPERATIVE_MAX_ROWS = 64
 
 # ---------------------------------------------------------------------------
@@ -298,9 +299,10 @@ class SparseIndexerTopk(torch.nn.Module):
         """The priority chain: cooperative -> persistent -> per_row.
         aiter/deep_select/flashinfer/flashinfer_gvr2/torch are opt-in only.
 
-        cooperative_topk is preferred whenever it is applicable, i.e. within
-        its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
-        persistent_topk.
+        cooperative_topk is preferred whenever it is applicable (any row
+        count; its cost does not depend on the score values, unlike
+        persistent_topk's sampled path); persistent_topk covers rows that are
+        not 16-byte aligned.
 
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
@@ -454,10 +456,6 @@ class SparseIndexerTopk(torch.nn.Module):
         if topk_tokens not in (512, 1024, 2048):
             failures.append(
                 f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
-            )
-        if num_rows > AUTO_COOPERATIVE_MAX_ROWS:
-            failures.append(
-                f"num_rows must be <= {AUTO_COOPERATIVE_MAX_ROWS}, got {num_rows}"
             )
         if logits.dtype not in (torch.float32, torch.bfloat16):
             failures.append(f"logits must be fp32 or bf16, got {logits.dtype}")
