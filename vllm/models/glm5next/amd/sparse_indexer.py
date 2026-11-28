@@ -9,6 +9,7 @@ from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -22,6 +23,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     _fill_short_decode_causal_indices,
     _gather_workspace_shapes,
     _scatter_decode_tokens_by_request,
+    all_gather_shardq_pool_ids,
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
@@ -36,6 +38,7 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    async_tensor_h2d,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -45,9 +48,13 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _decode_logits_workspace,
     _max_decode_logits_rows,
 )
+from vllm.v1.attention.ops.shardq import shardq_allowed
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+# Below this the exchange costs more than the split saves.
+_SHARDQ_MIN_SEQ_LEN = 16384
 
 _GFX950_KPOOL_AITER_MAX_POOLS = 256 * 1024  # (1M ctx)
 _GFX950_KPOOL_AITER_MIN_POOLS = 16 * 1024
@@ -178,6 +185,7 @@ def sparse_attn_indexer_kpool(
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
     topk_backend: str = "auto",
+    gather_shardq_topk: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -215,6 +223,13 @@ def sparse_attn_indexer_kpool(
         _ = torch.empty(
             prefill_cap_elems, dtype=torch.uint8, device=hidden_states.device
         )
+        if gather_shardq_topk:
+            # The exchanged pool ids: this rank's, every rank's, and in order.
+            _pool_ids = torch.empty(
+                (3 * hidden_states.shape[0], topk_tokens // index_kpool),
+                dtype=torch.int32,
+                device=hidden_states.device,
+            )
 
         return topk_indices_buffer
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
@@ -340,6 +355,28 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
+        # Under ShardQ the chunks index the shardq_gather_indices tokens; the
+        # Indexer may have projected q and weights for those rows only.
+        prefill_q, prefill_weights, prefill_positions = q_quant, weights, positions
+        if (indices := prefill_metadata.shardq_gather_indices) is not None:
+            if q_quant.shape[0] != indices.shape[0]:
+                prefill_q, prefill_weights = q_quant[indices], weights[indices]
+            if positions is not None:
+                prefill_positions = positions[indices]
+        select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
+        # Exchange pool ids, not tokens: index by row in the compact layout.
+        # Gather on every layer that reads a split, including MTP's draft prefill.
+        split = prefill_metadata.shardq_split
+        pool_buf = None
+        if split is not None and not short_prefill:
+            assert positions is not None
+            rank = get_tp_group().rank_in_group
+            num_local_rows = int(split.num_tokens_per_rank[rank])
+            pool_buf = torch.empty(
+                (split.num_decode_tokens + num_local_rows, select_k),
+                dtype=torch.int32,
+                device=topk_indices_buffer.device,
+            )
 
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
@@ -371,7 +408,7 @@ def sparse_attn_indexer_kpool(
                     token_to_seq=chunk.token_to_seq,
                 )
 
-            q_slice = q_quant[chunk.token_start : chunk.token_end]
+            q_slice = prefill_q[chunk.token_start : chunk.token_end]
             q_scale_slice = (
                 q_scale[chunk.token_start : chunk.token_end]
                 if q_scale is not None
@@ -395,7 +432,7 @@ def sparse_attn_indexer_kpool(
             logits = rocm_fp8_mqa_logits(
                 q_slice_cast,
                 (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
+                prefill_weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
@@ -404,8 +441,9 @@ def sparse_attn_indexer_kpool(
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
             # so topk selects pools. We pick topk_tokens // kpool pools then
             # expand each pool back to its kpool constituent tokens.
-            select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
-            if index_kpool > 1:
+            if pool_buf is not None:
+                topk_dst = pool_buf[chunk.token_start : chunk.token_end]
+            elif index_kpool > 1:
                 pool_topk = torch.empty(
                     (num_rows, select_k), dtype=torch.int32, device=logits.device
                 )
@@ -443,13 +481,13 @@ def sparse_attn_indexer_kpool(
                     select_k,
                 )
 
-            if index_kpool > 1:
-                if positions is not None:
+            if index_kpool > 1 and pool_buf is None:
+                if prefill_positions is not None:
                     # Fused expand-pools + append-tail into one Triton kernel
                     # (replaces ~25 elementwise ops); seq_len = pos + 1.
                     kpool_ops.expand_pools_and_append_tail(
                         pool_topk,
-                        positions[chunk.token_start : chunk.token_end],
+                        prefill_positions[chunk.token_start : chunk.token_end],
                         index_kpool,
                         seq_len_offset=1,
                         out=topk_indices_buffer[chunk.token_start : chunk.token_end],
@@ -463,6 +501,39 @@ def sparse_attn_indexer_kpool(
                     topk_indices_buffer[
                         chunk.token_start : chunk.token_end, : expanded.shape[-1]
                     ] = expanded
+
+        if pool_buf is not None:
+            assert split is not None and positions is not None
+            ndt = split.num_decode_tokens
+            if (rows := prefill_metadata.shardq_rows) is None:
+                rows = async_tensor_h2d(
+                    split.token_ids + ndt, device=topk_indices_buffer.device
+                )
+                prefill_metadata.shardq_rows = rows
+
+            def _expand_write(pool_ids: torch.Tensor, row: int) -> None:
+                end = row + pool_ids.shape[0]
+                kpool_ops.expand_pools_and_append_tail(
+                    pool_ids,
+                    positions[row:end],
+                    index_kpool,
+                    seq_len_offset=1,
+                    out=topk_indices_buffer[row:end],
+                )
+
+            # Rows ShardQ counts as decodes every rank scored in place.
+            if ndt > num_decode_tokens:
+                _expand_write(pool_buf[num_decode_tokens:ndt], num_decode_tokens)
+            _expand_write(
+                all_gather_shardq_pool_ids(
+                    pool_buf[ndt:],
+                    split.num_tokens_per_rank.tolist(),
+                    rows,
+                    cdiv(prefill_metadata.max_prefill_seq_len, index_kpool),
+                    start=ndt,
+                ),
+                ndt,
+            )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -789,6 +860,8 @@ class SparseAttnIndexerKpool(CustomOp):
         model_config = cfg.model_config if cfg is not None else None
         hf_config = model_config.hf_text_config if model_config is not None else None
         index_kpool = getattr(hf_config, "index_kpool", None) or 1
+        self.index_kpool = index_kpool
+        self.gather_shardq_topk = False
         if index_kpool > 1:
             kpool_ops.kpool_compress_dispatch.register_warmup(
                 k_cache=k_cache,
@@ -802,6 +875,29 @@ class SparseAttnIndexerKpool(CustomOp):
                     kpool=index_kpool,
                     head_dim=head_dim,
                 )
+
+    def enable_shardq(self) -> bool:
+        """Score only this TP rank's prefill tokens (ShardQ) and all-gather the
+        top-k rows, leaving attention head-sharded. False if unsupported."""
+        cfg = get_current_vllm_config_or_none()
+        if cfg is None or self.index_kpool <= 1:
+            return False
+        if not (
+            shardq_allowed(cfg)
+            and cfg.parallel_config.decode_context_parallel_size == 1
+            and not envs.VLLM_DISABLE_PYNCCL
+            and not envs.VLLM_USE_NCCL_SYMM_MEM
+        ):
+            return False
+        self.gather_shardq_topk = True
+        self.k_cache.use_shardq = True
+        self.k_cache.shardq_min_seq_len = _SHARDQ_MIN_SEQ_LEN
+        logger.info_once(
+            "Sharding kpool indexer prefill across TP ranks by token for "
+            "contexts of >= %d tokens (sparse_mla_shard_q).",
+            _SHARDQ_MIN_SEQ_LEN,
+        )
+        return True
 
     def forward_hip(
         self,
@@ -865,6 +961,7 @@ class SparseAttnIndexerKpool(CustomOp):
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
             self.topk_backend,
+            self.gather_shardq_topk,
         )
 
     def forward_native(
