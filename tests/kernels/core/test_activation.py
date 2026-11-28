@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import assert_kernel_traps, opcheck
 from vllm.model_executor.layers.activation import (
     FastGELU,
     FatreluAndMul,
@@ -390,6 +390,32 @@ MOE_ACTIVATION_CASES = [
         MoEActivation.RELU2_NO_MUL, ApplyMoEActivationConfig(), id="relu2_no_mul"
     ),
 ]
+
+
+@torch.inference_mode()
+def test_swiglu_limit_pad_aware_traps_on_expert_id_outside_map():
+    """-1 rows are skipped; an id outside expert_map is a producer bug and traps."""
+    from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+
+    d, rows = 64, 4
+    x = torch.randn((rows, 2 * d), device="cuda", dtype=torch.bfloat16)
+    out = torch.zeros((rows, d), device="cuda", dtype=torch.bfloat16)
+    topk_ids = torch.tensor([0, 1, 2, -1], device="cuda", dtype=torch.int32)
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+    swiglu_limit_func(out, x, 0.0, topk_ids, expert_map)
+
+    computed = out.abs().sum(dim=-1) > 0
+    assert computed.tolist() == [True, False, True, False]
+
+    assert_kernel_traps("""
+        from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+        x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
+        out = torch.zeros((2, 64), device="cuda", dtype=torch.bfloat16)
+        ids = torch.tensor([0, 0x3F988A43], device="cuda", dtype=torch.int32)
+        expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+        swiglu_limit_func(out, x, 0.0, ids, expert_map)
+    """)
 
 
 @pytest.mark.parametrize(("activation", "activation_config"), MOE_ACTIVATION_CASES)
