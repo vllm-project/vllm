@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -22,6 +23,10 @@ from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels.linear import (
+    HummingFP8ScaledMMLinearKernel,
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -56,6 +61,28 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def test_fp8_linear_pre_processed_weights_exclude_humming(monkeypatch):
+    """Humming keeps its layer config on the kernel object, which the weight
+    cache daemon cannot export, so the method declines pre-processed weights."""
+    method = Fp8LinearMethod.__new__(Fp8LinearMethod)
+    method.act_q_static = False
+    method.fp8_linear = Mock(spec=MarlinFP8ScaledMMLinearKernel)
+    assert method.supports_pre_processed_weights
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.fp8.is_weights_pre_processed",
+        lambda: True,
+    )
+    layer = torch.nn.Module()
+    method.process_weights_after_loading(layer)
+    assert layer.input_scale is None
+
+    method.fp8_linear = Mock(spec=HummingFP8ScaledMMLinearKernel)
+    assert not method.supports_pre_processed_weights
+    with pytest.raises(RuntimeError, match="Humming"):
+        method.process_weights_after_loading(layer)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")

@@ -23,7 +23,9 @@ The FP8 types typically supported in hardware have two distinct representations,
     checkpoints on CUDA it tries, in order: a FlashInfer/DeepGEMM hybrid
     (Hopper only), DeepGEMM, CUTLASS, Marlin, Triton, Humming, then a
     PyTorch fallback. GPUs without native FP8 support (e.g. Turing/Ampere)
-    land on weight-only (W8A16) Marlin.
+    land on weight-only (W8A16) Marlin. Compute capability 8.6 GPUs such as
+    the A10 and A40 try Humming before Marlin and land on weight-only
+    Humming; pass `--linear-backend marlin` to keep Marlin.
 
     If inference hangs with no error, try `VLLM_USE_DEEP_GEMM=0` or
     `--linear-backend cutlass`.
