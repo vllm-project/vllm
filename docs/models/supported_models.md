@@ -777,6 +777,22 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     its [DFlash](../features/speculative_decoding/README.md) path.
 
 !!! note
+    On ROCm gfx950 (MI355X) with AITER and tensor parallelism,
+    `MuseSparkForConditionalGeneration` can run large eager prefill steps with Ulysses
+    sequence parallelism on top of the token-sharded residual stream
+    (`VLLM_ROCM_MUSE_SP_MIN_TOKENS`): attention exchanges tokens for heads with two
+    all-to-all exchanges instead of gathering and reduce-scattering the hidden
+    states, and the MoE input is gathered as MXFP4. It is off by default; enable it
+    with `--additional-config '{"ulysses_prefill": "full"}'`. Every token-sharded eager
+    step then uses it, large decode batches included. On these steps the QKV and
+    output projections run in FP8 (per-channel weights, per-token activations) from
+    FP8 copies of the full BF16/FP16 weights kept on every rank, which leaves less
+    memory for the KV cache. It cannot be combined with LoRA. With
+    `"ulysses_prefill": "output_only"` only the O copy is kept: the attention input
+    is then all-gathered as FP8 rows and projected by each rank's own QKV shard, and
+    only the attention output takes the Ulysses all-to-all.
+
+!!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to
     the same vLLM implementation.
     Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`

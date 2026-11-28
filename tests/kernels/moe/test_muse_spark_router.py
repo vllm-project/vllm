@@ -360,3 +360,24 @@ def test_cuda_muse_routing_graph_replay():
         ref_w, ref_i = _triton_routing_reference(logits, bias, 1.0, 1.0, 1e-15, padding)
         assert torch.equal(ids, ref_i)
         assert torch.equal(weights, ref_w)
+
+
+def test_precomputed_routes_are_returned_once():
+    """Routes set with `set_precomputed_routes` (rows routed before a gather) are
+    returned by the next call instead of routing its logits, with padding masked
+    and the index dtype applied; the call after it routes the logits again."""
+    router = MuseSparkRouter(2, LOGITS.shape[-1], torch.zeros(LOGITS.shape[-1]), 1.0)
+    expected_w, expected_ids = _expected(LOGITS, torch.zeros(4), 2, 1.0)
+    weights = torch.tensor([[0.75, 0.25], [0.5, 0.5]])
+    ids = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32)
+    router.set_precomputed_routes(weights, ids)
+    got_w, got_ids = router._compute_routing(
+        HIDDEN, LOGITS, torch.int64, is_padding=torch.tensor([False, True])
+    )
+    assert torch.equal(got_w, torch.tensor([[0.75, 0.25], [0.0, 0.0]]))
+    assert got_ids.dtype == torch.int64
+    assert torch.equal(got_ids, torch.tensor([[3, 1], [-1, -1]]))
+    assert router.take_precomputed_routes() is None
+    got_w, got_ids = router._compute_routing(HIDDEN, LOGITS, None)
+    torch.testing.assert_close(got_w, expected_w)
+    assert torch.equal(got_ids, expected_ids.to(got_ids.dtype))

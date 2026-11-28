@@ -77,6 +77,7 @@ from vllm.transformers_utils.configs.muse_spark import (
     MuseSparkTextConfig,
 )
 
+from . import ulysses_sp as usp
 from .decode_moe import MuseSparkDecodeMoE
 from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
@@ -176,6 +177,13 @@ class TokenShard:
         if pad:
             x = torch.cat([x, x.new_zeros((pad, *x.shape[1:]))])
         return tensor_model_parallel_reduce_scatter(x.contiguous(), 0)
+
+
+class UlyssesShard(TokenShard):
+    """A token-sharded step that runs Ulysses attention and gathers the MoE input as
+    MXFP4 (`ulysses_sp`)."""
+
+    __slots__ = ()
 
 
 def norm_residual_then_norm(
@@ -409,6 +417,8 @@ class MuseSparkMoE(nn.Module):
     ) -> torch.Tensor:
         if self.pooler is not None:
             hidden_states, _ = self.pooler(hidden_states)
+        if isinstance(shard, UlyssesShard) and self._experts_take_expanded_input:
+            return self._gather_mxfp4(hidden_states, shard)
         if shard is not None:
             hidden_states = shard.gather(hidden_states)
         norm = self.pre_expert_norm
@@ -425,6 +435,42 @@ class MuseSparkMoE(nn.Module):
             )
         return norm(hidden_states)
 
+    def _gather_routes(
+        self, hidden_states: torch.Tensor, shard: TokenShard
+    ) -> torch.Tensor:
+        """Route the shard's own rows and gather their top-k weights and ids (2 x
+        top_k words per token) instead of the router logits (one FP32 per expert).
+        The router returns the gathered routes on its next call; returns the
+        stand-in router logits to pass it."""
+        logits = self._router_logits(hidden_states)
+        weights, ids = self.moe_router._compute_routing(
+            hidden_states, logits, torch.int32
+        )
+        k = weights.shape[1]
+        packed = usp.gather_bytes(torch.cat([weights.view(torch.int32), ids], 1), shard)
+        self.moe_router.set_precomputed_routes(
+            packed[:, :k].contiguous().view(torch.float32), packed[:, k:].contiguous()
+        )
+        return logits.new_empty(()).expand(shard.num_tokens, logits.shape[1])
+
+    def _gather_mxfp4(self, pooled: torch.Tensor, shard: UlyssesShard) -> torch.Tensor:
+        """Pre-expert norm and MXFP4 quantization on the token shard, then gather the
+        FP4 rows and E8M0 scales. Returns a placeholder `[T, hidden]` input that
+        carries them, one row per token, to the experts.
+        """
+        from aiter.ops.quant import per_1x32_f4_quant_hip
+
+        assert self.pre_expert_norm is not None
+        normed = self.pre_expert_norm(pooled, out_dtype=pooled.dtype).contiguous()
+        a1, a1_scale = per_1x32_f4_quant_hip(normed, shuffle=False)
+        placeholder = pooled.new_empty((shard.num_tokens, pooled.shape[1]))
+        usp.attach_prequant(
+            placeholder,
+            usp.gather_bytes(a1, shard).view(torch.float4_e2m1fn_x2),
+            usp.gather_bytes(a1_scale, shard).view(torch.float8_e8m0fnu),
+        )
+        return placeholder
+
     def forward(
         self, hidden_states: torch.Tensor, shard: TokenShard | None = None
     ) -> torch.Tensor:
@@ -438,10 +484,11 @@ class MuseSparkMoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        router_logits = self._router_logits(hidden_states)
-        hidden_states = self._pool(hidden_states, shard)
         if shard is not None:
-            router_logits = shard.gather(router_logits)
+            router_logits = self._gather_routes(hidden_states, shard)
+        else:
+            router_logits = self._router_logits(hidden_states)
+        hidden_states = self._pool(hidden_states, shard)
 
         if shard is not None and not self.defer_reduce:
             with token_sharded_moe_output():
@@ -459,6 +506,10 @@ class MuseSparkMoE(nn.Module):
                 experts_out = shard.reduce_scatter(experts_out)
             elif self.defer_reduce:
                 experts_out = tensor_model_parallel_all_reduce(experts_out)
+        if isinstance(shard, UlyssesShard) and usp.take_prequant(hidden_states):
+            raise RuntimeError("The MoE experts did not take the MXFP4 input.")
+        if self.moe_router.take_precomputed_routes() is not None:
+            raise RuntimeError("The MoE router did not take the gathered routes.")
 
         if self.unpooler is not None:
             experts_out, _ = self.unpooler(experts_out)
@@ -594,6 +645,8 @@ class MuseSparkAttention(nn.Module):
                 prefix=f"{prefix}.qkv_proj",
             )
         self.defer_reduce = defer_reduce
+        # Set after weight loading when Ulysses prefill is on.
+        self.ulysses_weights: usp.UlyssesWeights | None = None
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=self.hidden_size,
@@ -723,13 +776,12 @@ class MuseSparkAttention(nn.Module):
                 self.rms_norm_eps,
             )
 
-        if self.use_o_gate:
-            q, k, v, og = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size, self.q_size], dim=-1
-            )
-        else:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            og = None
+        # Ulysses steps pass [q|k|v] rows without the o-gate.
+        qkv_size = self.q_size + 2 * self.kv_size
+        q, k, v = qkv[:, :qkv_size].split(
+            [self.q_size, self.kv_size, self.kv_size], dim=-1
+        )
+        og = qkv[:, qkv_size:] if self.use_o_gate and qkv.shape[1] > qkv_size else None
         if self.fused_qk_norm_rope_kv_insert:
             return q, k, v, og
 
@@ -758,6 +810,8 @@ class MuseSparkAttention(nn.Module):
         shard: TokenShard | None = None,
     ) -> torch.Tensor:
         """Attention over an input the caller has already normalized."""
+        if isinstance(shard, UlyssesShard):
+            return self.forward_ulysses(positions, hidden_states, shard)
         if shard is not None:
             hidden_states = shard.gather(hidden_states)
         qkv, _ = self.qkv_proj(hidden_states)
@@ -770,6 +824,103 @@ class MuseSparkAttention(nn.Module):
         else:
             attn_output = self.attn(q, k, v)
         return self.back(attn_output, og, shard)
+
+    def build_ulysses_weights(self, output_only: bool = False) -> int:
+        """Build the full FP8 weights `forward_ulysses` uses; returns their bytes.
+        A weight reload refills the held copies in place."""
+        assert self.fuse_o_norm_gate, "Ulysses attention needs the fused O-norm gate"
+        if self.ulysses_weights is not None:
+            output_only = self.ulysses_weights.qkv is None
+        built = usp.build_weights(
+            self.qkv_proj, self.o_proj, self.q_size, self.kv_size, output_only
+        )
+        if self.ulysses_weights is None:
+            self.ulysses_weights = built
+        else:
+            self.ulysses_weights.refill(built)
+        return built.nbytes
+
+    def forward_ulysses(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        shard: UlyssesShard,
+    ) -> torch.Tensor:
+        """Ulysses attention (see `ulysses_sp`): token-sharded input and output."""
+        w = self.ulysses_weights
+        assert w is not None
+        logger.info_once(
+            "Muse Spark Ulysses prefill active (TP world size %d, FP8 %s weights, "
+            "FP8 all-to-all payloads).",
+            shard.world,
+            "O" if w.qkv is None else "QKV/O",
+            scope="process",
+        )
+        dtype = hidden_states.dtype
+        if w.qkv is None:
+            return self.forward_ulysses_output(positions, hidden_states, shard)
+        assert w.gate is not None
+        xq = usp.quant_rows(hidden_states)
+        qkv = usp.a2a_tokens_to_heads(
+            usp.gemm(xq, w.qkv, dtype),
+            self.q_size + 2 * self.kv_size,
+            shard,
+            self.head_dim,
+        )
+        q, k, v, _ = self._qk_norm_rope_kv_insert(qkv, positions)
+        if self.fused_qk_norm_rope_kv_insert:
+            attn_output = self.attn(q, None, None)
+        else:
+            attn_output = self.attn(q, k, v)
+        heads = usp.a2a_heads_to_tokens(
+            attn_output.reshape(-1, self.q_size), shard, self.head_dim
+        )
+        og = usp.gemm(xq, w.gate, dtype)
+        num_heads = heads.shape[1] // self.head_dim
+        gated = rms_norm_gated(
+            heads.view(-1, num_heads, self.head_dim),
+            og.view(-1, num_heads, self.head_dim),
+            None,
+            None,
+            "sigmoid",
+            eps=self.rms_norm_eps,
+        )
+        return usp.gemm(usp.quant_rows(gated.reshape(heads.shape)), w.o, dtype)
+
+    def forward_ulysses_output(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        shard: UlyssesShard,
+    ) -> torch.Tensor:
+        """Ulysses on the output side only: the normed rows are all-gathered as FP8
+        rows and projected by this rank's QKV-gate shard, the O-gate is applied to
+        this rank's heads, and one all-to-all hands them to the full O copy on the
+        token shard."""
+        w = self.ulysses_weights
+        assert w is not None
+        dtype = hidden_states.dtype
+        xq, xs = usp.gather_rows_fp8(hidden_states, shard)
+        x = (xq.float() * xs.view(-1, 1)).to(dtype)
+        qkv, _ = self.qkv_proj(x)
+        q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
+        assert og is not None
+        if self.fused_qk_norm_rope_kv_insert:
+            attn_output = self.attn(q, None, None)
+        else:
+            attn_output = self.attn(q, k, v)
+        gated = rms_norm_gated(
+            attn_output.reshape(-1, self.num_heads, self.head_dim),
+            og.reshape(-1, self.num_heads, self.head_dim),
+            None,
+            None,
+            "sigmoid",
+            eps=self.rms_norm_eps,
+        )
+        heads = usp.a2a_heads_to_tokens(
+            gated.reshape(-1, self.q_size), shard, self.head_dim
+        )
+        return usp.gemm(usp.quant_rows(heads), w.o, dtype)
 
     def back(
         self,
@@ -1083,6 +1234,10 @@ class MuseSparkModel(LlamaModel):
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         # Set after weight loading under --monokernel.
         self.mono: MuseSparkMono | None = None
+        self.ulysses_prefill = usp.ulysses_prefill_enabled(
+            vllm_config, self.token_shard_min_tokens
+        )
+        self.ulysses_output_only = self.ulysses_prefill and usp.output_only(vllm_config)
 
     def _make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
@@ -1135,7 +1290,7 @@ class MuseSparkModel(LlamaModel):
             and num_tokens % self.token_shard_divisor == 0
             and not torch.cuda.is_current_stream_capturing()
         ):
-            shard = TokenShard(num_tokens)
+            shard = (UlyssesShard if self.ulysses_prefill else TokenShard)(num_tokens)
             x = shard.local(x)
         for idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer] if mono_out is None else [],
@@ -1389,6 +1544,21 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         # monokernel also needs the cached coefficients and the folded router
         # weights from above.
         maybe_attach_mono(self)
+        if self.model.ulysses_prefill:
+            # Built here rather than on the first Ulysses step, so that the KV
+            # cache sizing accounts for them whatever shape the profile run has.
+            layers = self.model.layers[self.model.start_layer : self.model.end_layer]
+            output_only = self.model.ulysses_output_only
+            nbytes = sum(
+                layer.self_attn.build_ulysses_weights(output_only) for layer in layers
+            )
+            logger.info(
+                "Muse Spark Ulysses prefill: FP8 %s weights of %d layers built "
+                "(%.2f GiB).",
+                "O" if output_only else "QKV/O",
+                len(layers),
+                nbytes / 2**30,
+            )
 
 
 __all__ = [
