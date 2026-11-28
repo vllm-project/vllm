@@ -184,7 +184,16 @@ void selective_state_update_cpu_impl(
                : nullptr;
   };
   const int32_t* sbi_ptr = get_int32_ptr(state_batch_indices);
-  const int32_t* dsbi_ptr = get_int32_ptr(dst_state_batch_indices);
+  const auto& destination_indices =
+      get_int32_ptr(dst_state_batch_indices) != nullptr
+          ? dst_state_batch_indices
+          : state_batch_indices;
+  const int32_t* dsbi_ptr = get_int32_ptr(destination_indices);
+  auto index_stride = [](const c10::optional<at::Tensor>& indices, int dim) {
+    return indices.has_value() && indices->defined() && indices->dim() > dim
+               ? indices->stride(dim)
+               : int64_t(0);
+  };
   const int32_t* nat_ptr = get_int32_ptr(num_accepted_tokens);
   const int32_t* csl_ptr = get_int32_ptr(cu_seqlens);
 
@@ -205,8 +214,12 @@ void selective_state_update_cpu_impl(
             z_in.defined() ? z_in.data_ptr<input_t>() : nullptr,
             dt_bias_f32.defined() ? dt_bias_f32.data_ptr<float>() : nullptr,
             out.data_ptr<out_t>(), stride_out_n, stride_out_h, sbi_ptr,
-            dsbi_ptr, static_cast<int32_t>(null_block_id), nat_ptr, csl_ptr, N,
-            nheads, ngroups, dim, dstate, dt_softplus);
+            index_stride(state_batch_indices, 0),
+            index_stride(state_batch_indices, 1), dsbi_ptr,
+            index_stride(destination_indices, 0),
+            index_stride(destination_indices, 1),
+            static_cast<int32_t>(null_block_id), nat_ptr, csl_ptr, N, nheads,
+            ngroups, dim, dstate, dt_softplus);
       });
     });
   });
