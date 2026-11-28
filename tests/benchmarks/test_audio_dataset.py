@@ -9,6 +9,9 @@ from typing import Protocol, cast
 import numpy as np
 import pytest
 import soundfile as sf
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 import vllm.benchmarks.datasets.datasets as datasets_module
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
@@ -175,6 +178,65 @@ def test_asr_dataset_sample_handles_embedded_audio_bytes(
     assert sample_rate == 16_000
     assert isinstance(audio, np.ndarray)
     assert audio.size > 0
+
+
+@pytest.mark.parametrize("channels", [1, 2, 4])
+@pytest.mark.parametrize("embedded", [False, True], ids=["path", "bytes"])
+@pytest.mark.parametrize(
+    ("duration_s", "min_duration_s", "max_duration_s", "expected_count"),
+    [(1.0, 0.5, float("inf"), 1), (2.0, 0.0, 1.5, 0)],
+    ids=["minimum", "maximum"],
+)
+def test_asr_dataset_filters_audio_by_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channels: int,
+    embedded: bool,
+    duration_s: float,
+    min_duration_s: float,
+    max_duration_s: float,
+    expected_count: int,
+) -> None:
+    """Duration filtering must not depend on WAV channels or storage format."""
+    sample_rate = 16_000
+    num_samples = int(duration_s * sample_rate)
+    shape = (num_samples,) if channels == 1 else (num_samples, channels)
+    audio_path = tmp_path / "sample.wav"
+    sf.write(audio_path, np.zeros(shape, dtype=np.float32), sample_rate)
+    audio = (
+        {"bytes": audio_path.read_bytes(), "path": None}
+        if embedded
+        else str(audio_path)
+    )
+    monkeypatch.setattr(
+        datasets_module, "load_dataset", lambda *args, **kwargs: [{"audio": audio}]
+    )
+    dataset = datasets_module.ASRDataset(
+        dataset_path="local-fixture", dataset_split="test", disable_shuffle=True
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+
+    samples = dataset.sample(
+        tokenizer,
+        num_requests=1,
+        no_oversample=True,
+        asr_min_audio_len_sec=min_duration_s,
+        asr_max_audio_len_sec=max_duration_s,
+    )
+
+    assert len(samples) == expected_count
+    if samples:
+        if embedded:
+            assert isinstance(samples[0].multi_modal_data, dict)
+            decoded, rate = samples[0].multi_modal_data["audio"]
+            expected, _ = sf.read(audio_path, dtype="float32")
+            np.testing.assert_array_equal(decoded, expected)
+            assert rate == sample_rate
+        else:
+            assert samples[0].multi_modal_data == {"audio_path": str(audio_path)}
 
 
 def test_async_request_openai_audio_handles_local_audio_paths(
