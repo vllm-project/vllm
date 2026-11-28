@@ -11,6 +11,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
+| `UltraVBertModel` | [ColUltraVBERT](../models/pooling_models/specific_models.md#colultravbert-multi-modal-late-interaction-models) | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
 | `DeepseekOCR2ForCausalLM` | `DeepSeek-OCR-2` | ✅︎ | ❌︎ | ✅︎ |
 | `DeepseekVLV2ForCausalLM` | `DeepSeek-VL2` | ✅︎ | ❌︎ | ❌︎ |

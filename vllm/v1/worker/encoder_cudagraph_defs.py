@@ -111,6 +111,9 @@ class EncoderCudaGraphConfig:
     """Opt in to skip full-fallback staging when eager accepts unsorted inputs.
     Oversized output views are compacted in a batch."""
 
+    requires_exact_token_budget: bool = False
+    """Only replay an exact token count when padding can change valid outputs."""
+
 
 @dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:

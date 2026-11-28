@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
+from typing import Any
 
 import torch
 from torch import nn
@@ -43,6 +44,14 @@ from vllm.transformers_utils.configs.colultravbert import (
     UltraBertConfig,
 )
 from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from .idefics3 import (
     Idefics3DummyInputsBuilder,
@@ -52,12 +61,13 @@ from .idefics3 import (
 )
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLateInteraction,
     SupportsMultiModal,
 )
 from .interfaces_base import default_pooling_type
 from .siglip import SiglipVisionModel
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, StageMissingLayer, WeightsMapper, maybe_prefix
 
 
 class UltraBertAttention(nn.Module):
@@ -436,7 +446,9 @@ class ColUltraVBertMultiModalProcessor(Idefics3MultiModalProcessor):
     dummy_inputs=ColUltraVBertDummyInputsBuilder,
 )
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
-class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInteraction):
+class ColUltraVBertForRetrieval(
+    nn.Module, SupportsMultiModal, SupportsLateInteraction, SupportsEncoderCudaGraph
+):
     is_pooling_model = True
 
     packed_modules_mapping = {
@@ -500,12 +512,106 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
         if image_input is None:
             return []
 
-        pixel_values = image_input["pixel_values"]
-        features = self.connector(
-            self.vision_model(pixel_values.to(dtype=self.vision_model.dtype))
-        )
+        features = self._encode_tiles(image_input["pixel_values"])
         num_patches = image_input["num_patches"].tolist()
         return [f.flatten(0, 1) for f in features.split(num_patches)]
+
+    def _encode_tiles(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        return self.connector(
+            self.vision_model(pixel_values.to(dtype=self.vision_model.dtype))
+        )
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=[]
+            if isinstance(self.vision_model, StageMissingLayer)
+            else ["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+            # Padding the tile batch can change valid BF16 encoder outputs.
+            paths={
+                "default": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.config.image_seq_len
+                )
+            },
+            requires_exact_token_budget=True,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return min(self.config.image_seq_len, max_budget), max_budget
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        return [
+            EncoderItemSpec(input_size=n, output_tokens=n * self.config.image_seq_len)
+            for n in mm_kwargs["num_patches"].tolist()
+        ]
+
+    @staticmethod
+    def select_encoder_cudagraph_items(
+        mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        pixels = mm_kwargs["pixel_values"]
+        counts = mm_kwargs["num_patches"]
+        if indices == list(range(len(counts))):
+            return {"pixel_values": pixels, "num_patches": counts}
+        pages = pixels.split(counts.tolist())
+        return {
+            "num_patches": counts[indices],
+            "pixel_values": torch.cat([pages[i] for i in indices])
+            if indices
+            else pixels[:0],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        vision = self.config.vision_config
+        tiles = cdiv(token_budget, self.config.image_seq_len)
+        pixels = torch.zeros(
+            tiles,
+            vision.num_channels,
+            vision.image_size,
+            vision.image_size,
+            device=device,
+            dtype=dtype,
+        )
+        return EncoderCudaGraphCaptureInputs(values={"pixel_values": pixels})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return self._encode_tiles(values["pixel_values"]).flatten(0, 1)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return self.encoder_cudagraph_forward(mm_kwargs, path)
 
     def forward(
         self,
