@@ -163,6 +163,31 @@ def _min_across_ranks(value: int) -> int:
     return all_reduce_int(get_world_group().cpu_group, value)
 
 
+def _model_load_oom_message(model_runner: Any) -> str:
+    """Explain an OOM raised while loading the model.
+
+    Loading also allocates buffers sized by `max_num_seqs` and the vocabulary,
+    before KV cache planning can report that the device is full.
+    """
+    weights_bytes = getattr(model_runner, "model_memory_usage", 0)
+    weights = (
+        f"The model weights take {format_gib(weights_bytes)} GiB. "
+        if weights_bytes
+        else ""
+    )
+    free_bytes, total_bytes = torch.accelerator.get_memory_info()
+    return (
+        "Not enough GPU memory to load the model. "
+        f"{weights}{format_gib(free_bytes)} GiB of {format_gib(total_bytes)} GiB "
+        "is free, and the KV cache is sized after this. Use a smaller or "
+        "quantized checkpoint, a GPU with more memory, tensor_parallel_size > 1, "
+        "or a lower max_num_seqs, and check that no other process is using "
+        "this GPU. See "
+        "https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+        "for more details."
+    )
+
+
 def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     return (
@@ -651,13 +676,16 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        with (
-            self._maybe_get_memory_pool_context(tag="weights"),
-            set_current_vllm_config(self.vllm_config),
-            self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
-            self._external_weight_charges.track(),
-        ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        try:
+            with (
+                self._maybe_get_memory_pool_context(tag="weights"),
+                set_current_vllm_config(self.vllm_config),
+                self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
+                self._external_weight_charges.track(),
+            ):
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        except torch.OutOfMemoryError as e:
+            raise ValueError(_model_load_oom_message(self.model_runner)) from e
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
