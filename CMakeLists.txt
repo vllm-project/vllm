@@ -1251,12 +1251,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "10.0f" "${CUDA_ARCHS}")
   endif()
   if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
-    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC "csrc/qwen4_exp/hc_up_gate_mix.cu")
+    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC
+      "csrc/qwen4_exp/hc_up_gate_mix.cu"
+      "csrc/qwen4_exp/hc_down_silu.cu")
     set_gencode_flags_for_srcs(
       SRCS "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}"
       CUDA_ARCHS "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}")
-    message(STATUS "Building Qwen4Exp HC up+gate mix for archs: "
+    message(STATUS "Building Qwen4Exp HC SM100 kernels for archs: "
       "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
   endif()
 
