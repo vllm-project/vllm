@@ -1339,8 +1339,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         revision="refs/pr/8",
     ),
-    "Phi4MMForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
+    "Phi4MultimodalForCausalLM": _HfExamplesInfo(
+        "microsoft/Phi-4-multimodal-instruct",
+        revision="refs/pr/70",
+        min_transformers_version="5.25.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/51386 "
+            "and https://github.com/huggingface/transformers/pull/51385"
+        },
     ),
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",

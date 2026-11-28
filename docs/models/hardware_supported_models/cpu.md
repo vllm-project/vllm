@@ -76,7 +76,7 @@ For converter usage and interactive model/hardware discovery, see the
 | google/gemma-4-E4B-it | Gemma4ForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Google/gemma-4-E4B-it?hardware=xeon6) |
 | google/gemma-4-E2B-it | Gemma4ForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Google/gemma-4-E2B-it?hardware=xeon6) |
 | google/gemma-4-26B-A4B-it | Gemma4ForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Google/gemma-4-26B-A4B-it?hardware=xeon6) |
-| microsoft/Phi-4-multimodal-instruct | Phi4MMForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/microsoft/Phi-4-multimodal-instruct?hardware=xeon6) |
+| microsoft/Phi-4-multimodal-instruct | Phi4MultimodalForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/microsoft/Phi-4-multimodal-instruct?hardware=xeon6) |
 | Qwen/Qwen2.5-VL-7B-Instruct | Qwen2VLForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen2.5-VL-7B-Instruct?hardware=xeon6) |
 | Qwen/Qwen3-VL-30B-A3B-Instruct | Qwen3VLMoeForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-VL-30B-A3B-Instruct?hardware=xeon6) |
 | openai/whisper-large-v3 | WhisperForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/openai/whisper-large-v3?hardware=xeon6) |

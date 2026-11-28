@@ -23,19 +23,22 @@ from ....conftest import (
     VllmRunner,
 )
 from ....utils import large_gpu_test
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     {
-        "stop_sign": "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
-        "cherry_blossom": "<|user|>\n<|image_1|>\nPlease infer the season with reason in details.<|end|>\n<|assistant|>\n",  # noqa: E501
+        "stop_sign": "<|user|>\n<|image|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
+        "cherry_blossom": "<|user|>\n<|image|>\nPlease infer the season with reason in details.<|end|>\n<|assistant|>\n",  # noqa: E501
     }
 )
 HF_MULTIIMAGE_IMAGE_PROMPT = (
-    "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
+    "<|user|>\n<|image|>\n<|image|>\nDescribe these images.<|end|>\n<|assistant|>\n"
 )
 
-model_path = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
+model_path = hf_api().snapshot_download(
+    "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+)
 # Since the vision-lora and speech-lora co-exist with the base model,
 # we have to manually specify the path of the lora weights.
 vision_lora_path = os.path.join(model_path, "vision-lora")
@@ -101,10 +104,16 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     # max_model_len should be greater than image_feature_size
+    HF_EXAMPLE_MODELS.get_hf_info(
+        "Phi4MultimodalForCausalLM"
+    ).check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     with vllm_runner(
         model,
         runner="generate",
-        trust_remote_code=True,
         max_model_len=max_model_len,
         max_num_seqs=2,
         dtype=dtype,
@@ -279,7 +288,7 @@ def test_vision_speech_models(
 
     inputs_vision_speech = [
         (
-            ["<|user|><|image_1|><|audio_1|><|end|><|assistant|>"],
+            ["<|user|><|image|><|audio|><|end|><|assistant|>"],
             [image],
             [audio],
         ),

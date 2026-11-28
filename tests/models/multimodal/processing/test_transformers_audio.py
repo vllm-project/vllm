@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
+import torch
 import transformers
 from packaging.version import Version
+from PIL import Image
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -398,3 +403,102 @@ def test_diarized_stream_parser_rejects_unparsable_transformers_output(vibevoice
         assert list(parser.process_delta(char, finished=False)) == []
     with pytest.raises(ValueError, match="valid diarized transcript"):
         list(parser.process_delta("", finished=True))
+
+
+@pytest.mark.parametrize("has_projection_mode", [True, False])
+def test_audio_projection_cache_identity_and_missing_kwargs(has_projection_mode):
+    from vllm.multimodal.parse import (
+        AudioProcessorItems,
+        ImageProcessorItems,
+        MultiModalDataItems,
+    )
+    from vllm.multimodal.processing.inputs import ProcessorInputs
+
+    proc = TransformersMultiModalProcessor.__new__(TransformersMultiModalProcessor)
+    proc.info = SimpleNamespace(
+        model_id="test-model",
+        _has_audio_projection_mode=has_projection_mode,
+        ctx=SimpleNamespace(
+            get_mm_config=lambda: SimpleNamespace(mm_hasher_algorithm="blake3")
+        ),
+    )
+
+    audio = np.ones(1600, dtype=np.float32)
+    img1 = Image.new("RGB", (16, 16), color="red")
+    img2 = Image.new("RGB", (16, 16), color="blue")
+
+    def _inputs(img):
+        items = {"audio": AudioProcessorItems([audio])}
+        if img is not None:
+            items["image"] = ImageProcessorItems([img])
+        return ProcessorInputs(prompt=[1, 2], mm_data_items=MultiModalDataItems(items))
+
+    h_speech = proc._get_mm_hashes(_inputs(None))["audio"][0]
+    h_vision1 = proc._get_mm_hashes(_inputs(img1))["audio"][0]
+    h_vision2 = proc._get_mm_hashes(_inputs(img2))["audio"][0]
+
+    assert h_vision1 == h_vision2
+    if has_projection_mode:
+        assert h_speech != h_vision1
+        missing = proc._get_cache_missing_processor_kwargs(
+            _inputs(img1), {"image": [True], "audio": [False]}
+        )
+        assert missing == {"_audio_with_image": True}
+    else:
+        assert h_speech == h_vision1
+        missing = proc._get_cache_missing_processor_kwargs(
+            _inputs(img1), {"image": [True], "audio": [False]}
+        )
+        assert "_audio_with_image" not in missing
+
+
+@pytest.mark.parametrize("ragged", [False, True])
+def test_process_audio_input_routes_mixed_projection_modes(ragged):
+    from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+
+    calls: list[tuple[int, str]] = []
+
+    def _get_audio_features(features, return_dict=True, **kwargs):
+        mode = kwargs["audio_projection_mode"]
+        sizes = kwargs["audio_embed_sizes"].tolist()
+        calls.append((len(features), mode))
+        val = 1.0 if mode == "vision" else 2.0
+        return BaseModelOutputWithPooling(
+            pooler_output=[torch.full((s, 4), val) for s in sizes]
+        )
+
+    mixin = SimpleNamespace(
+        model=SimpleNamespace(get_audio_features=_get_audio_features),
+        _has_audio_projection_mode=True,
+    )
+    mixin._split_embeddings = lambda *a: MultiModalMixin._split_embeddings(mixin, *a)
+    mixin._split_feature_outputs = lambda *a: MultiModalMixin._split_feature_outputs(
+        mixin, *a
+    )
+    mixin._select_item_kwargs = lambda *a: MultiModalMixin._select_item_kwargs(
+        mixin, *a
+    )
+
+    split_sizes = [2, 3, 2]
+    features = (
+        [torch.zeros(4, 8), torch.zeros(6, 8), torch.zeros(5, 8)]
+        if ragged
+        else torch.zeros(3, 4, 8)
+    )
+    out = MultiModalMixin._process_audio_input(
+        mixin,
+        audio_input_features=features,
+        audio_embed_sizes=torch.tensor(split_sizes),
+        num_audio_tokens=torch.tensor(split_sizes),
+        audio_with_image=torch.tensor([False, True, False]),
+    )
+
+    assert out is not None
+    assert [t.shape for t in out] == [(2, 4), (3, 4), (2, 4)]
+    assert [float(t[0, 0]) for t in out] == [2.0, 1.0, 2.0]
+    expected_calls = (
+        [(1, "speech"), (1, "vision"), (1, "speech")]
+        if ragged
+        else [(2, "speech"), (1, "vision")]
+    )
+    assert calls == expected_calls

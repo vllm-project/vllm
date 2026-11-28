@@ -303,6 +303,15 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
+    def _set_text_attn_implementation(self, impl: str):
+        # PreTrainedConfig._attn_implementation setter recurses into sub_configs
+        # (including vision/audio configs on flat multimodal configs where
+        # text_config is config); dict key "" sets only text_config itself.
+        if isinstance(self.text_config, PreTrainedConfig):
+            self.text_config._attn_implementation = {"": impl}
+        else:
+            self.text_config._attn_implementation = impl
+
     def _patch_config(self):
         """Patch the config to ensure that the model is created correctly:
 
@@ -311,7 +320,7 @@ class Base(
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
-        self.text_config._attn_implementation = VLLM_ATTN_IMPL
+        self._set_text_attn_implementation(VLLM_ATTN_IMPL)
         self.config.dtype = torch.get_default_dtype()
 
     @contextmanager
@@ -687,7 +696,18 @@ class Base(
 
             orig_to_new_stacked.update(fuser.orig_to_new_stacked(prefix))
 
-            packed_modules_mapping = fuser.packed_modules_mapping
+            # Decoder fusers take precedence over tower fusers when both share
+            # a packed module suffix (e.g. LM packed `qkv_proj` vs encoder
+            # fused `q_proj + k_proj + v_proj -> qkv_proj`).
+            in_tower = any(
+                prefix == t or prefix.startswith(f"{t}.")
+                for t in self._tower_model_names
+            )
+            packed_modules_mapping = {
+                name: shards
+                for name, shards in fuser.packed_modules_mapping.items()
+                if not (in_tower and name in self.packed_modules_mapping)
+            }
             self.packed_modules_mapping.update(packed_modules_mapping)
             if self.quant_config is not None:
                 self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
@@ -814,7 +834,7 @@ class Base(
         # kv_lora_rank indicates that this is an MLA model
         if getattr(text_config, "kv_lora_rank", None) is not None:
             if attn_cls is MLAAttention:
-                text_config._attn_implementation = VLLM_MLA_ATTN_IMPL
+                self._set_text_attn_implementation(VLLM_MLA_ATTN_IMPL)
             else:
                 # MLA model not using MLAAttention: recompute head_size for full attn
                 qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)

@@ -852,6 +852,15 @@ class LoRAModelManager:
             return lm_wrapper
 
         # For multimodal model
+        # Exclude tower/connector prefixes when disabled so flat models whose
+        # language_model prefix is an ancestor (e.g. "model.") never route
+        # encoder/connector modules onto the LM punica wrapper.
+        if not self.supports_tower_connector_lora and any(
+            module_name.startswith(prefix)
+            for prefix in (*self.mm_mapping.tower_model, *self.mm_mapping.connector)
+        ):
+            return None
+
         # NOTE Sort by prefix length (descending) to match the longest prefix first
         # e.g., 'visual.merger' should match 'visual.merger' instead of 'visual.'
         for prefix in sorted(self.punica_wrapper_mapping.keys(), key=len, reverse=True):
