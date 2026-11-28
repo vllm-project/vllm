@@ -11,8 +11,8 @@ repos:
   hooks:
   - id: runner-snapshot
     name: runner snapshot
-    entry: python tools/pre_commit/check_spdx_header.py
-    language: python
+    entry: python3 tools/pre_commit/check_spdx_header.py
+    language: system
     types: [python]
     pass_filenames: false
 - repo: https://github.com/astral-sh/ruff-pre-commit
