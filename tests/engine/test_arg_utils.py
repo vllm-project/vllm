@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from typing import Annotated, Literal
 
@@ -17,6 +18,7 @@ from vllm.config import (
     ModelConfig,
     config,
 )
+from vllm.config.mamba import MambaConfig
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -189,6 +191,38 @@ def test_engram_config_cli_optional(options, provided, dp_shared_memory):
     if provided:
         assert args.engram_config.cpu_offload is True
         assert args.engram_config.dp_shared_memory is dp_shared_memory
+
+
+@pytest.mark.parametrize(
+    ("nested", "options", "expected"),
+    [
+        (MambaConfig(), [], None),
+        ({"prefill_backend": "flashinfer"}, [], "flashinfer"),
+        ({}, ["--mamba-prefill-backend", "triton"], "triton"),
+    ],
+)
+def test_mamba_prefill_backend_passes_through_to_mamba_config(
+    nested, options, expected
+):
+    """The flag sets `MambaConfig.prefill_backend`; unset, it leaves the field."""
+    original = deepcopy(nested)
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    namespace = parser.parse_args(["--model", "facebook/opt-125m", *options])
+    namespace.mamba_config = nested
+    args = EngineArgs.from_cli_args(namespace)
+
+    assert args.create_engine_config().mamba_config.prefill_backend == expected
+    assert nested == original
+
+
+def test_mamba_prefill_backend_and_mamba_config_field_are_mutually_exclusive():
+    args = EngineArgs(
+        model="facebook/opt-125m",
+        mamba_config=MambaConfig(prefill_backend="triton"),
+        mamba_prefill_backend="triton",
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        args.create_engine_config()
 
 
 @pytest.mark.parametrize(
