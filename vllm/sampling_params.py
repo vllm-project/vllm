@@ -782,6 +782,14 @@ class SamplingParams(
             )
 
     def _verify_extra_args(self) -> None:
+        # msgspec rejects the same integers in C. The walk is slow on long KV
+        # block-id lists, which the engine re-verifies on every request decode.
+        try:
+            msgspec.msgpack.encode(self.extra_args)
+        except Exception:
+            self._verify_extra_args_int_range()
+
+    def _verify_extra_args_int_range(self) -> None:
         # JSON accepts arbitrary integers, but the engine's MessagePack
         # transport only supports signed/unsigned 64-bit integers.
         pending: list[Any] = [self.extra_args]
