@@ -811,7 +811,9 @@ Setting `--probe-request-rate` to a positive value sends single-token text-only
 probe requests at that rate (requests per second) alongside the main workload.
 Probes bypass `--max-concurrency` and their latency is reported separately, so
 the probe percentiles directly measure the interference that the main workload
-inflicts on unrelated requests.
+inflicts on unrelated requests. When probes are enabled, the report includes
+the number of successful and failed probes even if all fail. Probe latency
+statistics are reported only when at least one probe succeeds.
 
 ```bash
 vllm bench serve \
