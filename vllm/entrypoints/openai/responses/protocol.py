@@ -611,7 +611,7 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
-    """CAUTION: Should only be set by the parser's adjust_request."""
+    """Set by parser request-adjustment hooks when they install a grammar."""
 
     _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
         default=None
