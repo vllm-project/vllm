@@ -71,6 +71,7 @@ EOS_TOKEN_ID = 50256
 
 def create_mock_connector() -> Mock:
     connector = Mock()
+    connector.get_kv_provenance.return_value = None
     connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
         {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
     )
@@ -285,6 +286,7 @@ def create_request(
     num_remote_blocks: int = 3,
     block_size: int = 16,
     hash_fn: Callable = sha256,
+    cache_salt: str | None = None,
 ) -> Request:
     """Make dummy request for testing."""
     assert num_tokens >= common_prefix_len >= 0
@@ -328,6 +330,7 @@ def create_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=None,
+        cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params

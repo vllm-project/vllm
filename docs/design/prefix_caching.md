@@ -99,6 +99,9 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
+**KV that a connector supplies but the model would not compute**
+A KV connector may load KV that differs from what the model computes for the request's tokens, such as KV translated from another model or a compressed cache. Such a connector returns a `KVProvenance` from `get_kv_provenance(request)`. vLLM then adds its `tag` to the hash of the request's first block, apart from `cache_salt`, so only requests with the same tag reuse those blocks. Connectors that key their own store on tokens and `cache_salt` must also key it on `request.kv_provenance`.
+
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):

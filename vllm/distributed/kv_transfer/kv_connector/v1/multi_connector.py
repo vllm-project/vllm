@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
+    KVProvenance,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -559,6 +560,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             else:
                 # Other connectors still receive the request's real blocks
                 c.update_state_after_alloc(request, blocks, 0)
+
+    def get_kv_provenance(self, request: "Request") -> KVProvenance | None:
+        provenances = [
+            provenance
+            for c in self._connectors
+            if (provenance := c.get_kv_provenance(request)) is not None
+        ]
+        if len(set(provenances)) > 1:
+            logger.warning_once(
+                "KV connectors declare different provenances for one request; "
+                "keying it under the first: %s",
+                provenances[0].tag,
+            )
+        return provenances[0] if provenances else None
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:

@@ -3214,6 +3214,12 @@ class Scheduler(SchedulerInterface):
             if request.resumable:
                 request.streaming_queue = deque()
             if self.connector is not None:
+                provenance = self.connector.get_kv_provenance(request)
+                if provenance is not None:
+                    # Key the request's blocks apart from native KV.
+                    request.kv_provenance = provenance.tag
+                    request.block_hashes.clear()
+                    request.update_block_hashes()
                 # Before enqueueing: may_load_async can use what this records.
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)

@@ -99,6 +99,19 @@ class KVConnectorTransferResults:
     failed_recving: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True, slots=True)
+class KVProvenance:
+    """Where the KV a connector loads for a request comes from, when it is not
+    the KV the model computes from the request's tokens (e.g. translated from
+    another model, or compressed).
+
+    The request's prefix-cache entries are keyed under `tag`, so only requests
+    with the same tag reuse them.
+    """
+
+    tag: str
+
+
 class SupportsHMA(ABC):
     """The class that indicates the corresponding connector supports hybrid memory
     allocator (HMA).
@@ -664,6 +677,17 @@ class KVConnectorBase_V1(ABC):
 
         """
         pass
+
+    def get_kv_provenance(self, request: "Request") -> KVProvenance | None:
+        """Provenance of the KV this connector may load for `request`, or None
+        if it is the KV the model computes from the request's tokens.
+
+        Called once when the request is added, before `on_new_request` and
+        any prefix-cache lookup. Connectors that key their own store on the
+        request's tokens and `cache_salt` must also key it on
+        `request.kv_provenance`.
+        """
+        return None
 
     def on_new_request(self, request: "Request") -> None:
         """Called by the scheduler when a new request is added.

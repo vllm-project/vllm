@@ -1217,6 +1217,13 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     assert to_event_extra_keys([]) is None
     assert to_event_extra_keys(None) is None
 
+    # A KV provenance changes the block hash, not the published keys.
+    request.kv_provenance = "translated:a"
+    tagged_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert tagged_keys == extra_keys + (("kv_provenance", "translated:a"),)
+    assert to_event_extra_keys([tagged_keys]) == [event_keys]
+    assert to_event_extra_keys([(("kv_provenance", "translated:a"),)]) == [None]
+
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
