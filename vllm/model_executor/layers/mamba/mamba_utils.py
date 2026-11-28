@@ -130,6 +130,15 @@ class MambaStateDtypeCalculator:
         base_dtypes = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+        conv_state_dtype, temporal_state_dtype = base_dtypes
+        if temporal_state_dtype == torch.float16:
+            raise ValueError(
+                "Gated delta net SSM state does not support float16: the "
+                "recurrent state is an unnormalized accumulator that "
+                "saturates inside an fp16 cache over long context, corrupting "
+                "outputs. Use --mamba-ssm-cache-dtype float32 or bfloat16 "
+                f"(resolved {mamba_ssm_cache_dtype!r} to float16)."
+            )
         if not use_replayssm:
             return base_dtypes
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)

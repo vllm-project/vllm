@@ -228,6 +228,14 @@ def _gdn_attention_core_xpu_impl(
         self.conv1d.weight.size(0), self.conv1d.weight.size(2)
     )
 
+    # The SYCL GDN kernels require dt_bias to share core_attn_out's dtype.
+    # With a fp32 SSM state the readout buffer is widened to fp32 (see
+    # _core_attn_out_dtype), so pre-cast dt_bias instead of failing the
+    # vendor dtype check. dt_bias is a per-head vector; the cast is tiny.
+    dt_bias = self.dt_bias
+    if dt_bias.dtype != core_attn_out.dtype:
+        dt_bias = dt_bias.to(core_attn_out.dtype)
+
     torch.ops._xpu_C.gdn_attention(
         core_attn_out,
         z,
@@ -243,7 +251,7 @@ def _gdn_attention_core_xpu_impl(
         conv_bias=self.conv1d.bias,
         activation=self.activation,
         A_log=self.A_log,
-        dt_bias=self.dt_bias,
+        dt_bias=dt_bias,
         num_prefills=num_prefills,  # type: ignore[attr-defined]
         num_decodes=num_decodes,  # type: ignore[attr-defined]
         num_spec_decodes=num_spec_decodes,  # type: ignore[attr-defined]
