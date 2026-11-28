@@ -3073,3 +3073,56 @@ async def test_streaming_derender_logprob_override(
     else:
         assert choice["logprobs"]["tokens"] == [expected]
         assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]
+
+
+DEEPSEEK_V3_MODEL = "deepseek-ai/DeepSeek-V3"
+
+
+@pytest.fixture(scope="module")
+def deepseek_v3_server():
+    args = ["--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v3"]
+    with RemoteLaunchRenderServer(DEEPSEEK_V3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_stream_parsed_deepseek_v3_content_in_tool_call_start_chunk(
+    deepseek_v3_server,
+):
+    """Content is streamed whole when its tail shares a chunk with the tool
+    call start tokens."""
+    tokenizer = get_tokenizer(DEEPSEEK_V3_MODEL)
+    text_ids = tokenizer.encode("Let me check the weather.", add_special_tokens=False)
+    call_ids = tokenizer.encode(
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>"
+        'get_weather\n```json\n{"city": "Paris"}\n```<｜tool▁call▁end｜>'
+        "<｜tool▁calls▁end｜>",
+        add_special_tokens=False,
+    )
+    chat_request = {
+        "model": DEEPSEEK_V3_MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": _PARSER_TOOLS,
+        "tool_choice": "auto",
+    }
+
+    async with httpx.AsyncClient(
+        base_url=deepseek_v3_server.url_for(""), timeout=60.0
+    ) as client:
+        resp = await client.post("/v1/chat/completions/render", json=chat_request)
+        assert resp.status_code == 200, resp.text
+        prompt_token_ids = resp.json()["token_ids"]
+        # The last two text tokens and both start tokens form one chunk.
+        streamed = await stream_chat_derender(
+            client,
+            text_ids + call_ids,
+            [1] * (len(text_ids) - 2) + [4] + [1] * (len(call_ids) - 2),
+            chat_request,
+            len(prompt_token_ids),
+            prompt_token_ids,
+        )
+
+    assert streamed["content"] == "Let me check the weather."
+    assert [(tc["name"], tc["arguments"]) for tc in streamed["tool_calls"]] == [
+        ("get_weather", '{"city": "Paris"}')
+    ]

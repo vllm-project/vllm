@@ -9,7 +9,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -146,3 +146,38 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
         assert len(tool_calls) == 1
         assert tool_calls[0].function.name == "get_weather"
         assert tool_calls[0].function.arguments == '{"city": "Paris"}'
+
+    @pytest.mark.parametrize(
+        "deltas",
+        [
+            [
+                "Let me check",
+                " the weather.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>",
+                "function<｜tool▁sep｜>get_weather\n```json\n",
+                '{"city": "Paris"}\n',
+                "```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+            ],
+            [
+                "Let me check",
+                (
+                    " the weather.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>"
+                    "function<｜tool▁sep｜>get_weather\n```json\n"
+                ),
+                '{"city": "Paris"}\n',
+                "```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+            ],
+        ],
+        ids=["text_and_start_tokens", "text_start_tokens_and_name"],
+    )
+    def test_streaming_keeps_text_in_delta_with_tool_call_start(
+        self, tool_parser, deltas: list[str]
+    ) -> None:
+        # Multi-token deltas (--stream-interval, speculative decoding) can put
+        # text and the tool call start tokens in the same delta.
+        reconstructor = run_tool_extraction_streaming(tool_parser, deltas)
+
+        assert reconstructor.other_content == "Let me check the weather."
+        assert [
+            (call.function.name, call.function.arguments)
+            for call in reconstructor.tool_calls
+        ] == [("get_weather", '{"city": "Paris"}')]
