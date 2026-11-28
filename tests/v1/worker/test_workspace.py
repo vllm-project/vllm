@@ -12,6 +12,37 @@ from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_worker import _num_workspace_lanes
 
 
+def test_disabled_trtllm_workspace_skips_sizing_and_allocation(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.experts import trtllm_moe_base
+
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_USE_WORKSPACE", "0")
+    monkeypatch.setattr(
+        trtllm_moe_base, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        trtllm_moe_base, "has_flashinfer_trtllm_fused_moe_workspace", lambda: True
+    )
+    sizer = Mock(side_effect=AssertionError("workspace sizing must be bypassed"))
+    manager = Mock(side_effect=AssertionError("workspace allocation must be bypassed"))
+    monkeypatch.setattr(
+        trtllm_moe_base, "flashinfer_trtllm_fused_moe_workspace_size", sizer
+    )
+    monkeypatch.setattr(trtllm_moe_base, "current_workspace_manager", manager)
+    result = trtllm_moe_base.TrtLlmExpertsBase._get_workspace(
+        Mock(_workspace_rows=128, local_num_experts=16),
+        torch.empty(1, 128),
+        quant_mode="bf16",
+        hidden_size=128,
+        intermediate_size=128,
+        num_experts=16,
+        top_k=2,
+        activation_type=0,
+    )
+    assert result is None
+    sizer.assert_not_called()
+    manager.assert_not_called()
+
+
 class _SpecConfig:
     def __init__(self, dspark: bool) -> None:
         self._dspark = dspark
