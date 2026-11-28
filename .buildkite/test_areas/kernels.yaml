@@ -38,6 +38,7 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 120
   source_file_dependencies:
+  - tests/kernels/test_hierarchical_lm_head.py
   - csrc/
   - tests/kernels/core
   - vllm/kernels/triton/
@@ -51,6 +52,7 @@ steps:
       --ignore=kernels/core/test_minimax_reduce_rms.py
       kernels/test_concat_mla_q.py
       kernels/test_fused_qk_norm_rope_gate.py
+      kernels/test_hierarchical_lm_head.py
   mirror:
     amd:
       label: ":amd: (MI300) Core Operation Kernels"

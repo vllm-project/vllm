@@ -32,6 +32,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.hierarchical_lm_head import HierarchicalLMHead
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -58,94 +59,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-class Gemma4MTPMaskedEmbedder(nn.Module):
-    """Sparse logit computation via centroid-based vocabulary masking.
-
-    Instead of computing logits against the full vocabulary, projects
-    hidden states to centroid scores, selects top-K centroids, and
-    computes logits only for the ~top_k * (vocab_size / num_centroids)
-    tokens belonging to those centroids.
-    """
-
-    token_ordering: torch.Tensor
-
-    def __init__(
-        self,
-        hidden_size: int,
-        vocab_size: int,
-        num_centroids: int,
-        centroid_intermediate_top_k: int,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.vocab_size = vocab_size
-        self.num_centroids = num_centroids
-        self.centroid_intermediate_top_k = centroid_intermediate_top_k
-        self.vocab_size_per_centroid = vocab_size // num_centroids
-        self.num_selected = centroid_intermediate_top_k * self.vocab_size_per_centroid
-
-        self.centroids = nn.Linear(hidden_size, num_centroids, bias=False)
-        self.register_buffer(
-            "token_ordering",
-            torch.empty(vocab_size, dtype=torch.long),
-        )
-
-    def _select_and_score(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Centroid selection + sparse dot product.
-
-        Returns:
-            logits: (num_tokens, num_selected) sparse logits.
-            indices: (num_tokens, num_selected) corresponding vocab indices.
-
-        """
-        num_tokens = hidden_states.shape[0]
-        _, top_k_indices = torch.topk(
-            self.centroids(hidden_states),
-            k=self.centroid_intermediate_top_k,
-            dim=-1,
-        )
-        clusters = self.token_ordering.view(
-            self.num_centroids,
-            self.vocab_size_per_centroid,
-        )
-        selected = clusters[top_k_indices]
-        embeddings = lm_head_weight[selected.reshape(-1)].view(
-            num_tokens,
-            self.num_selected,
-            self.hidden_size,
-        )
-        logits = torch.einsum("td,tsd->ts", hidden_states, embeddings)
-        return logits, selected.view(num_tokens, -1)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-    ) -> torch.Tensor:
-        """Full-vocab logits with non-selected positions masked to -inf."""
-        logits, indices = self._select_and_score(hidden_states, lm_head_weight)
-        output = torch.full(
-            (hidden_states.shape[0], self.vocab_size),
-            fill_value=torch.finfo(hidden_states.dtype).min,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        return output.scatter_(-1, indices, logits)
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-    ) -> torch.Tensor:
-        """Sparse argmax — returns vocab token IDs without full-vocab tensor."""
-        logits, indices = self._select_and_score(hidden_states, lm_head_weight)
-        return indices.gather(-1, logits.argmax(-1, keepdim=True)).squeeze(-1)
 
 
 class Gemma4MTPAttention(nn.Module):
@@ -497,16 +410,14 @@ class Gemma4MTP(nn.Module):
             soft_cap=getattr(text_config, "final_logit_softcapping", None),
         )
 
-        self.masked_embedding: Gemma4MTPMaskedEmbedder | None
-        if getattr(config, "use_ordered_embeddings", False):
-            num_centroids = getattr(config, "num_centroids", 2048)
-            top_k = getattr(config, "centroid_intermediate_top_k", 32)
-            self.masked_embedding = Gemma4MTPMaskedEmbedder(
-                hidden_size=text_config.hidden_size,
-                vocab_size=text_config.vocab_size,
-                num_centroids=num_centroids,
-                centroid_intermediate_top_k=top_k,
-            )
+        self.masked_embedding = HierarchicalLMHead.from_config(
+            config,
+            hidden_size=text_config.hidden_size,
+            vocab_size=text_config.vocab_size,
+        )
+        if self.masked_embedding is not None:
+            num_centroids = self.masked_embedding.num_centroids
+            top_k = self.masked_embedding.centroid_intermediate_top_k
             logger.info(
                 "Gemma4 MTP: centroids masking enabled "
                 "(num_centroids=%d, top_k=%d, active_tokens=%d/%d).",
@@ -515,8 +426,6 @@ class Gemma4MTP(nn.Module):
                 top_k * (text_config.vocab_size // num_centroids),
                 text_config.vocab_size,
             )
-        else:
-            self.masked_embedding = None
 
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()

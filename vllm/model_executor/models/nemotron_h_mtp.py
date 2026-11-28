@@ -15,6 +15,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.hierarchical_lm_head import HierarchicalLMHead
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -384,6 +385,19 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
 
         self.lm_head: ParallelLMHead | None = None
 
+        self.masked_embedding = HierarchicalLMHead.from_config(
+            config,
+            hidden_size=config.hidden_size,
+            vocab_size=config.vocab_size,
+        )
+        if self.masked_embedding is not None:
+            if speculative_config.draft_lm_head_quantization is not None:
+                raise ValueError(
+                    "The hierarchical head requires floating-point vocabulary weights"
+                )
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise ValueError("Hierarchical Nemotron head requires TP=1")
+
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
@@ -443,14 +457,28 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
         assert self.lm_head is not None, (
             "lm_head not initialized - must be shared from target model"
         )
+        if self.masked_embedding is not None:
+            return self.masked_embedding(hidden_states, self.lm_head.weight)
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.lm_head is not None
+        if self.masked_embedding is not None:
+            return self.masked_embedding.get_top_tokens(
+                hidden_states, self.lm_head.weight
+            )
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def is_unused_checkpoint_weight(self, name: str) -> bool:
-        """Only MTP weights are loaded: the embedding and LM head are the
-        target's, shared after loading, so a target refit also updates the
-        drafter."""
+        """Load MTP and router weights; embeddings and head are target-shared."""
         name = name.removeprefix("language_model.")
-        return not name.startswith("mtp.")
+        return not (
+            name.startswith("mtp.")
+            or (
+                self.masked_embedding is not None
+                and name.startswith("masked_embedding.")
+            )
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -477,12 +505,19 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        router_weights = []
 
         for name, loaded_weight in weights:
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
             if self.is_unused_checkpoint_weight(name):
+                continue
+            if name.startswith("masked_embedding."):
+                assert self.masked_embedding is not None
+                router_weights.append(
+                    (name.removeprefix("masked_embedding."), loaded_weight)
+                )
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
@@ -570,4 +605,9 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        if self.masked_embedding is not None:
+            loaded_params.update(
+                "masked_embedding." + name
+                for name in self.masked_embedding.load_weights(router_weights)
+            )
         return loaded_params
