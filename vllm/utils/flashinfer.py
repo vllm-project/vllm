@@ -23,6 +23,7 @@ from packaging.version import Version
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -79,6 +80,29 @@ def _flashinfer_nvcc_path() -> str | None:
             os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
         )
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
+
+
+# Compiling the dense CUTLASS NVFP4 kernel has used ~6 GiB per compiler job.
+_FLASHINFER_JIT_JOB_BYTES = 8 * 1024**3
+
+
+@functools.cache
+def _limit_flashinfer_jit_parallelism() -> None:
+    """Set a worker-wide Ninja default at the first dense CUTLASS NVFP4 GEMM."""
+    if "MAX_JOBS" in os.environ:
+        return
+
+    available = get_available_memory()
+    jobs = max(1, (available // 2) // _FLASHINFER_JIT_JOB_BYTES)
+    jobs = min(jobs, os.cpu_count() or 1)
+
+    max_jobs = os.environ.setdefault("MAX_JOBS", str(jobs))
+    logger.info_once(
+        "Using MAX_JOBS=%s for FlashInfer JIT compilation: %.1f GiB "
+        "of host memory is available. Set MAX_JOBS to override.",
+        max_jobs,
+        available / 1024**3,
+    )
 
 
 @functools.cache
@@ -1083,6 +1107,8 @@ if has_flashinfer():
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
+        if backend == "cutlass" and use_nvfp4:
+            _limit_flashinfer_jit_parallelism()
         return flashinfer_mm_fp4_(
             A,
             B,

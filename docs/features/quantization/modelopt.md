@@ -57,6 +57,13 @@ module prefix and decoder layer indices before constructing quantized layers.
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
 
+    At the first dense FlashInfer CUTLASS NVFP4 GEMM, after weight loading, vLLM
+    sets `MAX_JOBS` if it is unset. Each worker budgets 8 GiB per compiler job
+    against half of its available host memory (including cgroup limits), with
+    at least one job and at most the CPU count. The setting stays in the worker
+    environment and can affect subsequent JIT builds. Set `MAX_JOBS` before
+    starting vLLM to choose a different limit.
+
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
