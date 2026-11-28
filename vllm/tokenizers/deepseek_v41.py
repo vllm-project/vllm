@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-from collections.abc import Iterator
+import functools
+import json
+import uuid
+from collections.abc import Callable, Iterator
 from typing import Any
 
+import regex as re
+import tokenizers
 from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
@@ -13,21 +18,67 @@ from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
     REASONING_EFFORT_MAPPINGS,
     encode_messages,
+    parse_tool_call_arguments,
 )
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
+# As in deepseek-recipe, every added token in client text is plain text; images
+# come from image parts. Escaped text is wrapped in per-call sentinels.
+_ESCAPE_OPEN = "\ue000"
+_ESCAPE_CLOSE = "\ue001"
+# Message keys the encoder reads that no client may set.
+_ENCODER_KEYS = ("content_blocks", "updated_tools", "wo_eos", "_tool_references")
 
-def _reject_image_placeholder(text: Any) -> None:
-    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
-        raise ValueError(
-            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
-            "provide images as image content parts."
+# As in deepseek-recipe, the only special tokens that assistant content and
+# reasoning content can contain are the grounding tokens; every other added
+# token there is plain text.
+_ASSISTANT_SPECIAL_TOKENS = frozenset(
+    {
+        "<｜ref｜>",
+        "<｜/ref｜>",
+        "<｜box｜>",
+        "<｜/box｜>",
+        "<｜point｜>",
+        "<｜/point｜>",
+        "<｜polygon｜>",
+        "<｜/polygon｜>",
+    }
+)
+
+
+def _make_escape(
+    added_tokens_re: re.Pattern[str] | None, nonce: str
+) -> Callable[[Any], Any]:
+    prefix = f"{_ESCAPE_OPEN}{nonce}:"
+
+    def escape(text: Any) -> Any:
+        if text is not None and not isinstance(text, str):
+            raise ValueError(f"DeepSeek V4.1 expects text, got {type(text).__name__}")
+        if added_tokens_re is None or text is None:
+            return text
+        return added_tokens_re.sub(
+            lambda m: f"{prefix}{m.group(0)}{_ESCAPE_CLOSE}", text
         )
+
+    return escape
+
+
+def _escape_deep(value: Any, escape: Callable[[Any], Any]) -> Any:
+    """Escape every key and string of a JSON-like value."""
+    if isinstance(value, dict):
+        return {
+            _escape_deep(k, escape): _escape_deep(v, escape) for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_escape_deep(v, escape) for v in value]
+    return escape(value) if isinstance(value, str) else value
 
 
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
+    escape: Callable[[Any], Any],
+    escape_assistant: Callable[[Any], Any],
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # tool_reference, and ValueError (400) instead of the reference's asserts.
@@ -41,24 +92,27 @@ def _normalize_messages(
         result.append(dict(copy.deepcopy(original_message)))
     image_idx = 0
     for message in result:
+        for key in _ENCODER_KEYS:
+            message.pop(key, None)
         image_indices = message["_image_indices"] = []
         role = message.get("role")
         if role not in ("system", "developer", "user", "assistant", "tool"):
             raise ValueError(f"Invalid role: {role}")
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
-        _reject_image_placeholder(message.get("reasoning_content"))
+
+        # Assistant text keeps the grounding tokens, as in deepseek-recipe.
+        text_escape = escape_assistant if role == "assistant" else escape
+        if "reasoning_content" in message:
+            message["reasoning_content"] = text_escape(message["reasoning_content"])
         content = message.get("content")
-        if isinstance(content, str):
-            _reject_image_placeholder(content)
-        elif isinstance(content, list):
+        if isinstance(content, list):
             parts = []
             tool_references = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
-                    _reject_image_placeholder(block.get("text"))
-                    parts.append(block.get("text", ""))
+                    parts.append(text_escape(block.get("text", "")))
                 elif part_type in (
                     "image_url",
                     "input_image",
@@ -69,8 +123,7 @@ def _normalize_messages(
                     image_indices.append(image_idx)
                     image_idx += 1
                 elif part_type == "tool_reference":
-                    _reject_image_placeholder(block.get("name"))
-                    parts.append(block.get("name", ""))
+                    parts.append(escape(block.get("name", "")))
                     tool_references.append(block.get("name", ""))
                 else:
                     raise ValueError(
@@ -80,6 +133,16 @@ def _normalize_messages(
             message["content"] = "\n\n".join(parts)
             if tool_references:
                 message["_tool_references"] = tool_references
+        elif content is not None:
+            message["content"] = text_escape(content)
+        # Tool call names and arguments are plain text for every token.
+        for tool_call in message.get("tool_calls") or []:
+            function = tool_call["function"]
+            function["name"] = escape(function.get("name"))
+            # The same parsing as the encoder, so what it renders is escaped.
+            function["arguments"] = _escape_deep(
+                parse_tool_call_arguments(function.get("arguments")), escape
+            )
 
     return result
 
@@ -123,10 +186,58 @@ def _add_updated_tool_schemas(
     return result
 
 
+def _compile_added_tokens_pattern(tokens: list[str]) -> re.Pattern[str] | None:
+    """Match the longest added token at each position using shared prefixes."""
+    if not tokens:
+        return None
+
+    trie: dict[str, Any] = {}
+    for token in tokens:
+        node = trie
+        for char in token:
+            node = node.setdefault(char, {})
+        node[""] = {}  # End of a token, even if the node has children.
+
+    def build(node: dict[str, Any]) -> str:
+        branches = [
+            re.escape(char) + build(child) for char, child in node.items() if char
+        ]
+        if not branches:
+            return ""
+        if "" in node:
+            # Prefer a longer token before falling back to this prefix.
+            return f"(?:{'|'.join(branches)})?"
+        return branches[0] if len(branches) == 1 else f"(?:{'|'.join(branches)})"
+
+    return re.compile(build(trie))
+
+
 def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """Wrap an HF tokenizer with the V4.1 prompt encoder."""
     wrapped = copy.copy(tokenizer)
     added_vocab = tokenizer.get_added_vocab()
+
+    added_tokens_re = _compile_added_tokens_pattern(list(added_vocab))
+    assistant_tokens_re = _compile_added_tokens_pattern(
+        [t for t in added_vocab if t not in _ASSISTANT_SPECIAL_TOKENS]
+    )
+
+    @functools.cache
+    def plain_tokenizer() -> tokenizers.Tokenizer:
+        # A copy of the backend without the added vocabulary, so reserved
+        # tokens in a text are encoded as the ordinary text they spell, as in
+        # deepseek-recipe.
+        backend = getattr(tokenizer, "_tokenizer", None)
+        if backend is None:
+            raise RuntimeError(
+                "DeepSeek V4.1 needs a tokenizers-backed tokenizer to encode "
+                "reserved tokens in text as plain text"
+            )
+        spec = json.loads(backend.to_str())
+        spec["added_tokens"] = []
+        spec["truncation"] = None
+        spec["padding"] = None
+        return tokenizers.Tokenizer.from_str(json.dumps(spec))
 
     class _DeepseekV41Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
@@ -138,7 +249,11 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         ) -> str | list[int]:
             # The generic renderer's conversation has already flattened text
             # parts with '\n'. V4.1 encodes the original messages with '\n\n'.
-            conversation = _normalize_messages(messages)
+            nonce = uuid.uuid4().hex
+            escape = _make_escape(added_tokens_re, nonce)
+            conversation = _normalize_messages(
+                messages, escape, _make_escape(assistant_tokens_re, nonce)
+            )
             conversation = _add_updated_tool_schemas(conversation, tools)
             # As in deepseek-recipe, deferred tools load through tool search.
             listed = [_tool_schema(t) for t in tools or [] if not _is_deferred(t)]
@@ -160,6 +275,11 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     system = {"role": "system", "content": ""}
                     conversation.insert(0, system)
                 system["tools"] = listed
+            # Tool definitions and the response format schema are plain text.
+            for message in conversation:
+                for key in ("tools", "updated_tools", "response_format"):
+                    if key in message:
+                        message[key] = _escape_deep(message[key], escape)
 
             thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
             if "thinking" not in kwargs and "enable_thinking" not in kwargs:
@@ -188,14 +308,57 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 add_generation_prompt=kwargs.get("add_generation_prompt", True),
                 continue_final_message=kwargs.get("continue_final_message", False),
             )
-            if kwargs.get("tokenize", True):
-                tokenizer_kwargs = {
-                    key: kwargs[key]
-                    for key in ("truncation", "max_length")
-                    if key in kwargs
-                }
+            tokenizer_kwargs = {
+                key: kwargs[key]
+                for key in ("truncation", "max_length")
+                if key in kwargs
+            }
+            if nonce not in prompt:
+                if not kwargs.get("tokenize", True):
+                    return prompt
                 return self.encode(prompt, add_special_tokens=False, **tokenizer_kwargs)
-            return prompt
+
+            sentinel_re = re.compile(
+                f"{_ESCAPE_OPEN}{nonce}:(.*?){_ESCAPE_CLOSE}", re.DOTALL
+            )
+            # Tokenizing this text again would make the escaped tokens special.
+            if not kwargs.get("tokenize", True):
+                return sentinel_re.sub(lambda m: m.group(1), prompt)
+
+            # Added tokens outside the sentinels (even split parts) are special;
+            # the text between two of them is encoded whole, as in deepseek-recipe.
+            assert added_tokens_re is not None
+            regions: list[str] = []
+            special_ids: list[int] = []
+            run: list[str] = []
+            for index, part in enumerate(sentinel_re.split(prompt)):
+                if index % 2:
+                    run.append(part)
+                    continue
+                pos = 0
+                for m in added_tokens_re.finditer(part):
+                    run.append(part[pos : m.start()])
+                    regions.append("".join(run))
+                    run.clear()
+                    special_ids.append(added_vocab[m.group(0)])
+                    pos = m.end()
+                run.append(part[pos:])
+            regions.append("".join(run))
+            encodings = plain_tokenizer().encode_batch_fast(
+                regions, add_special_tokens=False
+            )
+            ids: list[int] = []
+            for encoding, special_id in zip(encodings, special_ids):
+                ids.extend(encoding.ids)
+                ids.append(special_id)
+            ids.extend(encodings[-1].ids)
+            max_length = tokenizer_kwargs.get("max_length")
+            if tokenizer_kwargs.get("truncation") and max_length is not None:
+                if getattr(self, "truncation_side", "right") == "left":
+                    ids = ids[max(len(ids) - max_length, 0) :]
+                else:
+                    ids = ids[:max_length]
+            return ids
 
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))

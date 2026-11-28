@@ -119,5 +119,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     def _apply_chat_template(self, *args, **kwargs):
         image_order: list[int] = []
         kwargs["image_order"] = image_order
+        # A caller's tokenize=False would return text that the engine tokenizes
+        # again, making reserved tokens in client text special.
+        kwargs["tokenize"] = True
         prompt_raw = self.get_tokenizer().apply_chat_template(*args, **kwargs)
         return prompt_raw, image_order
