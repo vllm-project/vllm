@@ -344,11 +344,15 @@ def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     draft = SimpleNamespace(
         use_mla=False,
+        dtype=vllm_config.model_config.dtype,
         get_num_kv_heads=lambda parallel_config: draft_kv_heads,
         get_head_size=lambda: 128,
     )
     vllm_config.speculative_config = SimpleNamespace(
-        draft_model_config=draft, draft_parallel_config=None, num_speculative_tokens=3
+        draft_model_config=draft,
+        draft_parallel_config=None,
+        num_speculative_tokens=3,
+        kv_cache_dtype=None,
     )
     cache_config = vllm_config.cache_config
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
@@ -365,6 +369,96 @@ def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
     )
     draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
     assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
+
+
+@pytest.mark.parametrize(
+    "target_kv_dtype,draft_kv_dtype,expected_page",
+    [
+        pytest.param("fp8_e4m3", "bfloat16", 2621440, id="fp8-bf16"),
+        pytest.param("bfloat16", "fp8_e4m3", 2621440, id="bf16-fp8"),
+        pytest.param("fp8_e4m3", None, 2490368, id="inherited"),
+        pytest.param("fp8_e4m3", "auto", 2621440, id="auto"),
+        pytest.param("fp8_e4m3", "fp8_e4m3", 2490368, id="same-fp8"),
+        pytest.param("bfloat16", "bfloat16", 2621440, id="same-bf16"),
+    ],
+)
+def test_mamba_page_covers_mixed_draft_kv_dtype(
+    target_kv_dtype, draft_kv_dtype, expected_page
+):
+    """Draft storage precision determines the shared page, not target precision."""
+    from vllm.config.vllm import set_current_vllm_config
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
+    from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    vllm_config = EngineArgs(
+        model="Qwen/Qwen3.5-4B",
+        dtype="bfloat16",
+        kv_cache_dtype=target_kv_dtype,
+        mamba_cache_dtype="bfloat16",
+        mamba_ssm_cache_dtype="float32",
+        max_model_len=1024,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        speculative_config={
+            "method": "dflash",
+            "model": "vllm-project/Qwen3.5-4B-DFlash2",
+            "num_speculative_tokens": 15,
+            "kv_cache_dtype": draft_kv_dtype,
+        },
+    ).create_engine_config()
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    Platform._align_hybrid_block_size(vllm_config, CPUAttentionBackend)
+    assert vllm_config.speculative_config is not None
+    draft_vllm_config = vllm_config.speculative_config.apply_draft_overrides(
+        vllm_config
+    )
+    layer_configs = {}
+    for prefix, config in (("target", vllm_config), ("draft", draft_vllm_config)):
+        model = config.model_config
+        parallel = config.parallel_config
+        with (
+            set_current_vllm_config(config),
+            set_default_torch_dtype(model.dtype),
+        ):
+            layer = Attention(
+                num_heads=model.get_num_attention_heads(parallel),
+                num_kv_heads=model.get_num_kv_heads(parallel),
+                head_size=model.get_head_size(),
+                scale=model.get_head_size() ** -0.5,
+                cache_config=config.cache_config,
+                attn_backend=CPUAttentionBackend,
+                prefix=prefix + ".attn",
+            )
+        layer_configs[prefix] = layer.get_kv_cache_config(vllm_config)
+
+    model_cls, _ = ModelRegistry.resolve_model_cls(
+        model_config.architecture, model_config=model_config
+    )
+    layer_configs["mamba"] = MambaManager.layer_config(
+        MambaSpec(
+            block_size=cache_config.block_size,
+            shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
+            dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+            page_size_padded=cache_config.mamba_page_size_padded,
+        )
+    )
+    unified = unify_kv_cache_spec_page_size(layer_configs)
+    print(
+        f"Draft KV pages: target_dtype={target_kv_dtype}, "
+        f"draft_dtype={draft_kv_dtype}, planned={cache_config.mamba_page_size_padded}, "
+        f"unified={sorted({lc.spec.page_size_bytes for lc in unified.values()})}, "
+        f"expected={expected_page}"
+    )
+    assert cache_config.mamba_page_size_padded == expected_page
+    assert {lc.spec.page_size_bytes for lc in unified.values()} == {expected_page}
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):

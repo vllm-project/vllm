@@ -991,7 +991,11 @@ class Platform:
         from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
-        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.utils.torch_utils import (
+            STR_DTYPE_TO_TORCH_DTYPE,
+            get_kv_cache_torch_dtype,
+            resolve_kv_cache_dtype_string,
+        )
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             AttentionSpec,
@@ -1103,14 +1107,20 @@ class Platform:
                     draft_parallel_config = (
                         spec_config.draft_parallel_config or parallel_config
                     )
+                    draft_cache_dtype = resolve_kv_cache_dtype_string(
+                        spec_config.kv_cache_dtype or cache_config.cache_dtype,
+                        draft_config,
+                    )
                     draft_spec = AttentionSpec(
                         block_size=1,
                         num_kv_heads=draft_config.get_num_kv_heads(
                             draft_parallel_config
                         ),
                         head_size=draft_config.get_head_size(),
-                        dtype=kv_cache_dtype,
-                        kv_quant_mode=kv_quant_mode,
+                        dtype=get_kv_cache_torch_dtype(
+                            draft_cache_dtype, draft_config.dtype
+                        ),
+                        kv_quant_mode=get_kv_quant_mode(draft_cache_dtype),
                     )
                     draft_page_size_1_token = backend_cls.customize_spec(
                         draft_spec
