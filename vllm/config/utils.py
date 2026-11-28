@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import textwrap
+import weakref
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
@@ -223,7 +224,9 @@ class SupportsCompileFactors(Protocol):
     def compile_factors(self) -> CompileFactors: ...
 
 
-_config_hash_cache: dict[int, str] = {}
+_config_hash_cache: dict[
+    int, tuple[weakref.ReferenceType[SupportsCompileFactors], str]
+] = {}
 
 
 def hash_config(config: SupportsCompileFactors) -> str:
@@ -234,17 +237,31 @@ def hash_config(config: SupportsCompileFactors) -> str:
 def hash_config_cached(config: SupportsCompileFactors) -> str:
     """Cache `hash_config(config)` by object identity.
 
-    Config objects (ModelConfig, etc.) are long-lived singletons that never
-    mutate after construction, but hashing them is expensive (JSON
-    serialization + SHA-256).  This utility avoids recomputing the hash on
-    every forward pass while keeping a single consistent key type for all
-    lookup paths.
+    Configs must not mutate after construction. Weak references prevent stale
+    hashes when objects are destroyed and their IDs are reused, without keeping
+    the configs alive. Configs without weak-reference support are hashed without
+    caching.
     """
     key = id(config)
-    result = _config_hash_cache.get(key)
-    if result is None:
-        result = hash_config(config)
-        _config_hash_cache[key] = result
+    cached = _config_hash_cache.get(key)
+    if cached is not None and cached[0]() is config:
+        return cached[1]
+
+    def remove(ref: weakref.ReferenceType[SupportsCompileFactors]) -> None:
+        cached = _config_hash_cache.get(key)
+        if cached is not None and cached[0] is ref:
+            del _config_hash_cache[key]
+
+    result = hash_config(config)
+    try:
+        ref = weakref.ref(config, remove)
+    except TypeError:
+        logger.debug(
+            "Not caching hash for %s: weak references are unsupported.",
+            type(config).__name__,
+        )
+        return result
+    _config_hash_cache[key] = (ref, result)
     return result
 
 
