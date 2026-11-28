@@ -22,7 +22,7 @@ from vllm.utils.deep_gemm import (
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
 
 from ..common.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
@@ -162,7 +162,7 @@ class FlashCompressedIndexer(nn.Module):
             self.head_weight_projection(hidden_states)[0][:tokens],
             positions[..., :tokens],
             self.rope_parameters,
-            32 if self.num_heads <= 32 else 64,
+            max(16, next_power_of_2(self.num_heads)),
         )
         quant_q = quant_q[:, None]
         mx_scales, weights = mqa_logits_mx_inputs(quant_q, None, weights, torch.float32)
