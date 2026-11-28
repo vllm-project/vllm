@@ -98,9 +98,9 @@ class InklingTextTokenizer(Protocol):
     def encode_special(self, token: str) -> int: ...
 
 
-# OpenAI content-part type spellings that mean image / audio (rendering only
+# Content-part type spellings that mean image / audio (rendering only
 # needs the kind, not the bytes — the bytes are handled by the MM processor).
-_IMAGE_PART_TYPES = frozenset({"image", "input_image", "image_url"})
+_IMAGE_PART_TYPES = frozenset({"image", "input_image", "image_url", "image_pil"})
 _AUDIO_PART_TYPES = frozenset({"audio", "input_audio", "audio_url"})
 
 DEFAULT_REASONING_EFFORT = 0.9
