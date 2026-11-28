@@ -168,7 +168,13 @@ recomputed window rebuilds the draft's cache too.
 
 ## Limitations
 
-- Pipeline parallelism is rejected.
+- Pipeline parallelism is supported in `standalone` mode when every stage
+  holds layers of every prefix-cacheable, transferable cache group. Other modes
+  and a stage missing a required group are rejected at startup. With an automatic
+  `key_namespace`, workers combine all stages' layout fingerprints into one
+  namespace; keys also include the pipeline rank. On multiple nodes the
+  scheduler queries its local UMBP server, so objects stored only on a remote
+  stage's server cannot produce a complete prefix hit.
 - Stores are submitted once per step after the forward pass.
 
 With KV events enabled, the scheduler verifies residency on every rank before

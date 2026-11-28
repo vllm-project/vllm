@@ -9,6 +9,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
     _CancellableWorkerHandle,
@@ -29,10 +30,13 @@ from tests.v1.kv_connector.umbp_test_utils import (
 )
 from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
+    connector as umbp_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
 )
@@ -72,13 +76,17 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -581,6 +589,231 @@ def test_scheduler_binds_when_ranks_share_a_report_key(monkeypatch):
     finally:
         scheduler.shutdown()
         worker.shutdown()
+
+
+def _pp_stage_kv_cache_config(layer: str) -> KVCacheConfig:
+    """KV cache config of one pipeline stage, which holds only its own layers."""
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=[layer], layer_stride=8192, block_stride=1024
+            )
+        ],
+        kv_cache_groups=[new_kv_cache_group([layer], spec)],
+    )
+
+
+def _pp_vllm_config(extra: dict, rank: int = 0) -> SimpleNamespace:
+    return _vllm_config(extra, rank=rank, pipeline_parallel_size=2, world_size=2)
+
+
+def test_standalone_pp_stages_share_one_namespace(monkeypatch):
+    """Each PP stage derives a namespace from its own layers. Workers combine
+    them across the PP group, so every stage and the scheduler use one
+    namespace, while keys stay separated by the PP rank."""
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    extra = {"mode": "standalone"}
+    stage_configs = [_pp_stage_kv_cache_config(f"layer{i}") for i in range(2)]
+    stage_namespaces = [
+        UMBPNamespace.from_vllm_config(_pp_vllm_config(extra, rank), config).value
+        for rank, config in enumerate(stage_configs)
+    ]
+    assert stage_namespaces[0] != stage_namespaces[1]
+    gathered: list[str] = []
+
+    def gather(local: UMBPNamespace) -> list[str]:
+        gathered.append(local.value)
+        return stage_namespaces
+
+    monkeypatch.setattr(umbp_connector, "_gather_pp_stage_namespaces", gather)
+    workers = [
+        UMBPStoreConnector(_pp_vllm_config(extra, rank), KVConnectorRole.WORKER, config)
+        for rank, config in enumerate(stage_configs)
+    ]
+    scheduler = UMBPStoreConnector(
+        _pp_vllm_config(extra), KVConnectorRole.SCHEDULER, stage_configs[0]
+    )
+    try:
+        assert gathered == stage_namespaces
+        shared = UMBPNamespace.for_pipeline(stage_namespaces)
+        reports = {
+            (pp_rank, 0): worker.get_handshake_metadata()
+            for pp_rank, worker in enumerate(workers)
+        }
+        assert {report.namespace for report in reports.values()} == {shared.value}
+
+        scheduler.set_xfer_handshake_metadata_pp_aware(reports)
+
+        codec = scheduler.connector_scheduler.codec
+        assert codec.namespace == shared
+        for pp_rank, worker in enumerate(workers):
+            key = worker.connector_worker.codec.key(b"a")
+            assert f":pp{pp_rank}:" in key
+            assert key in codec.keys_for_topology(
+                b"a", scheduler.connector_scheduler.topology, [0]
+            )
+    finally:
+        scheduler.shutdown()
+        for worker in workers:
+            worker.shutdown()
+
+
+def test_pp_configured_namespace_skips_gather(monkeypatch):
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+
+    def gather(local: UMBPNamespace) -> list[str]:
+        raise AssertionError("a configured namespace is already engine-wide")
+
+    monkeypatch.setattr(umbp_connector, "_gather_pp_stage_namespaces", gather)
+    worker = UMBPStoreConnector(
+        _pp_vllm_config({"mode": "standalone", "key_namespace": "ns"}, rank=1),
+        KVConnectorRole.WORKER,
+        _pp_stage_kv_cache_config("layer1"),
+    )
+    try:
+        assert worker.get_handshake_metadata().namespace == "ns"
+    finally:
+        worker.shutdown()
+
+
+def test_pp_stage_without_a_cache_group_is_rejected(monkeypatch):
+    """A PP stage may hold no layers of a global cache group (e.g. an indexer
+    group only on the last stage). UMBP assumes every stage holds every group,
+    so such a worker fails at startup rather than on its first save."""
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    monkeypatch.setattr(
+        umbp_connector, "_gather_pp_stage_namespaces", lambda local: [local.value]
+    )
+    config = _pp_stage_kv_cache_config("layer0")
+    config.kv_cache_groups.append(
+        new_kv_cache_group(
+            [],
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+            ),
+        )
+    )
+    with pytest.raises(NotImplementedError, match=r"cache groups \[1\]"):
+        UMBPStoreConnector(
+            _pp_vllm_config({"mode": "standalone"}, rank=0),
+            KVConnectorRole.WORKER,
+            config,
+        )
+
+
+def _pp_connector_config(rank: int, tp_size: int = 2) -> VllmConfig:
+    config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        max_model_len=128,
+        kv_connector_extra_config={"mode": "standalone", "key_namespace": "pp"},
+    )
+    return VllmConfig(
+        model_config=config.model_config,
+        scheduler_config=config.scheduler_config,
+        cache_config=config.cache_config,
+        kv_transfer_config=config.kv_transfer_config,
+        device_config=config.device_config,
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            pipeline_parallel_size=2,
+            rank=rank,
+            distributed_executor_backend="mp",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "group_kind", ["mixed", "replicated", "nontransferable", "noncacheable"]
+)
+def test_pp_handshake_uses_global_cacheable_group_specs(monkeypatch, group_kind):
+    """Mixed groups keep every TP key; stage-local groups outside UMBP's
+    prefix objects affect neither startup nor the replication decision."""
+
+    class SharedMemoryRuntime(MemoryRuntime):
+        shares_pool_across_ranks = True
+
+    runtime = SharedMemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    all_replicated = group_kind == "replicated"
+    replicated = replace(_LAYER1_SPEC, max_tp_shards=1)
+    layer_configs = {
+        "layer0": FullAttentionManager.layer_config(
+            replicated if group_kind in ("mixed", "replicated") else _LAYER2_SPEC
+        ),
+        "layer1": FullAttentionManager.layer_config(
+            replicated if all_replicated else _LAYER2_SPEC
+        ),
+    }
+    global_groups = [KVCacheGroup.from_layers(layer_configs)]
+    stage_layers = [
+        {"layer0": layer_configs["layer0"]},
+        {"layer1": layer_configs["layer1"]},
+    ]
+    if group_kind in ("nontransferable", "noncacheable"):
+        manager = (
+            CircularBufferManager
+            if group_kind == "noncacheable"
+            else FullAttentionManager
+        )
+        inactive = {"other_stage": manager.layer_config(replicated)}
+        global_groups.append(
+            KVCacheGroup.from_layers(
+                inactive, enable_kv_transfer=group_kind != "nontransferable"
+            )
+        )
+        stage_layers[1].update(inactive)
+    stage_configs = [
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=_project_kv_cache_groups_to_worker(global_groups, layers),
+        )
+        for layers in stage_layers
+    ]
+    workers = []
+    scheduler = UMBPStoreConnector(
+        _pp_connector_config(0), KVConnectorRole.SCHEDULER, stage_configs[0]
+    )
+    try:
+        for rank in range(4):
+            workers.append(
+                UMBPStoreConnector(
+                    _pp_connector_config(rank),
+                    KVConnectorRole.WORKER,
+                    stage_configs[rank // 2],
+                )
+            )
+        scheduler.set_xfer_handshake_metadata_pp_aware(
+            {
+                (rank // 2, rank % 2): worker.get_handshake_metadata()
+                for rank, worker in enumerate(workers)
+            }
+        )
+        assert all(
+            config.prefix_cacheable_group_ids == (0,) for config in stage_configs
+        )
+        codec = scheduler.connector_scheduler.codec
+        assert codec.replicated_groups == ({0} if all_replicated else set())
+        keys = codec.keys_for_topology(
+            b"block", RankTopology(tp_size=2, pp_size=2), [0]
+        )
+        assert len(set(keys)) == (2 if all_replicated else 4)
+        for rank, worker in enumerate(workers):
+            worker_codec = worker.connector_worker.codec
+            assert worker_codec.key(b"block") in keys
+            assert worker_codec.stores_group(0) == (not all_replicated or rank % 2 == 0)
+    finally:
+        scheduler.shutdown()
+        for worker in workers:
+            worker.shutdown()
 
 
 def test_layout_planner_builds_scatter_gather_ranges():
