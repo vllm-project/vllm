@@ -99,6 +99,14 @@ void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,
   TORCH_CHECK(index_dtype == at::kLong || index_dtype == at::kInt,
               "slot_mapping must be int32 or int64");
 
+  // Positive slots index a cache row; validate they are in bounds. Negative
+  // slots are padding and are intentionally skipped by the kernel.
+  if (slot_mapping.numel() > 0) {
+    const int64_t num_cache_rows = kv_cache.size(0) * kv_cache.size(1);
+    TORCH_CHECK(slot_mapping.max().item<int64_t>() < num_cache_rows,
+                "concat_and_cache_mla_cpu: slot_mapping value out of range");
+  }
+
   AT_DISPATCH_REDUCED_FLOATING_TYPES(dtype, "concat_and_cache_mla_cpu", [&] {
     AT_DISPATCH_INDEX_TYPES(index_dtype, "concat_and_cache_mla_cpu_index", [&] {
       concat_and_cache_mla_kernel_impl<scalar_t, index_t>(
