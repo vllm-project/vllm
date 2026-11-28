@@ -3952,6 +3952,7 @@ def source_construction(monkeypatch, default_vllm_config):
                 "wna16",
                 "w4a8_int8",
                 "unquantized",
+                "humming",
             )
         ],
         *[
@@ -3978,6 +3979,7 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
         "int_wna16": ("WNA16MoEKernelOracle", "WNA16MoEBackend"),
         "w4a8_int8": ("W4A8Int8MoEKernelOracle", "W4A8Int8MoeBackend"),
         "unquantized": ("UnquantizedMoEKernelOracle", "UnquantizedMoeBackend"),
+        "humming": ("HummingMoEKernelOracle", "HummingMoeBackend"),
     }[module]
     oracle_module = importlib.import_module(
         f"vllm.model_executor.layers.fused_moe.oracle.{module}"
