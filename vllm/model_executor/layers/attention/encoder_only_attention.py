@@ -107,7 +107,15 @@ class EncoderOnlyAttention(Attention):
                 head_size,
                 dtype,
                 kv_cache_dtype,
+                has_sink=kwargs.get("sinks") is not None,
                 attn_type=AttentionType.ENCODER_ONLY,
+                has_sliding_window=(
+                    kwargs.get("per_layer_sliding_window") is not None
+                    or (
+                        cache_config is not None
+                        and cache_config.sliding_window is not None
+                    )
+                ),
             )
         else:
             _warn_given_attn_backend(attn_backend)
