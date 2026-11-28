@@ -45,6 +45,8 @@ steps:
   - vllm/v1/worker/cpu_worker.py
   - vllm/v1/worker/gpu/warmup.py
   - tests/v1/worker/test_cpu_sampling_warmup.py
+  - vllm/v1/worker/gpu/sample/prompt_logprob.py
+  - tests/v1/worker/test_gpu_prompt_logprobs.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
@@ -68,7 +70,8 @@ steps:
       tests/kernels/mamba/test_causal_conv1d.py \
       tests/kernels/mamba/test_mamba_ssm.py \
       tests/v1/worker/test_cpu_sampling_warmup.py \
-      tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+      tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp \
+      tests/v1/worker/test_gpu_prompt_logprobs.py"
   parallelism: 2
 
 # Speculative decoding under a CPU platform. The unit tests already pass on
