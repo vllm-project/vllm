@@ -67,6 +67,8 @@ pub enum EngineCoreEventType {
     Queued = 1,
     Scheduled = 2,
     Preempted = 3,
+    /// The engine forced the end of a repeating reasoning section.
+    ThinkingLoopBreak = 4,
 }
 
 /// A timestamped engine-core event associated with one request.
@@ -561,6 +563,21 @@ mod tests {
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
         );
+    }
+
+    /// Python's `EngineCoreEventType` values, as they arrive on the wire.
+    #[test]
+    fn engine_core_event_types_decode_python_values() {
+        for (value, expected) in [
+            (1u8, EngineCoreEventType::Queued),
+            (2, EngineCoreEventType::Scheduled),
+            (3, EngineCoreEventType::Preempted),
+            (4, EngineCoreEventType::ThinkingLoopBreak),
+        ] {
+            let decoded: EngineCoreEventType =
+                decode_msgpack(&encode_msgpack(&value).unwrap()).unwrap();
+            assert_eq!(decoded, expected);
+        }
     }
 
     #[test]

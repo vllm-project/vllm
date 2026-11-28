@@ -460,6 +460,9 @@ impl RequestMetricsTracker {
                 // `vllm:num_preemptions` counts from scheduler stats; the
                 // event only feeds this request's preemption histogram.
                 EngineCoreEventType::Preempted => self.num_preemptions += 1,
+                // TODO: count `vllm:thinking_loop_breaks` as the Python
+                // frontend does.
+                EngineCoreEventType::ThinkingLoopBreak => {}
             }
         }
     }

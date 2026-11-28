@@ -74,6 +74,33 @@ impl ReasoningEffort {
     }
 }
 
+/// Per-request control of server-configured reasoning loop breaking
+/// (`thinking_loop_break`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ThinkingLoopBreak {
+    /// `true` follows the server configuration, like an absent field; `false`
+    /// opts the request out.
+    Enabled(bool),
+    /// Picks the release in place of the server's `loop_break_release`.
+    Release(ThinkingLoopBreakRelease),
+}
+
+impl ThinkingLoopBreak {
+    /// Whether the request leaves loop breaking to the server configuration.
+    pub fn follows_server_config(self) -> bool {
+        self == Self::Enabled(true)
+    }
+}
+
+/// How a loop break releases the forced end of the reasoning section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLoopBreakRelease {
+    Force,
+    Ramp,
+}
+
 // ============================================================================
 // String/Array Utilities
 // ============================================================================

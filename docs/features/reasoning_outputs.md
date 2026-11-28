@@ -367,6 +367,8 @@ Tune on total repeated length, not pattern size. A cycle of period `p` is only d
 
 Every detected loop increments the `vllm:thinking_loop_breaks_total` Prometheus counter and logs `Breaking a repeating reasoning loop after <N> reasoning tokens in request <id>.` at `INFO`. The request ID is the engine's, which begins with the `id` the OpenAI-compatible API returned. With OpenTelemetry tracing enabled, the request's `llm_request` span also carries the attribute `gen_ai.thinking_loop_breaks`. Use the request ID to see what a fire interrupted: fires on reasoning that was still making progress mean `loop_break_min_count` is too low.
 
+The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) runs configured loop breaking but does not count it in `vllm:thinking_loop_breaks_total` yet, and it answers a `thinking_loop_break` other than `true` with a 400.
+
 ## Automatic `enable_thinking` Activation
 
 Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.

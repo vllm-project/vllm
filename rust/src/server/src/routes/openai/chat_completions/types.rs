@@ -19,8 +19,8 @@ use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestM
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, ContentPart, FunctionCallResponse, PromptLogprobs, ReasoningEffort,
-    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k,
+    StreamOptions, StreamResponseEnvelope, StringOrArray, ThinkingLoopBreak, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -182,6 +182,9 @@ pub struct ChatCompletionRequest {
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
 
+    /// Per-request control of server-configured reasoning loop breaking.
+    pub thinking_loop_break: Option<ThinkingLoopBreak>,
+
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
     pub include_reasoning: bool,
@@ -306,6 +309,7 @@ impl Default for ChatCompletionRequest {
             tool_choice: None,
             reasoning_effort: None,
             thinking_token_budget: None,
+            thinking_loop_break: None,
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,

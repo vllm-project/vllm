@@ -55,6 +55,16 @@ fn reject_unsupported_fields(request: &GenerateRequest) -> Result<(), ApiError> 
             "trace_decode_token_ids is not supported."
         );
     }
+    if request
+        .sampling_params
+        .thinking_loop_break
+        .is_some_and(|loop_break| !loop_break.follows_server_config())
+    {
+        bail_invalid_request!(
+            param = "thinking_loop_break",
+            "thinking_loop_break is not supported."
+        );
+    }
 
     Ok(())
 }
@@ -135,6 +145,28 @@ mod tests {
                 validate_request(&request).is_ok(),
                 accepted,
                 "{trace_decode_token_ids}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_rejects_non_default_thinking_loop_break() {
+        for (thinking_loop_break, accepted) in [
+            (json!(null), true),
+            (json!(true), true),
+            (json!(false), false),
+            (json!("force"), false),
+            (json!("ramp"), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {"thinking_loop_break": thinking_loop_break},
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request(&request).is_ok(),
+                accepted,
+                "{thinking_loop_break}"
             );
         }
     }
