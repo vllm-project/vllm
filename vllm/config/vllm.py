@@ -883,7 +883,11 @@ class VllmConfig:
     def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
         """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
         Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
-        at capture; lm_head runs outside compiled forward and does not benefit."""
+        at capture; lm_head runs outside compiled forward and does not benefit.
+        gpt-oss MXFP4 quantizes only MoE experts; its dense Linear layers stay
+        bf16. Plain "mxfp4" is excluded: as an online shorthand it also
+        quantizes Linear layers. An online quantization_config that quantizes
+        Linear layers (linear or targets) is excluded; a moe-only one is not."""
         from vllm.model_executor.determinism import batch_invariant_configs as bi
 
         model = self.model_config
@@ -892,9 +896,17 @@ class VllmConfig:
             or model is None
             or model.enforce_eager
             or model.dtype != torch.bfloat16
-            or model.quantization is not None
+            or model.quantization not in (None, "gpt_oss_mxfp4")
             or not current_platform.is_cuda()
         ):
+            return False
+        quant_cfg = getattr(model, "quantization_config", None)
+        if isinstance(quant_cfg, dict):
+            linear, targets = quant_cfg.get("linear"), quant_cfg.get("targets")
+        else:
+            linear = getattr(quant_cfg, "linear", None)
+            targets = getattr(quant_cfg, "targets", None)
+        if linear is not None or targets:
             return False
         family = bi._get_tuned_matmul_arch_family(
             current_platform.get_device_capability()
