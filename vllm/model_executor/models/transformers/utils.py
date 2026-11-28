@@ -38,6 +38,7 @@ from torch import nn
 from transformers import AutoModel
 
 from vllm.logger import init_logger
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
@@ -303,7 +304,8 @@ def replace_embedding_class(
     )
     # If `embedding` is a bare `nn.Embedding`, simple replace
     if type(embedding) is nn.Embedding:
-        return VocabParallelEmbedding(**kwargs)
+        cls = hw_agnostic.resolve("vocab_parallel_embedding", "VocabParallelEmbedding")
+        return cls(**kwargs)
 
     # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
     embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
