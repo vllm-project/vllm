@@ -664,7 +664,7 @@ def fused_recurrent_gated_delta_rule(
     else:
         assert scale > 0, "scale must be positive"
     if beta is None:
-        beta = torch.ones_like(q[..., 0])
+        beta = torch.ones_like(v[..., 0])
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,

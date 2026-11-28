@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+
 import pytest
 import torch
 
@@ -240,3 +242,50 @@ def test_packed_decode_strided_ba_bitwise(num_tokens: int) -> None:
 
     torch.testing.assert_close(out_strided, out_contig, rtol=0, atol=0)
     torch.testing.assert_close(state_strided, state_contig, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "vllm.third_party.flash_linear_attention.ops.fused_recurrent",
+        "vllm.models.glm5next.nvidia.ops.third_party.kda.fused_recurrent",
+    ],
+)
+def test_fused_recurrent_default_beta_covers_value_heads(module: str):
+    """With beta=None and more value heads than key heads (GVA), the default
+    beta must have one entry per value head, since the kernel reads beta at
+    `bos * HV + i_hv`. It must match an explicit all-ones beta."""
+    fused_recurrent = importlib.import_module(module).fused_recurrent_gated_delta_rule
+    generator = torch.Generator(device=DEVICE).manual_seed(0)
+    B, T, H, HV, K, V = 3, 1, 2, 6, 64, 64
+    device = torch.device(DEVICE)
+
+    def randn(*shape):
+        return torch.randn(shape, device=device, generator=generator)
+
+    q = randn(B, T, H, K).to(torch.bfloat16)
+    k = randn(B, T, H, K).to(torch.bfloat16)
+    v = randn(B, T, HV, V).to(torch.bfloat16)
+    g = -randn(B, T, HV).abs()
+    # Slot 0 is the null slot, as in serving.
+    state0 = randn(B + 1, HV, V, K)
+    ssm_state_indices = torch.arange(1, B + 1, device=device, dtype=torch.int32)
+
+    outs = []
+    for beta in (None, torch.ones(B, T, HV, device=device, dtype=torch.bfloat16)):
+        state = state0.clone()
+        out, _ = fused_recurrent(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        outs.append((out, state))
+
+    torch.testing.assert_close(outs[0][0], outs[1][0], rtol=0, atol=0)
+    torch.testing.assert_close(outs[0][1], outs[1][1], rtol=0, atol=0)
