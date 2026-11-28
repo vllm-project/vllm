@@ -20,6 +20,13 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
@@ -30,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     ChunkedTokenDatabase,
     LoadSpec,
+    MooncakeStoreWorkerMetadata,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
@@ -37,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     PoolKey,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
+    MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.store_service import (  # noqa: E501
@@ -47,8 +56,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (
     KVCacheStoreSendingThread,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.sched.output import (
+    KVConnectorBlockState,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -58,6 +75,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
@@ -113,7 +132,9 @@ def _minimal_vllm_config(cache_block_size=16):
     return cfg
 
 
-def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
+def _build_worker_with_dict_store(
+    vllm_config, kv_cache_config, store, *, tp_size: int = 1, tp_rank: int = 0
+):
     """Build a MooncakeStoreWorker patching all distributed dependencies."""
     fake_mooncake_store = types.ModuleType("mooncake.store")
     fake_mooncake_store.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
@@ -137,12 +158,12 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
                 ".worker.get_tensor_model_parallel_rank",
-                return_value=0,
+                return_value=tp_rank,
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
                 ".worker.get_tensor_model_parallel_world_size",
-                return_value=1,
+                return_value=tp_size,
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
@@ -1254,7 +1275,14 @@ class _LeaseTrackingStore(_DictStore):
         return super().batch_is_exist(keys)
 
 
-def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
+def _full_plus_mamba_worker(
+    store,
+    *,
+    partial_hash_hits: bool = False,
+    num_blocks: int = 8,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+):
     """Full-attention + align-mode Mamba worker on `store`."""
     full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = mamba_layer(
@@ -1264,18 +1292,18 @@ def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
         enable_prefix_caching=True,
     )
     cfg = KVCacheConfig(
-        num_blocks=8,
+        num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=8 * full.page_size_bytes,
+                size=num_blocks * full.page_size_bytes,
                 layers=["L0"],
-                layer_stride=8 * full.page_size_bytes,
+                layer_stride=num_blocks * full.page_size_bytes,
                 block_stride=full.page_size_bytes,
             ),
             KVCacheTensor(
-                size=8 * mamba.spec.page_size_bytes,
+                size=num_blocks * mamba.spec.page_size_bytes,
                 layers=["L1"],
-                layer_stride=8 * mamba.spec.page_size_bytes,
+                layer_stride=num_blocks * mamba.spec.page_size_bytes,
                 block_stride=mamba.spec.page_size_bytes,
             ),
         ],
@@ -1287,10 +1315,14 @@ def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
         **({"cache_hit_alignment_tokens": 4} if partial_hash_hits else {}),
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    vllm_config.parallel_config.world_size = tp_size
     if partial_hash_hits:
         # Hash unit 4 < Mamba block 16 enables partial hash hits.
         vllm_config.cache_config.prefix_match_unit = 4
-    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker = _build_worker_with_dict_store(
+        vllm_config, cfg, store, tp_size=tp_size, tp_rank=tp_rank
+    )
     for g_idx, db in enumerate(worker.token_dbs):
         db.set_kv_caches_base_addr([g_idx * 10_000])
         db.set_block_len([512])
@@ -1500,3 +1532,130 @@ def test_selective_lease_requires_probe_support(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
     with pytest.raises(RuntimeError, match="batch_probe_key"):
         _full_plus_mamba_worker(_DictStore())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("failure_mode", ["healthy", "single_rank_put_fail", "evicted"])
+def test_stride_throttling_e2e_multi_rank_lookup_and_self_heal(failure_mode):
+    """E2E: 2-rank worker lookup + scheduler stride throttling.
+
+    With stride=64 and local GPU hitting 128 (bucket 2):
+    - healthy: both ranks hold 128 in Store -> 140 (bucket 2) is skipped with
+      no Mamba or orphan attention partial-tail puts.
+    - single_rank_put_fail / evicted: Store only has a complete checkpoint at
+      64 (bucket 1) -> 140 crosses into bucket 2, writes Mamba + paired
+      attention tail on both ranks, and restores Store lookup hit to 140.
+    """
+    store = _DictStore()
+    workers = [
+        _full_plus_mamba_worker(
+            store, partial_hash_hits=True, num_blocks=16, tp_size=2, tp_rank=r
+        )
+        for r in range(2)
+    ]
+    senders = [
+        KVCacheStoreSendingThread(
+            store_service=MooncakeStoreService(store),
+            token_databases=w.token_dbs,
+            block_size=w.block_size,
+            coord=w.coord,
+            tp_rank=r,
+            group_put_steps=w._group_tp_replication_factors,
+            kv_role="kv_both",
+            ready_event=threading.Event(),
+            enable_kv_event=False,
+        )
+        for r, w in enumerate(workers)
+    ]
+    vllm_config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        cache_config=CacheConfig(block_size=16, prefix_match_unit=4),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"boundary_state_offload_stride": 64},
+        ),
+    )
+    kv_cfg = workers[0]._kv_cache_config
+    assert kv_cfg is not None
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler.LookupKeyClient"
+    ) as lc_cls:
+        scheduler = MooncakeStoreScheduler(vllm_config, kv_cfg)
+        lc_cls.return_value.lookup.side_effect = lambda _rid, n, hs, non_block=False: (
+            workers[0].lookup(n, hs)
+        )
+        lc_cls.return_value.discard.side_effect = lambda _rid: None
+    scheduler.bind_gpu_block_pool(
+        BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
+    )
+    hs = [BlockHash(f"h{i:03d}".encode()) for i in range(40)]
+
+    def _run_turn(rid: str, plen: int, lhit: int, offloads: list[tuple[int, int, int]]):
+        req = Request(
+            rid,
+            list(range(plen)),
+            SamplingParams(max_tokens=1),
+            None,
+            block_hashes=hs[: plen // 4],
+        )
+        req.num_computed_tokens = lhit
+        ext, _ = scheduler.get_num_new_matched_tokens(req, lhit)
+        nblk = (plen + 15) // 16
+        bids = (list(range(1, nblk + 1)), list(range(1, nblk + 1)))
+        scheduler.update_state_after_alloc(req, KVCacheBlocks(()), ext or 0)
+        out = SchedulerOutput.make_empty()
+        out.scheduled_new_reqs = [
+            NewRequestData.from_request(req, bids, req.all_token_ids)
+        ]
+        out.num_scheduled_tokens = {rid: plen - lhit}
+        out.kv_connector_block_state = KVConnectorBlockState(
+            {rid}, lambda _r: bids, {rid: offloads}
+        )
+        meta = scheduler.build_connector_meta(out)
+        for rm in meta.requests:
+            if rm.can_save:
+                for st in senders:
+                    st.add_request(rm)
+                    st._handle_request(st.request_queue.get())
+                    scheduler.update_connector_output(
+                        KVConnectorOutput(
+                            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                                completed_saves=st.take_completed_saves()
+                            )
+                        )
+                    )
+        fin = SchedulerOutput.make_empty()
+        fin.finished_req_ids = {rid}
+        scheduler.build_connector_meta(fin)
+        return meta
+
+    # Turn 1 writes aligned checkpoints at 64 (bucket 1) and 128 (bucket 2).
+    _run_turn("t1", 129, 0, [(1, 4, 64), (1, 8, 128)])
+    hit1 = workers[0].lookup(141, hs[:35])
+    assert hit1 is not None and hit1.hit_length == 128
+
+    mamba_128_keys = _store_keys(workers[0], 1, hs[128 // 4 - 1])
+    assert len(mamba_128_keys) == 2
+    if failure_mode == "single_rank_put_fail":
+        del store._data[mamba_128_keys[1]]
+    elif failure_mode == "evicted":
+        for key in mamba_128_keys:
+            del store._data[key]
+
+    # Turn 2 has local GPU hit at 128 and reaches partial-tail boundary 140.
+    meta2 = _run_turn("t2", 141, 128, [(1, 9, 140)])
+    puts2 = [p for r in meta2.requests for p in (r.boundary_puts or [])]
+    hit2 = workers[0].lookup(145, hs[:36])
+    assert hit2 is not None
+    if failure_mode == "healthy":
+        assert puts2 == []
+        assert hit2.hit_length == 128
+    else:
+        assert BoundaryPut(1, 9, 140) in puts2
+        assert any(p.group_id == 0 and p.num_tokens == 140 for p in puts2)
+        assert hit2.hit_length == 140
+    assert not scheduler.has_pending_push_work()
