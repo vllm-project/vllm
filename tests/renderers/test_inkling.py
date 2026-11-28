@@ -951,15 +951,31 @@ class TestInkling2Rendering:
             "<|content_model_end_sampling|>"
         )
 
-    def test_continue_final_message(self):
+    @pytest.mark.parametrize(
+        ("content", "previous_block"),
+        [
+            ("The answer is", ""),
+            ([{"type": "text", "text": "The answer is"}], ""),
+            (
+                [
+                    {"type": "text", "text": "Let's see."},
+                    {"type": "text", "text": "The answer is"},
+                ],
+                "<|message_model|><|content_text|>Let's see.<|end_message|>",
+            ),
+        ],
+        ids=["string", "single-part", "multi-part"],
+    )
+    def test_continue_final_message(self, content, previous_block):
         messages = [
             {"role": "user", "content": "Finish: The answer is"},
-            {"role": "assistant", "content": "The answer is"},
+            {"role": "assistant", "content": content},
         ]
         assert render_inkling2_text(messages, continue_final_message=True) == (
             "<|message_system|><|content_text|>Thinking effort level: 0.9"
             "<|end_message|>"
             "<|message_user|><|content_text|>Finish: The answer is<|end_message|>"
+            f"{previous_block}"
             "<|message_model|><|content_text|>The answer is"
         )
         # Only a plain text answer is continued; others render as closed turns.
@@ -968,6 +984,47 @@ class TestInkling2Rendering:
             "<|message_model|><|content_text|>The answer is<|end_message|>"
             "<|content_model_end_sampling|>"
         )
+
+    @pytest.mark.parametrize(
+        "assistant_message",
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "refusal",
+                        "refusal": "I do not have access to the file.",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "refusal": "I do not have access to the file.",
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "refusal": "I do not have access to the file.",
+            },
+        ],
+        ids=["content-part", "top-level", "top-level-empty-content"],
+    )
+    def test_assistant_refusal_renders_as_closed_text(self, assistant_message):
+        refusal = "I do not have access to the file."
+        messages = [
+            {"role": "user", "content": "Can you access the file?"},
+            assistant_message,
+        ]
+        rendered = render_inkling2_text(messages, continue_final_message=True)
+        expected_messages = [messages[0], {"role": "assistant", "content": refusal}]
+        assert rendered == render_inkling2_text(expected_messages)
+
+    def test_user_refusal_part_rejected(self):
+        with pytest.raises(ValueError, match="unsupported Inkling2 content part type"):
+            render_inkling2_text(
+                [{"role": "user", "content": [{"type": "refusal", "refusal": "no"}]}]
+            )
 
     @pytest.mark.parametrize(
         ("value", "expected"),

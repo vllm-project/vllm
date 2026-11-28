@@ -1211,8 +1211,8 @@ class TestInkling2:
         assert (reasoning, content, names) == ("hm", "4", [])
 
     @staticmethod
-    def _json_request(tools=None, assistant: str | None = None):
-        messages = [{"role": "user", "content": "q"}]
+    def _json_request(tools=None, assistant: str | list[dict[str, str]] | None = None):
+        messages: list[dict] = [{"role": "user", "content": "q"}]
         if assistant is not None:
             messages.append({"role": "assistant", "content": assistant})
         return ChatCompletionRequest(
@@ -1268,13 +1268,25 @@ class TestInkling2:
             f'{MSG_MODEL}{TEXT_START}{{"a": 1}}{END_MESSAGE}',
         )
 
-    def test_json_response_format_continues_empty_answer(self, parser):
-        matcher = self._json_grammar_matcher(parser, assistant="")
+    @pytest.mark.parametrize(
+        "assistant",
+        ["", [{"type": "text", "text": ""}]],
+        ids=["string", "text-part"],
+    )
+    def test_json_response_format_continues_empty_answer(self, parser, assistant):
+        matcher = self._json_grammar_matcher(parser, assistant=assistant)
         assert self._accepts(matcher, f"{{}}{END_MESSAGE}")
 
-    def test_json_response_format_rejects_nonempty_continuation(self, parser):
+    @pytest.mark.parametrize(
+        "assistant",
+        ["{", [{"type": "text", "text": "{"}]],
+        ids=["string", "text-part"],
+    )
+    def test_json_response_format_rejects_nonempty_continuation(
+        self, parser, assistant
+    ):
         with pytest.raises(ValueError, match="nonempty assistant message"):
-            parser.adjust_request(self._json_request(assistant="{"))
+            parser.adjust_request(self._json_request(assistant=assistant))
 
     @pytest.mark.parametrize(
         "output",
