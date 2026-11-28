@@ -29,8 +29,8 @@ def determine_expert_map(
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """Calculates how many experts should be assigned to each rank for EP and
     creates a mapping from global to local expert index. Experts are
-    distributed evenly across ranks. Any remaining are assigned to the
-    last rank.
+    distributed evenly across ranks. Any remaining are assigned one each to
+    the first ``global_num_experts % ep_size`` ranks.
 
     Args:
         ep_size: The size of the expert parallel group

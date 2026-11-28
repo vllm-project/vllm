@@ -84,6 +84,7 @@ class TrtLlmBf16ExpertsBase:
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.local_expert_offset = moe_config.local_expert_offset
 
         self.moe_config = moe_config
         self.quant_config = quant_config
@@ -248,7 +249,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
@@ -340,7 +341,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             n_group=num_expert_group,
             topk_group=topk_group,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,

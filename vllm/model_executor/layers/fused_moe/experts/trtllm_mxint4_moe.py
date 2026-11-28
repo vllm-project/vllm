@@ -155,6 +155,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             intermediate_size_per_partition=self.intermediate_size_per_partition,
             local_num_experts=self.local_num_experts,
             ep_rank=self.ep_rank,
+            local_expert_offset=self.moe_config.local_expert_offset,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,

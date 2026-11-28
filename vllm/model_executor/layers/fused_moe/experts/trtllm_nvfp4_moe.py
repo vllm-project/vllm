@@ -94,6 +94,7 @@ class TrtLlmNvFp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.local_expert_offset = moe_config.local_expert_offset
         self.is_situ = moe_config.activation == MoEActivation.SITU
 
         self.g1_scale_c = self._compute_g1_scale_c()
@@ -409,7 +410,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             n_group=0,
             topk_group=0,
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
@@ -622,7 +623,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             n_group=(num_expert_group or 0),
             topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
