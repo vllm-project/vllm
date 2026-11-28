@@ -1274,6 +1274,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
@@ -1289,6 +1290,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quantized_input=quantized_input,
         )
 
 

@@ -19,6 +19,7 @@ warmup (`MegaMHCKernel`) builds every program before serving.
 
 import functools
 import inspect
+import itertools
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,7 +75,7 @@ def _flashinfer_mega_mhc():
     return prepare_mega_mhc, rules
 
 
-def mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
+def mega_mhc_supported(hidden_size: int, hc_mult: int, sf_layout: str = "bf16") -> bool:
     """Whether FlashInfer has a fused mHC program for this shape and device."""
     if (hidden_size, hc_mult) != (HIDDEN_SIZE, HC_MULT):
         return False
@@ -84,8 +85,10 @@ def mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
     if fi is None:
         return False
     rules = fi[1]
+    if sf_layout == "nvfp4" and not hasattr(rules, "mhc_infer_variant_num_splits"):
+        return False
     arch = rules.CAPABILITIES.get(current_platform.get_device_capability())
-    return arch is not None and rules.supported(arch, HIDDEN_SIZE, "bf16")
+    return arch is not None and rules.supported(arch, HIDDEN_SIZE, sf_layout)
 
 
 def split_mhc_fn(fn: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -97,10 +100,13 @@ def split_mhc_fn(fn: torch.Tensor, out: torch.Tensor | None = None) -> torch.Ten
 
 
 @functools.cache
-def _launch_grid(num_tokens: int, num_sms: int) -> tuple[int, int]:
+def _launch_grid(num_tokens: int, num_sms: int, nvfp4: bool = False) -> tuple[int, int]:
     """(split count, grid) FlashInfer's plan uses for `num_tokens`."""
     rules = _flashinfer_mega_mhc()[1]
-    splits = rules.mhc_infer_num_splits(num_tokens, num_sms)
+    if nvfp4:  # The quantized-output programs have a split rule of their own.
+        splits = rules.mhc_infer_variant_num_splits(num_tokens, num_sms)
+    else:
+        splits = rules.mhc_infer_num_splits(num_tokens, num_sms)
     return splits, rules.mhc_infer_num_ctas(num_tokens, num_sms, splits)
 
 
@@ -109,8 +115,16 @@ def _max_scratch_floats(num_sms: int) -> int:
     # Not monotonic in the token count, so take the maximum over every launch.
     rules = _flashinfer_mega_mhc()[1]
     return max(
-        rules.mhc_infer_scratch_floats(t, _launch_grid(t, num_sms)[0])
+        rules.mhc_infer_scratch_floats(t, _launch_grid(t, num_sms, nvfp4)[0])
         for t in range(1, _MAX_TOKENS_PER_SM * num_sms + 1)
+        for nvfp4 in _layouts()
+    )
+
+
+def _layouts() -> tuple[bool, ...]:
+    """The `nvfp4` values of `_launch_grid` this FlashInfer can launch."""
+    return (
+        (False, True) if mega_mhc_supported(HIDDEN_SIZE, HC_MULT, "nvfp4") else (False,)
     )
 
 
@@ -127,7 +141,11 @@ def _counters(device: torch.device, num_sms: int):
     def allocate() -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
         words = _flashinfer_mega_mhc()[1].SPLIT_BARRIER_WORDS
         # From 4 tokens per SM on, the grid is the SM count.
-        grids = {_launch_grid(t, num_sms)[1] for t in range(1, 4 * num_sms + 1)}
+        grids = {
+            _launch_grid(t, num_sms, nvfp4)[1]
+            for t in range(1, 4 * num_sms + 1)
+            for nvfp4 in _layouts()
+        }
         return {
             grid: (
                 torch.zeros(words, dtype=torch.uint64, device=device),
@@ -157,12 +175,19 @@ def mhc_fused_post_pre_flashinfer_mega(
     sinkhorn_repeat: int,
     norm_weight: torch.Tensor,
     norm_eps: float,
+    fp4_global_scale: torch.Tensor | None = None,
+    y_fp4: torch.Tensor | None = None,
+    y_fp4_sf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """MHCFusedPostPreOp (with its RMSNorm) as one FlashInfer launch.
 
     Same contract as `mhc_fused_post_pre_tilelang`, plus `fn_split`, the
-    BF16 pieces of `fn` (`split_mhc_fn`).
+    BF16 pieces of `fn` (`split_mhc_fn`). With `fp4_global_scale` (`float32 [1]`)
+    it also writes the layer input's NVFP4 values (`uint8 [T, H // 2]`) and
+    block scales (`float8_e4m3fn [T, H // 16]`) into `y_fp4` and `y_fp4_sf`:
+    bitwise `scaled_fp4_quant(y, fp4_global_scale, is_sf_swizzled_layout=False)`.
     """
+    nvfp4 = fp4_global_scale is not None
     num_tokens = residual.numel() // (HC_MULT * HIDDEN_SIZE)
     prepare_mega_mhc, rules = _flashinfer_mega_mhc()
     outer_shape = residual.shape[:-2]
@@ -192,13 +217,15 @@ def mhc_fused_post_pre_flashinfer_mega(
             num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device=device
         ),
     }
+    if nvfp4:
+        out.update(y_fp4=y_fp4, y_fp4_sf=y_fp4_sf)
     # FlashInfer before #8199 takes at most 64 tokens per SM in one launch, so
     # larger batches run as several launches over consecutive token ranges;
     # mHC is per token, so this is exact.
     step = _MAX_TOKENS_PER_SM * num_sms
     for lo in range(0, num_tokens, step):
         hi = min(lo + step, num_tokens)
-        splits, grid = _launch_grid(hi - lo, num_sms)
+        splits, grid = _launch_grid(hi - lo, num_sms, nvfp4)
         split_barriers, launch_epochs = (
             (None, None) if counters is None else counters[grid]
         )
@@ -220,7 +247,8 @@ def mhc_fused_post_pre_flashinfer_mega(
             num_sinkhorn_iters=sinkhorn_repeat,
             rmsnorm_eps=norm_eps,
             rmsnorm_scale=1.0,
-            sf_layout="bf16",
+            sf_layout="nvfp4" if nvfp4 else "bf16",
+            fp4_global_scale=fp4_global_scale,
             out={name: tensor[lo:hi] for name, tensor in out.items()},
             scratch=(
                 None
@@ -262,6 +290,9 @@ def _mhc_fused_post_pre_flashinfer_mega_fake(
     sinkhorn_repeat: int,
     norm_weight: torch.Tensor,
     norm_eps: float,
+    fp4_global_scale: torch.Tensor | None = None,
+    y_fp4: torch.Tensor | None = None,
+    y_fp4_sf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     hc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
@@ -277,7 +308,7 @@ def _mhc_fused_post_pre_flashinfer_mega_fake(
 direct_register_custom_op(
     op_name="mhc_fused_post_pre_flashinfer_mega",
     op_func=mhc_fused_post_pre_flashinfer_mega,
-    mutates_args=[],
+    mutates_args=["y_fp4", "y_fp4_sf"],
     fake_impl=_mhc_fused_post_pre_flashinfer_mega_fake,
 )
 
@@ -295,26 +326,39 @@ class MegaMHCKernel(VllmJitKernel["MegaMHCKernel.CompileKey"]):
         program: str
         defines: tuple[tuple[str, Any], ...]
         num_sms: int
-        # A launch size that selects the program; not part of its identity.
+        # A launch that selects the program; not part of its identity.
         num_tokens: int = field(compare=False)
+        sf_layout: str = field(default="bf16", compare=False)
 
-    def get_warmup_keys(self, *, max_num_batched_tokens: int) -> list[CompileKey]:
+    def get_warmup_keys(
+        self, *, max_num_batched_tokens: int, nvfp4: bool = False
+    ) -> list[CompileKey]:
         rules = _flashinfer_mega_mhc()[1]
         arch, num_sms = rules.device_facts(torch.accelerator.current_device_index())
         launch = inspect.signature(rules.select_program).parameters
         max_tokens = min(max_num_batched_tokens, _MAX_TOKENS_PER_SM * num_sms)
         keys: dict[MegaMHCKernel.CompileKey, None] = {}
         # Chunk remainders make every launch size up to max_tokens reachable.
-        for t in range(1, max_tokens + 1):
-            splits = _launch_grid(t, num_sms)[0]
-            kwargs = {"regime": rules.mhc_infer_tail_program(t, num_sms)}
+        for layout, t in itertools.product(
+            ("bf16", "nvfp4") if nvfp4 else ("bf16",), range(1, max_tokens + 1)
+        ):
+            splits = _launch_grid(t, num_sms, layout == "nvfp4")[0]
+            kwargs: dict[str, Any] = {
+                "regime": rules.mhc_infer_tail_program(t, num_sms)
+            }
+            if layout == "nvfp4":
+                kwargs["regime"] = rules.mhc_infer_variant_program(
+                    t, num_sms, layout, False, arch in rules.VARIANT_TAIL_ARCHES
+                )
             if "tokens" in launch:
                 kwargs.update(tokens=t, deterministic=False)
+            if "num_sms" in launch:  # Some programs serve only the SM counts named.
+                kwargs.update(num_sms=num_sms)
             program, defines = rules.select_program(
-                HIDDEN_SIZE, splits, False, False, "bf16", arch, **kwargs
+                HIDDEN_SIZE, splits, False, False, layout, arch, **kwargs
             )
-            key = self.CompileKey(program, tuple(sorted(defines.items())), num_sms, t)
-            keys.setdefault(key, None)
+            defines = tuple(sorted(defines.items()))
+            keys.setdefault(self.CompileKey(program, defines, num_sms, t, layout))
         return list(keys)
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -335,7 +379,10 @@ class MegaMHCKernel(VllmJitKernel["MegaMHCKernel.CompileKey"]):
             mix_scales=torch.zeros(3, **fp32),
             mix_bases=torch.zeros(rules.FN_ROWS, **fp32),
             rmsnorm_weight=torch.zeros(h, **bf16),
-            sf_layout="bf16",
+            sf_layout=compile_key.sf_layout,
+            fp4_global_scale=(
+                torch.ones(1, **fp32) if compile_key.sf_layout == "nvfp4" else None
+            ),
             fnp=torch.zeros(rules.FNP_PIECES, rules.FNP_ROWS, HC_MULT * h, **bf16),
         )
         if plan.program != compile_key.program:

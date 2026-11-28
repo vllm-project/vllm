@@ -133,6 +133,8 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    hidden_states_q: torch.Tensor | None = None,
+    hidden_states_q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -142,6 +144,8 @@ def _moe_forward(
             router_logits,
             shared_experts_input,
             input_ids,
+            hidden_states_q,
+            hidden_states_q_scale,
         ),
     )
 
@@ -153,6 +157,8 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    hidden_states_q: torch.Tensor | None = None,
+    hidden_states_q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
@@ -170,6 +176,8 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    hidden_states_q: torch.Tensor | None = None,
+    hidden_states_q_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -179,6 +187,8 @@ def _moe_forward_shared(
             router_logits,
             shared_experts_input,
             input_ids,
+            hidden_states_q,
+            hidden_states_q_scale,
         ),
     )
 
@@ -190,6 +200,8 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    hidden_states_q: torch.Tensor | None = None,
+    hidden_states_q_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
@@ -630,6 +642,8 @@ class MoERunner(MoERunnerInterface):
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
         hidden_states_scale: torch.Tensor | None = None,
+        hidden_states_q: torch.Tensor | None = None,
+        hidden_states_q_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -672,6 +686,11 @@ class MoERunner(MoERunnerInterface):
         elif self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             router_logits = self.router.prepare_monolithic_logits(router_logits)
+            if hidden_states_q is not None:
+                hidden_states, hidden_states_scale = (
+                    hidden_states_q,
+                    hidden_states_q_scale,
+                )
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
@@ -694,6 +713,9 @@ class MoERunner(MoERunnerInterface):
                 topk_ids=topk_ids,
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
+                x_quantized=None
+                if hidden_states_q is None
+                else (hidden_states_q, hidden_states_q_scale),
             )
 
         if shared_experts_overlapping:
@@ -746,6 +768,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -789,6 +812,8 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
+        if og_hidden_dim_pre_xform is not None:  # Padding changed the rows.
+            quantized_input = None
         result = self._forward_entry(
             hidden_states,
             router_logits,
@@ -798,6 +823,7 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output
             else 0,
+            *(quantized_input or (None, None)),
         )
 
         #
@@ -888,6 +914,47 @@ class MoERunner(MoERunnerInterface):
             and qc.a1_scale is None
         )
 
+    def nvfp4_input_global_scale(self) -> torch.Tensor | None:
+        """The global scale (`float32 [1]`) with which a caller may quantize this
+        layer's input and pass it as `forward`'s `quantized_input`, or None.
+
+        The caller must quantize exactly as
+        `scaled_fp4_quant(x, scale, is_sf_swizzled_layout=False)`, which is what
+        the prepare step would do; the step then skips it.
+        """
+        self.routed_experts._ensure_moe_quant_config_init()
+        method, qc = self._quant_method, self._quant_method.moe_quant_config
+        kernel = method.moe_kernel
+        if (
+            kernel is None
+            or qc is None
+            or not (method.accepts_quantized_input and qc.use_nvfp4_w4a4)
+            or qc.a1_gscale is None
+            or kernel.fused_experts.expects_unquantized_inputs
+            or getattr(kernel.fused_experts, "_lora_context", None) is not None
+            or self.routed_input_transform is not None
+            or self.routed_experts.apply_router_weight_on_input
+            or self.do_naive_dispatch_combine
+            or self.moe_config.pcp_size > 1
+            or self.moe_config.is_sequence_parallel
+        ):
+            return None
+        if method.is_monolithic:
+            # Only the plain no-DP prepare passes a quantized input through.
+            monolithic_ok = (
+                isinstance(
+                    kernel.prepare_finalize, MoEPrepareAndFinalizeNoDPEPMonolithic
+                )
+                and not qc.is_scale_swizzled
+                and self.moe_config.dp_size == 1
+            )
+            if not monolithic_ok:
+                return None
+        elif not kernel.prepare_finalize.supports_quantized_input():
+            return None
+        # One per local expert; the prepare step quantizes with the first.
+        return qc.a1_gscale.reshape(-1)[:1]
+
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
@@ -966,6 +1033,8 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        hidden_states_q: torch.Tensor | None = None,
+        hidden_states_q_scale: torch.Tensor | None = None,
     ) -> (
         torch.Tensor
         | UnfinalizedMoEOutput
@@ -1022,6 +1091,8 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
                 hidden_states_scale=hidden_states_scale,
+                hidden_states_q=hidden_states_q,
+                hidden_states_q_scale=hidden_states_q_scale,
             )
 
             return self._maybe_combine(

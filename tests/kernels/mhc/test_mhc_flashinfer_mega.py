@@ -15,6 +15,7 @@ import torch
 
 import vllm.model_executor.kernels.mhc  # noqa: F401  (registers the custom ops)
 import vllm.model_executor.kernels.mhc.flashinfer_mega as fm
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.workspace import lock_workspace
@@ -24,7 +25,7 @@ RMS_EPS, NORM_EPS, HC_EPS, POST_MULT, REPEAT = 1e-5, 1e-5, 1e-6, 2.0, 20
 _PTXAS_ENV = "TRITON_PTXAS_BLACKWELL_PATH"
 
 
-def _mega_supported() -> bool:
+def _mega_supported(sf_layout: str = "bf16") -> bool:
     if not current_platform.is_cuda():
         return False
     # Importing FlashInfer points Triton at the system ptxas
@@ -32,7 +33,7 @@ def _mega_supported() -> bool:
     # share this process. The first call imports it; later calls are cached.
     saved = os.environ.get(_PTXAS_ENV)
     try:
-        return fm.mega_mhc_supported(H, HC)
+        return fm.mega_mhc_supported(H, HC, sf_layout)
     finally:
         if saved is None:
             os.environ.pop(_PTXAS_ENV, None)
@@ -43,6 +44,9 @@ def _mega_supported() -> bool:
 requires_mega = pytest.mark.skipif(
     not _mega_supported(),
     reason="FlashInfer mega mHC (with its kernel sources) is unavailable here",
+)
+requires_mega_nvfp4 = pytest.mark.skipif(
+    not _mega_supported("nvfp4"), reason="no NVFP4-output mega mHC program here"
 )
 
 
@@ -68,11 +72,11 @@ def _inputs(num_tokens: int, seed: int):
     return x, residual, post, comb
 
 
-def _mega(inputs, weights, fn_split):
+def _mega(inputs, weights, fn_split, *nvfp4_out):
     fn, scale, base, norm = weights
     return torch.ops.vllm.mhc_fused_post_pre_flashinfer_mega(
         *inputs, fn, fn_split, scale, base, RMS_EPS, HC_EPS, HC_EPS, POST_MULT,
-        REPEAT, norm, NORM_EPS,
+        REPEAT, norm, NORM_EPS, *nvfp4_out,
     )  # fmt: skip
 
 
@@ -174,12 +178,35 @@ def test_cuda_graph_replay_matches_eager(workspace_init, num_tokens):
     assert all(torch.equal(a, b) for a, b in zip(eager, captured))
 
 
-@requires_mega
-def test_warmup_keys_cover_every_selected_program(workspace_init):
+@requires_mega_nvfp4
+@pytest.mark.parametrize("num_tokens", [5, 64, 512, 4096])
+def test_nvfp4_output_is_the_moe_input_quantization(workspace_init, num_tokens):
+    weights, inputs = _weights(61), _inputs(num_tokens, 62)
+    gscale = torch.tensor([448.0 * 6.0 / 8.0], device="cuda")
+    y_fp4 = torch.empty(num_tokens, H // 2, dtype=torch.uint8, device="cuda")
+    y_sf = torch.empty(num_tokens, H // 16, dtype=torch.float8_e4m3fn, device="cuda")
+    out = _mega(inputs, weights, fm.split_mhc_fn(weights[0]), gscale, y_fp4, y_sf)
+    _assert_close(out, inputs, weights)
+    ref_fp4, ref_sf = ops.scaled_fp4_quant(out[3], gscale, is_sf_swizzled_layout=False)
+    assert torch.equal(y_fp4, ref_fp4.view(torch.uint8))
+    assert torch.equal(y_sf.view(torch.uint8), ref_sf.view(torch.uint8).view_as(y_sf))
+
+
+@pytest.mark.parametrize(
+    "sf_layout",
+    [
+        pytest.param("bf16", marks=requires_mega),
+        pytest.param("nvfp4", marks=requires_mega_nvfp4),
+    ],
+)
+def test_warmup_keys_cover_every_selected_program(workspace_init, sf_layout):
     from flashinfer.mega_mhc import prepare_mega_mhc
 
     max_tokens = 64 * _num_sms()
-    keys = fm.MEGA_MHC_KERNEL.get_warmup_keys(max_num_batched_tokens=max_tokens)
+    keys = fm.MEGA_MHC_KERNEL.get_warmup_keys(
+        max_num_batched_tokens=max_tokens, nvfp4=sf_layout == "nvfp4"
+    )
+    gscale = torch.ones(1, device="cuda") if sf_layout == "nvfp4" else None
     weights = _weights(51)
     # Remainders of the chunk loop reach 1-4 tokens too.
     for num_tokens in (1, 3, 5, 384, 385, 832, 833, 3392, 3393, max_tokens):
@@ -187,9 +214,12 @@ def test_warmup_keys_cover_every_selected_program(workspace_init):
         plan = prepare_mega_mhc(
             x=x, residual=residual, post_mix=post, comb_res_mix=comb,
             shifted_prev_mix=None, fn=weights[0], mix_scales=weights[1],
-            mix_bases=weights[2], rmsnorm_weight=weights[3], sf_layout="bf16",
+            mix_bases=weights[2], rmsnorm_weight=weights[3], sf_layout=sf_layout,
+            fp4_global_scale=gscale,
         )  # fmt: skip
-        assert any(key.program == plan.program for key in keys), num_tokens
+        assert any(
+            k.program == plan.program and k.sf_layout == sf_layout for k in keys
+        ), num_tokens
 
 
 def test_other_shapes_are_unsupported():

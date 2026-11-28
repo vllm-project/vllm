@@ -323,6 +323,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return self.supports_async()
 
+    def supports_quantized_input(self) -> bool:
+        """Whether `prepare` takes `quantized_input`: `a1` as it would quantize it."""
+        return False
+
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether `finalize` can be skipped for a deferring consumer.
 
@@ -1390,6 +1394,7 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1424,6 +1429,11 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+                **(
+                    {}
+                    if quantized_input is None
+                    else {"quantized_input": quantized_input}
+                ),
             )
         else:
             # Overlap shared expert compute with all2all dispatch.
@@ -1437,6 +1447,11 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+                **(
+                    {}
+                    if quantized_input is None
+                    else {"quantized_input": quantized_input}
+                ),
             )
 
             # TODO(lucas): refactor this in the alternative schedules followup
@@ -1652,6 +1667,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -1677,6 +1693,8 @@ class FusedMoEKernelModularImpl:
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
                 hidden_states before latent projection.
+            quantized_input: `hidden_states` already quantized as the prepare
+                step would (`prepare_finalize.supports_quantized_input()`).
 
         Returns:
             torch.Tensor: The output tensor after applying the MoE layer, or
@@ -1706,6 +1724,7 @@ class FusedMoEKernelModularImpl:
             global_num_experts,
             expert_map,
             apply_router_weight_in_prepare,
+            quantized_input,
         )
 
         # Stash the original unquantized hidden states on the LoRA context
@@ -2058,6 +2077,7 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -2072,4 +2092,5 @@ class FusedMoEKernel:
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quantized_input=quantized_input,
         )
