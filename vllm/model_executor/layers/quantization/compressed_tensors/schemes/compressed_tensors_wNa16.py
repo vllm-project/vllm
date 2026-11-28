@@ -150,12 +150,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             zero_points=not self.symmetric,
         )
 
-        if self.use_batch_invariant:
-            kernel_type = None
-            backend_name = "dequantize + batch-invariant matmul"
-        else:
-            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
-            backend_name = kernel_type.__name__
+        chosen = choose_mp_linear_kernel(mp_linear_kernel_config)
+        use_fallback = self.use_batch_invariant and not (
+            chosen.supports_batch_invariance()
+        )
+        kernel_type = None if use_fallback else chosen
+        backend_name = (
+            kernel_type.__name__
+            if kernel_type is not None
+            else "dequantize + batch-invariant matmul"
+        )
 
         if backend_name not in self._kernel_backends_being_used:
             logger.debug("Using %s for CompressedTensorsWNA16", backend_name)
@@ -272,19 +276,18 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 assert self.kernel is not None
                 self.kernel.w_zp_name = "w_zp"
             return
-        if self.use_batch_invariant:
+        if self.kernel is None:
             # Keep the checkpoint layout: Marlin's reduction depends on M.
             for name in ("weight_packed", "weight_scale", "weight_zero_point"):
                 if hasattr(layer, name):
                     replace_parameter(layer, name, getattr(layer, name).data)
             return
-        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
-        if self.use_batch_invariant:
+        if self.kernel is None:
             shape = torch.Size(
                 (layer.output_size_per_partition, layer.input_size_per_partition)
             )
@@ -305,5 +308,4 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             if bias is not None:
                 output.add_(bias)
             return output
-        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)

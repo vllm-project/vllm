@@ -158,6 +158,7 @@ When batch invariance is enabled, vLLM:
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. On CUDA, prefers a batch-invariant mixed-precision linear kernel (Humming) for weight-only quantized layers; when none is available, compressed-tensors WNA16 layers unpack the weight and use the batch-invariant matmul
 
 For multimodal vision attention, `VLLM_BATCH_INVARIANT=1` disables Split-KV when
 the `FLASH_ATTN` encoder backend uses FlashAttention 3 on Hopper. On B200,
