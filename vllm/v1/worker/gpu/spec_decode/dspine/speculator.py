@@ -59,8 +59,16 @@ def _maybe_override_dspine_config(config: PreTrainedConfig) -> None:
         or draft.get("selected_prefix_feature_reliability") is not None
     ):
         raise ValueError("DSpine requires independent causal writes at every layer.")
-    second = getattr(config, "code_bridge_second_pass", {})
     refine = draft.get("selected_prefix_last_write_refine", {})
+    second = getattr(config, "code_bridge_second_pass", None)
+    if second is None:
+        # Some exports (tencent/Qwen3-8B-DSpine-b16) omit this block, but the
+        # only settings accepted below are fixed by the refine block and depth.
+        second = {
+            "mode": "serial_table",
+            "first_exact": config.num_hidden_layers - 1,
+            "head_topk": refine.get("head_topk"),
+        }
     if (
         second.get("mode") != "serial_table"
         or second.get("first_exact") != config.num_hidden_layers - 1

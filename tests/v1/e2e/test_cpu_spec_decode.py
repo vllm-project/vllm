@@ -139,6 +139,15 @@ SMOKE_CONFIGS = [
         id="dflash",
     ),
     pytest.param(
+        "Qwen/Qwen3-8B",
+        {
+            "method": "dflash",
+            "model": "tencent/Qwen3-8B-DSpine-b16",
+            "num_speculative_tokens": 4,
+        },
+        id="dspine",
+    ),
+    pytest.param(
         "Qwen/Qwen3.5-0.8B",
         {
             "method": "mtp",
@@ -148,8 +157,9 @@ SMOKE_CONFIGS = [
     ),
 ]
 
-# Measured 1.85 (eagle3), 1.99 (dflash), 2.29 (mtp) on CPU; this floor leaves
-# room for numeric drift while still failing if speculation stops paying off.
+# Measured 1.85 (eagle3), 1.99 (dflash), 2.29 (mtp), 3.72 (dspine) on CPU; this
+# floor leaves room for numeric drift while still failing if speculation stops
+# paying off.
 MIN_ACCEPTANCE_LEN = 1.5
 
 

@@ -75,6 +75,11 @@ class AdjacentCausalInjection(nn.Module):
         self.message = linear(transfer_dim, message_dim, "message")
         self.receiver_gate = linear(transfer_dim, message_dim, "receiver_gate")
         self.predecessor_gate = linear(transfer_dim, message_dim, "predecessor_gate")
+        # The refine pass reads these weights directly to force fp32 math, so
+        # they must survive the CPU GEMM dispatch, which otherwise frees the
+        # originals once they are packed.
+        for layer in (self.message, self.predecessor_gate, *self.writes):
+            layer._cpu_keep_weight = True
         self.gate_bias = nn.Parameter(
             torch.empty(message_dim, dtype=params_dtype), requires_grad=False
         )
@@ -225,10 +230,10 @@ class DSpineQwen3Model(DFlashQwen3Model):
         assert speculative_config is not None
         block_size = 1 + speculative_config.num_speculative_tokens
         configured_block_size = int(draft_config.get("block_size", block_size))
-        if configured_block_size != block_size:
+        if block_size > configured_block_size:
             raise ValueError(
-                "DSpine block_size must equal 1 + num_speculative_tokens: "
-                f"{configured_block_size} != {block_size}."
+                "DSpine num_speculative_tokens must be at most block_size - 1 = "
+                f"{configured_block_size - 1}, got {block_size - 1}."
             )
         transfer_dim = int(draft_config["transfer_dim"])
         if transfer_dim > self.config.hidden_size:
