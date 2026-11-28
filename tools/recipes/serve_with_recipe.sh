@@ -26,7 +26,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     esac
 done
 
-if [[ "${hardware,,}" == "xeon6" ]]; then
+if [[ "$(printf '%s' "${hardware}" | tr '[:upper:]' '[:lower:]')" == "xeon6" ]]; then
     args+=(--detect-hardware)
 fi
 

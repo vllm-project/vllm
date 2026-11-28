@@ -20,7 +20,7 @@ if [ ! -x "$WRAPPER" ]; then
     exit 1
 fi
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # Stub `vllm` on PATH. It dumps env + argv + cwd to stdout so we can assert.
@@ -60,6 +60,8 @@ expect_default_home() {
         expected_home="/tmp/vllm-home.XXXXXX"
         grep -Eq '^HOME=/tmp/vllm-home\.[^/]+$' "$_out" \
             || fail "$_out" "$_case: HOME not set to $expected_home"
+        created_home="$(sed -n 's/^HOME=//p' "$_out")"
+        rm -rf "$created_home"
     fi
 }
 
