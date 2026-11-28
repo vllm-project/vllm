@@ -240,6 +240,7 @@ _EMBEDDING_MODELS = {
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "EmbeddingGemma2Model": ("embedding_gemma2", "EmbeddingGemma2Model"),
+    "KananaVDecideModel": ("kanana_v_decide", "KananaVDecideModel"),
     "LlamaNemotronVLModel": ("nemotron_vl", "LlamaNemotronVLForEmbedding"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",

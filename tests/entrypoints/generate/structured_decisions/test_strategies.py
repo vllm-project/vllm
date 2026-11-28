@@ -53,6 +53,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     D3Strategy,
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
+    KananaVDecideStrategy,
     LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
@@ -134,6 +135,8 @@ def test_strategy_selection():
     assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
     d3 = model("D3ForSequenceClassification", "raw_logits")
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
+    kanana = model("KananaVDecideModel", "raw_logits")
+    assert select_read_strategy(kanana, ("embed",)) is KananaVDecideStrategy
 
 
 def test_route_is_registered_by_default():

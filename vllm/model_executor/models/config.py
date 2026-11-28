@@ -1255,6 +1255,17 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.logit_mean = 2.65
 
 
+class KananaVDecideModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # The checkpoint reads up to max_length tokens, below
+        # max_position_embeddings; an explicit --max-model-len wins.
+        if model_config.original_max_model_len is None:
+            model_config.max_model_len = min(
+                model_config.max_model_len, model_config.hf_config.max_length
+            )
+
+
 class Lfm3VlForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1917,6 +1928,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "KananaVDecideModel": KananaVDecideModelConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "KimiK31ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,

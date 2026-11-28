@@ -26,6 +26,7 @@ used for classification and routing.
 | `D3ForSequenceClassification`           | T + I + V                             | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
 | `Gemma4ForConditionalGeneration`        | T + I<sup>+</sup> + V + A<sup>*</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc.            |
 | `Gemma4UnifiedForConditionalGeneration` | T + I<sup>+</sup> + V + A             | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-12B-it`, etc.            |
+| `KananaVDecideModel`                    | T + I<sup>+</sup>                     | `KananaVDecideStrategy`        | `embed`          | N/A               | `kakaocorp/kanana-2-v-decide-3b-2611`    |
 | `Lfm2VlForConditionalGeneration`        | T + I<sup>+</sup>                     | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
 | `Qwen3_5ForConditionalGeneration`       | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
 | `Qwen3_5MoeForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
@@ -199,7 +200,7 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Kanana-2-v-decide](#kanana-2-v-decide), images only; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
 
 By default, `/v1/systemone` rejects `chat_template_kwargs.chat_template` with
 HTTP 400. Start the server with `--trust-request-chat-template` to allow
@@ -377,6 +378,50 @@ vllm serve vllm-sr/d3
   once and shared by every question of the request.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
+
+### Kanana-2-v-decide
+
+[`kakaocorp/kanana-2-v-decide-3b-2611`](https://huggingface.co/kakaocorp/kanana-2-v-decide-3b-2611)
+is a Qwen3-VL embedding model with a gated vision attention. It answers a
+question by comparing an embedding of the state and the question with an
+embedding of each option. vLLM serves it as an embedding model, with
+`--trust-remote-code` for the checkpoint's config class.
+
+```bash
+vllm serve kakaocorp/kanana-2-v-decide-3b-2611 --trust-remote-code
+```
+
+- Each question is one embedding of the prompt the checkpoint's
+  `decision_kanana_v_decide.py` writes: the images, the state, the task, the
+  question and the options. Each distinct option text is embedded once per
+  request. A question's probabilities are the softmax of the cosine
+  similarities at the checkpoint's `decision_temperature`, so picks and
+  probabilities match `model.system_one()`. `confidence` and `usage` follow
+  the definitions on this page instead.
+- A JSON state is written as compact JSON. Images go in `images`; a state
+  with image parts, or text spelling `<|image_pad|>`, returns 400.
+- `images` are placed before the state, at most 10, resized to between
+  65,536 and 1,638,400 pixels as the checkpoint's processor does, with an
+  aspect ratio of at most 200 after resizing. The images
+  are read once and shared by every question of the request. Videos return
+  400. Unlike the reference, images are turned upright by their EXIF
+  orientation, so a rotated photo can read differently.
+- A state longer than the checkpoint's `max_length` (or `--max-model-len`,
+  if smaller) loses its middle, as the reference does. A question whose
+  images, task, question and options alone exceed it returns 400; the
+  reference's `truncate_question_candidates`, which shortens a structured
+  `instructions.candidate` instead, is not supported.
+- A choice can have up to 1024 options; one with more than 255 is scored
+  without listing them in the prompt.
+- `instructions` returns 400, since the prompt is fixed.
+  `chat_template_kwargs` has no effect.
+- `/v1/embeddings` returns the model's embeddings, without the image resizing
+  above. To embed chat messages as the checkpoint does, send the system
+  instruction as the first message and set `add_generation_prompt: true` and
+  `add_special_tokens: true`; the defaults leave out the `<|begin_of_text|>`
+  token and the assistant turn, and silently give different embeddings.
+- `max_model_len` defaults to the checkpoint's `max_length` (20,480) rather
+  than `max_position_embeddings`.
 
 ### Liquid d1
 
