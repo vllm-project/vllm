@@ -28,6 +28,7 @@ def _build(
     kv_quant_mode=KVQuantMode.NONE,
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(
         current_platform, "is_device_capability", lambda cap: cap == capability
     )
