@@ -4,7 +4,7 @@
 use std::error::Error as StdError;
 use std::time::Instant;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 
 use super::streaming::StreamedResponseHandler;
 use super::{
@@ -74,10 +74,6 @@ impl OpenAICompletionsBackend {
         let st = Instant::now();
         // start_time is overwritten by benchmark.rs with monotonic offset
 
-        let mut most_recent_timestamp = st;
-        let mut generated_text = String::new();
-        let mut first_chunk_received = false;
-
         let mut request = client.post(&input.api_url).json(&payload);
         for (k, v) in &headers_map {
             request = request.header(k, v);
@@ -86,78 +82,7 @@ impl OpenAICompletionsBackend {
         match request.send().await {
             Ok(response) => {
                 if response.status().is_success() {
-                    let mut handler = StreamedResponseHandler::new();
-                    let mut stream = response.bytes_stream();
-
-                    while let Some(chunk_result) = stream.next().await {
-                        let chunk_bytes = match chunk_result {
-                            Ok(b) => b,
-                            Err(e) => {
-                                output.success = false;
-                                output.error = format!("Stream error: {e}");
-                                return Ok(output);
-                            }
-                        };
-
-                        let messages = handler.add_chunk(&chunk_bytes);
-                        for message in messages {
-                            // Take the data: line of each event, which may carry other
-                            // fields (Dynamo sends "event: message\ndata: {...}").
-                            // Comments and other events without data are skipped.
-                            let Some(chunk) =
-                                message.lines().find_map(|l| l.strip_prefix("data: "))
-                            else {
-                                continue;
-                            };
-
-                            if chunk == "[DONE]" {
-                                continue;
-                            }
-
-                            // Typed deserialization — avoids allocating a full
-                            // serde_json::Value tree; only extracts needed fields.
-                            let data: CompletionChunk = match serde_json::from_str(chunk) {
-                                Ok(d) => d,
-                                Err(_) => continue,
-                            };
-
-                            update_server_metrics(&mut output, data.metrics.as_ref());
-
-                            if !data.choices.is_empty() {
-                                let text = data.choices[0].text.as_deref().unwrap_or("");
-
-                                let timestamp = Instant::now();
-
-                                if !first_chunk_received {
-                                    first_chunk_received = true;
-                                    output.ttft = timestamp.duration_since(st).as_secs_f64();
-                                } else {
-                                    output.itl.push(
-                                        timestamp
-                                            .duration_since(most_recent_timestamp)
-                                            .as_secs_f64(),
-                                    );
-                                }
-
-                                most_recent_timestamp = timestamp;
-                                generated_text.push_str(text);
-                            }
-                            // Separate `if` (not `else if`) — Dynamo may send
-                            // both choices and usage in the same chunk.
-                            if let Some(usage) = &data.usage {
-                                usage.apply(&mut output);
-                            }
-                        }
-                    }
-
-                    if first_chunk_received {
-                        output.success = true;
-                    } else {
-                        output.success = false;
-                        output.error = NO_VALID_CHUNK_ERROR.to_string();
-                    }
-                    output.generated_text = generated_text;
-                    output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
+                    read_stream(response.bytes_stream(), &mut output, st).await;
                 } else {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
@@ -184,6 +109,85 @@ impl OpenAICompletionsBackend {
 
         Ok(output)
     }
+}
+
+/// Read a completions SSE body into `output`, one `add_chunk` call per stream
+/// item. `send_request` passes the response body; tests pass recorded chunks
+/// directly.
+pub(super) async fn read_stream<S, B, E>(mut stream: S, output: &mut RequestFuncOutput, st: Instant)
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut handler = StreamedResponseHandler::new();
+    let mut most_recent_timestamp = st;
+    let mut generated_text = String::new();
+    let mut first_chunk_received = false;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk_bytes = match chunk_result {
+            Ok(b) => b,
+            Err(e) => {
+                output.success = false;
+                output.error = format!("Stream error: {e}");
+                return;
+            }
+        };
+
+        let messages = handler.add_chunk(chunk_bytes.as_ref());
+        for message in messages {
+            // Take the data: line of each event, which may carry other
+            // fields (Dynamo sends "event: message\ndata: {...}").
+            // Comments and other events without data are skipped.
+            let Some(chunk) = message.lines().find_map(|l| l.strip_prefix("data: ")) else {
+                continue;
+            };
+
+            if chunk == "[DONE]" {
+                continue;
+            }
+
+            // Typed deserialization — avoids allocating a full
+            // serde_json::Value tree; only extracts needed fields.
+            let data: CompletionChunk = match serde_json::from_str(chunk) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            update_server_metrics(output, data.metrics.as_ref());
+
+            if !data.choices.is_empty() {
+                let text = data.choices[0].text.as_deref().unwrap_or("");
+
+                let timestamp = Instant::now();
+
+                if !first_chunk_received {
+                    first_chunk_received = true;
+                    output.ttft = timestamp.duration_since(st).as_secs_f64();
+                } else {
+                    output.itl.push(timestamp.duration_since(most_recent_timestamp).as_secs_f64());
+                }
+
+                most_recent_timestamp = timestamp;
+                generated_text.push_str(text);
+            }
+            // Separate `if` (not `else if`) — Dynamo may send
+            // both choices and usage in the same chunk.
+            if let Some(usage) = &data.usage {
+                usage.apply(output);
+            }
+        }
+    }
+
+    if first_chunk_received {
+        output.success = true;
+    } else {
+        output.success = false;
+        output.error = NO_VALID_CHUNK_ERROR.to_string();
+    }
+    output.generated_text = generated_text;
+    output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
 }
 
 #[cfg(test)]

@@ -361,4 +361,221 @@ mod tests {
         assert_eq!(output.server_queue_time, None);
         assert_eq!(output.server_ttft, Some(0.5));
     }
+
+    /// Stream cases shared with the Python client, which runs the same file in
+    /// `tests/benchmarks/test_stream_conformance.py`.
+    const STREAM_CASES: &str = include_str!("../../../../../tests/benchmarks/stream_cases.json");
+
+    /// Serve the chunks as one HTTP chunk each, all in a single write, then
+    /// close. Hyper never reads past the end of an HTTP chunk but can split
+    /// one into several reads, so the reads need not match the fixture's.
+    fn spawn_case_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                                 transfer-encoding: chunked\r\nconnection: close\r\n\r\n"
+                .to_vec();
+            for chunk in chunks {
+                response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                response.extend_from_slice(&chunk);
+                response.extend_from_slice(b"\r\n");
+            }
+            response.extend_from_slice(b"0\r\n\r\n");
+            stream.write_all(&response).unwrap();
+        });
+        addr
+    }
+
+    fn case_chunks(case: &serde_json::Value) -> Vec<Vec<u8>> {
+        let strings = |key: &str| -> Vec<&str> {
+            case[key].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect()
+        };
+        if case.get("chunks_hex").is_some() {
+            let byte = |h: &str, i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap();
+            strings("chunks_hex")
+                .into_iter()
+                .map(|h| (0..h.len()).step_by(2).map(|i| byte(h, i)).collect())
+                .collect()
+        } else {
+            strings("chunks").into_iter().map(|c| c.as_bytes().to_vec()).collect()
+        }
+    }
+
+    fn case_observed(output: &RequestFuncOutput) -> serde_json::Value {
+        serde_json::json!({
+            "success": output.success,
+            "itl": output.itl.len(),
+            "text": output.generated_text,
+            "output_tokens": output.output_tokens,
+            "prompt_len": output.prompt_len,
+            "error": output.error,
+        })
+    }
+
+    fn case_mismatches(expect: &serde_json::Value, got: &serde_json::Value) -> Vec<String> {
+        let error = got["error"].as_str().unwrap();
+        let mut bad = Vec::new();
+        for (key, want) in expect.as_object().unwrap() {
+            if key == "error_contains" {
+                if !error.contains(want.as_str().unwrap()) {
+                    bad.push(format!("error {error:?} lacks {want}"));
+                }
+            } else if key != "success" && expect["success"] == false {
+                continue;
+            } else if &got[key] != want {
+                bad.push(format!("{key}: got {}, want {want}", got[key]));
+            }
+        }
+        bad
+    }
+
+    /// The `known_gap` entry `got` that describes this output.
+    fn case_gap_got(expect: &serde_json::Value, got: &serde_json::Value) -> serde_json::Value {
+        let fields = ["itl", "text", "output_tokens", "prompt_len"];
+        let mut record = serde_json::Map::new();
+        if got["success"] == true && expect["success"] == false {
+            record.insert("success".into(), true.into());
+            for key in fields {
+                record.insert(key.into(), got[key].clone());
+            }
+        } else if got["success"] == false {
+            let error = got["error"].as_str().unwrap();
+            let last = error.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+            record.insert("success".into(), false.into());
+            record.insert("error_contains".into(), last.into());
+        } else {
+            for key in fields {
+                if expect.get(key).is_some_and(|want| &got[key] != want) {
+                    record.insert(key.into(), got[key].clone());
+                }
+            }
+        }
+        record.into()
+    }
+
+    fn case_gap_expect(
+        expect: &serde_json::Value,
+        gap_got: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut merged = expect.as_object().unwrap().clone();
+        merged.extend(gap_got.as_object().unwrap().clone());
+        if gap_got["success"] == true {
+            merged.remove("error_contains");
+        }
+        merged.into()
+    }
+
+    fn case_input(api_url: String) -> RequestFuncInput {
+        RequestFuncInput {
+            prompt: Arc::from("hello"),
+            api_url,
+            model: "test-model".to_string(),
+            // The client-side estimate; a case expects another value only
+            // when the stream reports usage.
+            prompt_len: 100,
+            output_len: 3,
+            ..Default::default()
+        }
+    }
+
+    /// Hand the chunks to the backend's stream reader, one `add_chunk` call
+    /// per chunk, without a socket.
+    async fn feed_case(backend: &str, chunks: Vec<Vec<u8>>) -> serde_json::Value {
+        let input = case_input(String::new());
+        let body = futures::stream::iter(chunks.into_iter().map(Ok::<_, std::convert::Infallible>));
+        let st = std::time::Instant::now();
+        let mut output = RequestFuncOutput {
+            prompt_len: input.prompt_len,
+            ..Default::default()
+        };
+        match backend {
+            "openai" => openai_completions::read_stream(body, &mut output, st).await,
+            "openai-chat" => openai_chat::read_stream(body, &mut output, st).await,
+            "openai-responses" => output = openai_responses::read_stream(body, &input, st).await,
+            other => panic!("unknown backend {other}"),
+        }
+        case_observed(&output)
+    }
+
+    #[tokio::test]
+    async fn test_stream_cases() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(STREAM_CASES).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut failures = Vec::new();
+
+        for case in &cases {
+            let name = case["name"].as_str().unwrap();
+            let backend = case["backend"].as_str().unwrap();
+            let (kind, path) = match backend {
+                "openai" => (BackendKind::Openai, "/v1/completions"),
+                "openai-chat" => (BackendKind::OpenaiChat, "/v1/chat/completions"),
+                "openai-responses" => (BackendKind::OpenaiResponses, "/v1/responses"),
+                other => panic!("{name}: unknown backend {other}"),
+            };
+            let chunks = case_chunks(case);
+            let got = feed_case(backend, chunks.clone()).await;
+
+            // The same case through reqwest and a local socket, unless the
+            // result changes when the whole stream arrives in one read or one
+            // byte per read: the socket does not keep the fixture's split.
+            let joined = chunks.concat();
+            let whole = feed_case(backend, vec![joined.clone()]).await;
+            let bytewise = feed_case(backend, joined.iter().map(|b| vec![*b]).collect()).await;
+            if whole == got && bytewise == got {
+                let input = case_input(format!("http://{}{path}", spawn_case_server(chunks)));
+                let output =
+                    get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+                let over_socket = case_observed(&output);
+                if over_socket != got {
+                    failures.push(format!(
+                        "{name}: over a socket got {over_socket}, fed directly {got}"
+                    ));
+                }
+            }
+
+            let bad = case_mismatches(&case["expect"], &got);
+
+            match case["known_gap"].get("rust") {
+                None if !bad.is_empty() => failures.push(format!("{name}: {}", bad.join("; "))),
+                None => {}
+                // Strict: closing the gap must also remove it from the case file.
+                Some(gap) if bad.is_empty() => failures.push(format!(
+                    "{name}: rust now meets this case; drop its known_gap ({})",
+                    gap["pr"]
+                )),
+                // Every field the gap does not name must still match `expect`.
+                Some(gap)
+                    if !case_mismatches(&case_gap_expect(&case["expect"], &gap["got"]), &got)
+                        .is_empty() =>
+                {
+                    failures.push(format!(
+                        "{name}: known_gap.rust.got no longer matches ({}); got\t{}",
+                        gap["pr"],
+                        case_gap_got(&case["expect"], &got)
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
 }

@@ -856,6 +856,15 @@ The Rust implementation matches Python `vllm bench serve` in:
   `tests/benchmarks/test_rust_bench_cli_parity.py` in the repo root) with an
   explicit allowlist for the Python-only remainder — so `VLLM_USE_RUST_BENCH=1`
   delegation cannot silently reject documented flags
+- Stream handling: `tests/benchmarks/stream_cases.json` in the repo root holds
+  recorded SSE streams and the result both clients must report for each
+  (ITL sample count, text and token counts for a successful stream; for a
+  failed one, that it fails and part of the error). `test_stream_cases` in
+  `src/backends/mod.rs` and `tests/benchmarks/test_stream_conformance.py` run
+  the same file, handing the client's stream reader one read per fixture
+  chunk, and also over a local socket when the result does not depend on the
+  split. A case lists a client under `known_gap`, with the values that client
+  reports instead, until that client meets it
 
 ## Environment Variables
 
