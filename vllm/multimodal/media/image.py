@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pybase64
 import torch
-from PIL import Image
+from PIL import Image, ImageFile
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -36,6 +36,13 @@ MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generat
 # Image decoding backends selectable via
 # `--media-io-kwargs '{"image": {"image_backend": ...}}'`.
 IMAGE_BACKENDS = ("pil", "torchcodec")
+
+# Single-frame files of these formats behave like a detached `Image.Image` once
+# loaded, so when no EXIF orientation transform is needed we can skip
+# `exif_transpose`'s full-image copy and detach via `_new(im)`. Other formats
+# keep frame or tag state (e.g. TIFF IFD tags, PSD layers, ICO sizes) that the
+# copy drops.
+_IN_PLACE_EXIF_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "BMP"})
 
 
 class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
@@ -142,8 +149,16 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
             ):
                 io_config = self._io_config(image.mode != self.image_mode)
                 return MediaWithBytes(tensor, data, io_config)
-            image = normalize_image(image)
+            in_place = (
+                image.format in _IN_PLACE_EXIF_FORMATS
+                and getattr(image, "n_frames", 1) == 1
+            )
+            image = normalize_image(image, in_place=in_place)
             image.load()
+            if in_place and isinstance(image, ImageFile.ImageFile):
+                # Share the decoded ImagingCore on a detached Image.Image so
+                # return type, format, and state/seek behavior match the copy.
+                image = image._new(image.im)
             converted = self._convert_image_mode(image)
         # Pillow raises SyntaxError (not OSError) for broken PNG chunks and
         # RuntimeError for undecodable data, e.g. from the AVIF decoder.

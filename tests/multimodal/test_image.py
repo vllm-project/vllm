@@ -188,3 +188,147 @@ def test_normalize_image_no_exif():
     result = normalize_image(img)
     assert result.size == img.size
     assert result.mode == img.mode
+
+
+def make_test_png_bytes(
+    mode: str,
+    orientation: int | None = None,
+    *,
+    include_metadata: bool = True,
+) -> bytes:
+    """Build an asymmetric rectangular PNG with optional EXIF and ICC metadata."""
+    width, height = 6, 4
+    if mode == "RGB":
+        arr = np.arange(height * width * 3, dtype=np.uint8).reshape(height, width, 3)
+        img = Image.fromarray(arr, mode="RGB")
+    elif mode == "RGBA":
+        arr = np.arange(height * width * 4, dtype=np.uint8).reshape(height, width, 4)
+        img = Image.fromarray(arr, mode="RGBA")
+    elif mode == "L":
+        arr = np.arange(height * width, dtype=np.uint8).reshape(height, width)
+        img = Image.fromarray(arr, mode="L")
+    elif mode == "P":
+        arr = np.arange(height * width, dtype=np.uint8).reshape(height, width)
+        img = Image.fromarray(arr, mode="P")
+        palette = [(i * 7) % 256 for i in range(768)]
+        img.putpalette(palette)
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    save_kwargs: dict[str, bytes] = {}
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[0x0112] = orientation
+    if include_metadata:
+        exif[270] = "exif-description"
+        save_kwargs["icc_profile"] = b"test-icc-profile"
+    if len(exif):
+        save_kwargs["exif"] = exif.tobytes()
+
+    buf = BytesIO()
+    img.save(buf, format="PNG", **save_kwargs)
+    return buf.getvalue()
+
+
+def test_normalize_image_default_preserves_caller_image():
+    """Default normalize_image(in_place=False) must not mutate caller-owned images."""
+    data = make_test_png_bytes("RGB", orientation=6)
+    img = Image.open(BytesIO(data))
+    img.load()
+
+    orig_bytes = img.tobytes()
+    orig_size = img.size
+    orig_exif_bytes = img.getexif().tobytes()
+    orig_info = dict(img.info)
+
+    out = normalize_image(img)
+
+    assert out is not img
+    assert out.size == orig_size[::-1]
+    assert img.size == orig_size
+    assert img.tobytes() == orig_bytes
+    assert img.getexif().tobytes() == orig_exif_bytes
+    assert img.info == orig_info
+    assert 0x0112 not in out.getexif()
+    assert out.getexif().get(270) == "exif-description"
+
+    # Without an Orientation tag, the default path still returns a detached copy.
+    no_exif = Image.open(
+        BytesIO(make_test_png_bytes("RGB", orientation=None, include_metadata=False))
+    )
+    no_exif.load()
+    no_exif_bytes = no_exif.tobytes()
+    out_copy = normalize_image(no_exif)
+    assert out_copy is not no_exif
+    out_copy.putpixel((0, 0), (255, 255, 255))
+    assert no_exif.tobytes() == no_exif_bytes
+
+
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L", "P"])
+@pytest.mark.parametrize("orientation", [None, *range(1, 9)])
+def test_normalize_image_in_place_matches_copy(mode: str, orientation: int | None):
+    """in_place=True reuses the image when no transform is needed and matches copy."""
+    data = make_test_png_bytes(mode, orientation)
+    img_ref = Image.open(BytesIO(data))
+    img_in_place = Image.open(BytesIO(data))
+
+    expected = normalize_image(img_ref)
+    actual = normalize_image(img_in_place, in_place=True)
+
+    assert (actual is img_in_place) == (orientation not in range(2, 9))
+    assert actual.mode == expected.mode
+    assert actual.size == expected.size
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    np.testing.assert_array_equal(
+        np.asarray(actual.convert("RGB")), np.asarray(expected.convert("RGB"))
+    )
+    if mode == "P":
+        assert actual.getpalette() == expected.getpalette()
+    assert dict(actual.getexif()) == dict(expected.getexif())
+    assert actual.info == expected.info
+    assert actual.info.get("icc_profile") == b"test-icc-profile"
+    assert actual.getexif().get(270) == "exif-description"
+
+
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L", "P"])
+def test_normalize_image_in_place_without_exif(mode: str):
+    """in_place=True handles EXIF-free images without copying or altering pixels."""
+    data = make_test_png_bytes(mode, orientation=None, include_metadata=False)
+    img_ref = Image.open(BytesIO(data))
+    img_in_place = Image.open(BytesIO(data))
+
+    expected = normalize_image(img_ref)
+    actual = normalize_image(img_in_place, in_place=True)
+
+    assert actual is img_in_place
+    assert actual.mode == expected.mode
+    assert actual.size == expected.size
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    np.testing.assert_array_equal(
+        np.asarray(actual.convert("RGB")), np.asarray(expected.convert("RGB"))
+    )
+    if mode == "P":
+        assert actual.getpalette() == expected.getpalette()
+    assert dict(actual.getexif()) == dict(expected.getexif()) == {}
+    assert actual.info == expected.info
+
+
+def test_normalize_image_in_place_exif_cleanup_failure_discards_rotation(monkeypatch):
+    """If EXIF rewrite raises during transposition, in_place=True must not leave
+    rotated pixels paired with the original Orientation tag."""
+    data = make_test_png_bytes("RGB", orientation=6)
+    img = Image.open(BytesIO(data))
+    img.load()
+    orig_size = img.size
+    orig_bytes = img.tobytes()
+
+    def _boom_tobytes(self):
+        raise RuntimeError("EXIF serialize failed")
+
+    monkeypatch.setattr(Image.Exif, "tobytes", _boom_tobytes)
+    out = normalize_image(img, in_place=True)
+
+    assert out is img
+    assert out.size == orig_size
+    assert out.tobytes() == orig_bytes
+    assert out.getexif().get(0x0112) == 6
