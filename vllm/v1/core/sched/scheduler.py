@@ -289,6 +289,8 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # Load failures cannot identify a safe external source to retry.
+        self.requests_with_failed_kv_loads: set[str] = set()
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -1186,11 +1188,15 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
+                        ext_tokens: int | None
+                        if request_id in self.requests_with_failed_kv_loads:
+                            ext_tokens, load_kv_async = 0, False
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, block_aligned_local
+                                )
                             )
-                        )
                         if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
@@ -1202,7 +1208,10 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         if self.prefix_replay_tokens and not (
-                            ext_tokens and self._load_restores_replay_window(request)
+                            ext_tokens
+                            and self._load_restores_replay_window(
+                                request, block_aligned_local + ext_tokens
+                            )
                         ):
                             # DSV41 SWA bounded replay recomputes the hit's last
                             # window, from the block holding its first
@@ -1275,7 +1284,9 @@ class Scheduler(SchedulerInterface):
                     # nothing.
                     window_loaded = bool(
                         num_external_computed_tokens
-                    ) and self._load_restores_replay_window(request)
+                    ) and self._load_restores_replay_window(
+                        request, num_computed_tokens
+                    )
                     if (
                         not window_loaded
                         and 0 < num_computed_tokens <= self.prefix_replay_tokens
@@ -1524,7 +1535,9 @@ class Scheduler(SchedulerInterface):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     skip_zeroing_group_ids=(
-                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        self.connector.get_loaded_kv_cache_group_ids_for_prefix(
+                            request, num_computed_tokens
+                        )
                         if load_kv_async and self.connector is not None
                         else ()
                     ),
@@ -3329,6 +3342,7 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
+        self.requests_with_failed_kv_loads.discard(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
@@ -3765,14 +3779,17 @@ class Scheduler(SchedulerInterface):
     def _unreserve_parked(self, request: Request) -> None:
         self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)
 
-    def _load_restores_replay_window(self, request: Request) -> bool:
-        """Whether the KV connector's load for `request` restores every DSV41
+    def _load_restores_replay_window(self, request: Request, end_token: int) -> bool:
+        """Whether the KV connector's load for ``request`` restores every DSV41
         SWA bounded-replay group, as a P/D transfer of the request's own blocks
         does; a prefix-cache store holds no window."""
         assert self.connector is not None
+        loaded_groups = self.connector.get_loaded_kv_cache_group_ids_for_prefix(
+            request, end_token
+        )
         return bool(self.prefix_replay_group_ids) and set(
             self.prefix_replay_group_ids
-        ).issubset(self.connector.get_loaded_kv_cache_group_ids(request))
+        ).issubset(loaded_groups)
 
     def _mark_prefix_replay(
         self, request: Request, num_hit_tokens: int, window_loaded: bool
@@ -3838,7 +3855,7 @@ class Scheduler(SchedulerInterface):
             request,
             request.num_computed_tokens,
             window_loaded=not load_failed
-            and self._load_restores_replay_window(request),
+            and self._load_restores_replay_window(request, request.num_computed_tokens),
         )
         if num_replay_tokens > 0:
             request.num_computed_tokens -= num_replay_tokens
@@ -4033,6 +4050,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = 0
                     self._refresh_queued_workload(request)
                     self.failed_recving_kv_req_ids.add(req_id)
+                    self.requests_with_failed_kv_loads.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
@@ -4114,5 +4132,8 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+        self.requests_with_failed_kv_loads.update(
+            async_failed_req_ids | sync_failed_req_ids
+        )
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
