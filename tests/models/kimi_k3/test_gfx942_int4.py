@@ -1,104 +1,75 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""`int4_per_group_32` MoE config resolution, as used for Kimi-K3 on gfx942."""
 
-import sys
-from collections.abc import Callable
-from types import ModuleType, SimpleNamespace
+import os
 from unittest.mock import patch
 
 import pytest
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    _moe_weight_override_is_int4,
-    _use_k3_situ_int4_gfx942,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerGroup32OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.requantization import (
+    skip_checkpoint_backend_selection,
 )
 
 pytestmark = pytest.mark.cpu_test
 
-
-class _FakeRocmModule(ModuleType):
-    on_gfx942: Callable[[], bool]
+_PREFIX = "model.layers.0.mlp.experts"
 
 
-class _FakeAiterOpsModule(ModuleType):
-    rocm_aiter_ops: SimpleNamespace
+def _online_config(**args) -> OnlineQuantizationConfig:
+    return OnlineQuantizationConfig(QuantizationConfigArgs(**args))
 
 
-def _vllm_config(moe_weight: str | None):
-    quantization_config = (
-        None
-        if moe_weight is None
-        else QuantizationConfigArgs(moe={"weight": moe_weight})
-    )
-    return SimpleNamespace(
-        model_config=SimpleNamespace(quantization_config=quantization_config)
-    )
+def test_int4_per_group_32_is_an_online_moe_method():
+    config = _online_config(moe={"weight": "int4_per_group_32"})
+    resolved = config.resolve_quant_method_cls(RoutedExperts, _PREFIX)
+    assert resolved is not None
+    assert resolved[-1] is Int4PerGroup32OnlineMoEMethod
 
 
-@pytest.mark.parametrize(
-    ("moe_weight", "expected"),
-    [
-        (None, False),
-        ("mxfp4", False),
-        ("int4_per_group_32", True),
-    ],
-)
-def test_moe_weight_override_is_int4(monkeypatch, moe_weight, expected):
-    monkeypatch.setattr(
-        "vllm.config.get_current_vllm_config",
-        lambda: _vllm_config(moe_weight),
-    )
-    assert _moe_weight_override_is_int4() is expected
-
-
-@pytest.mark.parametrize("int4_requested", [False, True])
-def test_k3_situ_int4_gfx942_requires_explicit_override(int4_requested):
-    moe = SimpleNamespace(
-        activation=MoEActivation.SITU,
-        activation_situ_linear_beta=25.0,
-    )
-    fake_rocm = _FakeRocmModule("vllm.platforms.rocm")
-    fake_rocm.on_gfx942 = lambda: True
-    fake_aiter_ops = _FakeAiterOpsModule("vllm._aiter_ops")
-    fake_aiter_ops.rocm_aiter_ops = SimpleNamespace(is_fused_moe_enabled=lambda: True)
-    with (
-        patch("vllm.platforms.current_platform.is_rocm", return_value=True),
-        patch.dict(
-            sys.modules,
-            {
-                "vllm.platforms.rocm": fake_rocm,
-                "vllm._aiter_ops": fake_aiter_ops,
-            },
-        ),
-        patch(
-            "vllm.model_executor.layers.quantization.mxfp4."
-            "_moe_weight_override_is_int4",
-            return_value=int4_requested,
-        ),
-    ):
-        assert _use_k3_situ_int4_gfx942(moe) is int4_requested
-
-
-def test_int4_per_group_32_is_not_an_online_moe_method():
-    # Load-time gfx942 requant. Must not match the online MoE table.
-    config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(moe={"weight": "int4_per_group_32"})
-    )
-    assert (
-        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
-        is None
-    )
+def test_int4_per_group_32_is_rejected_for_linear_layers():
+    config = _online_config(linear={"weight": "int4_per_group_32"})
+    with pytest.raises(ValueError, match="online quantization"):
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.mlp.down_proj")
 
 
 def test_unknown_online_moe_weight_still_raises():
-    config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(moe={"weight": "fp8_per_token"})
-    )
+    config = _online_config(moe={"weight": "fp8_per_token"})
     with pytest.raises(ValueError, match="online quantization"):
-        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
+        config.resolve_quant_method_cls(RoutedExperts, _PREFIX)
+
+
+def test_mxfp4_requantization_source_skips_k3_aiter_setup(monkeypatch):
+    """As a requantization source, Kimi-K3's MXFP4 experts only dequantize: the
+    gfx950 AITER route, and its AITER_BF16_FP8_MOE_BOUND override, stay off."""
+    monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
+    moe = make_dummy_moe_config(
+        num_experts=8,
+        hidden_dim=256,
+        intermediate_size=256,
+        activation=MoEActivation.SITU,
+    )
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.mxfp4._use_k3_situ_aiter",
+            return_value=True,
+        ),
+        skip_checkpoint_backend_selection(),
+    ):
+        method = Mxfp4MoEMethod(moe)
+    assert not method.is_k3_situ_aiter
+    assert method.mxfp4_backend == Mxfp4MoeBackend.NONE
+    assert "AITER_BF16_FP8_MOE_BOUND" not in os.environ

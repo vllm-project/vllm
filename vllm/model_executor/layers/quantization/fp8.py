@@ -207,6 +207,16 @@ class Fp8Config(QuantizationConfig):
                 and self.weight_block_size is not None
                 and current_platform.is_rocm()
             ):
+                from vllm.model_executor.layers.quantization.online.requantization import (  # noqa: E501
+                    is_requantization_source,
+                )
+
+                if is_requantization_source():
+                    raise ValueError(
+                        f"{prefix}: VLLM_FP8_MOE_REQUANT=mxfp4 conflicts with the "
+                        "online MoE quantization in --quantization-config; set "
+                        "only one."
+                    )
                 from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
                     Fp8BlockExpertsAsMxfp4FusedMoE,
                 )

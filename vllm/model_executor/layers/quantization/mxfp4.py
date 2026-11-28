@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Iterator
 
 import torch
 
@@ -38,6 +39,12 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.online.requantization import (
+    is_requantization_source,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequantize_mxfp4_moe_weights,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -505,146 +512,6 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     )
 
 
-# The gfx942 int4 requant unpacks MXFP4 to f32 and peaks above 20 GiB per rank
-# if all experts convert at once, so it converts in chunks. Chunks are sized by
-# unpacked values rather than experts so that pure TP, which holds every expert
-# at 1/tp width, runs as many chunks as EP.
-_K3_INT4_CONVERT_CHUNK_VALUES = 1 << 27
-
-
-def _mxfp4_experts_to_int4_gfx942(
-    weight: torch.nn.Parameter,
-    scale: torch.nn.Parameter,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Requantize packed MXFP4 experts to shuffled groupwise int4 for gfx942.
-
-    Takes `(E, N, K // 2)` MXFP4 weights with `(E, N, K // 32)` E8M0
-    scales and returns `(E, N, K // 2)` packed int4 with flattened
-    per-32 scales.
-    """
-    from aiter import dtypes as aiter_dtypes
-    from aiter.ops.quant import per_1x32_i4_quant
-    from aiter.ops.shuffle import (
-        pack_int8_to_packed_int4,
-        shuffle_scale_for_int4,
-        shuffle_weight,
-    )
-    from aiter.utility import fp4_utils
-
-    fp4_dtype = torch.float4_e2m1fn_x2
-    e8m0_dtype = torch.float8_e8m0fnu
-
-    w_all = weight.data.view(fp4_dtype)
-    s_all = scale.data.view(e8m0_dtype)
-    num_experts, rows, packed_cols = w_all.shape
-    chunk = min(
-        num_experts,
-        max(1, _K3_INT4_CONVERT_CHUNK_VALUES // (rows * packed_cols * 2)),
-    )
-
-    # Write chunks into a preallocated output. torch.cat of a list
-    # would hold the full result twice at the join.
-    out_packed: torch.Tensor | None = None
-    out_scale: torch.Tensor | None = None
-    scale_stride = 0
-    for lo in range(0, num_experts, chunk):
-        # Shift the last chunk back so every chunk has the same shapes. Under
-        # load_model's max_split_size_mb, a shorter chunk cannot reuse the
-        # cached blocks. The overlapping experts are recomputed identically.
-        lo = min(lo, num_experts - chunk)
-        hi = lo + chunk
-        weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
-        scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
-        chunk_experts, output_size, input_size = weight_f32.shape
-        weight_bf16 = (
-            (
-                weight_f32.view(chunk_experts, output_size, input_size // 32, 32)
-                * scale_f32.view(chunk_experts, output_size, input_size // 32, 1)
-            )
-            .view(chunk_experts, output_size, input_size)
-            .to(torch.bfloat16)
-        )
-        del weight_f32, scale_f32
-
-        weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
-        del weight_bf16
-        weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
-            chunk_experts, output_size, input_size
-        )
-        weight_packed = pack_int8_to_packed_int4(
-            shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
-        )
-        del weight_int4
-        chunk_packed = weight_packed.view(
-            chunk_experts, output_size, input_size // 2
-        ).view(aiter_dtypes.i4x2)
-        chunk_scale = (
-            shuffle_scale_for_int4(weight_scale, group_size=32).view(-1).contiguous()
-        )
-        if out_packed is None:
-            out_packed = torch.empty(
-                (num_experts,) + tuple(chunk_packed.shape[1:]),
-                dtype=chunk_packed.dtype,
-                device=chunk_packed.device,
-            )
-            scale_stride = chunk_scale.numel() // chunk_experts
-            out_scale = torch.empty(
-                num_experts * scale_stride,
-                dtype=chunk_scale.dtype,
-                device=chunk_scale.device,
-            )
-        assert out_packed is not None
-        assert out_scale is not None
-        out_packed[lo:hi].copy_(chunk_packed)
-        out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
-        # No empty_cache() here: the next chunk reuses these cached
-        # blocks, while releasing them costs a hipFree per temporary.
-        del weight_packed, weight_scale, chunk_packed, chunk_scale
-
-    del w_all, s_all
-    assert out_packed is not None
-    assert out_scale is not None
-    return out_packed, out_scale
-
-
-def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
-    """Opt-in gfx942 MXFP4-to-int4 requant for Kimi-K3 SiTU experts."""
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.platforms.rocm import on_gfx942
-
-    return (
-        rocm_aiter_ops.is_fused_moe_enabled()
-        and on_gfx942()
-        and moe.activation == MoEActivation.SITU
-        and moe.activation_situ_linear_beta is not None
-        and _moe_weight_override_is_int4()
-    )
-
-
-def _moe_weight_override_is_int4() -> bool:
-    """True when --quantization-config.moe.weight int4_per_group_32 was set."""
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    if vllm_config is None:
-        return False
-    quant_args = getattr(vllm_config.model_config, "quantization_config", None)
-    moe_spec = getattr(quant_args, "moe", None)
-    weight = getattr(moe_spec, "weight", None)
-    if weight is None:
-        return False
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kInt4Static32,
-    )
-
-    return weight == kInt4Static32
-
-
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
@@ -656,27 +523,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # Checkpoint-declared activation quantization. Only backends that pick
         # their activation format from the layer (Humming) consume it.
         self.activation_key = activation_key
-        self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
-        self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
+        # A requantization source only dequantizes its weights.
+        self.is_k3_situ_aiter = (
+            _use_k3_situ_aiter(moe) and not is_requantization_source()
+        )
         self.experts_cls: type[mk.FusedMoEExperts] | None
-        if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
+        if self.is_k3_situ_aiter:
             from vllm._aiter_ops import rocm_aiter_ops
 
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            if self.is_k3_situ_int4_gfx942:
-                logger.warning_once(
-                    "Requantizing Kimi-K3 MXFP4 experts to groupwise int4 "
-                    "for gfx942. This conversion is lossy and was explicitly "
-                    "enabled by --quantization-config.moe.weight "
-                    "int4_per_group_32."
-                )
-            else:
-                logger.info_once(
-                    "Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE, SiTUv2 "
-                    "activation mode %s (VLLM_ROCM_USE_AITER_MOE_SITUV2).",
-                    rocm_aiter_ops.get_fused_moe_situv2_activation(),
-                )
+            logger.info_once(
+                "Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE, SiTUv2 "
+                "activation mode %s (VLLM_ROCM_USE_AITER_MOE_SITUV2).",
+                rocm_aiter_ops.get_fused_moe_situv2_activation(),
+            )
 
             if rocm_aiter_ops.is_fused_moe_situv2_enabled():
                 # a16w4 does not read this bound. Force 0 so leftover a8w4
@@ -986,49 +847,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
-        import inspect
-
-        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
-            flydsl_a16w4_gemm1,
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized MXFP4 experts, for online
+        requantization."""
+        return dequantize_mxfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            out_dtype=layer.orig_dtype,
         )
-
-        # Fail closed if this AITER build would silently run SiLU.
-        if "act" not in inspect.signature(flydsl_a16w4_gemm1).parameters:
-            raise RuntimeError(
-                "This AITER build ignores the SiTUv2 activation on the "
-                "replacement packed-int4 MoE path and would silently compute "
-                "SiLU. Rebuild with the replacement A16W4/int4 pipeline."
-            )
-
-        w13, w13_scale = _mxfp4_experts_to_int4_gfx942(
-            layer.w13_weight, layer.w13_weight_scale
-        )
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        del w13, w13_scale
-        torch.accelerator.empty_cache()
-
-        w2, w2_scale = _mxfp4_experts_to_int4_gfx942(
-            layer.w2_weight, layer.w2_weight_scale
-        )
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
-        del w2, w2_scale
-        torch.accelerator.empty_cache()
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
-            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
@@ -1041,10 +871,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     f"moe backend, got {self.mxfp4_backend}"
                 )
             self._build_moe_kernel(layer)
-            return
-
-        if self.is_k3_situ_int4_gfx942:
-            self._setup_kernel_k3_situ_gfx942(layer)
             return
 
         w13 = layer.w13_weight

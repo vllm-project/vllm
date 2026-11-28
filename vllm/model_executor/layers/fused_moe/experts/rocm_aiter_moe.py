@@ -756,8 +756,7 @@ class AiterFp8ChannelExperts(AiterExperts):
 
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
-    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
-    Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
+    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250)."""
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
 
@@ -766,10 +765,8 @@ class AiterMxfp4Experts(AiterExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-        if (weight_key, activation_key) == (kInt4Static32, None):
-            return on_gfx942()
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
             (kMxfp4Static, kMxfp4Dynamic),
@@ -780,3 +777,50 @@ class AiterMxfp4Experts(AiterExperts):
 
     def _extra_fused_moe_kwargs(self) -> dict:
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+
+
+@lru_cache(maxsize=1)
+def _a16wi4_honours_activation() -> bool:
+    """Whether this AITER build's a16wi4 stage 1 takes the activation, rather
+    than always computing SiLU."""
+    import inspect
+
+    try:
+        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm1
+    except ImportError:
+        return False
+    return "act" in inspect.signature(flydsl_a16w4_gemm1).parameters
+
+
+class AiterInt4Experts(AiterExperts):
+    """Symmetric int4 weights with one bf16 scale per 32 input channels and
+    unquantized activations, on the gfx942 FlyDSL a16wi4 kernels. Weights are
+    in the layout of `int_wna16._process_weights_aiter`."""
+
+    _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
+    # The a16wi4 stage 1 ignores doweight_stage1, and stage 2 then scales by
+    # an uninitialized weight buffer.
+    _SUPPORTS_ROUTER_WEIGHT_ON_INPUT = False
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        from vllm.platforms.rocm import on_gfx942
+
+        return rocm_aiter_ops.is_fused_moe_enabled() and on_gfx942()
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        if activation == MoEActivation.SITU:
+            # The weights are shuffled with gate and up separated.
+            return (
+                _a16wi4_honours_activation()
+                and not rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            )
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kInt4Static32, None)

@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 )
 from vllm.model_executor.layers.quantization.online.int4 import (
     Int4PerGroup32AsymLMHeadMethod,
+    Int4PerGroup32OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
@@ -129,6 +130,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kMxfp8Static: Mxfp8OnlineMoEMethod,
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
+    kInt4Static32: Int4PerGroup32OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
     kLutBStatic: LutBOnlineMoEMethod,
 }
@@ -309,9 +311,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
         """
         if spec is None or spec.weight is None:
-            return None
-        # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
-        if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)
         if cls is None:

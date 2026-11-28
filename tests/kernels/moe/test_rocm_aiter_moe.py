@@ -1061,13 +1061,13 @@ def _fake_rocm_arch(monkeypatch: pytest.MonkeyPatch, arch: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("arch", "int4", "mxfp4"),
-    [("gfx942", True, False), ("gfx950", False, True), ("gfx1250", False, False)],
+    ("arch", "mxfp4"),
+    [("gfx942", False), ("gfx950", True), ("gfx1250", False)],
 )
 def test_aiter_mxfp4_experts_quant_scheme_support_by_arch(
-    monkeypatch: pytest.MonkeyPatch, arch: str, int4: bool, mxfp4: bool
+    monkeypatch: pytest.MonkeyPatch, arch: str, mxfp4: bool
 ):
-    """MXFP4 on gfx950 only; int4 on gfx942 only, for Kimi-K3's int4 requant."""
+    """MXFP4 on gfx950 only; int4 belongs to AiterInt4Experts."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterMxfp4Experts,
     )
@@ -1079,17 +1079,112 @@ def test_aiter_mxfp4_experts_quant_scheme_support_by_arch(
 
     _fake_rocm_arch(monkeypatch, arch)
     supports = AiterMxfp4Experts._supports_quant_scheme
-    assert supports(kInt4Static32, None) is int4
+    assert not supports(kInt4Static32, None)
     assert supports(kMxfp4Static, None) is mxfp4
     assert supports(kMxfp4Static, kMxfp4Dynamic) is mxfp4
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950", "gfx1250"])
+def test_aiter_int4_experts_support_gfx942_only(
+    monkeypatch: pytest.MonkeyPatch, arch: str
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+        kMxfp4Static,
+    )
+
+    _fake_rocm_arch(monkeypatch, arch)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+    experts = rocm_aiter_moe.AiterInt4Experts
+    assert experts._supports_current_device() is (arch == "gfx942")
+    assert experts._supports_quant_scheme(kInt4Static32, None)
+    assert not experts._supports_quant_scheme(kMxfp4Static, None)
+    assert experts._supports_activation(MoEActivation.SILU)
+    assert not experts._supports_activation(MoEActivation.SWIGLUOAI)
+
+
+@pytest.mark.parametrize(
+    ("honours_activation", "situv2", "supported"),
+    [(True, "a16w4", True), (False, "a16w4", False), (True, "a8w4", False)],
+)
+def test_aiter_int4_experts_situ_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    honours_activation: bool,
+    situv2: str,
+    supported: bool,
+):
+    """SiTU needs an AITER build whose a16wi4 stage 1 takes the activation,
+    and w13 shuffled with gate and up separated, as the weights are."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    monkeypatch.setattr(
+        rocm_aiter_moe, "_a16wi4_honours_activation", lambda: honours_activation
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "_MOE_SITUV2", situv2)
+    supports = rocm_aiter_moe.AiterInt4Experts._supports_activation
+    assert supports(MoEActivation.SITU) is supported
+
+
+def test_aiter_int4_experts_reject_router_weight_on_input():
+    """The a16wi4 kernels drop doweight_stage1 and scale the output by an
+    uninitialized buffer, so the experts raise before calling AITER."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        int4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    num_experts, hidden_dim, intermediate_dim, num_tokens = 4, 256, 128, 8
+    experts = rocm_aiter_moe.AiterInt4Experts(
+        make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=hidden_dim,
+            intermediate_size=intermediate_dim,
+        ),
+        int4_w4a16_moe_quant_config(
+            w1_scale=torch.empty(0),
+            w2_scale=torch.empty(0),
+            block_shape=[0, 32],
+        ),
+    )
+    hidden_states = torch.zeros(num_tokens, hidden_dim, dtype=torch.bfloat16)
+    workspace = torch.empty(0)
+    with (
+        mock.patch.object(rocm_aiter_ops, "fused_moe") as fused_moe,
+        pytest.raises(AssertionError, match="apply_router_weight_on_input"),
+    ):
+        experts.apply(
+            output=torch.empty_like(hidden_states),
+            hidden_states=hidden_states,
+            w1=torch.empty(0),
+            w2=torch.empty(0),
+            topk_weights=torch.ones(num_tokens, 1),
+            topk_ids=torch.zeros(num_tokens, 1, dtype=torch.int32),
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace,
+            workspace2=workspace,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=True,
+        )
+    fused_moe.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("backend", "arch", "activation"),
     [
         ("AITER_MXFP4_BF16", "gfx950", "SWIGLUOAI"),
-        # Kimi-K3's MXFP4 experts requantized to int4 at load.
-        ("AITER_MXFP4_BF16", "gfx942", "SITU"),
         ("AITER_MXFP4_MXFP4", "gfx950", "SILU"),
         ("AITER_TRITON_MXFP4_BF16", "gfx942", "SWIGLUOAI"),
         ("AITER_TRITON_MXFP4_BF16", "gfx950", "SWIGLUOAI"),

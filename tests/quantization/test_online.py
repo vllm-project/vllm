@@ -23,7 +23,7 @@ from tests.quantization.utils import (
 )
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
@@ -55,9 +55,15 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.oracle import int_wna16
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    WNA16WeightFormat,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     _backend_activation_key,
@@ -113,6 +119,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _fp8_scale,
     _is_tp_sharded,
 )
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerGroup32OnlineMoEMethod,
+    quantize_int4_per_group_sym,
+)
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
@@ -142,6 +152,9 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
 from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequantize_mxfp4_e8m0,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
@@ -2299,6 +2312,19 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
         pytest.param(
             GRANITE_MODEL_NAME,
             "online",
+            {"moe": "int4_per_group_32"},
+            UnquantizedLinearMethod,
+            Int4PerGroup32OnlineMoEMethod,
+            {},
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="int4_per_group_32 MoE is ROCm-only.",
+            ),
+            id="int4_per_group_32_moe",
+        ),
+        pytest.param(
+            GRANITE_MODEL_NAME,
+            "online",
             {"moe": {"weight": "mxfp8", "activation": "mxfp8"}},
             UnquantizedLinearMethod,
             Mxfp8OnlineMoEMethod,
@@ -3709,6 +3735,424 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         keys=("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
         packed_weight_keys=("w13_weight", "w2_weight"),
     )
+
+
+# int4_per_group_32 MoE is ROCm-only: AITER's a16wi4 kernels on gfx942, Triton
+# (or int4 emulation for SiTU) otherwise.
+_AITER_GFX942 = on_gfx942() and IS_AITER_FOUND
+requires_aiter_gfx942 = pytest.mark.skipif(
+    not _AITER_GFX942, reason="Requires AITER on gfx942."
+)
+_INT4_SITU_BETAS = {"activation_situ_beta": 1.5, "activation_situ_linear_beta": 2.0}
+# Checkpoint quantization_config, scale name, and (experts, hidden, intermediate,
+# top-k) per checkpoint format.
+_INT4_MOE_SOURCES = {
+    # Mistral Large 4's routed experts per rank under TP4.
+    "fp8": (
+        {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+        },
+        "weight_scale_inv",
+        (128, 6144, 1536, 4),
+    ),
+    # Kimi-K3's intermediate size per rank under TP8, with fewer, narrower experts.
+    "mxfp4": ({"quant_method": "mxfp4"}, "weight_scale", (64, 2048, 384, 8)),
+    "bf16": (None, None, (64, 2048, 384, 8)),
+}
+
+
+@pytest.fixture
+def set_aiter_moe(monkeypatch):
+    def set_enabled(enabled: bool) -> None:
+        for name in ("VLLM_ROCM_USE_AITER", "VLLM_ROCM_USE_AITER_MOE"):
+            monkeypatch.setenv(name, "1" if enabled else "0")
+        rocm_aiter_ops.refresh_env_variables()
+
+    yield set_enabled
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+def _unpack_uint4b8(packed: torch.Tensor) -> torch.Tensor:
+    """int32 words of 8 uint4b8 codes along K, low nibble first -> int8."""
+    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=packed.device)
+    return (((packed.unsqueeze(-1) >> shifts) & 0xF).flatten(-2) - 8).to(torch.int8)
+
+
+def _int4_reference_quant(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric int4 with one scale per 32 input channels, in the weight dtype:
+    scale = amax / 7 and code = round(w / scale), in [-7, 7]."""
+    groups = weight.unflatten(-1, (-1, 32))
+    scale = groups.abs().amax(dim=-1, keepdim=True).clamp(min=1e-6) / 7
+    codes = torch.round(groups / scale).clamp(-7, 7).to(torch.int8)
+    return codes.flatten(-2), scale.squeeze(-1)
+
+
+def _int4_reference_weight(weight: torch.Tensor) -> torch.Tensor:
+    """What the int4 kernels multiply by: the int4 codes times their scales."""
+    codes, scale = _int4_reference_quant(weight)
+    return codes.float() * scale.float().repeat_interleave(32, dim=-1)
+
+
+def _ocp_mxfp4_to_bf16(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Decode MXFP4 as the OCP MX spec defines it, element 2i in the low nibble."""
+    e2m1 = (0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6)
+    codes = torch.stack((weight & 0xF, weight >> 4), dim=-1).flatten(-2)
+    values = torch.tensor(e2m1, device=weight.device)[codes.long()]
+    block_scales = torch.ldexp(
+        torch.ones_like(scale, dtype=torch.float32), scale.int() - 127
+    )
+    values = values.unflatten(-1, (-1, 32)) * block_scales.unsqueeze(-1)
+    return values.flatten(-2).to(torch.bfloat16)
+
+
+def _int4_moe_source_experts(
+    source: str, num_experts: int, rows: int, cols: int, seed: int
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """Random experts as a `source` checkpoint stores them, `(weight, scale)`,
+    and their bf16 values."""
+    gen = torch.Generator(device=DEVICE).manual_seed(seed)
+    if source == "mxfp4":
+        # Every E2M1 code, with E8M0 block scales around 2^-7.
+        kwargs = {"dtype": torch.uint8, "device": DEVICE, "generator": gen}
+        weight = torch.randint(0, 256, (num_experts, rows, cols // 2), **kwargs)
+        scale = torch.randint(117, 123, (num_experts, rows, cols // 32), **kwargs)
+        return weight, scale, _ocp_mxfp4_to_bf16(weight, scale)
+    bf16 = torch.randn(num_experts, rows, cols, device=DEVICE, generator=gen)
+    bf16 = (bf16 * cols**-0.5).to(torch.bfloat16)
+    if source == "bf16":
+        return bf16, None, bf16
+    # Block-FP8: e4m3fn values with fp32 128x128 block scales.
+    blocks = bf16.float().unflatten(1, (-1, 128)).unflatten(-1, (-1, 128))
+    scale = blocks.abs().amax(dim=(2, 4)).clamp(min=1e-12) / 448.0
+    weight = (blocks / scale[:, :, None, :, None]).to(torch.float8_e4m3fn)
+    values = (weight.float() * scale[:, :, None, :, None]).to(torch.bfloat16)
+    return weight.flatten(3).flatten(1, 2), scale, values.flatten(3).flatten(1, 2)
+
+
+def _int4_moe_quant_config(tmp_path, vllm_config, source: str) -> QuantizationConfig:
+    """The quant config the loader builds for a `source` checkpoint served with
+    `--quantization-config.moe.weight int4_per_group_32`."""
+    checkpoint_config = _INT4_MOE_SOURCES[source][0]
+    _write_minimal_llama_config(tmp_path, checkpoint_config)
+    vllm_config.model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization=None if checkpoint_config else "online",
+        quantization_config=quant_config_args(moe="int4_per_group_32"),
+    )
+    return weight_utils.get_quant_config(vllm_config.model_config, LoadConfig())
+
+
+def _int4_reference_moe(x, w13, w2, topk_weights, topk_ids, activation: str):
+    """Float32 MoE over the int4 quantization of the bf16 experts `w13`, `w2`."""
+    out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
+    for e in topk_ids.unique().tolist():
+        tokens, slots = (topk_ids == e).nonzero(as_tuple=True)
+        gate_up = x[tokens].float() @ _int4_reference_weight(w13[e]).t()
+        gate, up = gate_up.chunk(2, -1)
+        if activation == "situ":
+            beta, linear_beta = _INT4_SITU_BETAS.values()
+            gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+            up = linear_beta * torch.tanh(up / linear_beta)
+        else:
+            gate = torch.nn.functional.silu(gate)
+        y = (gate * up) @ _int4_reference_weight(w2[e]).t()
+        out.index_add_(0, tokens, y * topk_weights[tokens, slots, None])
+    return out
+
+
+@pytest.mark.parametrize(
+    ("reference", "dtype"),
+    [
+        ("torch", torch.bfloat16),
+        ("torch", torch.float16),
+        ("torch", torch.float32),
+        pytest.param("aiter", torch.bfloat16, marks=requires_aiter_gfx942),
+    ],
+)
+def test_int4_per_group_32_quantizer_matches_reference(reference, dtype) -> None:
+    # The torch reference runs on any platform; AITER needs the GPU.
+    device = DEVICE if reference == "aiter" else "cpu"
+    gen = torch.Generator(device=device).manual_seed(0)
+    weight = torch.randn(8, 256, 1024, device=device, generator=gen).to(dtype)
+    # An all-zero group exercises the scale clamp.
+    weight[0, 0, :32] = 0
+
+    packed, scale = quantize_int4_per_group_sym(weight, 32)
+
+    if reference == "aiter":
+        from aiter.ops.quant import per_1x32_i4_quant
+
+        ref_codes, ref_scale = per_1x32_i4_quant(weight)
+        ref_codes, ref_scale = ref_codes.view(torch.int8), ref_scale.transpose(-1, -2)
+    else:
+        ref_codes, ref_scale = _int4_reference_quant(weight)
+    assert packed.dtype == torch.int32 and packed.shape == (8, 256, 1024 // 8)
+    codes = _unpack_uint4b8(packed)
+    assert torch.equal(codes, ref_codes) and torch.equal(scale, ref_scale)
+    assert scale.dtype == dtype and not codes[0, 0, :32].any()
+    # Round to nearest, up to the rounding of the weight dtype's math.
+    step = scale.float().repeat_interleave(32, dim=-1)
+    assert ((codes.float() * step - weight.float()).abs() <= step * (0.5 + 2**-5)).all()
+
+
+@pytest.mark.parametrize(
+    "reference", ["ocp", pytest.param("aiter", marks=requires_aiter_gfx942)]
+)
+def test_mxfp4_dequant_matches_reference(reference) -> None:
+    # The OCP reference runs on any platform; AITER needs the GPU.
+    device = DEVICE if reference == "aiter" else "cpu"
+    gen = torch.Generator(device=device).manual_seed(0)
+    weight = torch.randint(
+        0, 256, (4, 256, 512), dtype=torch.uint8, device=device, generator=gen
+    )
+    # Every finite E8M0 scale; 255 is NaN.
+    scale = torch.randint(
+        0, 255, (4, 256, 32), dtype=torch.uint8, device=device, generator=gen
+    )
+
+    out = dequantize_mxfp4_e8m0(weight, scale, torch.bfloat16)
+
+    if reference == "aiter":
+        from aiter.utility import fp4_utils
+
+        values = fp4_utils.mxfp4_to_f32(weight.view(torch.float4_e2m1fn_x2))
+        scales = fp4_utils.e8m0_to_f32(scale.view(torch.float8_e8m0fnu))
+        ref = (values.view(4, 256, 32, 32) * scales.unsqueeze(-1)).view(4, 256, 1024)
+        ref = ref.to(torch.bfloat16)
+    else:
+        ref = _ocp_mxfp4_to_bf16(weight, scale)
+    assert torch.equal(out, ref)
+
+
+@requires_aiter_gfx942
+@pytest.mark.parametrize(
+    "experts_per_chunk",
+    [1, 5, 16],
+    ids=["one_expert", "uneven_last_chunk", "single_chunk"],
+)
+def test_mxfp4_requant_matches_previous_kimi_path(
+    monkeypatch, experts_per_chunk
+) -> None:
+    """MXFP4 -> int4 -> AITER a16wi4 matches Kimi-K3's previous gfx942 path,
+    where AITER quantized the dequantized experts, then shuffled and packed them."""
+    from aiter.ops.quant import per_1x32_i4_quant
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+
+    num_experts, rows, cols = 16, 256, 2048
+    monkeypatch.setattr(
+        int_wna16, "_AITER_REPACK_CHUNK_VALUES", experts_per_chunk * rows * cols
+    )
+    weight, scale, values = _int4_moe_source_experts(
+        "mxfp4", num_experts, rows, cols, seed=0
+    )
+
+    packed, int4_scale = quantize_int4_per_group_sym(
+        dequantize_mxfp4_e8m0(weight, scale, torch.bfloat16), 32
+    )
+    out_weight, out_scale = int_wna16._aiter_int4_repack(packed, int4_scale)
+
+    ref_int4, ref_scale = per_1x32_i4_quant(values)
+    ref_weight = pack_int8_to_packed_int4(shuffle_weight(ref_int4, (16, 16)))
+    ref_scale = shuffle_scale_for_int4(ref_scale, group_size=32)
+    assert out_scale.shape[0] == num_experts
+    assert torch.equal(
+        out_weight.view(torch.uint8), ref_weight.view(torch.uint8).view(weight.shape)
+    )
+    assert torch.equal(out_scale.reshape(-1), ref_scale.reshape(-1))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "num_bits", "group_size", "may_have_bias", "reason"),
+    [
+        ({}, 4, 32, False, None),
+        ({}, 8, 32, False, "group size 32"),
+        ({}, 4, 128, False, "group size 32"),
+        ({"hidden_dim": 2880}, 4, 32, False, "multiples of 128"),
+        ({}, 4, 32, True, "bias"),
+        ({"in_dtype": torch.float16}, 4, 32, False, "bfloat16"),
+        # rocm_aiter_fused_experts would double the pad of a padded SiLU layer.
+        ({"intermediate_size_per_partition_unpadded": 300}, 4, 32, False, "padded"),
+        ({"intermediate_pad": 128}, 4, 32, False, "padded"),
+        ({"hidden_dim_unpadded": 1920}, 4, 32, False, "padded"),
+        (
+            {
+                "activation": MoEActivation.SITU,
+                "intermediate_size_per_partition_unpadded": 300,
+            },
+            4,
+            32,
+            False,
+            None,
+        ),
+        (
+            {"activation": MoEActivation.SITU, "hidden_dim_unpadded": 1920},
+            4,
+            32,
+            False,
+            None,
+        ),
+    ],
+)
+def test_aiter_int4_moe_backend_requirements(
+    overrides, num_bits, group_size, may_have_bias, reason
+) -> None:
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    moe = make_dummy_moe_config(num_experts=8, hidden_dim=2048, intermediate_size=384)
+    for name, value in overrides.items():
+        setattr(moe, name, value)
+    out = int_wna16._backend_incompatibility_reason(
+        WNA16MoEBackend.AITER,
+        moe,
+        WNA16WeightFormat(num_bits=num_bits, group_size=group_size),
+        False,
+        may_have_bias,
+        True,
+    )
+    if reason is None:
+        assert out is None
+    else:
+        assert out is not None and reason in out
+
+
+def test_online_int4_moe_is_rocm_only(monkeypatch) -> None:
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    moe = make_dummy_moe_config()
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    with pytest.raises(NotImplementedError, match="only supported on ROCm"):
+        Int4PerGroup32OnlineMoEMethod(moe=moe)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="int4_per_group_32 MoE is ROCm-only."
+)
+@pytest.mark.parametrize(
+    ("source", "activation", "aiter", "num_tokens"),
+    [
+        *(("fp8", "silu", True, n) for n in (1, 16, 256, 4096)),
+        ("fp8", "silu", False, 16),
+        *(
+            ("mxfp4", activation, aiter, n)
+            for activation in ("silu", "situ")
+            for aiter in (True, False)
+            for n in (1, 256)
+        ),
+        ("bf16", "silu", True, 1),
+        ("bf16", "silu", True, 256),
+        ("bf16", "silu", False, 16),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_online_int4_moe_matches_reference(
+    source,
+    activation,
+    aiter,
+    num_tokens,
+    tmp_path,
+    default_vllm_config,
+    workspace_init,
+    set_aiter_moe,
+) -> None:
+    """`int4_per_group_32` MoE from block-FP8, MXFP4 (Kimi-K3) and bf16
+    checkpoints, on the backend the oracle selects, against a float32 MoE over
+    the same int4 weights."""
+    set_aiter_moe(aiter)
+    _, scale_name, (num_experts, hidden, inter, top_k) = _INT4_MOE_SOURCES[source]
+    quant_config = _int4_moe_quant_config(tmp_path, default_vllm_config, source)
+    with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+        runner = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden,
+            intermediate_size=inter,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.experts",
+            activation=activation,
+            **(_INT4_SITU_BETAS if activation == "situ" else {}),
+        )
+    method = runner._quant_method
+    assert type(method) is Int4PerGroup32OnlineMoEMethod
+    if aiter and _AITER_GFX942:
+        expected_backend = WNA16MoEBackend.AITER
+    elif activation == "silu":
+        expected_backend = WNA16MoEBackend.TRITON
+    else:
+        # Triton WNA16 has no SiTU.
+        expected_backend = WNA16MoEBackend.EMULATION
+    assert method.wna16_backend == expected_backend
+
+    w13, w13_s, w13_ref = _int4_moe_source_experts(
+        source, num_experts, 2 * inter, hidden, seed=1
+    )
+    w2, w2_s, w2_ref = _int4_moe_source_experts(
+        source, num_experts, hidden, inter, seed=2
+    )
+    tensors = {"weight": (w13, w2)}
+    if scale_name is not None:
+        tensors[scale_name] = (w13_s, w2_s)
+    checkpoint = []
+    for e in range(num_experts):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            for name, (t13, t2) in tensors.items():
+                gate, up = t13[e].chunk(2)
+                shard = {"gate_proj": gate, "up_proj": up, "down_proj": t2[e]}[proj]
+                checkpoint.append((f"{e}.{proj}.{name}", shard))
+    # The layerwise loader quantizes the experts once all of them are loaded.
+    list(runner.load_weights(checkpoint))
+    layer = runner.routed_experts
+    assert not hasattr(layer, "w13_weight_scale_inv")
+    if expected_backend == WNA16MoEBackend.AITER:
+        assert layer.w13_weight.dtype == torch.int4
+        assert layer.w13_weight.shape == (num_experts, 2 * inter, hidden // 2)
+
+    gen = torch.Generator(device=DEVICE).manual_seed(3)
+    x = torch.randn(
+        num_tokens, hidden, device=DEVICE, generator=gen, dtype=torch.bfloat16
+    )
+    logits = torch.randn(num_tokens, num_experts, device=DEVICE, generator=gen)
+    topk_weights, topk_ids = torch.topk(logits.softmax(-1), top_k, dim=-1)
+    topk_weights /= topk_weights.sum(-1, keepdim=True)
+    out = method.apply(layer, x, topk_weights, topk_ids, None, None)
+    assert isinstance(out, torch.Tensor) and out.shape == x.shape
+    ref = _int4_reference_moe(x, w13_ref, w2_ref, topk_weights, topk_ids, activation)
+    assert ((out.float() - ref).norm() / ref.norm()).item() < 0.02
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="int4_per_group_32 MoE is ROCm-only."
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_fp8_moe_requant_env_conflicts_with_online_int4(
+    tmp_path, monkeypatch, default_vllm_config, set_aiter_moe
+) -> None:
+    set_aiter_moe(True)
+    monkeypatch.setenv("VLLM_FP8_MOE_REQUANT", "mxfp4")
+    quant_config = _int4_moe_quant_config(tmp_path, default_vllm_config, "fp8")
+    with (
+        pytest.raises(ValueError, match="conflicts"),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device(DEVICE),
+    ):
+        FusedMoEFactory(
+            num_experts=8,
+            top_k=2,
+            hidden_size=256,
+            intermediate_size=256,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.experts",
+        )
 
 
 @pytest.mark.parametrize("scheme", ["per_tensor", "per_channel", "nvfp4"])

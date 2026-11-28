@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -235,6 +236,66 @@ except AttributeError as error:
 
 def xpu_mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.xpu_mxfp4_quantize(x)
+
+
+# E2M1 values by 4-bit code, sign in the high bit.
+_E2M1_VALUES = (
+    *(0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0),
+    *(-0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
+)
+_MXFP4_BLOCK_SIZE = 32
+# Bounds the fp32 staging memory of `dequantize_mxfp4_moe_weights`.
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequantize_mxfp4_e8m0(
+    weight: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Dequantize MXFP4 weights `[..., K // 2]` (two E2M1 values per byte, the
+    even element in the low nibble) with E8M0 scales `[..., K // 32]` to
+    `[..., K]`. Values are scaled in fp32, then cast to `out_dtype`."""
+    raw = weight.view(torch.uint8)
+    lut = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=raw.device)
+    values = torch.stack((lut[(raw & 0xF).int()], lut[(raw >> 4).int()]), dim=-1).view(
+        *scale.shape, _MXFP4_BLOCK_SIZE
+    )
+    values *= scale.view(torch.float8_e8m0fnu).float().unsqueeze(-1)
+    return values.view(*raw.shape[:-1], -1).to(out_dtype)
+
+
+def dequantize_mxfp4_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize MXFP4 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, N13, K // 2]` packed MXFP4 weights.
+        w13_scale: `[E, N13, K // 32]` E8M0 scales.
+        w2_weight: `[E, K, I // 2]` packed MXFP4 weights.
+        w2_scale: `[E, K, I // 32]` E8M0 scales.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
+    num_experts = w13_weight.shape[0]
+    # The fp32 nibble lookups and their stacked copy, plus the `out_dtype` result.
+    expert_values = 2 * (w13_weight[0].numel() + w2_weight[0].numel())
+    expert_bytes = expert_values * (4 + 4 + out_dtype.itemsize)
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        yield (
+            experts,
+            dequantize_mxfp4_e8m0(w13_weight[experts], w13_scale[experts], out_dtype),
+            dequantize_mxfp4_e8m0(w2_weight[experts], w2_scale[experts], out_dtype),
+        )
 
 
 def permute_shape(shape: tuple[int, ...], permute_order: list[int]) -> tuple[int, ...]:
