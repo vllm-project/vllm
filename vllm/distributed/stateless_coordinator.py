@@ -6,6 +6,7 @@ import torch
 from torch.distributed import Backend, ProcessGroup, Store
 
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     TensorMetadata,
@@ -159,17 +160,34 @@ class StatelessGroupCoordinator(GroupCoordinator):
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls()
             )
-            assert device_comm_cls == CudaCommunicator
-            self.device_communicator = CudaCommunicator(
-                cpu_group=self.cpu_group,
-                device=self.device,
-                device_group=self.device_group,
-                unique_name=self.unique_name,
-                global_ranks=self.ranks,
-                global_world_size=global_world_size,
-                tcp_store_group=self.tcp_store_group,
-                use_all2all=use_all2all,
-            )
+            if device_comm_cls == CudaCommunicator:
+                self.device_communicator = CudaCommunicator(
+                    cpu_group=self.cpu_group,
+                    device=self.device,
+                    device_group=self.device_group,
+                    unique_name=self.unique_name,
+                    global_ranks=self.ranks,
+                    global_world_size=global_world_size,
+                    tcp_store_group=self.tcp_store_group,
+                    use_all2all=use_all2all,
+                )
+            elif device_comm_cls == XpuCommunicator:
+                # XPU has no raw-communicator rendezvous equivalent to
+                # PyNccl's tcp_store_group, so it is not forwarded here.
+                self.device_communicator = XpuCommunicator(
+                    cpu_group=self.cpu_group,
+                    device=self.device,
+                    device_group=self.device_group,
+                    unique_name=self.unique_name,
+                    global_ranks=self.ranks,
+                    global_world_size=global_world_size,
+                    use_all2all=use_all2all,
+                )
+            else:
+                raise NotImplementedError(
+                    f"StatelessGroupCoordinator does not support device "
+                    f"communicator {device_comm_cls}."
+                )
 
         self.mq_broadcaster = None
 
