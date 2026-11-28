@@ -2814,6 +2814,11 @@ guide: |
   ([concurrency 48 and 64](#preset-b300_agentx_ep)) sets
   the same `decode_backend` in its own args.
 
+  On NVIDIA, vLLM turns this path on by default wherever its startup checks pass, and falls back
+  to the default path (logging why) where they don't. The toggle then makes it required: an
+  unsupported setup fails at startup instead of falling back. To keep the default path,
+  set `--additional-config '{"decode_backend":"stock"}'`.
+
   On MI355X the same switch selects fused FlyDSL decode kernels. They cover only pure decode
   steps of up to 16 rows, so among other checks they also need speculative decoding,
   `--max-num-seqs` 1, 2, 4 or 8 with `--max-num-seqs` × (1 + draft tokens) ≤ 16, BF16 KDA
