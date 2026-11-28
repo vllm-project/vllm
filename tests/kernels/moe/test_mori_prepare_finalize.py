@@ -6,6 +6,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -126,3 +127,59 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         "instead of this rank's pre-dispatch routing, which silently corrupts "
         "the reduction (ROCm/mori#475)"
     )
+
+
+class _CapacityMoriOp:
+    """Returns MoRI's capacity-sized receive buffers, of which only the first
+    `recv_rows` rows hold tokens."""
+
+    def __init__(self, capacity, recv_rows):
+        self.capacity = capacity
+        self.recv_rows = recv_rows
+
+    def dispatch(self, a1, weights, scale, indices):
+        return (
+            torch.zeros(self.capacity, a1.shape[1]),
+            torch.zeros(self.capacity, weights.shape[1]),
+            scale,
+            torch.zeros(self.capacity, indices.shape[1], dtype=indices.dtype),
+            torch.tensor([self.recv_rows]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("capturing", "recv_rows", "expected"),
+    [
+        # Eager: the received count, even above this rank's tokens * ep_size,
+        # since DP ranks are not padded to a common batch when eager.
+        (False, 5, 5),
+        (False, 20, 20),
+        # Capture: every rank runs the same padded batch, and MoRI sends a
+        # token to a given rank at most once: tokens * ep_size, not * topk.
+        (True, 5, 2 * 8),
+    ],
+)
+def test_mori_prepare_trims_receive_buffer(monkeypatch, capturing, recv_rows, expected):
+    """prepare() hands the experts only the rows that can hold tokens."""
+    mori_module = _import_mori_prepare_finalize(monkeypatch)
+    monkeypatch.setattr(mori_module, "_is_stream_capturing", lambda: capturing)
+    num_tokens, topk, ep_size = 2, 4, 8
+    adapter = mori_module.MoriPrepareAndFinalize(
+        mori_op=_CapacityMoriOp(capacity=16 * ep_size, recv_rows=recv_rows),
+        max_tokens_per_rank=16,
+        num_dispatchers=ep_size,
+    )
+
+    dispatch_a1, _, _, dispatch_ids, dispatch_weights = adapter.prepare(
+        torch.randn(num_tokens, 4),
+        torch.ones(num_tokens, topk),
+        torch.zeros(num_tokens, topk, dtype=torch.int32),
+        num_experts=ep_size,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        quant_config=SimpleNamespace(is_block_quantized=False, is_per_act_token=False),
+    )
+
+    assert dispatch_a1.shape[0] == expected
+    assert dispatch_ids.shape[0] == expected
+    assert dispatch_weights.shape[0] == expected
