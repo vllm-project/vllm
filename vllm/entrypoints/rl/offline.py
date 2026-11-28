@@ -34,10 +34,10 @@ class RLOfflineMixin(OfflineInferenceMixin):
 
     def start_weight_update(
         self,
-        lora_adapters: list[dict[str, Any]] | None = None,
+        lora_adapter: dict[str, Any] | None = None,
     ) -> None:
         """Start a new weight update."""
-        kwargs = {"lora_adapters": lora_adapters} if lora_adapters is not None else None
+        kwargs = {"lora_adapter": lora_adapter} if lora_adapter is not None else None
         self.llm_engine.collective_rpc("start_weight_update", kwargs=kwargs)
 
     def start_draft_weight_update(self) -> None:

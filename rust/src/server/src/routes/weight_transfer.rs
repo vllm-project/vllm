@@ -26,12 +26,9 @@ pub(crate) struct InitWeightTransferRequest {
 #[derive(Deserialize)]
 pub(crate) struct LoraAdapterUpdateRequest {
     lora_name: String,
+    peft_config: JsonValue,
     #[serde(default)]
     lora_int_id: Option<u64>,
-    #[serde(default)]
-    lora_path: Option<String>,
-    #[serde(default)]
-    peft_config: Option<JsonValue>,
     #[serde(default)]
     base_model_name: Option<String>,
     #[serde(default)]
@@ -41,7 +38,7 @@ pub(crate) struct LoraAdapterUpdateRequest {
 #[derive(Default, Deserialize)]
 pub(crate) struct StartWeightUpdateRequest {
     #[serde(default)]
-    lora_adapters: Option<Vec<LoraAdapterUpdateRequest>>,
+    lora_adapter: Option<LoraAdapterUpdateRequest>,
 }
 
 #[derive(Deserialize)]
@@ -88,14 +85,14 @@ pub(crate) struct MessageResponse {
 pub(crate) struct StartWeightUpdateResponse {
     message: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    lora_adapters: Option<Vec<LoraAdapterSummary>>,
+    lora_adapter: Option<LoraAdapterSummary>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct FinishWeightUpdateResponse {
     message: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    lora_adapters: Option<Vec<LoraAdapterSummary>>,
+    lora_adapter: Option<LoraAdapterSummary>,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     matched: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,14 +151,14 @@ pub async fn shutdown_weight_transfer_engine(
     }))
 }
 
-/// Start a weight update transaction (base model when body is empty, or LoRA
-/// adapters when `lora_adapters` is provided).
+/// Start a weight update transaction (base model when body is empty, or one
+/// LoRA adapter when `lora_adapter` is provided).
 pub async fn start_weight_update(
     State(state): State<Arc<AppState>>,
     body: Result<Option<Json<StartWeightUpdateRequest>>, JsonRejection>,
 ) -> Result<Json<StartWeightUpdateResponse>, ApiError> {
     let request = body?.map(|Json(request)| request).unwrap_or_default();
-    let Some(lora_adapters) = request.lora_adapters else {
+    let Some(adapter) = request.lora_adapter else {
         let _recorder = METRICS.api_server.record_weight_operation("start");
         state
             .engine_core_client()
@@ -172,36 +169,32 @@ pub async fn start_weight_update(
 
         return Ok(Json(StartWeightUpdateResponse {
             message: "Weight update started",
-            lora_adapters: None,
+            lora_adapter: None,
         }));
     };
 
-    let specs: Vec<LoraWeightUpdateSpec> = lora_adapters
-        .into_iter()
-        .map(|adapter| LoraWeightUpdateSpec {
-            lora_name: adapter.lora_name,
-            lora_int_id: adapter.lora_int_id,
-            lora_path: adapter.lora_path,
-            peft_config: adapter.peft_config,
-            base_model_name: adapter.base_model_name,
-            is_3d_lora_weight: adapter.is_3d_lora_weight,
-        })
-        .collect();
-    let prepared = state.prepare_lora_weight_update(&specs).await.map_err(load_lora_api_error)?;
+    let spec = LoraWeightUpdateSpec {
+        lora_name: adapter.lora_name,
+        lora_int_id: adapter.lora_int_id,
+        peft_config: adapter.peft_config,
+        base_model_name: adapter.base_model_name,
+        is_3d_lora_weight: adapter.is_3d_lora_weight,
+    };
+    let prepared = state.prepare_lora_weight_update(&spec).await.map_err(load_lora_api_error)?;
 
     let _recorder = METRICS.api_server.record_weight_operation("start");
     state
         .engine_core_client()
-        .start_lora_weight_update(prepared.worker_specs)
+        .start_lora_weight_update(prepared.worker_spec)
         .await
         .map_err(|error| utility_call_error("start_weight_update", error))?;
 
-    let summary = prepared.loaded.iter().map(LoraAdapterSummary::from).collect();
+    let summary = LoraAdapterSummary::from(&prepared.loaded);
     state.set_pending_lora_weight_update(Some(prepared.loaded)).await;
 
     Ok(Json(StartWeightUpdateResponse {
         message: "Weight update started",
-        lora_adapters: Some(summary),
+        lora_adapter: Some(summary),
     }))
 }
 
@@ -260,7 +253,7 @@ pub async fn finish_weight_update(
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
-    let pending_loras = state.take_pending_lora_weight_update().await;
+    let pending_lora = state.take_pending_lora_weight_update().await;
 
     let _recorder = METRICS.api_server.record_weight_operation("finish");
     client
@@ -268,26 +261,20 @@ pub async fn finish_weight_update(
         .await
         .map_err(|error| utility_call_error("finish_weight_update", error))?;
 
-    let lora_summary = if let Some(adapters) = pending_loras {
-        let summary = adapters.iter().map(LoraAdapterSummary::from).collect();
-        let reused_same_path = state.commit_lora_weight_update(adapters).await;
-        let should_reset = request.reset_prefix_cache.unwrap_or(reused_same_path);
-        if should_reset {
-            client
-                .reset_prefix_cache(false, false)
-                .await
-                .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
-        }
+    let lora_summary = if let Some(adapter) = pending_lora {
+        let summary = LoraAdapterSummary::from(&adapter);
+        state.commit_lora_weight_update(adapter).await;
         Some(summary)
     } else {
-        if request.reset_prefix_cache == Some(true) {
-            client
-                .reset_prefix_cache(false, false)
-                .await
-                .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
-        }
         None
     };
+
+    if request.reset_prefix_cache == Some(true) {
+        client
+            .reset_prefix_cache(false, false)
+            .await
+            .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
+    }
 
     if let Some(version) = request.weight_version {
         client
@@ -302,7 +289,7 @@ pub async fn finish_weight_update(
 
     Ok(Json(FinishWeightUpdateResponse {
         message: "Weight update finished",
-        lora_adapters: lora_summary,
+        lora_adapter: lora_summary,
         matched: mismatches.as_ref().map(Vec::is_empty),
         mismatches,
     }))

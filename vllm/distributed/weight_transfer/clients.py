@@ -84,11 +84,9 @@ class HTTPVLLMWeightSyncClient:
 
     def start_weight_update(
         self,
-        lora_adapters: list[dict[str, Any]] | None = None,
+        lora_adapter: dict[str, Any] | None = None,
     ) -> Any:
-        payload = (
-            {"lora_adapters": lora_adapters} if lora_adapters is not None else None
-        )
+        payload = {"lora_adapter": lora_adapter} if lora_adapter is not None else None
         return self._post("start_weight_update", payload)
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
@@ -142,16 +140,16 @@ class RayVLLMWeightSyncClient:
 
     def start_weight_update(
         self,
-        lora_adapters: list[dict[str, Any]] | None = None,
+        lora_adapter: dict[str, Any] | None = None,
     ) -> None:
         import ray
 
-        if lora_adapters is None:
+        if lora_adapter is None:
             ray.get([h.start_weight_update.remote() for h in self.handles])
         else:
             ray.get(
                 [
-                    h.start_weight_update.remote(lora_adapters=lora_adapters)
+                    h.start_weight_update.remote(lora_adapter=lora_adapter)
                     for h in self.handles
                 ]
             )

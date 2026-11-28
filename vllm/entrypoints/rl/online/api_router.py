@@ -26,9 +26,8 @@ class LoRAAdapterUpdateRequest(BaseModel):
     """Specification for one LoRA adapter in `/start_weight_update`."""
 
     lora_name: str
+    peft_config: dict[str, Any]
     lora_int_id: int | None = None
-    lora_path: str | None = None
-    peft_config: dict[str, Any] | None = None
     base_model_name: str | None = None
     is_3d_lora_weight: bool = False
 
@@ -37,24 +36,22 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def _lora_summary(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "lora_name": spec["lora_name"],
-            "lora_int_id": spec["lora_int_id"],
-            "lora_path": spec["lora_path"],
-        }
-        for spec in specs
-    ]
+def _lora_summary(spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lora_name": spec["lora_name"],
+        "lora_int_id": spec["lora_int_id"],
+        "lora_path": spec["lora_path"],
+    }
 
 
-def _prepare_lora_specs_fallback(
+def _prepare_lora_spec_fallback(
     raw_request: Request,
-    adapters: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+    adapter: dict[str, Any],
+) -> dict[str, Any]:
     """Fallback spec resolution when `openai_serving_models` is absent."""
-    if not adapters:
-        raise ValueError("'lora_adapters' must not be empty.")
+    lora_name = str(adapter.get("lora_name", "")).strip()
+    if not lora_name:
+        raise ValueError("'lora_name' must be a non-empty string.")
     registry: dict[str, dict[str, Any]] = getattr(
         raw_request.app.state, "_rl_lora_registry", {}
     )
@@ -62,57 +59,28 @@ def _prepare_lora_specs_fallback(
     next_id: int = getattr(raw_request.app.state, "_rl_lora_next_id", 0)
     next_rev: int = getattr(raw_request.app.state, "_rl_lora_next_rev", 0)
 
-    seen_names: set[str] = set()
-    resolved: list[dict[str, Any]] = []
-    for raw in adapters:
-        lora_name = str(raw.get("lora_name", "")).strip()
-        if not lora_name:
-            raise ValueError("'lora_name' must be a non-empty string.")
-        if lora_name in seen_names:
-            raise ValueError(f"Duplicate lora_name '{lora_name}' in 'lora_adapters'.")
-        seen_names.add(lora_name)
+    raw_int_id = adapter.get("lora_int_id")
+    if raw_int_id is not None:
+        lora_int_id = int(raw_int_id)
+        if lora_int_id < 1:
+            raise ValueError(f"'lora_int_id' must be >= 1, got {lora_int_id}.")
+    elif lora_name in registry:
+        lora_int_id = registry[lora_name]["lora_int_id"]
+    else:
+        next_id += 1
+        lora_int_id = next_id
 
-        peft_config = raw.get("peft_config")
-        lora_path = raw.get("lora_path")
-        if peft_config is None and not (
-            isinstance(lora_path, str) and lora_path.strip()
-        ):
-            raise ValueError(
-                f"LoRA adapter '{lora_name}' must provide either "
-                "'peft_config' (for tensor updates) or 'lora_path' (for disk)."
-            )
-
-        raw_int_id = raw.get("lora_int_id")
-        if raw_int_id is not None:
-            lora_int_id = int(raw_int_id)
-            if lora_int_id < 1:
-                raise ValueError(f"'lora_int_id' must be >= 1, got {lora_int_id}.")
-        elif lora_name in registry:
-            lora_int_id = registry[lora_name]["lora_int_id"]
-        else:
-            next_id += 1
-            lora_int_id = next_id
-
-        if isinstance(lora_path, str) and lora_path.strip():
-            effective_path = lora_path.strip()
-        else:
-            next_rev += 1
-            effective_path = f"memory://{lora_name}@{next_rev}"
-
-        resolved.append(
-            {
-                "lora_name": lora_name,
-                "lora_int_id": lora_int_id,
-                "lora_path": effective_path,
-                "peft_config": peft_config,
-                "base_model_name": raw.get("base_model_name"),
-                "is_3d_lora_weight": bool(raw.get("is_3d_lora_weight", False)),
-            }
-        )
-
+    next_rev += 1
     raw_request.app.state._rl_lora_next_id = next_id
     raw_request.app.state._rl_lora_next_rev = next_rev
-    return resolved
+    return {
+        "lora_name": lora_name,
+        "lora_int_id": lora_int_id,
+        "lora_path": f"memory://{lora_name}@{next_rev}",
+        "peft_config": adapter["peft_config"],
+        "base_model_name": adapter.get("base_model_name"),
+        "is_3d_lora_weight": bool(adapter.get("is_3d_lora_weight", False)),
+    }
 
 
 router = APIRouter()
@@ -271,12 +239,10 @@ async def shutdown_weight_transfer_engine(raw_request: Request):
 @router.post("/start_weight_update")
 async def start_weight_update(
     raw_request: Request,
-    lora_adapters: Annotated[
-        list[LoRAAdapterUpdateRequest] | None, Body(embed=True)
-    ] = None,
+    lora_adapter: Annotated[LoRAAdapterUpdateRequest | None, Body(embed=True)] = None,
 ):
     client = engine_client(raw_request)
-    if lora_adapters is None:
+    if lora_adapter is None:
         with weight_operation_metrics().record("start"):
             await client.start_weight_update()
         raw_request.app.state._pending_lora_weight_update = None
@@ -289,13 +255,13 @@ async def start_weight_update(
             detail="LoRA is not enabled on this server. Start vLLM with --enable-lora.",
         )
 
-    raw_specs = [adapter.model_dump() for adapter in lora_adapters]
+    raw_spec = lora_adapter.model_dump()
     models = getattr(raw_request.app.state, "openai_serving_models", None)
     try:
         if models is not None:
-            resolved_specs = models.prepare_lora_weight_update(raw_specs)
+            resolved_spec = models.prepare_lora_weight_update(raw_spec)
         else:
-            resolved_specs = _prepare_lora_specs_fallback(raw_request, raw_specs)
+            resolved_spec = _prepare_lora_spec_fallback(raw_request, raw_spec)
     except ValueError as err:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
@@ -303,12 +269,12 @@ async def start_weight_update(
         ) from err
 
     with weight_operation_metrics().record("start"):
-        await client.start_weight_update(lora_adapters=resolved_specs)
-    raw_request.app.state._pending_lora_weight_update = resolved_specs
+        await client.start_weight_update(lora_adapter=resolved_spec)
+    raw_request.app.state._pending_lora_weight_update = resolved_spec
     return JSONResponse(
         content={
             "message": "Weight update started",
-            "lora_adapters": _lora_summary(resolved_specs),
+            "lora_adapter": _lora_summary(resolved_spec),
         }
     )
 
@@ -345,7 +311,7 @@ async def finish_weight_update(
 ):
     """Finish the weight update; with a baseline, also compare the weights."""
     client = engine_client(raw_request)
-    pending_loras: list[dict[str, Any]] | None = getattr(
+    pending_lora: dict[str, Any] | None = getattr(
         raw_request.app.state, "_pending_lora_weight_update", None
     )
     raw_request.app.state._pending_lora_weight_update = None
@@ -354,29 +320,18 @@ async def finish_weight_update(
         await client.finish_weight_update(weight_version)
 
     content: dict[str, Any] = {"message": "Weight update finished"}
-    if pending_loras is not None:
+    if pending_lora is not None:
         models = getattr(raw_request.app.state, "openai_serving_models", None)
         if models is not None:
-            reused_same_path = models.commit_lora_weight_update(pending_loras)
+            models.commit_lora_weight_update(pending_lora)
         else:
             registry: dict[str, dict[str, Any]] = getattr(
                 raw_request.app.state, "_rl_lora_registry", {}
             )
-            reused_same_path = any(
-                (prev := registry.get(spec["lora_name"])) is not None
-                and prev["lora_path"] == spec["lora_path"]
-                for spec in pending_loras
-            )
-            for spec in pending_loras:
-                registry[spec["lora_name"]] = spec
+            registry[pending_lora["lora_name"]] = pending_lora
+        content["lora_adapter"] = _lora_summary(pending_lora)
 
-        should_reset = (
-            reset_prefix_cache if reset_prefix_cache is not None else reused_same_path
-        )
-        if should_reset:
-            await client.reset_prefix_cache()
-        content["lora_adapters"] = _lora_summary(pending_loras)
-    elif reset_prefix_cache is True:
+    if reset_prefix_cache is True:
         await client.reset_prefix_cache()
 
     if baseline is not None:

@@ -335,7 +335,7 @@ class EngineClient(ABC):
 
     async def start_weight_update(
         self,
-        lora_adapters: list[dict[str, Any]] | None = None,
+        lora_adapter: dict[str, Any] | None = None,
     ) -> None:
         """Start a new weight update."""
         raise NotImplementedError
