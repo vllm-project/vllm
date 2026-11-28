@@ -401,7 +401,7 @@ class ReplaySSMModelContext:
     src_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
-    materialize_tables: _ReplaySSMMaterializeTables
+    materialize_tables: _ReplaySSMMaterializeTables | None
     src_slots: torch.Tensor
     dst_slots: torch.Tensor
     plan_ring_start: torch.Tensor
@@ -431,7 +431,7 @@ class ReplaySSMModelContext:
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
             [(state.shape[1:], state.dtype) for state in mixer.kv_cache[1:]] == geometry
-            and mixer.A.dtype == first.A.dtype
+            and (not materialize_prefixes or mixer.A.dtype == first.A.dtype)
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
         ), "ReplaySSM trackers require equal materialization geometry"
@@ -450,7 +450,30 @@ class ReplaySSMModelContext:
             layer_offsets.append(layer_offsets[-1] + len(group))
         # Each pointer selects a group's first row in the flat [layer, batch]
         # allocation. Different group sizes need no padding or per-step concat.
-        zero_table = torch.zeros(len(mixers), dtype=torch.int64, device=device)
+        materialize_tables = None
+        if materialize_prefixes:
+            zero_table = torch.zeros(len(mixers), dtype=torch.int64, device=device)
+            materialize_tables = _ReplaySSMMaterializeTables(
+                state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
+                state_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[1] for m in mixers]
+                ),
+                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[2] for m in mixers]),
+                x_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[2] for m in mixers]
+                ),
+                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
+                B_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[4] for m in mixers]
+                ),
+                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
+                dt_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[3] for m in mixers]
+                ),
+                A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
+                state_scale_ptrs=zero_table,
+                state_scale_slot_strides=zero_table,
+            )
         return cls(
             mixers=mixers,
             block_tables=block_tables,
@@ -473,27 +496,7 @@ class ReplaySSMModelContext:
                 dtype=torch.int32,
                 device=device,
             ),
-            materialize_tables=_ReplaySSMMaterializeTables(
-                state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
-                state_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[1] for m in mixers]
-                ),
-                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[2] for m in mixers]),
-                x_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[2] for m in mixers]
-                ),
-                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
-                B_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[4] for m in mixers]
-                ),
-                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
-                dt_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[3] for m in mixers]
-                ),
-                A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
-                state_scale_ptrs=zero_table,
-                state_scale_slot_strides=zero_table,
-            ),
+            materialize_tables=materialize_tables,
             src_slots=src_slots,
             dst_slots=dst_slots,
             plan_ring_start=torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
@@ -512,6 +515,7 @@ class ReplaySSMModelContext:
 
     def _materialize(self, num_reqs: int) -> None:
         """Publish all canonical prefix snapshots in one kernel launch."""
+        assert self.materialize_tables is not None
         first = self.mixers[0]
         mamba_config = first.mamba_config
         if not first.use_flashinfer_replayssm:

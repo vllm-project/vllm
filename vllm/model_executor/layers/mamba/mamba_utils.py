@@ -286,6 +286,9 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (local_v_heads, head_v_dim, head_k_dim)
         if replayssm_buffer_len is None:
             return conv_state_shape, temporal_state_shape
+        # Keep the verify window disjoint from committed history until sampling.
+        if num_spec:
+            replayssm_buffer_len += 1 + num_spec
         return (
             conv_state_shape,
             temporal_state_shape,

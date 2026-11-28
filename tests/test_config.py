@@ -264,7 +264,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     ),
     [
         (0, MambaBackendEnum.TRITON, False, 32, 1.0, None),
-        (2, MambaBackendEnum.TRITON, False, 16, 1.0, "speculative decoding"),
+        (2, MambaBackendEnum.TRITON, False, 16, 1.0, None),
         (0, MambaBackendEnum.FLASHINFER, False, 16, 1.0, "--mamba-backend triton"),
         (0, MambaBackendEnum.TRITON, True, 16, 1.0, "stochastic-rounding"),
         (0, MambaBackendEnum.TRITON, False, 64, 1.0, "--replayssm-buffer-len <= 32"),
@@ -290,7 +290,9 @@ def test_gdn_replayssm_validates_config(
 
     config = SimpleNamespace(
         num_speculative_tokens=num_speculative_tokens,
-        cache_config=SimpleNamespace(replayssm_buffer_len=buffer_len),
+        cache_config=SimpleNamespace(
+            replayssm_buffer_len=buffer_len, enable_prefix_caching=False
+        ),
         mamba_config=SimpleNamespace(
             backend=backend, enable_stochastic_rounding=stochastic_rounding
         ),
@@ -302,6 +304,12 @@ def test_gdn_replayssm_validates_config(
         assert reason is not None and error in reason
     else:
         assert reason is None
+        if num_speculative_tokens:
+            config.cache_config.enable_prefix_caching = True
+            assert (
+                "prefix-caching"
+                in QwenGatedDeltaNetAttention._replayssm_unsupported_reason(config)
+            )
 
 
 def _write_json(path: Path, value: object) -> None:

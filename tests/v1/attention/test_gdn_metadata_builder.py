@@ -545,6 +545,7 @@ def _create_replayssm_gdn_builder(
     enable_prefix_caching: bool = False,
     full_cuda_graph: bool = False,
     block_size: int = BLOCK_SIZE,
+    num_spec: int = 0,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
     vllm_config = create_vllm_config(
@@ -558,6 +559,10 @@ def _create_replayssm_gdn_builder(
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = 16
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    if num_spec:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=num_spec
+        )
     mamba_spec = MambaSpec(
         block_size=block_size,
         shapes=((16, 64),),
@@ -594,6 +599,23 @@ def _assert_plans_into_persistent_buffers(
     assert meta.write_pos_d.data_ptr() == builder.decode_write_pos_d.data_ptr()
     assert meta.is_flush_d.data_ptr() == builder.decode_is_flush_d.data_ptr()
     assert meta.write_pos_d.numel() == meta.is_flush_d.numel() == num_rows
+
+
+def test_replayssm_spec_single_token_prefill_keeps_its_checkpoint():
+    builder = _create_replayssm_gdn_builder(num_spec=3)
+    meta = _build_replayssm(builder, [100], [1], [True])
+    assert meta.num_prefills == 1
+    assert meta.num_decodes == 0
+
+
+def test_replayssm_spec_uses_one_state_slot_per_verify_row():
+    builder = _create_replayssm_gdn_builder(full_cuda_graph=True, num_spec=3)
+    slots = torch.tensor([[21], [7]], dtype=torch.int32)
+    meta = _build(
+        builder, BatchSpec(seq_lens=[10, 15], query_lens=[4, 1]), [3, 0], slots
+    )
+    assert meta.num_spec_decodes == 2
+    torch.testing.assert_close(meta.spec_state_indices_tensor, slots)
 
 
 def test_replayssm_single_token_prefill_runs_as_decode():
