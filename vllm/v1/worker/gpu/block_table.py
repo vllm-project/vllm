@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -103,6 +104,12 @@ class BlockTables:
         ]
         self._num_dirty_rows = 0
 
+        # gfx942 hd512 cascade (VLLM_GEMMA4_HD512_CASCADE): CPU shadows of
+        # the hd512 groups' block tables, keyed by group id and filled by
+        # the model runner. This runner keeps no CPU block table, and the
+        # cascade's per-step sibling-group detection needs one.
+        self.cascade_shadow_np: dict[int, np.ndarray] = {}
+
         self.slot_mappings = make_slot_mappings(
             self.num_kv_cache_groups, self.max_num_batched_tokens, self.device
         )
@@ -155,6 +162,14 @@ class BlockTables:
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
+        if self.cascade_shadow_np:
+            for gid, shadow in self.cascade_shadow_np.items():
+                ids = new_block_ids[gid]
+                if self.redirect_writes_to_null_block:
+                    ids = [0] * len(ids)
+                end = self.num_blocks.np[gid, req_index]
+                start = 0 if overwrite else end - len(ids)
+                shadow[req_index, start:end] = ids
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
