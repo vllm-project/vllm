@@ -34,6 +34,16 @@ The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 certificate removals when the image is rebuilt. This complements the Python
 `certifi` bundle used by other HTTP clients.
 
+`vllm-runtime-base` also deletes six large CUDA static archives that vLLM and
+FlashInfer runtime JIT do not link: `libcublas_static.a`, `libcublasLt_static.a`,
+`libcurand_static.a`, `libnvrtc_static.a`, `libnvrtc-builtins_static.a` and
+`libnvptxcompiler_static.a`. The shared libraries stay. An image built on top
+that links one of them statically can reinstall the package that ships it,
+for example `apt-get install --reinstall libcublas-dev-<cuda version>`
+for the two cuBLAS archives, `libcurand-dev-*` or `cuda-nvrtc-dev-*`;
+`dpkg -S` on a stock `nvidia/cuda` devel image names the package for
+`libnvptxcompiler_static.a`.
+
 When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
 AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC
 backend and Mooncake's EFA transport load at runtime. Kernel modules and host

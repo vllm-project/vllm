@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -600,7 +601,9 @@ WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
-COPY . .
+# Exclude .git (~362 MB) so it is not exported in the mode=max cache
+# layer on every commit; the RUNs below bind-mount .git when needed.
+COPY --exclude=.git . .
 
 # Drop the pre-built Rust artifacts into the source tree. setup.py detects
 # them and ships them as-is, skipping the local Rust build.
@@ -789,7 +792,19 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libnuma-dev \
         # numactl CLI for NUMA binding at runtime
         numactl && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    # Drop six large CUDA static archives (~1.2 GB) that vLLM and FlashInfer
+    # runtime JIT do not link (they link the shared CUDA libraries instead).
+    # Exact filenames, NOT a *_static.a wildcard: nvcc links libcudart_static.a
+    # by default and -rdc device linking needs libcudadevrt.a, so both stay.
+    # libnvptxcompiler_static.a moves to libnvptxcompiler-dev in CUDA 13.5, so
+    # remove it only when present.
+    rm /usr/local/cuda/lib64/libcublas_static.a \
+       /usr/local/cuda/lib64/libcublasLt_static.a \
+       /usr/local/cuda/lib64/libcurand_static.a \
+       /usr/local/cuda/lib64/libnvrtc_static.a \
+       /usr/local/cuda/lib64/libnvrtc-builtins_static.a && \
+    rm -f /usr/local/cuda/lib64/libnvptxcompiler_static.a
 
 # Ensures nvcc/ptxas (installed above, needed at runtime for FlashInfer/
 # DeepGEMM/EP kernel JIT compilation) are reachable on PATH. Harmless no-op
@@ -1189,7 +1204,10 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-ADD . /vllm-workspace/
+# Exclude .git (~362 MB) so it never enters the test image or mode=max cache.
+# The one thing tests read from it, the merge base with main, is recorded in
+# .ci-merge-base from a read-only bind mount below.
+COPY --exclude=.git . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1216,8 +1234,9 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
-RUN mkdir src
-RUN mv vllm src/vllm
+RUN --mount=type=bind,source=.git,target=/git \
+    mkdir src && mv vllm src/vllm \
+    && { git -c safe.directory='*' --git-dir=/git merge-base HEAD origin/main > .ci-merge-base 2>/dev/null || rm -f .ci-merge-base; }
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
