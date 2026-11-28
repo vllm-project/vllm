@@ -241,11 +241,11 @@ class MiMoVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
     ) -> torch.Tensor:
-        """Window attention with the per-head sink applied to key 0.
+        """Window attention with the per-head sink as a null softmax logit.
 
-        The reference adds `sinks[h]` to the logit of each sequence's first
-        key, which the Triton prefill kernel supports directly, so the softmax
-        normalizes over the biased scores in one pass.
+        The sink only enlarges the softmax denominator and carries no value.
+        Biasing the first key instead makes every patch of a flat-colour image
+        produce the same output, so the language model loses the image.
         """
         from vllm.v1.attention.ops.triton_prefill_attention import (
             context_attention_fwd,
@@ -272,7 +272,7 @@ class MiMoVisionAttention(nn.Module):
             sliding_window_q=w,
             sliding_window_k=w,
             sinks=sinks,
-            sinks_bias_key0=True,
+            sinks_bias_key0=False,
         )
         return output
 
@@ -1267,6 +1267,8 @@ class MiMoV2OmniForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
 ):
     supports_encoder_tp_data = True
+
+    packed_modules_mapping = MiMoV2FlashForCausalLM.packed_modules_mapping
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
