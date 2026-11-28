@@ -1090,6 +1090,104 @@ def test_shm_handle_issued_before_cache_clear():
         sender_cache.close()
 
 
+def test_shm_receiver_reuses_resolved_item_after_preemption():
+    vllm_config = _small_shm_vllm_config()
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+    request_id = "request_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    def feature(data: MultiModalKwargsItem) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    try:
+        address_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert address_item is not None
+
+        initial = feature(address_item)
+        receiver_cache.get_and_update_features_for_request(request_id, [initial])
+        assert initial.data == item
+
+        sender_cache._shm_cache.free_unused()
+        assert not sender_cache._shm_cache.is_cached(mm_hash)
+
+        sender_cache.get_and_update_item(
+            (MultiModalKwargsItem.dummy(2048), []),
+            "image_B",
+        )
+
+        resumed = feature(address_item)
+        receiver_cache.get_and_update_features_for_request(request_id, [resumed])
+        assert resumed.data == item
+
+        receiver_cache.finish_requests([request_id])
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
+@pytest.mark.parametrize("in_process", [False, True])
+def test_shm_receiver_counts_streaming_handle_references(in_process: bool):
+    """Streaming updates acknowledge only newly appended SHM references."""
+    vllm_config = _small_shm_vllm_config()
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    def feature(data: MultiModalKwargsItem) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    try:
+        address_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert address_item is not None
+
+        initial = feature(address_item)
+        receiver_cache.get_and_update_features_for_request("request_A", [initial])
+
+        continuation_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert continuation_item is not None
+        old_feature_data = initial.data if in_process else address_item
+        continuation = [feature(old_feature_data), feature(continuation_item)]
+        receiver_cache.get_and_update_features_for_request("request_A", continuation)
+        assert all(item_feature.data == item for item_feature in continuation)
+
+        request_b_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert request_b_item is not None
+
+        receiver_cache.finish_requests(["request_A"])
+        sender_cache._shm_cache.free_unused()
+        assert sender_cache._shm_cache.is_cached(mm_hash)
+
+        request_b = feature(request_b_item)
+        receiver_cache.get_and_update_features_for_request("request_B", [request_b])
+        assert request_b.data == item
+
+        sender_cache._shm_cache.free_unused()
+        assert not sender_cache._shm_cache.is_cached(mm_hash)
+
+        resumed_b = feature(request_b_item)
+        receiver_cache.get_and_update_features_for_request("request_B", [resumed_b])
+        assert resumed_b.data == item
+        receiver_cache.finish_requests(["request_B"])
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
 def test_processor_cache_shared_across_loras():
     """Test that processor cache uses mm_hash to share data across LoRAs."""
     model_config = ModelConfig(

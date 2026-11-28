@@ -3,7 +3,7 @@
 import operator
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar
 
 import torch
@@ -479,6 +479,23 @@ class BaseMultiModalReceiverCache(
         if missing_mm_hashes:
             raise MultiModalCacheMissError(missing_mm_hashes)
         return mm_features
+
+    def get_and_update_features_for_request(
+        self,
+        request_id: str,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        """Resolve features for a request, including any request lifecycle state.
+
+        Receiver caches that do not retain request-scoped resources use the
+        regular feature update path.
+        """
+        del request_id
+        return self.get_and_update_features(mm_features)
+
+    def finish_requests(self, request_ids: Iterable[str]) -> None:
+        """Release resources retained for requests that have finished."""
+        del request_ids
 
     @abstractmethod
     def touch_receiver_cache_item(

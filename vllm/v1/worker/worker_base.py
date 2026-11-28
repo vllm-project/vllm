@@ -423,9 +423,11 @@ class WorkerWrapperBase:
         if mm_cache is None:
             return
 
+        mm_cache.finish_requests(scheduler_output.finished_req_ids)
         for req_data in scheduler_output.scheduled_new_reqs:
-            req_data.mm_features = mm_cache.get_and_update_features(
-                req_data.mm_features
+            req_data.mm_features = mm_cache.get_and_update_features_for_request(
+                req_data.req_id,
+                req_data.mm_features,
             )
 
     def execute_model(
