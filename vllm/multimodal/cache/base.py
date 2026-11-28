@@ -153,22 +153,6 @@ class MultiModalCache:
         return size
 
     @classmethod
-    def get_item_complexity(cls, value: MultiModalCacheValue) -> int:
-        """Get the number of leaf elements in a multi-modal cache value.
-
-        This provides a measure of structural complexity that can be useful
-        for debugging cache performance and understanding data patterns.
-
-        Args:
-            value: The multi-modal cache value to analyze.
-
-        Returns:
-            The number of leaf elements in the nested structure.
-
-        """
-        return json_count_leaves(value)
-
-    @classmethod
     def get_lru_cache(
         cls,
         capacity_gb: float,
@@ -474,11 +458,15 @@ class BaseMultiModalReceiverCache(
         identifier for backward compatibility).
         """
         for feature in mm_features:
+            if feature.skip_mm_cache:
+                continue
             cache_key = feature.mm_hash or feature.identifier
             self.touch_receiver_cache_item(cache_key, feature.data)
 
         missing_mm_hashes: list[str] = []
         for feature in mm_features:
+            if feature.skip_mm_cache:
+                continue
             cache_key = feature.mm_hash or feature.identifier
             try:
                 feature.data = self.get_and_update_item(feature.data, cache_key)

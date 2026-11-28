@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.utils import large_gpu_mark
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
@@ -81,7 +82,7 @@ def dspark_vllm_config():
             enable_eplb=True,
             enable_elastic_ep=False,
         ),
-        speculative_config=SimpleNamespace(
+        speculative_config=fake_speculative_config(
             method="dspark",
             draft_model_config=draft_model_config,
         ),
@@ -246,7 +247,7 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
             (
                 "eagle",
                 "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                "vllm/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
                 1,
@@ -315,7 +316,7 @@ def test_eplb_spec_decode(
 
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
-    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next."""
+    """Default async policy subprocess works with Qwen3-Next MTP decoding."""
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03
@@ -329,7 +330,6 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
         model_max_len=4096,
         use_async=True,
     )
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,

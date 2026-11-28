@@ -126,30 +126,15 @@ def native_w8a8_block_matmul(
     assert n_tiles == Bs.shape[0], f"{n_tiles} == {Bs.shape[0]}"
     assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
-    C_shape = (M, N)
-    C = torch.zeros(C_shape, dtype=compute_type, device=A.device)
-
-    A_tiles = [A[:, i * block_k : min((i + 1) * block_k, K)] for i in range(k_tiles)]
-    B_tiles = [
-        [
-            B[
-                j * block_n : min((j + 1) * block_n, N),
-                i * block_k : min((i + 1) * block_k, K),
-            ]
-            for i in range(k_tiles)
-        ]
-        for j in range(n_tiles)
-    ]
-    C_tiles = [C[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)]
-    As_tiles = [As[:, i : i + 1] for i in range(k_tiles)]
-
+    # Accumulate one K tile at a time, as the block-scaled kernels do: one
+    # matmul over the dequantized operands would sum in a different order.
+    Bs = Bs.repeat_interleave(block_n, dim=0)[:N]
+    C = torch.zeros((M, N), dtype=compute_type, device=A.device)
     for i in range(k_tiles):
-        for j in range(n_tiles):
-            a = A_tiles[i]
-            b = B_tiles[j][i]
-            c = C_tiles[j]
-            s = As_tiles[i] * Bs[j][i]
-            c[:, :] += torch.matmul(a, b.t()) * s
+        k = slice(i * block_k, min((i + 1) * block_k, K))
+        tile = torch.matmul(A[:, k], B[:, k].t())
+        tile *= As[:, i : i + 1] * Bs[:, i]
+        C += tile
 
     C = C.reshape(origin_C_shape).to(output_dtype)
     return C

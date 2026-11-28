@@ -34,6 +34,7 @@ mod readiness;
 mod state;
 mod stream;
 
+pub use state::RequestObserver;
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
@@ -595,6 +596,15 @@ impl EngineCoreClient {
         (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
     }
 
+    /// The tightest engine-reported limit on the encoder cache tokens a
+    /// request's multimodal items may need together, if any engine has one.
+    pub fn max_mm_embeds_per_request(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.max_mm_embeds_per_request)
+            .min()
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
@@ -739,7 +749,26 @@ impl EngineCoreClient {
     /// tokens, and the terminal output is delivered immediately together with
     /// any held-back outputs. The stream still yields every raw output in
     /// order; batching only reduces how often the consuming task is woken.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+    pub async fn call(&self, req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+        self.submit(req, None).await
+    }
+
+    /// Like [`Self::call`], with an observer that sees each of the request's
+    /// outputs as the client receives it and is dropped when the request
+    /// leaves the client. See [`RequestObserver`].
+    pub async fn call_observed(
+        &self,
+        req: EngineCoreRequest,
+        observer: Box<dyn RequestObserver>,
+    ) -> Result<EngineCoreOutputStream> {
+        self.submit(req, Some(observer)).await
+    }
+
+    async fn submit(
+        &self,
+        mut req: EngineCoreRequest,
+        observer: Option<Box<dyn RequestObserver>>,
+    ) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         if req.block_hashes.is_none()
@@ -766,6 +795,7 @@ impl EngineCoreClient {
             lora_name,
             data_parallel_rank,
             stream_interval,
+            observer,
         )?;
 
         // Construct the output stream first before actually sending the request to the engine.

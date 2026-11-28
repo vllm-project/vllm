@@ -94,9 +94,11 @@ impl HarmonyChatOutputProcessor {
 /// Validate that the generic parser selections are compatible with native
 /// Harmony output parsing.
 ///
-/// `gpt_oss` uses a model-specific token-level parser, so any generic
+/// `gpt_oss` uses a model-specific token-level parser, so a generic
 /// reasoning/tool parser override is rejected instead of being silently
-/// ignored.
+/// ignored. `none` is accepted like `auto`: it is what `vllm serve` passes
+/// when the parser flags are omitted, and Python ignores those flags for
+/// Harmony models.
 pub(crate) fn validate_harmony_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
@@ -107,7 +109,7 @@ pub(crate) fn validate_harmony_parser_overrides(
 }
 
 fn validate_harmony_override(kind: &'static str, selection: &ParserSelection) -> ChatResult<()> {
-    if matches!(selection, ParserSelection::Auto) {
+    if matches!(selection, ParserSelection::Auto | ParserSelection::None) {
         return Ok(());
     }
 
@@ -389,6 +391,7 @@ async fn harmony_assistant_event_stream(
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     let mut state = HarmonyState::new(encoding, tool_calls_enabled)?;
+    let mut first_content_token_ts = None;
     futures::pin_mut!(decoded);
 
     while let Some(event) = decoded.next().await.transpose()? {
@@ -408,6 +411,7 @@ async fn harmony_assistant_event_stream(
                 decoded: _, // harmony takes raw token IDs as input, so we ignore decoded text here
                 sampled:
                     SampledDelta {
+                        timestamp,
                         token_ids,
                         logprobs,
                         ..
@@ -415,11 +419,13 @@ async fn harmony_assistant_event_stream(
                 finished,
             } => {
                 for event in state.process_token_ids(&token_ids)? {
+                    event.record_first_content_token(timestamp, &mut first_content_token_ts);
                     y.yield_ok(event).await;
                 }
 
                 if finished.is_some() {
                     for event in state.process_eos()? {
+                        event.record_first_content_token(timestamp, &mut first_content_token_ts);
                         y.yield_ok(event).await;
                     }
                 }
@@ -439,7 +445,8 @@ async fn harmony_assistant_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        spec_decode_metrics: finished.spec_decode_metrics,
+                        first_content_token_ts,
+                        spec_decode_metrics: finished.spec_decode_metrics.map(Box::new),
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,

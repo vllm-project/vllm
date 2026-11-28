@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm/tiny-random-LlamaForCausalLM"]
 
 
 def evil_forward(self, *args, **kwargs):

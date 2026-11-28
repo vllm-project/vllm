@@ -20,8 +20,10 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import ParallelConfig, VllmConfig
+    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -396,6 +398,13 @@ class Platform:
         return
 
     @classmethod
+    def get_moe_backends(cls) -> dict[str, type["FusedMoEExperts"]]:
+        """Out-of-tree MoE backends by `--moe-backend` name, in the priority
+        order used by `auto`. Names are lowercase with underscores and must not
+        reuse an in-tree backend's."""
+        return {}
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
@@ -433,10 +442,10 @@ class Platform:
                 f"Backend {backend} is not supported for vit attention"
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
@@ -1157,7 +1166,7 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
         checkpoint_alignment = 1
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             # Internal prefill checkpoints land on block boundaries.
             checkpoint_alignment = (
                 get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
@@ -1197,7 +1206,7 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
 
         if packed_block_size is not None:
@@ -1373,7 +1382,7 @@ class Platform:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
@@ -1492,6 +1501,43 @@ class Platform:
         keep the old pool allocated, and capturing into it would fail.
         """
         cls._global_graph_pool = None
+
+    def get_cudagraph_capture_defaults(
+        self, vllm_config: "VllmConfig"
+    ) -> "CUDAGraphCaptureDefaults":
+        """Return capture defaults without mutating user configuration.
+
+        The common resolver applies these only to unset settings; explicit
+        legacy settings retain their shared-grid semantics.
+        """
+        from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+        return CUDAGraphCaptureDefaults()
+
+    @classmethod
+    def get_prefill_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return prefill token sizes within `max_tokens`; zero returns `[]`."""
+        from vllm.config.compilation import prefill_cudagraph_capture_grid
+
+        return prefill_cudagraph_capture_grid(max_tokens, dense_head)
+
+    @classmethod
+    def get_decode_cudagraph_capture_grid(cls, max_requests: int) -> list[int]:
+        """Return uniform decode request counts, independent of query length."""
+        from vllm.config.compilation import decode_cudagraph_capture_grid
+
+        return decode_cudagraph_capture_grid(max_requests)
+
+    @classmethod
+    def get_varlen_decode_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return adaptive verification token sizes within `max_tokens`."""
+        from vllm.config.compilation import varlen_decode_cudagraph_capture_grid
+
+        return varlen_decode_cudagraph_capture_grid(max_tokens, dense_head)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

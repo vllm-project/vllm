@@ -30,11 +30,13 @@ from vllm.distributed import (
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
@@ -54,7 +56,8 @@ def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     # Image input
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
-        W, H = map(lambda x: int(x * size_factor), (W, H))
+        short = int(min(W, H) * size_factor)
+        W, H = (W * short // H, short) if W >= H else (short, H * short // W)
         return _data.resize((W, H))
     # Video input with PIL Images
     elif is_list_of(_data, Image.Image):
@@ -109,11 +112,13 @@ def create_batched_mm_kwargs(
     # video metadata will be added back to the resized video data here.
     token_prompt = get_token_prompt(processor, resized_mm_data)
 
-    mm_kwargs = processor(
-        prompt=token_prompt,
-        mm_items=processor.info.parse_mm_data(resized_mm_data),
-        hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-    )["mm_kwargs"].require_data()
+    # Exercise the full range of dummy tensor shapes as in startup profiling.
+    with profiling_media():
+        mm_kwargs = processor(
+            prompt=token_prompt,
+            mm_items=processor.info.parse_mm_data(resized_mm_data),
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        )["mm_kwargs"].require_data()
 
     return group_and_batch_mm_kwargs(
         [
@@ -138,9 +143,7 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(
-        model_config=model_config, cache_config=CacheConfig(block_size=16)
-    )
+    vllm_config = VllmConfig(model_config=model_config, cache_config=CacheConfig())
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,
@@ -150,6 +153,7 @@ def initialize_dummy_model(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
+        init_workspace_manager(torch.device(current_platform.device_type, 0))
 
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
@@ -158,6 +162,7 @@ def initialize_dummy_model(
         yield model
 
     del model
+    reset_workspace_manager()
     cleanup_dist_env_and_memory()
 
 
@@ -179,8 +184,19 @@ def test_model_tensor_schema(model_id: str):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
-    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
-        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+    xpu_unsupported_models = {
+        "zai-org/GLM-5.3-Flash",
+        "tencent/Hy4-preview",
+        "tencent/Hy4",
+    }
+    if current_platform.is_xpu() and model_id in xpu_unsupported_models:
+        pytest.skip(f"{model_id} is not supported on XPU")
+
+    if (
+        model_id == "thinkingmachines/Inkling-2-Small"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("Inkling 2 Small is only supported on CUDA")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
 
@@ -216,8 +232,18 @@ def test_model_tensor_schema(model_id: str):
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    assert supports_multimodal(model_cls)
+    assert isinstance(model_cls, type)
 
+    if model_config.hf_config.model_type == "hy_v4_flash_vl":
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                pytest.skip("HY4 Flash on ROCm requires gfx950")
+        elif not current_platform.is_cuda():
+            pytest.skip("HY4 Flash is only supported on CUDA and ROCm")
+
+    assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory
 
     # Capture helpers return capture-buffer containers (e.g.

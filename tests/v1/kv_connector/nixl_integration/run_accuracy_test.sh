@@ -105,7 +105,7 @@ INTERNAL_PORT_STRIDE=${INTERNAL_PORT_STRIDE:-100}
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
@@ -119,10 +119,55 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-# Function to clean up previous instances
+# Seconds the instances get to exit after SIGTERM before they are killed. Above
+# the 30 s an API server gives its EngineCore before killing it, so a stuck
+# EngineCore is still reaped by its own server.
+SHUTDOWN_TIMEOUT_S=${SHUTDOWN_TIMEOUT_S:-45}
+# Seconds killed processes and their GPU memory get to go away before the
+# script fails instead of starting the next instances on a busy GPU.
+RELEASE_TIMEOUT_S=${RELEASE_TIMEOUT_S:-120}
+# The API servers and their EngineCore/worker children, which set their
+# process titles to "VLLM::<name>" and no longer match "vllm serve".
+VLLM_PROCESS_PATTERN="vllm serve|^${VLLM_PROCESS_NAME_PREFIX:-VLLM}::"
+
+list_vllm_processes() {
+  local pids
+  pids=$(pgrep -d, -f -- "$VLLM_PROCESS_PATTERN") || return 0
+  ps -o pid=,ppid=,etime=,args= -p "$pids" || true
+}
+
+# Returns 1 if vLLM processes are still running after $1 seconds.
+wait_for_vllm_exit() {
+  local deadline=$((SECONDS + $1))
+  while pgrep -f -- "$VLLM_PROCESS_PATTERN" > /dev/null; do
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Fails if a GPU still holds more than 10% of its memory after the timeout.
 wait_for_gpu_memory_release() {
-  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+  if [[ "$SMI_BIN" == *rocm-smi || "$SMI_BIN" == *amd-smi ]]; then
     PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
+  elif [[ "$SMI_BIN" == *"nvidia"* ]]; then
+    local deadline=$((SECONDS + RELEASE_TIMEOUT_S))
+    local usage
+    while true; do
+      usage=$($SMI_BIN --query-gpu=index,memory.used,memory.total \
+        --format=csv,noheader,nounits)
+      if awk -F', ' '$2 > $3 * 0.1 { busy = 1 } END { exit busy }' <<< "$usage"; then
+        return 0
+      fi
+      if (( SECONDS >= deadline )); then
+        echo "ERROR: GPU memory still in use ${RELEASE_TIMEOUT_S}s after the vLLM processes exited (index, used MiB, total MiB):"
+        echo "$usage"
+        $SMI_BIN || true
+        exit 1
+      fi
+      sleep 1
+    done
   fi
 }
 
@@ -130,23 +175,29 @@ cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "toy_proxy_server.py" || true
   pkill -TERM -f "vllm serve" || true
-  sleep 3
-  pkill -9 -f "vllm serve" || true
-  sleep 2
+  if ! wait_for_vllm_exit "$SHUTDOWN_TIMEOUT_S"; then
+    echo "WARNING: vLLM processes still running ${SHUTDOWN_TIMEOUT_S}s after SIGTERM, killing them:"
+    list_vllm_processes
+    pkill -9 -f -- "$VLLM_PROCESS_PATTERN" || true
+    if ! wait_for_vllm_exit "$RELEASE_TIMEOUT_S"; then
+      echo "ERROR: vLLM processes still running ${RELEASE_TIMEOUT_S}s after SIGKILL:"
+      list_vllm_processes
+      exit 1
+    fi
+  fi
   wait_for_gpu_memory_release
 }
 
 get_num_gpus() {
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    $SMI_BIN -l | grep -c GPU
-  else
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l ;;
+    rocm-smi)   $SMI_BIN -l | grep -c GPU ;;
+    amd-smi)    $SMI_BIN list | grep -c "^GPU" ;;
     # works for non-cuda platforms,
     # assuming at least 1 device and
     # let system to decide which card to use
-    echo "1"
-  fi
+    *)          echo 1 ;;
+  esac
 }
 
 # Function to run tests for a specific model

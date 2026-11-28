@@ -128,16 +128,25 @@ def test_attention_sink_model_loading_shards_once(
 @pytest.mark.parametrize(
     "module_name,class_name,attention_name,sink_name",
     [
-        ("deepseek_v4", "DeepseekV4Model", "attn", "attn_sink"),
-        ("deepseek_v41", "DeepseekV4Model", "attn", "attn_sink"),
-        ("hy_v4", "HYV4Model", "self_attn", "learnable_sink_param"),
+        ("deepseek_v4.nvidia", "DeepseekV4Model", "attn", "attn_sink"),
+        ("deepseek_v41.nvidia", "DeepseekV4Model", "attn", "attn_sink"),
+        ("hy_v4.nvidia", "HYV4Model", "self_attn", "learnable_sink_param"),
+        pytest.param(
+            "hy_v4.amd",
+            "HYV4Model",
+            "self_attn",
+            "learnable_sink_param",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm HY-V4 model"
+            ),
+        ),
     ],
 )
 def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
     monkeypatch, tp_rank, module_name, class_name, attention_name, sink_name
 ):
     """DeepSeek and HY-V4 pass global sinks to the parameter's current loader."""
-    module = import_module(f"vllm.models.{module_name}.nvidia.model")
+    module = import_module(f"vllm.models.{module_name}.model")
     from vllm.model_executor.model_loader import weight_utils
 
     monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -1538,13 +1547,13 @@ def _reload_with_lora_expert_names(worker) -> None:
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
 )
-def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch, reload_mode):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    lora_path = hf_api().snapshot_download(
-        repo_id="vllm-project/qwen3-moe-text2sql-spider"
-    )
+    lora_path = hf_api().snapshot_download(repo_id="vllm/qwen3-moe-text2sql-spider")
     prompts = [
         (
             "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"

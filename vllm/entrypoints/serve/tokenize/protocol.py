@@ -14,7 +14,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    ReasoningEffort,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -101,6 +107,22 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort used to render the chat template, with the same "
+            "meaning as in the Chat Completions API."
+        ),
+    )
+    documents: list[dict[str, str]] | None = Field(
+        default=None,
+        description=(
+            "A list of dicts representing documents that will be accessible to "
+            "the model if it is performing RAG (retrieval-augmented generation)."
+            " If the template does not support RAG, this argument will have no "
+            "effect."
+        ),
+    )
     response_format: AnyResponseFormat | None = Field(
         default=None,
         description="Output format to include in model-specific chat templating.",
@@ -137,16 +159,31 @@ class TokenizeChatRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
+        reasoning_effort = map_reasoning_effort(
+            self.reasoning_effort, reasoning_effort_map
+        )
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            documents=self.documents,
+            reasoning_effort=reasoning_effort,
+        )
+
+        # Same as the chat completions request, so that /tokenize renders the
+        # prompt the chat route would generate from.
+        user_kwargs = self.chat_template_kwargs or {}
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
             response_format=self.response_format,
@@ -171,6 +208,8 @@ class TokenizeChatRequest(OpenAIBaseModel):
                 "add_special_tokens",
                 "chat_template",
                 "chat_template_kwargs",
+                "reasoning_effort",
+                "documents",
                 "media_io_kwargs",
                 "mm_processor_kwargs",
                 "response_format",

@@ -67,7 +67,19 @@ pub struct SamplingHints {
     pub default_repetition_penalty: Option<f32>,
     pub default_presence_penalty: Option<f32>,
     pub default_frequency_penalty: Option<f32>,
-    pub default_max_tokens: Option<u32>,
+    pub default_max_tokens: Option<DefaultMaxTokens>,
+    /// Applies when a request leaves `skip_special_tokens` unset; see
+    /// [`TextDecodeOptions::skip_special_tokens`](crate::output::TextDecodeOptions::skip_special_tokens).
+    pub default_skip_special_tokens: Option<bool>,
+}
+
+/// Server-side `max_tokens` from the generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultMaxTokens {
+    /// Applies only when a request omits `max_tokens` (the model's config).
+    Fallback(u32),
+    /// Also bounds a client-provided `max_tokens` (`--override-generation-config`).
+    Cap(u32),
 }
 
 /// Effective bounds used to validate and lower sampling requests.
@@ -83,8 +95,8 @@ pub struct SamplingLimits {
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
     pub model_vocab_size: usize,
-    /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
-    /// token-ID prompts.
+    /// Tokenizer vocabulary size, used to bound `bad_words` token IDs and
+    /// token-ID prompts that carry multimodal inputs.
     pub tokenizer_vocab_size: usize,
 }
 
@@ -95,11 +107,6 @@ impl SamplingLimits {
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 256;
-
-    /// Return the union bound used to validate token-ID prompts.
-    pub fn prompt_token_vocab_size(&self) -> usize {
-        self.tokenizer_vocab_size.max(self.model_vocab_size)
-    }
 }
 
 /// Minimal text-processing backend needed by `vllm-text`.
@@ -142,7 +149,7 @@ pub trait TextBackend: Send + Sync {
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
-    /// Used to range-check `allowed_token_ids` and token-id prompts.
+    /// Used to range-check `bad_words` token IDs and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {
         self.tokenizer().vocab_size()
     }

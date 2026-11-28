@@ -15,6 +15,7 @@ from vllm.entrypoints.common.cli_args import (
     propagate_flash_late_interaction,
     validate_parsed_serve_args,
 )
+from vllm.entrypoints.common.stale_rust_frontend import warn_if_rust_frontend_stale
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
@@ -247,6 +248,12 @@ def run_headless(args: argparse.Namespace):
     # hybrid or external DP LB) also handshakes with them for their I/O.
     client_handshake_address = args.headless_client_handshake_address
 
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
+
     # Create the engines.
     engine_manager = CoreEngineProcManager(
         local_engine_count=local_engine_count,
@@ -256,7 +263,7 @@ def run_headless(args: argparse.Namespace):
         local_client=client_handshake_address is not None,
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
-        log_stats=not engine_args.disable_log_stats,
+        collect_stats=collect_stats,
         client_handshake_address=client_handshake_address,
     )
 
@@ -283,6 +290,8 @@ def run_multi_api_server(args: argparse.Namespace):
         raise ValueError(
             "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
         )
+    if rust_frontend_path:
+        warn_if_rust_frontend_stale(rust_frontend_path)
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
@@ -313,6 +322,10 @@ def run_multi_api_server(args: argparse.Namespace):
     propagate_flash_late_interaction(args, engine_args)
     engine_args._api_process_count = num_api_servers
     engine_args._api_process_rank = -1
+    if rust_frontend_path:
+        # vllm-rs has no multimodal processor cache yet, so the engine's
+        # receiver cache would never be hit.
+        engine_args.mm_processor_cache_gb = 0
 
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
@@ -323,7 +336,11 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
     executor_class = Executor.get_class(vllm_config)
-    log_stats = not engine_args.disable_log_stats
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
@@ -339,7 +356,7 @@ def run_multi_api_server(args: argparse.Namespace):
     addresses = zmq_listeners.addresses
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses
+        vllm_config, executor_class, collect_stats, addresses
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator

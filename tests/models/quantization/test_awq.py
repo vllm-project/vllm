@@ -108,7 +108,7 @@ def run_awq_test(
 @pytest.mark.parametrize(
     ("model", "quantization", "dtype"),
     [
-        ("vllm-project/gemma-4-26B-AWQ", "awq", "float16"),
+        ("vllm/gemma-4-26B-AWQ", "awq", "float16"),
         ("cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", "compressed-tensors", "bfloat16"),
     ],
     ids=[

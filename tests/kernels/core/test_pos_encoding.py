@@ -7,8 +7,9 @@ from itertools import product
 import pytest
 import torch
 
-from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm import _custom_ops as ops
+from vllm import ir
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
@@ -102,22 +103,23 @@ def test_rotary_embedding(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope.forward_native(positions, query, key)
-    out_query, out_key = rope.forward(positions, query, key)
-    # Compare the results.
-    torch.testing.assert_close(
-        out_query,
-        ref_query,
-        atol=get_default_atol(out_query),
-        rtol=get_default_rtol(out_query),
-    )
+    with (
+        ir.ops.rotary_embedding.set_priority(["native"]),
+        ir.ops.rotary_embedding_query_only.set_priority(["native"]),
+    ):
+        ref_query, ref_key = rope.forward_native(positions, query, key)
+    # Base RoPE dispatches through vLLM IR; select the kernel explicitly.
+    with (
+        ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]),
+        ir.ops.rotary_embedding_query_only.set_priority(["vllm_c", "native"]),
+    ):
+        out_query, out_key = rope.forward(positions, query, key)
+    # The kernel computes in fp32 while native rounds every op, so compare
+    # with the RoPE IR op tolerances.
+    tol = ir.ops.rotary_embedding.get_tolerance(out_query.dtype)
+    torch.testing.assert_close(out_query, ref_query, **tol)
     if use_key:
-        torch.testing.assert_close(
-            out_key,
-            ref_key,
-            atol=get_default_atol(out_key),
-            rtol=get_default_rtol(out_key),
-        )
+        torch.testing.assert_close(out_key, ref_key, **tol)
     else:
         assert ref_key is None and out_key is None, "expected returned key to be None"
 
@@ -164,7 +166,12 @@ def test_rope_module_cache(default_vllm_config):
         )
         # different settings cannot share the same rope module
         assert id(rope) not in rope_setting_id_map.values()
-        assert all(x.dtype == dtype for x in rope.buffers())
+        # The AITER bf16 cache copy is bf16 by design.
+        assert all(
+            x.dtype == dtype
+            for name, x in rope.named_buffers()
+            if name != "cos_sin_cache_bf16"
+        )
         assert all(x.dtype == dtype for x in rope.parameters())
         rope_setting_id_map[str(setting)] = id(rope)
 
@@ -191,3 +198,50 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+def _assert_gptj_fp64_rotation(got, query, table, positions):
+    cos, sin = table.double()[positions].chunk(2, dim=-1)
+    cos, sin = cos[:, None], sin[:, None]
+    x = query.double().view(query.shape[0], -1, 64)
+    even, odd = x[..., 0::2], x[..., 1::2]
+    ref = torch.stack([even * cos - odd * sin, odd * cos + even * sin], -1)
+    ref = ref.flatten(-2)
+    ulp = torch.ldexp(
+        torch.ones_like(ref), torch.frexp(ref.abs().float())[1].double() - 8
+    )
+    slack = 2**-22 * (even.abs() + odd.abs()).repeat_interleave(2, dim=-1)
+    got = got.reshape(query.shape[0], -1, 64)
+    err = ((got.double() - ref).abs() / (ulp + slack)).max().item()
+    assert err <= 1.0, f"rotation error is {err:.2f} bf16 ulp"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
+def test_rotary_embedding_fp32_cache_with_bf16_query(cache_dtype, default_vllm_config):
+    """Preserve an FP32 table without changing the output dtype."""
+    torch.manual_seed(0)
+    rope = RotaryEmbedding(64, 64, 128, 10000.0, False, torch.float32)
+    table = torch.randn(128, 64, dtype=cache_dtype, device="cuda")
+    rope.cos_sin_cache = table
+    saved_table = table.clone()
+    positions = torch.arange(17, device="cuda")
+    query = torch.randn(17, 128, dtype=torch.bfloat16, device="cuda")
+    key = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
+
+    with ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]):
+        out_query, out_key = rope.forward_cuda(positions, query.clone(), key.clone())
+    assert out_key is not None
+    ref_query, ref_key = query.clone(), key.clone()
+    ops.rotary_embedding(positions, ref_query, ref_key, 64, saved_table, False)
+    torch.testing.assert_close(out_query, ref_query, atol=0, rtol=0)
+    torch.testing.assert_close(out_key, ref_key, atol=0, rtol=0)
+    assert out_query.dtype == query.dtype
+    assert out_key.dtype == key.dtype
+    assert rope.cos_sin_cache is table
+    assert rope.cos_sin_cache.dtype == cache_dtype
+    assert torch.equal(table, saved_table)
+
+    if cache_dtype == torch.float32:
+        _assert_gptj_fp64_rotation(out_query, query, saved_table, positions)
+        _assert_gptj_fp64_rotation(out_key, key, saved_table, positions)

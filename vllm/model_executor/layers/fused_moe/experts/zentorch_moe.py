@@ -35,6 +35,8 @@ _ROUTING_SCORING: dict[RoutingMethodType, tuple[str, bool]] = {
     RoutingMethodType.Renormalize: ("softmax", True),
     RoutingMethodType.RenormalizeNaive: ("softmax", True),
     RoutingMethodType.MiniMax2: ("sigmoid", True),
+    # Like MiniMax2, but with expert groups.
+    RoutingMethodType.DeepSeekV3: ("sigmoid", True),
 }
 
 
