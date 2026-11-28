@@ -432,7 +432,7 @@ def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> No
 def prefault_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Take the integrated-GPU path of `copy_weight_` without a GPU."""
     monkeypatch.setattr(
-        "vllm.model_executor.utils._is_integrated_gpu", lambda device: True
+        "vllm.model_executor.utils._faults_pageable_copies", lambda device: True
     )
 
 

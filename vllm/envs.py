@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_COMPILE_ON_ONE_RANK: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_SAFETENSORS_PREFETCH_LEAD_GB: float = 64.0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -1163,6 +1164,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # at peak during loading.
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
+    ),
+    # GiB of checkpoint files the safetensors prefetch may read ahead of each
+    # rank's loader on Lustre, whose clients drop the cached pages of old locks.
+    # 0 disables this pacing.
+    "VLLM_SAFETENSORS_PREFETCH_LEAD_GB": lambda: float(
+        os.getenv("VLLM_SAFETENSORS_PREFETCH_LEAD_GB", "64")
     ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
@@ -2581,6 +2588,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_SAFETENSORS_PREFETCH_LEAD_GB",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_MAX_TOKENIZE_TOKENS",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
