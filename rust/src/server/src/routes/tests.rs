@@ -7719,6 +7719,90 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_endpoint_returns_503_after_input_send_timeout() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-health-timeout".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id,
+        move |_dealer, _push| {
+            boxed_test_future(async move {
+                // Keep the mock engine's DEALER socket open without reading to simulate
+                // a deadlocked EngineCoreProc.
+                let _ = release_rx.await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect_with_input_send_timeout(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+        Duration::from_millis(80),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let state = Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    ));
+    let app = build_router(state.clone());
+
+    let (status, _) = health_status(&app).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Saturate the IPC socket buffer + zmq.rs peer send queue (100_000) until
+    // input send hits the configured 80ms timeout.
+    let big_prompt: Vec<u32> = vec![1; 2048];
+    let small_prompt: Vec<u32> = vec![1];
+    let mut timed_out = false;
+    for i in 0..115_000usize {
+        let req = vllm_engine_core_client::protocol::request::EngineCoreRequest {
+            request_id: format!("req-health-stall-{i}"),
+            prompt_token_ids: Some(
+                if i < 2_000 {
+                    big_prompt.clone()
+                } else {
+                    small_prompt.clone()
+                }
+                .into(),
+            ),
+            sampling_params: Some(
+                vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams::default(),
+            ),
+            ..Default::default()
+        };
+        if state.engine_core_client().call(req).await.is_err() {
+            timed_out = true;
+            break;
+        }
+    }
+    assert!(
+        timed_out,
+        "expected input send to time out on stalled engine"
+    );
+
+    let (status, body) = health_status(&app).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.is_empty(), "expected empty body, got {:?}", body);
+    assert!(matches!(
+        state.engine_core_client().health_error().as_deref(),
+        Some(vllm_engine_core_client::Error::InputSendTimeout { .. })
+    ));
+
+    let _ = release_tx.send(());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn load_endpoint_resets_when_stream_response_is_dropped() {
     let (app, engine_task) = test_app_with_engine_handle().await;

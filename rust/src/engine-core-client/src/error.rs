@@ -41,6 +41,11 @@ pub enum Error {
     EngineCoreDead,
     #[error("engine core {engine_id:?} disconnected")]
     EngineDisconnected { engine_id: EngineId },
+    #[error("engine input send to {engine_id:?} timed out after {timeout:?}")]
+    InputSendTimeout {
+        engine_id: EngineId,
+        timeout: Duration,
+    },
     #[error("startup handshake timed out while waiting for {stage} after {timeout:?}")]
     HandshakeTimeout {
         stage: &'static str,
