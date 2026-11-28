@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+from vllm.config import LoRAConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -12,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+    MuseSparkMoEConfig,
     _validate_route_major_deployment,
     needs_pre_norm_all_reduce,
     validate_deployment,
@@ -20,6 +22,7 @@ from vllm.models.muse_spark.nvidia.muse_moe_runner import (
 
 def _moe_config(
     *,
+    is_lora_enabled: bool = False,
     tp_size: int = 1,
     ep_size: int = 1,
     dp_size: int = 1,
@@ -42,7 +45,8 @@ def _moe_config(
         all2all_backend="allgather_reducescatter",
         enable_eplb=enable_eplb,
     )
-    return FusedMoEConfig(
+    return MuseSparkMoEConfig(
+        is_lora_enabled=is_lora_enabled,
         num_experts=32,
         experts_per_token=8,
         hidden_dim=2048,
@@ -126,3 +130,26 @@ def test_hopper_route_major_deployments(kwargs, match):
         return
     with pytest.raises(NotImplementedError, match=match):
         _validate_route_major_deployment(_moe_config(**kwargs))
+
+
+@pytest.mark.parametrize(
+    ("targets", "expert_lora"),
+    [
+        (["qkv_proj"], False),
+        (["q_proj", "v_proj"], False),
+        (None, True),
+        (["qkv_proj", "experts"], True),
+    ],
+)
+def test_muse_spark_attention_only_lora(targets, expert_lora):
+    config = VllmConfig()
+    config.lora_config = LoRAConfig(target_modules=targets)
+    with set_current_vllm_config(config):
+        moe = _moe_config(is_lora_enabled=True)
+    assert moe.is_lora_enabled == expert_lora
+    _validate_route_major_deployment(moe, supports_lora=True)
+    if expert_lora:
+        with pytest.raises(NotImplementedError, match="MoE LoRA"):
+            _validate_route_major_deployment(moe)
+    else:
+        _validate_route_major_deployment(moe)

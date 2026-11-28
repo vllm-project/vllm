@@ -23,6 +23,8 @@ from vllm.lora.layers.custom_layer import (
     Glm5NextIndexerWkWeightsWithLoRA,
     MLAKVBProjWithLoRA,
     MLAKVBProjWithShardedLoRA,
+    MuseSparkQKVOGateWithLoRA,
+    MuseSparkQKVOGateWithShardedLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "Glm5NextIndexerWkWeightsWithLoRA",
     "MLAKVBProjWithLoRA",
     "MLAKVBProjWithShardedLoRA",
+    "MuseSparkQKVOGateWithLoRA",
+    "MuseSparkQKVOGateWithShardedLoRA",
     "VocabParallelEmbeddingWithLoRA",
     "LogitsProcessorWithLoRA",
     "ColumnParallelLinearWithLoRA",

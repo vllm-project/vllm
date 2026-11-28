@@ -130,6 +130,7 @@ class LoRAModelManager:
             else None
         )
         self.packed_modules: dict[str, list[str]] = {}
+        self.layer_specific_lora_targets: set[str] = set()
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
         self._last_slot_layout: tuple[int | None, ...] | None = None
@@ -164,7 +165,7 @@ class LoRAModelManager:
             vllm_config and vllm_config.parallel_config.enable_expert_parallel
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
-        self._create_lora_modules()
+        self._create_lora_modules(vllm_config)
 
         self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
             None
@@ -473,7 +474,7 @@ class LoRAModelManager:
         self._last_mapping = None
         self._last_slot_layout = None
 
-    def _create_lora_modules(self):
+    def _create_lora_modules(self, vllm_config: VllmConfig):
         def _parent_module(module_name: str) -> str:
             # module name is a dot separated name.
             # for example:
@@ -523,7 +524,10 @@ class LoRAModelManager:
                     ):
                         self.unsupported_lora_modules.add(module_name)
                     continue
-            elif not self._match_target_modules(module_name) and not is_classifier_head:
+            elif (
+                not self._match_target_modules(module_name, module)
+                and not is_classifier_head
+            ):
                 # Full classification heads bypass the A/B LoRA target filter.
                 continue
 
@@ -569,7 +573,11 @@ class LoRAModelManager:
 
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
+            layer_config = self.model.config
             if isinstance(module, MoERunner):
+                # Multimodal text configs can omit the checkpoint architecture.
+                if self._is_3d_moe_model and not layer_config.architectures:
+                    layer_config = vllm_config.model_config.hf_config
                 # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
@@ -590,7 +598,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
-                    self.model.config,
+                    layer_config,
                 )
             new_module = replace_submodule(self.model, module_name, new_module)
 
@@ -687,7 +695,7 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 )
-                or not self._match_target_modules(module_name)
+                or not self._match_target_modules(module_name, module)
                 or not isinstance(module, BaseLayerWithLoRA)
                 or self._get_punica_wrapper(module_name) is None
             ):
@@ -756,7 +764,10 @@ class LoRAModelManager:
                     model.loras[module_name] = lora
             else:
                 parts = module_name.split(".")
-                replacements = self.packed_modules_mapping[parts[-1]]
+                replacements = (
+                    getattr(module, "lora_packed_modules", None)
+                    or (self.packed_modules_mapping[parts[-1]])
+                )
                 n_slices = getattr(module, "n_slices", len(replacements))
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
                     replacements = replacements[
@@ -822,21 +833,25 @@ class LoRAModelManager:
             )
         return adjusted_rank
 
-    def _match_target_modules(self, module_name: str) -> bool:
+    def _match_target_modules(self, module_name: str, module: nn.Module) -> bool:
         """Check if a module passes the deployment-time target filter.
 
         Args:
             module_name: Full dot-separated module name (e.g.,
                 "model.layers.0.self_attn.o_proj")
+            module: Runtime layer providing any projection-specific LoRA targets.
 
         Returns:
             True if the module passes the filter, False otherwise.
 
         """
+        mapping = self.packed_modules_mapping
+        if self.lora_config.target_modules and (
+            override := getattr(module, "lora_packed_modules", None)
+        ):
+            mapping = mapping | {module_name.rsplit(".", 1)[-1]: override}
         return is_in_target_modules(
-            module_name,
-            self.lora_config.target_modules,
-            self.packed_modules_mapping,
+            module_name, self.lora_config.target_modules, mapping
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
@@ -868,9 +883,11 @@ class LoRAModelManager:
         # A base layer may set `lora_packed_modules` to override the leaf-name
         # mapping for that layer only, e.g. Gemma4 k_eq_v layers pack
         # [q_proj, k_proj, k_proj].
-        replacements = getattr(
-            module, "lora_packed_modules", None
-        ) or self.packed_modules_mapping.get(module_name, [])
+        replacements = getattr(module, "lora_packed_modules", None)
+        if replacements:
+            self.layer_specific_lora_targets.update(replacements)
+        else:
+            replacements = self.packed_modules_mapping.get(module_name, [])
         # When replacements is less than or equal to 1, it indicates that this
         # module is not a packed module.
         if len(replacements) <= 1:

@@ -402,10 +402,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
         hooked = self._uses_post_gemm2_hook(num_tokens)
-        if hooked and (apply_router_weight_on_input or self._lora_context is not None):
+        if hooked and apply_router_weight_on_input:
             raise NotImplementedError(
-                "post_gemm2_hook needs unweighted GEMM2 rows; it supports neither "
-                "router weights on the input nor LoRA."
+                "post_gemm2_hook needs unweighted GEMM2 rows; "
+                "applying router weights on the input is unsupported."
             )
 
         # Under EP, drop the top-k slots routed to remote experts at alignment
@@ -755,6 +755,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 A_is_sorted=use_sorted_a,
             )
 
+        # W2 LoRA takes one input per route. Its kernels also multiply by the
+        # supplied weights; a post-GEMM2 hook needs the unweighted delta.
+        w2_lora_weights = (
+            torch.ones_like(topk_weights)
+            if hooked and lora_context is not None
+            else topk_weights
+        )
         if lora_context is not None and lora_context.aux_stream is not None:
             lora_delta_w2 = torch.zeros_like(intermediate_cache3)
 
@@ -763,7 +770,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     lora_context,
                     y=lora_delta_w2,
                     x=intermediate_cache2,
-                    topk_weights=topk_weights,
+                    topk_weights=w2_lora_weights,
                     sorted_token_ids_lora=sorted_token_ids_lora,
                     expert_ids_lora=expert_ids_lora,
                     num_tokens_post_padded_lora=num_tokens_post_padded_lora,
@@ -791,7 +798,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     lora_context,
                     y=intermediate_cache3,
                     x=intermediate_cache2,
-                    topk_weights=topk_weights,
+                    topk_weights=w2_lora_weights,
                     sorted_token_ids_lora=sorted_token_ids_lora,
                     expert_ids_lora=expert_ids_lora,
                     num_tokens_post_padded_lora=num_tokens_post_padded_lora,

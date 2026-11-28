@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -127,7 +128,9 @@ def uses_modular_all2all(moe_config: FusedMoEConfig) -> bool:
     )
 
 
-def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> None:
+def validate_deployment(
+    moe_config: FusedMoEConfig, *, kernel_routes: bool, supports_lora: bool = False
+) -> None:
     """Reject deployments the post-expert norm cannot be spliced into."""
     parallel_config = moe_config.moe_parallel_config
     routing_method = moe_config.routing_method
@@ -139,10 +142,9 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
             f"route_scale == 1.0); this checkpoint classifies as "
             f"{routing_method.name}."
         )
-    if moe_config.is_lora_enabled:
+    if moe_config.is_lora_enabled and not supports_lora:
         raise NotImplementedError(
-            "Muse Spark post-expert norm does not support MoE LoRA: the LoRA "
-            "path applies the top-k weights alongside GEMM2."
+            "Muse Spark MoE LoRA requires unquantized Triton experts."
         )
     if parallel_config.enable_eplb:
         raise NotImplementedError("Muse Spark post-expert norm does not support EPLB.")
@@ -160,8 +162,10 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
 
 
-def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
-    validate_deployment(moe_config, kernel_routes=False)
+def _validate_route_major_deployment(
+    moe_config: FusedMoEConfig, *, supports_lora: bool = False
+) -> None:
+    validate_deployment(moe_config, kernel_routes=False, supports_lora=supports_lora)
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
@@ -792,10 +796,36 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig) -> None:
         self.use_route_major = current_platform.is_device_capability_family(90)
         if self.use_route_major:
-            _validate_route_major_deployment(moe)
+            _validate_route_major_deployment(moe, supports_lora=True)
             FusedMoEMethodBase.__init__(self, moe)
             self.unquantized_backend = UnquantizedMoeBackend.TRITON
             self.experts_cls = TritonExperts
+            cfg = get_current_vllm_config_or_none()
+            lora = cfg.lora_config if cfg is not None else None
+            if (
+                moe.is_lora_enabled
+                and lora is not None
+                and lora.lora_dtype == torch.float32
+            ):
+                from vllm.models.muse_spark.nvidia.merge_order_experts import (
+                    MuseSparkMergeOrderExperts,
+                )
+
+                if (
+                    set(lora.target_modules or ()) != {"experts"}
+                    or lora.max_lora_rank != 8
+                    or lora.max_loras != 1
+                    or lora.fully_sharded_loras
+                    or lora.enable_moe_shared_loras
+                    or moe.moe_parallel_config.tp_size not in (1, 2)
+                    or moe.moe_parallel_config.use_ep
+                    or not cfg.model_config.enforce_eager
+                ):
+                    raise ValueError(
+                        "Muse Spark FP32 expert LoRA requires eager mode, TP 1 or 2, "
+                        "one expert-only adapter slot, and max_lora_rank=8."
+                    )
+                self.experts_cls = MuseSparkMergeOrderExperts
             return
         super().__init__(moe)
         modular = uses_modular_all2all(moe)

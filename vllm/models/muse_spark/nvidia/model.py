@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -433,6 +433,15 @@ class MuseSparkMoE(nn.Module):
             and not isinstance(quant_config, ModelOptNvFp4Config)
         ):
             raise NotImplementedError("MuseSpark MegaMoE supports BF16 and NVFP4.")
+        lora = vllm_config.lora_config
+        if (
+            mega_backend
+            and lora
+            and (not lora.target_modules or "experts" in lora.target_modules)
+        ):
+            raise NotImplementedError(
+                "Muse Spark MegaMoE does not support routed expert LoRA."
+            )
         self.use_mega_moe = mega_backend
         self.is_nvfp4_mega_moe = mega_backend and layer_is_nvfp4
 
@@ -1269,7 +1278,10 @@ class MuseSparkAttention(nn.Module):
     def can_fuse_sp_gather(self, x: torch.Tensor) -> bool:
         """Whether the sequence all-gather can be fused into the QKV GEMM."""
         return (
-            isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
+            isinstance(
+                self.qkv_proj, (QKVParallelLinear, MuseSparkQKVOGateParallelLinear)
+            )
+            and isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
             and self.qkv_proj.bias is None
             and can_sp_all_gather_matmul(x, self.qkv_proj.weight)
         )
@@ -1968,6 +1980,7 @@ class MuseSparkModel(LlamaModel):
 
 
 class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
+    is_3d_moe_weight: ClassVar[bool] = True
     model_cls = MuseSparkModel
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
@@ -2014,7 +2027,7 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
-        # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
+        # The text QKV+O-gate layer declares its four adapter projections locally.
         self.packed_modules_mapping = {  # type: ignore[misc]
             k: v for k, v in self.packed_modules_mapping.items() if k != "qkv_proj"
         }
