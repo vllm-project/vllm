@@ -3668,10 +3668,10 @@ def test_spec_decode_padding_first_decode_step():
         enable_prefix_caching=True,
         block_size=16,
     )
-    # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
-    # second identical request hits num_computed == num_prompt_tokens - 1.
-    r1, r2 = create_requests(
-        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    # Identical 33-token prompts: two full blocks (32 tokens) get cached, so
+    # later identical requests hit num_computed == num_prompt_tokens - 1.
+    r1, r2, r3 = create_requests(
+        num_requests=3, num_tokens=33, same_prompt=True, max_tokens=16
     )
 
     # Drive r1 through prefill so its prompt blocks are cached, then give it real
@@ -3682,15 +3682,17 @@ def test_spec_decode_padding_first_decode_step():
     _model_output(scheduler, out, [[100]])
     scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
 
-    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
+    # r2 and r3 arrive with one token left after the prefix-cache hit.
     scheduler.add_request(r2)
+    scheduler.add_request(r3)
     out = scheduler.schedule()
 
     # r1 verifies its real drafts.
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
-    # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
-    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
-    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    # Both cached requests keep the uniform width with placeholder (-1) drafts.
+    for request in (r2, r3):
+        assert out.num_scheduled_tokens[request.request_id] == 1 + num_spec
+        assert out.scheduled_spec_decode_tokens[request.request_id] == [-1] * num_spec
 
 
 def test_spec_decode_padding_resumed_request_without_running_requests():
@@ -3832,6 +3834,77 @@ def test_spec_decode_padding_skipped_with_prefill_in_batch():
     assert r_long.request_id in out.num_scheduled_tokens
     assert out.num_scheduled_tokens[r_candidate.request_id] == 1
     assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
+
+
+@pytest.mark.parametrize("prefill_tokens", [4, 63])
+def test_spec_decode_padding_skipped_after_new_prefill(prefill_tokens):
+    """A new prefill makes the batch nonuniform even if its width is K+1.
+
+    With one token of budget left, padding would also defer a cached request
+    that could otherwise complete its prompt in the same step.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        enable_prefix_caching=True,
+        block_size=16,
+        max_num_batched_tokens=64,
+    )
+    warm, cached = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=1
+    )
+    # The second request has different prompt tokens from the warmed prefix.
+    _, prefill = create_requests(
+        num_requests=2, num_tokens=prefill_tokens, req_ids=["unused", "prefill"]
+    )
+    scheduler.add_request(warm)
+    _model_output(scheduler, scheduler.schedule(), [[100]])
+    scheduler.add_request(prefill)
+    scheduler.add_request(cached)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[prefill.request_id] == prefill_tokens
+    assert out.num_scheduled_tokens[cached.request_id] == 1
+    assert cached.request_id not in out.scheduled_spec_decode_tokens
+
+
+@pytest.mark.parametrize("num_drafts", [0, 1])
+def test_spec_decode_padding_skipped_with_short_running_drafts(num_drafts):
+    """Padding a cached admission to K+1 cannot match shorter running rows."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=3, enable_prefix_caching=True, block_size=16
+    )
+    running, cached = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+    scheduler.add_request(running)
+    _model_output(scheduler, scheduler.schedule(), [[100]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([running.request_id], [[1] * num_drafts])
+    )
+    scheduler.add_request(cached)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[running.request_id] == 1 + num_drafts
+    assert out.num_scheduled_tokens[cached.request_id] == 1
+    assert cached.request_id not in out.scheduled_spec_decode_tokens
+
+
+def test_spec_decode_padding_skipped_for_uncached_single_token_prompt():
+    """A one-token prompt without computed context is a real prefill."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=3, enable_prefix_caching=True, block_size=16
+    )
+    (running,) = create_requests(num_requests=1, num_tokens=33)
+    (cold,) = create_requests(num_requests=1, num_tokens=1, req_ids=["cold"])
+    scheduler.add_request(running)
+    _model_output(scheduler, scheduler.schedule(), [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([running.request_id], [[1, 2, 3]]))
+    scheduler.add_request(cold)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[running.request_id] == 4
+    assert out.num_scheduled_tokens[cold.request_id] == 1
+    assert cold.request_id not in out.scheduled_spec_decode_tokens
 
 
 def test_scheduler_stats_waiting_queues():

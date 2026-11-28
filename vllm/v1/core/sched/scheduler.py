@@ -774,8 +774,14 @@ class Scheduler(SchedulerInterface):
         # Whether a request scheduled this step can use the drafts proposed after
         # it. Stays set if that request is preempted later in the step.
         drafts_needed = not self.can_skip_drafts
-        # Whether the running batch contains any prefill requests.
-        prefill_scheduled = False
+        # Padding can preserve a FULL graph only while the batch can run as
+        # fixed-width speculative decode.
+        padded_num_tokens = 1 + self.num_spec_tokens
+        can_pad_spec_decode = (
+            self.num_spec_tokens > 0
+            and self.dynamic_sd_lookup is None
+            and self.num_sampled_tokens_per_step > 0
+        )
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -1013,7 +1019,11 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            prefill_scheduled |= request.is_prefill_chunk
+            can_pad_spec_decode = (
+                can_pad_spec_decode
+                and not request.is_prefill_chunk
+                and num_new_tokens == padded_num_tokens
+            )
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -1376,29 +1386,24 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    # Pad new decode requests to uniform spec decoding size to
-                    # preserve full cudagraph for this step.
-                    # Not for diffusion where draft tokens can't be padded.
+                    # Only a one-token extension of an existing context is
+                    # decode-eligible; padding a true prefill or an already
+                    # nonuniform batch cannot restore the decode graph.
+                    # Leave room for the sampled token(s) as well.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
-                        and self.num_sampled_tokens_per_step > 0
+                        can_pad_spec_decode
                         and num_new_tokens == 1
-                        and not prefill_scheduled
-                        and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and num_computed_tokens > 0
+                        and num_computed_tokens
+                        + padded_num_tokens
+                        + self.num_sampled_tokens_per_step
+                        <= self.max_model_len
                     ):
-                        padded_num_tokens = 1 + self.num_spec_tokens
-                        # Pad only when there is room for the sampled token(s).
-                        if (
-                            num_computed_tokens
-                            + padded_num_tokens
-                            + self.num_sampled_tokens_per_step
-                            <= self.max_model_len
-                        ):
-                            if padded_num_tokens > request_token_budget:
-                                # Prefer to not schedule than schedule un-padded.
-                                break
-                            num_new_tokens = padded_num_tokens
-                            pad_spec_decode = True
+                        if padded_num_tokens > request_token_budget:
+                            # Prefer to not schedule than schedule un-padded.
+                            break
+                        num_new_tokens = padded_num_tokens
+                        pad_spec_decode = True
 
                     if 0 < long_prefill_token_threshold < num_new_tokens:
                         num_new_tokens = long_prefill_token_threshold
@@ -1656,10 +1661,12 @@ class Scheduler(SchedulerInterface):
                     request, num_computed_tokens, num_new_tokens
                 )
                 if pad_spec_decode:
-                    assert num_new_tokens == 1 + self.num_spec_tokens
+                    assert num_new_tokens == padded_num_tokens
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                else:
+                    can_pad_spec_decode = False
                 # Track requests still prefilling after this chunk. A promoted load
                 # also stays tracked until _update_after_schedule drops it.
                 if (
