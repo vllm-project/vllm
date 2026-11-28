@@ -297,6 +297,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
+        from vllm.v1.worker.gpu.sample.logprob import register_topk_logprob_warmup
+
+        with worker.model_runner.jit_warmup_registry.activate():
+            register_topk_logprob_warmup()
         try:
             worker.model_runner.jit_warmup_registry.warmup()
         except Exception:

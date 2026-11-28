@@ -5,8 +5,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from vllm.config import VllmConfig
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
@@ -14,7 +17,7 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 _MAX_TOPK_BLOCK = 1024
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["logits_stride", "topk", "vocab_size"])
 def _topk_log_softmax_kernel(
     output_ptr,
     logits_ptr,
@@ -57,6 +60,61 @@ def _topk_log_softmax_kernel(
         logits = logits.to(tl.float32)
         o = logits - max_val - lse
         tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+
+
+def topk_logprob_block_sizes(max_logprobs: int) -> tuple[int, ...]:
+    """Power-of-two gather widths this kernel can launch.
+
+    `max_logprobs == 0` disables logprobs. `-1` means a request may ask for
+    the full vocabulary, which the kernel caps at `_MAX_TOPK_BLOCK`. A positive
+    cap covers the sampled id plus that many extra ids.
+    """
+    if max_logprobs == 0:
+        return ()
+    if max_logprobs < 0:
+        limit = _MAX_TOPK_BLOCK
+    else:
+        limit = min(_MAX_TOPK_BLOCK, next_power_of_2(max_logprobs + 1))
+    sizes: list[int] = []
+    size = 1
+    while size <= limit:
+        sizes.append(size)
+        size *= 2
+    return tuple(sizes)
+
+
+class _TopkLogSoftmaxWarmup(VllmJitKernel[int]):
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[int]:
+        return list(topk_logprob_block_sizes(vllm_config.model_config.max_logprobs))
+
+    def compile(self, block_size: int) -> None:
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+            TritonWarmupTensor,
+        )
+
+        logits = TritonWarmupTensor(torch.float32, shape=(1, 128))
+        ids = TritonWarmupTensor(torch.int64, shape=(1, block_size))
+        out = TritonWarmupTensor(torch.float32, shape=(1, block_size))
+        _topk_log_softmax_kernel.warmup(
+            out,
+            logits,
+            128,
+            ids,
+            block_size,
+            block_size,
+            128,
+            BLOCK_SIZE=1024,
+            TOPK_BLOCK_SIZE=block_size,
+            grid=(1,),
+        )
+        self._compiled_cache[block_size] = True
+
+
+_TOPK_LOG_SOFTMAX_WARMUP = _TopkLogSoftmaxWarmup()
+
+
+def register_topk_logprob_warmup() -> None:
+    _TOPK_LOG_SOFTMAX_WARMUP.register_warmup()
 
 
 @triton.jit
