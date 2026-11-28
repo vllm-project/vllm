@@ -236,6 +236,24 @@ In this example, the benchmark observes two 40 ms ITL samples. The three tokens
 in the second streamed output do not create additional ITL samples, so mean ITL
 is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
 
+#### Steady-State Metrics
+
+With `--max-concurrency` and the default `--request-rate inf`, a run starts with
+a burst of `--max-concurrency` requests and ends with a drain, and the full-run
+numbers include both. Their share depends on `--num-prompts`, so full-run
+throughput and TTFT change with it even when the server does not.
+
+`vllm bench serve` therefore also reports steady-state metrics, computed over
+the window from when `--steady-state-threshold` (default `0.95`) of
+`--max-concurrency` requests are first in flight until they last drop below
+that: request, input, output and total token throughput, and TTFT and TPOT of
+the requests started in the window. They
+are printed after the main results and saved under `steady_state` in the result
+JSON, in the same layout as the Rust `vllm-bench`. A window shorter than
+`--steady-state-min-window` (default `max(10, 0.1 * duration)` seconds) gets a
+warning. Runs with a finite `--request-rate`, `--ramp-up-strategy` or a
+replayed trace report none, and `--no-steady-state` turns them off.
+
 #### Saving Server-Side Per-Request Metrics
 
 When the server is started with
