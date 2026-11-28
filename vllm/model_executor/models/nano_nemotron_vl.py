@@ -16,6 +16,7 @@ from typing import Annotated, Literal, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig
 
 from vllm import envs
@@ -319,10 +320,12 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             target_width, target_height = (
                 tiler.width_and_height_for_max_num_tokens_available(budget)
             )
-            return (
-                (target_width, target_height),
-                tiler._get_num_embeddings(target_width, target_height),
+            # The tiler caps each image at max_num_patches, so count the
+            # embeddings it actually produces for the dummy image.
+            (params,) = tiler.compute_params(
+                [Image.new("RGB", (target_width, target_height))], budget
             )
+            return (target_width, target_height), params.num_embeddings
 
         max_num_tiles = processor.max_num_tiles
         target_width, target_height = self.get_image_size_with_most_features(
