@@ -4,6 +4,7 @@ import ctypes
 import dataclasses
 import functools
 import importlib
+import inspect
 import itertools
 import os
 from collections.abc import Callable
@@ -46,6 +47,60 @@ MB = 1024 * KB
 
 def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
     return t is not None and t.dtype in _FP8_E4M3_DTYPES
+
+
+def _quick_reduce_relay_kwargs(
+    engine_cls: type, *, group: Any, device: Any, world_size: int
+) -> dict[str, Any]:
+    """Keyword arguments for AITER's QuickAllReduceInt4 relay, from
+    VLLM_ROCM_QUICK_REDUCE_RELAY; empty when the relay is off.
+
+    Every rank gets the same answer: the setting and the world size are the
+    same on all of them, and the relays are picked from the TP devices that
+    the ranks all-gather. AITER's constructor is a collective that hangs if
+    the ranks disagree.
+    """
+    setting = envs.VLLM_ROCM_QUICK_REDUCE_RELAY.strip()
+    if setting in ("", "0"):
+        return {}
+    if world_size != 2:
+        logger.warning_once(
+            "VLLM_ROCM_QUICK_REDUCE_RELAY=%s is TP2 only; TP%d runs without it.",
+            setting,
+            world_size,
+        )
+        return {}
+    takes_relay = any(
+        "relay_devices" in inspect.signature(vars(klass)["__init__"]).parameters
+        for klass in engine_cls.__mro__
+        if "__init__" in vars(klass)
+    )
+    if not takes_relay:
+        raise ValueError(
+            f"VLLM_ROCM_QUICK_REDUCE_RELAY={setting} needs an AITER whose "
+            "FlyDSL QuickAllReduceInt4 takes relay_devices."
+        )
+    kwargs: dict[str, Any] = {}
+    if setting != "1":
+        try:
+            num, den = (int(v) for v in setting.split("/"))
+        except ValueError:
+            raise ValueError(
+                f"VLLM_ROCM_QUICK_REDUCE_RELAY={setting}: expected 0, 1 or num/den"
+            ) from None
+        kwargs["relay_fraction"] = (num, den)
+    tp_devices: list[Any] = [None] * world_size
+    dist.all_gather_object(tp_devices, torch.device(device).index, group=group)
+    visible = torch.accelerator.device_count()
+    spare = [d for d in range(visible) if d not in tp_devices]
+    if len(spare) < 2:
+        raise ValueError(
+            f"VLLM_ROCM_QUICK_REDUCE_RELAY={setting} needs two visible GPUs "
+            f"outside the TP devices {tp_devices}, but only {visible} are "
+            "visible: list them after the TP pair in HIP_VISIBLE_DEVICES."
+        )
+    kwargs["relay_devices"] = (spare[0], spare[1])
+    return kwargs
 
 
 def _get_or_create_aiter_qr_rmsnorm_comm(
@@ -2662,9 +2717,21 @@ class rocm_aiter_ops:
     ) -> Any:
         from aiter.ops.flydsl import QuickAllReduceInt4
 
-        return QuickAllReduceInt4(
-            group=group, device=device, rank=rank, world_size=world_size
+        relay = _quick_reduce_relay_kwargs(
+            QuickAllReduceInt4, group=group, device=device, world_size=world_size
         )
+        engine = QuickAllReduceInt4(
+            group=group, device=device, rank=rank, world_size=world_size, **relay
+        )
+        if relay:
+            logger.info_once(
+                "FlyDSL INT4 QuickReduce relays %s/%s of its blocks through "
+                "GPUs %s from %d bytes.",
+                *engine.relay_fraction,
+                engine.relay_devices,
+                engine.relay_min_bytes,
+            )
+        return engine
 
     @classmethod
     @if_aiter_supported
