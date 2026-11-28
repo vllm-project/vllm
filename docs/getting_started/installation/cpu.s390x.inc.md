@@ -100,7 +100,7 @@ uv pip install -v \
     -r requirements/cpu.txt \
     --torch-backend cpu \
     --index-strategy unsafe-best-match && \
-VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
+VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
     uv pip install dist/*.whl
 ```
 
@@ -116,7 +116,7 @@ VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
         /path/to/torchcodec.whl \
         -r requirements/build/cpu.txt \
         -r requirements/cpu.txt && \
-    VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
+    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
         pip install dist/*.whl
     ```
 
