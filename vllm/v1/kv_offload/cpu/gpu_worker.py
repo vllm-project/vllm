@@ -91,12 +91,86 @@ class Transfer:
     failed: bool = False
 
 
+class _HostToDeviceMap(NamedTuple):
+    host_starts: np.ndarray  # sorted uint64 host start of each registration
+    device_bases: np.ndarray  # uint64 device address of each host start
+
+
+def _registered_device_ptr(host_ptr: int) -> int | None:
+    """Device address of a host-registered pointer, or None if pageable."""
+    from cuda.bindings import runtime as cudart
+
+    err, attr = cudart.cudaPointerGetAttributes(host_ptr)
+    if err != cudart.cudaError_t.cudaSuccess:
+        cudart.cudaGetLastError()
+        return None
+    if attr.type != cudart.cudaMemoryType.cudaMemoryTypeHost or not attr.devicePointer:
+        return None
+    return int(attr.devicePointer)
+
+
+def _host_to_device_map(host_starts: Sequence[int]) -> _HostToDeviceMap | None:
+    """Device-address view of host-registered CPU memory, if it differs.
+
+    Host memory pinned with cudaHostRegister can be mapped at a device
+    address that differs from its host address (NVIDIA vGPU, WSL2).
+    cudaMemcpyAsync translates such addresses itself, but cuMemcpyBatchAsync
+    and kernels that dereference the pointer (the Triton swap kernel) need
+    the device address. On bare-metal Linux the two are equal and this
+    returns None.
+
+    Each registration may get its own device mapping, so ``host_starts``
+    must list the start of every registered range the pointers can fall in:
+    ``region.pinned_addresses`` for an mmap region (row-aligned chunks, or one
+    range per row for the worker-slot layout), or the tensor's own address
+    for a single allocation such as ``torch.zeros(..., pin_memory=True)``.
+    No registration may straddle a copy, which pin_mmap_region guarantees.
+    """
+    if not host_starts or not current_platform.is_cuda():
+        return None
+    starts = sorted(host_starts)
+    device_bases: list[int] = []
+    for start in starts:
+        dev = _registered_device_ptr(start)
+        if dev is None:
+            # Not registered (pageable): the copy APIs take the host address.
+            return None
+        device_bases.append(dev)
+    if device_bases == starts:
+        return None
+    logger.info_once(
+        "Host-registered CPU KV memory is mapped at device addresses that "
+        "differ from its host addresses (e.g. NVIDIA vGPU, WSL2); "
+        "translating CPU-side copy pointers."
+    )
+    return _HostToDeviceMap(
+        host_starts=np.array(starts, dtype=np.uint64),
+        device_bases=np.array(device_bases, dtype=np.uint64),
+    )
+
+
+def _translate_to_device(mapping: _HostToDeviceMap, ptrs: np.ndarray) -> None:
+    """Rewrite host pointers as device pointers, in place."""
+    p = ptrs.view(np.uint64)
+    if len(mapping.host_starts) == 1:
+        p -= mapping.host_starts[0]
+        p += mapping.device_bases[0]
+        return
+    # Index of the registration each pointer falls in. Subtract its host start
+    # before adding its device base so that no step wraps around, even when
+    # the device address is below the host address.
+    idx = np.searchsorted(mapping.host_starts, p, side="right") - 1
+    p -= mapping.host_starts[idx]
+    p += mapping.device_bases[idx]
+
+
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     blocks_per_chunk: int,
     output: np.ndarray,
     tensor: torch.Tensor,
     skip_count: int = 0,
+    device_map: _HostToDeviceMap | None = None,
 ):
     """Compute byte pointers for sub-blocks of the given block IDs.
 
@@ -115,6 +189,8 @@ def compute_sub_block_ptrs(
         output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
+        device_map: if set, translate the pointers to the device addresses
+            of the host-registered tensor (see _host_to_device_map).
 
     """
     assert skip_count < blocks_per_chunk
@@ -126,6 +202,8 @@ def compute_sub_block_ptrs(
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
         output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
+        if device_map is not None:
+            _translate_to_device(device_map, output)
         return
 
     # Vectorized expansion for blocks_per_chunk > 1.
@@ -139,6 +217,8 @@ def compute_sub_block_ptrs(
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
+    if device_map is not None:
+        _translate_to_device(device_map, output)
 
 
 class CopyPlan(NamedTuple):
@@ -326,6 +406,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
+        cpu_device_maps: Sequence[_HostToDeviceMap | None] | None = None,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -339,6 +420,9 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
+            cpu_device_maps: per CPU tensor, the host-to-device address map
+                of its registered memory, or None where no translation is
+                needed (see _host_to_device_map).
 
         """
         assert len(cpu_tensors) > 0
@@ -349,6 +433,10 @@ class SingleDirectionOffloadingHandler:
             assert cpu_tensor.device.type == "cpu"
 
         self.cpu_tensors = cpu_tensors
+        if cpu_device_maps is None:
+            cpu_device_maps = [None] * len(cpu_tensors)
+        assert len(cpu_device_maps) == len(cpu_tensors)
+        self._cpu_device_maps = list(cpu_device_maps)
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
@@ -435,6 +523,7 @@ class SingleDirectionOffloadingHandler:
                 cpu_out[op_idx:end_idx],
                 self.cpu_tensors[t_idx],
                 skip_count=cpu_skip_count,
+                device_map=self._cpu_device_maps[t_idx],
             )
             all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
             num_bytes += group_size * data_ref.page_size_bytes
@@ -488,6 +577,7 @@ class SingleDirectionOffloadingHandler:
                 cpu_bases,
                 self.cpu_tensors[t_idx],
                 skip_count=cpu_skip_count,
+                device_map=self._cpu_device_maps[t_idx],
             )
 
             if self.gpu_to_cpu:
@@ -893,6 +983,24 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             cpu_tensors.append(cpu_tensor)
 
+        # Device addresses of the registered CPU memory, where they differ
+        # from the host addresses (NVIDIA vGPU, WSL2). Every registration of
+        # the mmap region may get its own mapping, so translate per range.
+        cpu_device_maps: list[_HostToDeviceMap | None]
+        if mmap_region is not None:
+            region_map = (
+                _host_to_device_map(
+                    mmap_region.pinned_addresses or [mmap_region.base_tensor.data_ptr()]
+                )
+                if host_memory_is_pinned
+                else None
+            )
+            cpu_device_maps = [region_map] * len(cpu_tensors)
+        elif host_memory_is_pinned:
+            cpu_device_maps = [_host_to_device_map([t.data_ptr()]) for t in cpu_tensors]
+        else:
+            cpu_device_maps = [None] * len(cpu_tensors)
+
         make_handler = functools.partial(
             SingleDirectionOffloadingHandler,
             cpu_tensors=cpu_tensors,
@@ -900,6 +1008,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
+            cpu_device_maps=cpu_device_maps,
         )
         self._store_handler = make_handler(gpu_to_cpu=True)
         self._load_handler = make_handler(gpu_to_cpu=False)
