@@ -305,6 +305,52 @@ def test_processor_multi_video(
 _LONG_VIDEO_SIZE = {"longest_edge": 469762048, "shortest_edge": 4096}
 
 
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_video_prompt_has_no_outer_vision_markers(model_id: str) -> None:
+    """Video prompt must not nest per-frame markers inside an outer pair.
+
+    The per-frame replacement already emits its own
+    `<|vision_start|>` / `<|vision_end|>` pair per frame, so the prompt's
+    outer pair must be consumed by the replacement, matching the layout
+    the model was trained with (transformers 4.57.1 processor). With
+    transformers>=5.10 the HF processor only expands the bare
+    `<|video_pad|>`, and targeting just that token left the outer pair
+    in place, adding 2 prompt tokens per video. Regression for #69473.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    # Same setup as the #69473 repro: 4 pre-sampled 64x64 frames at 2 fps.
+    video = np.zeros((4, 64, 64, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": 2.0,
+        "total_num_frames": 4,
+        "frames_indices": [0, 1, 2, 3],
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>Hi",
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    tokenizer = processor.info.get_tokenizer()
+    video_token_id = tokenizer.convert_tokens_to_ids("<|video_pad|>")
+    decoded = tokenizer.decode(
+        [t for t in processed["prompt_token_ids"] if t != video_token_id]
+    )
+    assert decoded == (
+        "<0.2 seconds><|vision_start|><|vision_end|>"
+        "<1.2 seconds><|vision_start|><|vision_end|>Hi"
+    )
+
+
 def _probe_mm_token_budgets(
     model_id: str, mm_processor_kwargs: dict[str, Any] | None
 ) -> tuple[int, int]:

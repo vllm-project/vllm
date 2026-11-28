@@ -35,7 +35,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
@@ -1439,15 +1439,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         )
         return kwargs
 
-    @staticmethod
-    def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
-        """Transformers>=5.10 processors override `replace_video_token`
-        to expand only the bare video token, keeping the prompt's outer
-        `<|vision_start|>`/`<|vision_end|>` markers."""
-        mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
-        proc_impl = getattr(type(hf_processor), "replace_video_token", None)
-        return proc_impl is not None and proc_impl is not mixin_impl
-
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -1760,16 +1751,23 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 select_token_id=select_token_id,
             )
 
-        if self._expands_only_video_token(hf_processor):
-            # transformers>=5.10 expands only the bare video_token
-            video_target = [video_token_id]
-        else:
-            # Old-style processors expand the full placeholder
-            video_target = [
-                vision_start_token_id,
-                video_token_id,
-                vision_end_token_id,
-            ]
+        # Always match the full
+        # `<|vision_start|><|video_pad|><|vision_end|>` placeholder. The
+        # per-frame replacement already emits its own `<|vision_start|>` /
+        # `<|vision_end|>` pair per frame, so the prompt's outer pair must
+        # be consumed here, matching the layout the model was trained with.
+        # (transformers>=5.10 only expands the bare `<|video_pad|>` in the
+        # HF processor's own text expansion, but that expansion is not used
+        # for vLLM's prompt: the HF processor is only called with dummy
+        # text to extract grid/pixel data, while the prompt is tokenized
+        # and replaced by vLLM itself. Targeting only the bare video token
+        # left the outer pair in place and nested the per-frame markers
+        # inside it; see #69473.)
+        video_target = [
+            vision_start_token_id,
+            video_token_id,
+            vision_end_token_id,
+        ]
 
         return [
             PromptReplacement(
