@@ -55,6 +55,9 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -448,19 +451,33 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
         cap = current_platform.get_device_capability()
         if cap is None or not backend_cls.supports_compute_capability(cap):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
+    elif backend_cls is FlashAttnMLASparseBackend:
+        from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+
+        cap = current_platform.get_device_capability()
+        if cap is None or not backend_cls.supports_compute_capability(cap):
+            pytest.skip("FlashAttnMLASparseBackend requires SM 9.x capability")
+        if not flash_attn_supports_mla():
+            pytest.skip("FlashAttention MLA is not available")
 
 
+@pytest.mark.parametrize(
+    "backend_cls,kv_cache_dtype",
+    [(FlashInferMLASparseTRTLLMBackend, "fp8"), (FlashAttnMLASparseBackend, "auto")],
+    ids=["FlashInferTRTLLM", "FlashAttention"],
+)
 @pytest.mark.parametrize("query_lens", [[1, 7, 3, 5], [1, 7, 8, 0]])
-def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
+def test_sparse_mla_adaptive_varlen_graph_matches_sdpa(
     default_vllm_config,
     dist_init,
     workspace_init,
+    backend_cls,
+    kv_cache_dtype,
     query_lens,
     monkeypatch,
 ):
     """Replay uses device boundaries, including empty padding, despite stale CPU."""
-    backend_cls = FlashInferMLASparseTRTLLMBackend
-    _skip_if_backend_unavailable(backend_cls, "fp8", 64)
+    _skip_if_backend_unavailable(backend_cls, kv_cache_dtype, 64)
 
     device = torch.device(DEVICE_TYPE)
     seq_lens = [257, 270, 265, 276]
@@ -477,7 +494,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
         seq_lens,
         query_lens,
         sparse_indices,
-        "fp8",
+        kv_cache_dtype,
         64,
         16,
         device,

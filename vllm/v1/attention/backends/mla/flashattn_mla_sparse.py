@@ -22,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
@@ -34,7 +35,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
 )
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
@@ -130,6 +131,16 @@ class FlashAttnMLASparseMetadataBuilder(
 ):
     metadata_cls = FlashAttnMLASparseMetadata
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Each query token is its own attention row, and its KV length and
+        # top-k slots come from device tensors, so varlen decodes replay as is.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,

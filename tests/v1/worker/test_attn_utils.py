@@ -494,10 +494,11 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     [
         "flashinfer_mla_sparse.FlashInferMLASparseTRTLLMBackend",
         "flashinfer_mla_sparse_sm90.FlashInferMLASparseSM90Backend",
+        "flashattn_mla_sparse.FlashAttnMLASparseBackend",
     ],
 )
 @pytest.mark.parametrize("num_speculative_tokens", [0, 7])
-def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
+def test_sparse_mla_full_graphs_exclude_prefill_keep_varlen_decode(
     num_speculative_tokens,
     backend_qualname,
 ):
