@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.distributed.device_communicators import cuda_communicator
+from vllm.distributed.device_communicators import custom_all_reduce as custom_ar
 from vllm.distributed.device_communicators import (
     flashinfer_pcie_ipc_all_reduce as pcie_ipc,
 )
@@ -144,3 +145,41 @@ def test_group_destroy_releases_communicator_before_process_groups(monkeypatch):
     coordinator.destroy()
 
     assert events == ["communicator", "process_group", "process_group"]
+
+
+@pytest.mark.parametrize(
+    ("missing_local_peer", "other_rank_ok", "expected_disabled"),
+    [
+        (None, True, False),  # full peer access: keep PCIe IPC
+        (2, True, True),  # this rank cannot reach rank 2 (P2P only per switch pair)
+        (None, False, True),  # another rank lacks peer access: all ranks fall back
+    ],
+)
+def test_init_falls_back_without_peer_access(
+    monkeypatch, missing_local_peer, other_rank_ok, expected_disabled
+):
+    """Hosts that expose P2P only within a PCIe-switch pair must fall back to
+    another all-reduce backend instead of failing in the IPC workspace."""
+    monkeypatch.setattr(pcie_ipc, "_pcie_ipc_available", True)
+    monkeypatch.setattr(pcie_ipc.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(pcie_ipc.dist, "get_world_size", lambda group: 4)
+    monkeypatch.setattr(pcie_ipc.dist, "get_rank", lambda group: 0)
+    monkeypatch.setattr(
+        pcie_ipc, "in_the_same_node_as", lambda *args, **kwargs: [True] * 4
+    )
+    monkeypatch.setattr(custom_ar.envs, "VLLM_SKIP_P2P_CHECK", False, raising=False)
+    monkeypatch.setattr(
+        custom_ar, "gpu_p2p_access_check", lambda src, tgt: tgt != missing_local_peer
+    )
+
+    def fake_all_reduce(tensor, op, group):
+        # MIN reduction over this rank's vote and one remote rank's vote.
+        tensor.fill_(min(int(tensor.item()), int(other_rank_ok)))
+
+    monkeypatch.setattr(pcie_ipc.dist, "all_reduce", fake_all_reduce)
+
+    comm = pcie_ipc.FlashInferPcieIpcAllReduce(
+        group=object(), tune_group=object(), device="cuda:0"
+    )
+
+    assert comm.disabled is expected_disabled
