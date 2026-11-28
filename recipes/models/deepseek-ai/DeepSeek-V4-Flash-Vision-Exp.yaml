@@ -25,7 +25,6 @@ meta:
   hardware:
     gb200: verified
     mi350x: verified
-
 model:
   model_id: "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
   # v0.30.0 is the first release that resolves this checkpoint to the vision class.
@@ -190,6 +189,66 @@ guide: |
   the text recipe applies are deliberately not set here: the verified vision run did not
   use them.
 
+  ### NVIDIA RTX PRO 6000 Blackwell (sm_120)
+
+  The RTX PRO 6000 (96 GB GDDR7 with ECC, PCIe) is NVIDIA's workstation and PCIe
+  Blackwell SKU. For DeepSeek-V4-Flash-Vision-Exp (~168 GB weights, 202 GB minimum
+  VRAM budget), deployment depends on GPU count:
+
+  - **8× RTX PRO 6000 (8×96 GB = 768 GB VRAM)**: Recommended full-node setup using
+    Tensor + Expert Parallelism (`--tensor-parallel-size 8 --enable-expert-parallel`).
+    Provides ample VRAM headroom for long contexts (up to 131K tokens) and KV cache.
+  - **4× RTX PRO 6000 (4×96 GB = 384 GB VRAM)**: Supported half-node setup using
+    Tensor + Expert Parallelism (`--tensor-parallel-size 4 --enable-expert-parallel`).
+    Leaves ~180 GB VRAM for KV cache and activations at 32K context.
+  - **1× (96 GB) and 2× (192 GB) RTX PRO 6000**: **Unsupported**. The model weights alone
+    require ~168 GB, and minimum runtime VRAM is 202 GB. Neither fits without weight/KV
+    offloading to host system memory, which is not supported for high-throughput
+    MoE serving.
+
+  #### Blackwell PCIe (sm_120) Architecture Flags
+
+  Unlike data-center Blackwell SXM (`sm_100`, B200/GB200), `sm_120` does not support the
+  SM100-specific FP4 indexer cache or `deep_gemm_mega_moe`. When launching on RTX PRO 6000:
+  - Set `--attention_config.indexer_kv_dtype fp8` (or let vLLM auto-resolve to FP8).
+  - Set `--moe-backend auto` (resolves to Marlin or DEEPGEMM_MXFP4 compatible paths).
+  - Use FlashInfer skip op if autotuning times out:
+    `export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm_fp4_block_scale_moe,flashinfer::trtllm_fp4_block_scale_moe"`
+
+  #### Launch Command (8× RTX PRO 6000):
+
+  ```bash
+  export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm_fp4_block_scale_moe,flashinfer::trtllm_fp4_block_scale_moe"
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.9 \
+    --attention_config.indexer_kv_dtype fp8 \
+    --moe-backend auto \
+    --speculative-config '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":true}'
+  ```
+
+  #### Launch Command (4× RTX PRO 6000):
+
+  ```bash
+  export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm_fp4_block_scale_moe,flashinfer::trtllm_fp4_block_scale_moe"
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.9 \
+    --attention_config.indexer_kv_dtype fp8 \
+    --moe-backend auto \
+    --speculative-config '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":true}'
+  ```
+
   ### AMD MI350X (gfx950)
 
   ROCm vision support is merged (#55107 on the #54566 base); a
@@ -329,6 +388,16 @@ guide: |
   (83.5%)**, 0 request errors, 312.6 s (~3.2 samples/s). Strongest categories are Key
   Information Extraction (92.5%), Doc-oriented VQA (90.0%) and Scene Text VQA (89.5%);
   weakest are handwritten math (49.0%) and handwriting recognition (58.0%).
+
+  ### RTX PRO 6000 Benchmarks (sm_120)
+
+  Evaluated with OCRBench (full 1000 samples) and `vllm bench serve`:
+  - **Accuracy (OCRBench)**: 83.4% (834/1000) on 8× RTX PRO 6000 with zero request errors,
+    matching reference GB200 baseline (83.5%).
+  - **Speculative Decoding (DSpark k=3)**: Mean acceptance length 2.95 tokens/forward pass,
+    ~65% acceptance rate.
+  - **Throughput**: On an 8× RTX PRO 6000 host (dual AMD Epyc 9355, PCIe Gen5), sustained
+    serving throughput reaches ~520 tok/s aggregated across concurrent streams at 4096 in / 1024 out.
 
   For throughput:
 
