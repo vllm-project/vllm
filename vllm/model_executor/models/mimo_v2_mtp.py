@@ -45,8 +45,13 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
-from .utils import _merge_multimodal_embeddings, maybe_prefix
+from .mimo_v2 import (
+    MiMoV2Attention,
+    MiMoV2MLP,
+    _mimo_fp8_scale_name,
+    _shard_fp8_qkv_proj,
+)
+from .utils import _merge_multimodal_embeddings, get_draft_quant_config, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer
@@ -187,7 +192,8 @@ class MiMoV2MultiTokenPredictor(nn.Module):
             config=config,
             num_mtp_layers=num_mtp_layers,
             cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
+            # The target's config has been renamed to the target's module paths.
+            quant_config=get_draft_quant_config(vllm_config),
             prefix=maybe_prefix(prefix, "mtp.layers"),
         )
 
@@ -289,6 +295,12 @@ class MiMoV2MTP(nn.Module):
                 and not name.startswith("lm_head")
             ):
                 continue
+            if "qkv_proj" not in name and (
+                scale_name := _mimo_fp8_scale_name(
+                    name, params_dict, stacked_params_mapping
+                )
+            ):
+                name, loaded_weight = scale_name, loaded_weight[:, None, :, None]
 
             # Fused qkv_proj: the fp8 weight and its block scales arrive as
             # separate tensors and are pre-sharded at `config.num_key_value_heads`
@@ -305,9 +317,15 @@ class MiMoV2MTP(nn.Module):
                 is_fp8_scale = name.endswith("qkv_proj.weight_scale_inv")
                 if is_fp8_weight or is_fp8_scale:
                     prefix, kind = name.rsplit(".", 1)
+                    # ModelOpt FP8_PB_WO holds the same scale as a 4-D weight_scale.
+                    scale_key = (
+                        "weight_scale_inv"
+                        if f"{prefix}.weight_scale_inv" in params_dict
+                        else "weight_scale"
+                    )
                     if (
                         f"{prefix}.weight" not in params_dict
-                        or f"{prefix}.weight_scale_inv" not in params_dict
+                        or f"{prefix}.{scale_key}" not in params_dict
                     ):
                         continue
                     entry = pending_qkv_proj.setdefault(prefix, {})
@@ -330,8 +348,10 @@ class MiMoV2MTP(nn.Module):
                         tp_size=tp_size,
                         ckpt_tp=self.config.num_key_value_heads,
                     )
-                    for k, tensor in (("weight", w_rank), ("weight_scale_inv", s_rank)):
+                    for k, tensor in (("weight", w_rank), (scale_key, s_rank)):
                         param = params_dict[f"{prefix}.{k}"]
+                        if param.dim() == 4:
+                            tensor = tensor[:, None, :, None]
                         if tensor.shape[0] > param.shape[0]:
                             tensor = tensor[: param.shape[0]]
                         default_weight_loader(param, tensor)
