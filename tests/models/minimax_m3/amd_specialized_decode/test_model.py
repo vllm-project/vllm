@@ -16,6 +16,7 @@ MXFP4 format and converted by that same path.
   native eager;
 - fail-stop: a late rank fault under FULL graphs returns no token."""
 
+import tempfile
 import zlib
 from types import SimpleNamespace
 
@@ -320,7 +321,9 @@ def _replay(worker):
     return results, failed
 
 
-def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
+def _engine(
+    vllm_runner, model_dir, mono, graphs=False, enable_prefix_caching=False, **extra
+):
     return vllm_runner(
         model_dir,
         load_format="dummy",
@@ -338,7 +341,7 @@ def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
         },
         enforce_eager=not graphs,
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY" if graphs else "NONE"},
-        enable_prefix_caching=False,
+        enable_prefix_caching=enable_prefix_caching,
         enable_trace_replay=True,
         max_logprobs=-1,
         gpu_memory_utilization=0.1,
@@ -398,6 +401,217 @@ def _reset_every(worker, steps):
 def _reset_state(worker):
     executor = _executor(worker)
     return executor.resets, executor.health().failed
+
+
+@pytest.mark.parametrize(
+    "connector, children, accepted",
+    [
+        ("UMBPStoreConnector", None, True),
+        ("ExampleConnector", None, False),
+        ("MultiConnector", ["UMBPStoreConnector"], True),
+        ("MultiConnector", ["UMBPStoreConnector", "ExampleConnector"], False),
+        ("MultiConnector", [], False),
+    ],
+)
+def test_monokernel_accepts_only_canonical_kv_connectors(
+    model_dir, connector, children, accepted
+):
+    from vllm.config import KVTransferConfig
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import (
+        specialized_decode_config,
+    )
+
+    extra = {}
+    if children is not None:
+        extra["connectors"] = [
+            {"kv_connector": child, "kv_role": "kv_both"} for child in children
+        ]
+    config = EngineArgs(
+        model=model_dir,
+        skip_tokenizer_init=True,
+        tensor_parallel_size=4,
+        kv_cache_dtype="fp8",
+        block_size=128,
+        attention_config={"indexer_kv_dtype": "fp8"},
+        monokernel=True,
+        moe_backend="aiter",
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=extra,
+        ),
+    ).create_engine_config()
+    if accepted:
+        decode = specialized_decode_config(config)
+        assert decode is not None and decode.last_layer == LAYERS - 1
+    else:
+        with pytest.raises(ValueError, match="KV connector with noncanonical KV"):
+            specialized_decode_config(config)
+
+
+def _mono_coverage(worker):
+    decode = worker.model_runner.model_state.backbone.specialized_decode
+    return decode.mono_steps, decode.health().failed
+
+
+def _whole_layer_decode_active(worker):
+    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
+
+    backbone = next(
+        m for m in worker.get_model().modules() if isinstance(m, MiniMaxM3Model)
+    )
+    mono = backbone._mono
+    return (
+        mono is not None
+        and mono._enabled
+        and mono._runner is not None
+        and mono._slots_verified
+    )
+
+
+@pytest.fixture
+def umbp_lookup_dir():
+    """Keep AF_UNIX paths short regardless of CI's TMPDIR or pytest basetemp."""
+    with tempfile.TemporaryDirectory(prefix="umbp-", dir="/tmp") as directory:
+        yield directory
+
+
+def test_m31_umbp_restore_keeps_whole_layer_decode(
+    vllm_runner, monkeypatch, umbp_lookup_dir
+):
+    """M3.1 keeps its whole-layer runner after an external prefix restore."""
+    from tests.models.utils import check_logprobs_close
+    from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
+        _external_tokens,
+        _reset_gpu_prefix_cache,
+    )
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    with vllm_runner(
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        skip_tokenizer_init=True,
+        tensor_parallel_size=4,
+        quantization_config={"moe": "mxfp4"},
+        kernel_config={"moe_backend": "aiter", "monokernel": True},
+        kv_cache_dtype="fp8",
+        block_size=128,
+        attention_backend="ROCM_AITER_FA",
+        attention_config={"indexer_kv_dtype": "fp8"},
+        enforce_eager=True,
+        disable_hybrid_kv_cache_manager=True,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        language_model_only=True,
+        max_model_len=4096,
+        max_num_seqs=1,
+        kv_transfer_config={
+            "kv_connector": "UMBPStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "mode": "embedded",
+                "capacity_bytes": 1 << 30,
+                "lookup_dir": umbp_lookup_dir,
+                "dram_prefault": False,
+                "load_async": True,
+            },
+        },
+    ) as runner:
+        llm = runner.llm
+        prompt = {"prompt_token_ids": [1 + (i * 37) % (VOCAB - 1) for i in range(2307)]}
+        params = SamplingParams(
+            temperature=0,
+            max_tokens=STEPS,
+            logprobs=5,
+            detokenize=False,
+            ignore_eos=True,
+        )
+        expected = llm.generate(prompt, params, use_tqdm=False)
+        assert all(llm.collective_rpc(_whole_layer_decode_active))
+        _reset_gpu_prefix_cache(llm)
+        before = _external_tokens(llm)
+        restored = llm.generate(prompt, params, use_tqdm=False)
+        assert _external_tokens(llm) - before == 2304
+        assert restored[0].num_cached_tokens == 2304
+        assert all(llm.collective_rpc(_whole_layer_decode_active))
+        check_logprobs_close(
+            outputs_0_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in expected
+            ],
+            outputs_1_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in restored
+            ],
+            name_0="M3.1 recompute",
+            name_1="M3.1 UMBP restore",
+            always_check_logprobs=True,
+        )
+
+
+@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
+def test_umbp_restore_keeps_monokernel(vllm_runner, model_dir, umbp_lookup_dir, graphs):
+    """Restore attention and indexer KV, then decode through the fused FFN."""
+    from tests.models.utils import check_logprobs_close
+    from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
+        _external_tokens,
+        _reset_gpu_prefix_cache,
+    )
+    from vllm import SamplingParams
+    from vllm.config import KVTransferConfig
+
+    with _engine(
+        vllm_runner,
+        model_dir,
+        mono=True,
+        graphs=graphs,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        max_model_len=4096,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "mode": "embedded",
+                "capacity_bytes": 1 << 30,
+                "lookup_dir": umbp_lookup_dir,
+                "dram_prefault": False,
+                "load_async": True,
+            },
+        ),
+    ) as runner:
+        llm = runner.llm
+        llm.collective_rpc(_randomize)
+        prompt = {"prompt_token_ids": [1 + (i * 37) % (VOCAB - 1) for i in range(2307)]}
+        params = SamplingParams(
+            temperature=0,
+            max_tokens=STEPS,
+            logprobs=5,
+            detokenize=False,
+            ignore_eos=True,
+        )
+        llm.generate(prompt, params, use_tqdm=False)
+        expected = llm.generate(prompt, params, use_tqdm=False)
+        assert expected[0].num_cached_tokens == 2304
+        _reset_gpu_prefix_cache(llm)
+        before = _external_tokens(llm)
+        restored = llm.generate(prompt, params, use_tqdm=False)
+        assert _external_tokens(llm) - before == 2304
+        assert restored[0].num_cached_tokens == 2304
+        assert all(
+            steps > 0 and not failed
+            for steps, failed in llm.collective_rpc(_mono_coverage)
+        )
+        check_logprobs_close(
+            outputs_0_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in expected
+            ],
+            outputs_1_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in restored
+            ],
+            name_0="GPU prefix hit",
+            name_1="UMBP restore",
+            always_check_logprobs=True,
+        )
 
 
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])

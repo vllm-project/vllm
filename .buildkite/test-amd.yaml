@@ -1459,6 +1459,7 @@ steps:
   - vllm/models/deepseek_v41/amd/mono/common/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
+  - tests/models/minimax_m3/test_mono_host.py
   - tests/models/minimax_m3/test_dspark_drafter.py
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
@@ -1471,6 +1472,7 @@ steps:
     models/minimax_m3/amd_specialized_decode/test_model.py
     models/minimax_m3/amd_specialized_decode/test_runtime.py
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
+  - pytest -v -s models/minimax_m3/test_mono_host.py
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py
   # the long TP4 hand-off stress, the one pytest.mark.optional in the directory
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode/test_ops.py

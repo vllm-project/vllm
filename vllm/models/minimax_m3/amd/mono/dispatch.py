@@ -110,6 +110,9 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
     cg = vllm_config.compilation_config.cudagraph_mode
     max_len = vllm_config.model_config.max_model_len
     index_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
+    # Fusion is per MoE layer; the runner requires all fused or all separate.
+    moes = [layer.block_sparse_moe for layer in model.layers if layer.is_moe_layer]
+    fused_shared = bool(moes) and all(m.is_fused_shared_expert_enabled for m in moes)
     cus = _compute_units()
     checks = (
         # one CTA per CU, all co-resident
@@ -126,8 +129,7 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
         # the runner keeps converted weight copies that a weight push would not update
         (vllm_config.weight_transfer_config is None, "weight transfer"),
         (
-            getattr(model, "is_fused_shared_expert_enabled", False)
-            or _separate_shared_ok(model.layers),
+            fused_shared or _separate_shared_ok(model.layers),
             "shared expert neither fused nor a separate MLP",
         ),
         (
@@ -147,6 +149,13 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
     for ok, why in checks:
         if not ok:
             return why
+    transfer = vllm_config.kv_transfer_config
+    if transfer is not None and transfer.kv_connector is not None:
+        from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+        connector_cls = KVConnectorFactory.get_connector_class(transfer)
+        if not connector_cls.only_restores_canonical_kv(transfer):
+            return "KV connector with noncanonical KV"
     return None
 
 

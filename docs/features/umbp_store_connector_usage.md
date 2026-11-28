@@ -176,3 +176,27 @@ publishing a stored-object event. It periodically rechecks tracked objects
 during engine steps to report removals. These checks do not delay the release
 of GPU source blocks after a completed transfer. With events disabled, no
 historical object identities are retained for event reporting.
+
+## Monokernel compatibility
+
+On ROCm, `UMBPStoreConnector` supports MiniMax M3 and M3.1-Flash
+monokernels in both embedded and standalone modes because it restores
+canonical KV blocks produced with the same cache layout.
+
+Connectors that do not declare `only_restores_canonical_kv` remain
+unsupported. A `MultiConnector` qualifies only when every child
+declares this capability.
+
+When using UMBP with monokernels, keep prefix caching and asynchronous
+loading enabled. The hybrid KV cache manager requirements depend on
+the monokernel execution path:
+
+- **MiniMax M3:** Keep the hybrid KV cache manager enabled so attention
+  and indexer state are restored together.
+- **MiniMax M3.1-Flash:** Disable the hybrid KV cache manager
+  (`--disable-hybrid-kv-cache-manager`) because whole-layer decode
+  requires matching attention and indexer block IDs.
+
+All other monokernel deployment requirements still apply.
+See the monokernel documentation for supported checkpoints,
+quantization, execution modes, and kernel selection.
