@@ -154,7 +154,9 @@ class HYV4VLEncoderCudaGraphMixin:
         # taxes every replay. Capture separate image and video graphs: image
         # graphs need only one slot per item, video graphs cover multi-frame
         # batches (bounded by the frame charge in the item specs).
-        capture_axes = (("image", "video"),) if self._video_enabled() else ()
+        capture_axes: tuple[dict[Hashable, int], ...] = (
+            ({"image": 0, "video": 0},) if self._video_enabled() else ()
+        )
 
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],

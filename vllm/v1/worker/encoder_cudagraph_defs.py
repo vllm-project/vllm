@@ -99,12 +99,16 @@ class EncoderCudaGraphConfig:
     )
     """Independently captured encoder paths keyed by their forward name."""
 
-    capture_axes: tuple[tuple[Hashable, ...], ...] = ()
+    capture_axes: tuple[dict[Hashable, int], ...] = ()
     """Extra capture axes beyond the token budget; empty to disable.
 
-    Each entry is the ordered key set of one axis. When non-empty, one graph
-    is captured per token budget per combination of axis keys (cartesian
-    product), so the total number of captured graphs is
+    Each entry maps the ordered keys of one axis to the fewest output tokens
+    of a batch that resolves to that key (0 for no minimum). When non-empty,
+    one graph is captured per token budget per combination of axis keys
+    (cartesian product), except for budgets below the minimum of one of the
+    keys: a batch is replayed on the smallest budget that holds its tokens,
+    so those budgets are never selected for that combination. The total
+    number of captured graphs is at most
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
     eager_fallback_fast_path: bool = False

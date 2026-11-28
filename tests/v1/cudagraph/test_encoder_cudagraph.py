@@ -346,6 +346,27 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
 
+    def test_capture_skips_budgets_below_axis_minimum(self):
+        """A budget below a combination's minimum tokens is never replayed."""
+        mgr = _make_manager_with_budgets([70, 140, 280, 560])
+        mgr._capture_axes = ({w: w for w in (70, 140, 280)},)
+        captured = []
+
+        def fake_capture(token_budget, path="default", axis_keys=()):
+            captured.append((token_budget, axis_keys))
+
+        with patch.object(mgr, "_capture_budget_graph", fake_capture):
+            mgr.capture(graph_pool=object())
+
+        expected = [
+            (budget, (width,))
+            for budget in (560, 280, 140, 70)
+            for width in (70, 140, 280)
+            if width <= budget
+        ]
+        assert captured == expected
+        assert mgr.get_num_graphs_to_capture() == len(expected) == 9
+
     def test_capture_skipped_without_supported_modalities(self):
         mgr = _make_manager_with_budgets([2048, 4096])
         mgr.config.modalities = []
