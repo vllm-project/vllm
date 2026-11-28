@@ -52,6 +52,19 @@ inline bool on_gfx115x_int4() {
   return result;
 }
 
+// gfx12 (RDNA4) walks K in LDS-sized chunks too: K * N past the medium
+// kernel's 1.2x LDS bound is then served by the CHUNKED kernel.
+inline bool on_gfx12_int4() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    return std::string(dprops->gcnArchName).find("gfx12") != std::string::npos;
+  }();
+  return result;
+}
+
+// Targets whose K * N is not bounded by the medium kernel.
+inline bool chunked_k_int4() { return on_gfx115x_int4() || on_gfx12_int4(); }
+
 // Callers check it before on_gfx115x_int4(), which matches gfx1151 too.
 inline bool on_gfx1151_int4() {
   static const bool result = [] {
@@ -1017,9 +1030,10 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
 
   TORCH_CHECK(N_in <= kInt4NarrowMaxN || on_gfx1151_int4(), "N_in=", N_in,
               " is only supported on gfx1151");
-  // gfx115x walks K in LDS-sized chunks, so K * N is unbounded there. Elsewhere
-  // only the medium kernel serves shapes past LDS, and within 1.2x of it.
-  TORCH_CHECK(on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
+  // gfx115x and gfx12 walk K in LDS-sized chunks, so K * N is unbounded there.
+  // Elsewhere only the medium kernel serves shapes past LDS, and within 1.2x of
+  // it.
+  TORCH_CHECK(chunked_k_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
               "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
 
   auto out_c = torch::empty(
@@ -1192,8 +1206,9 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
         WVSPLIT_INT4G_GFX115X(__N, _HAS_ZP)                                    \
       }                                                                        \
     }                                                                          \
-    if (K_in * N_in > max_lds_len && !on_gfx115x_int4()) {                     \
-      /* Off gfx115x only the medium kernel serves this, up to 1.2x LDS. */    \
+    if (K_in * N_in > max_lds_len && !chunked_k_int4()) {                      \
+      /* Off gfx115x and gfx12 only the medium kernel serves this, up to 1.2x  \
+         LDS. */                                                               \
       if (_sYT < 30)                                                           \
         WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                                   \
       else                                                                     \
