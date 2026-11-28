@@ -13133,6 +13133,315 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_transfer_routes_support_multi_lora_and_prefix_cache_reset() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let mut methods = Vec::new();
+            // 1) start multi-lora, 2) update_weights, 3) finish multi-lora,
+            // 4) start mem update 2, 5) finish mem update 2 (no reset_prefix_cache!),
+            // 6) start disk same-path reload, 7) finish disk reload, 8) reset_prefix_cache!
+            for _ in 0..8 {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let method = array[2].as_str().expect("method").to_string();
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                methods.push((method.clone(), args));
+                let result = if method == "collective_rpc" {
+                    utility_result_value(vec![(), ()])
+                } else if method == "reset_prefix_cache" {
+                    utility_result_value(true)
+                } else {
+                    utility_none_result()
+                };
+                send_outputs(push, utility_outputs(call_id, result)).await;
+            }
+            assert_eq!(methods[0].0, "collective_rpc");
+            assert_eq!(methods[0].1[0], "start_weight_update");
+            assert_eq!(
+                methods[0].1[3]["lora_adapters"][0]["lora_name"],
+                "adapter_mem"
+            );
+            assert_eq!(methods[0].1[3]["lora_adapters"][0]["lora_int_id"], 1);
+            assert_eq!(
+                methods[0].1[3]["lora_adapters"][0]["lora_path"],
+                "memory://adapter_mem@1"
+            );
+            assert_eq!(
+                methods[0].1[3]["lora_adapters"][1]["lora_name"],
+                "adapter_disk"
+            );
+            assert_eq!(methods[0].1[3]["lora_adapters"][1]["lora_int_id"], 2);
+            assert_eq!(
+                methods[0].1[3]["lora_adapters"][1]["lora_path"],
+                "org/disk_v1"
+            );
+
+            assert_eq!(methods[1].1[0], "update_weights");
+            assert_eq!(methods[2].1[0], "finish_weight_update");
+            assert_eq!(methods[3].1[0], "start_weight_update");
+            assert_eq!(methods[3].1[3]["lora_adapters"][0]["lora_int_id"], 1);
+            assert_eq!(
+                methods[3].1[3]["lora_adapters"][0]["lora_path"],
+                "memory://adapter_mem@2"
+            );
+            assert_eq!(methods[4].1[0], "finish_weight_update");
+            assert_eq!(methods[5].1[0], "start_weight_update");
+            assert_eq!(methods[6].1[0], "finish_weight_update");
+            assert_eq!(methods[7].0, "reset_prefix_cache");
+        })
+    })
+    .await;
+
+    // 1. Multi-LoRA session (in-memory + disk)
+    let start_resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_adapters": [
+                            {"lora_name": "adapter_mem", "peft_config": {"r": 4}},
+                            {"lora_name": "adapter_disk", "lora_path": "org/disk_v1"}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_resp.status(), StatusCode::OK);
+    let start_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(start_resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        start_json["lora_adapters"][0]["lora_path"],
+        "memory://adapter_mem@1"
+    );
+    assert_eq!(start_json["lora_adapters"][1]["lora_path"], "org/disk_v1");
+
+    // 2. Send in-memory safetensors chunk
+    let upd_resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/update_weights")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "update_info": {"safetensors_b64": "AAAA", "lora_name": "adapter_mem"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upd_resp.status(), StatusCode::OK);
+
+    // 3. Finish -> publishes both adapters in /v1/models
+    let fin_resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fin_resp.status(), StatusCode::OK);
+
+    let models_resp = app
+        .call(Request::builder().method("GET").uri("/v1/models").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let models_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(models_resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let model_ids: Vec<&str> = models_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert!(model_ids.contains(&"adapter_mem"), "{model_ids:?}");
+    assert!(model_ids.contains(&"adapter_disk"), "{model_ids:?}");
+
+    // 4-5. Second in-memory update advances revision path -> no reset_prefix_cache
+    let start2 = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_adapters": [{"lora_name": "adapter_mem", "peft_config": {"r": 4}}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start2.status(), StatusCode::OK);
+    let fin2 = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fin2.status(), StatusCode::OK);
+
+    // 6-8. Same-path disk reload -> triggers reset_prefix_cache automatically
+    let start3 = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_adapters": [{"lora_name": "adapter_disk", "lora_path": "org/disk_v1"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start3.status(), StatusCode::OK);
+    let fin3 = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fin3.status(), StatusCode::OK);
+
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_support_lora_abort_and_reject_invalid_specs() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            for expected_abort in [None, Some(true)] {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                if let Some(abort) = expected_abort {
+                    assert_eq!(args[0], "finish_weight_update");
+                    assert_eq!(args[3]["abort"], abort);
+                } else {
+                    assert_eq!(args[0], "start_weight_update");
+                }
+                send_outputs(
+                    push,
+                    utility_outputs(call_id, utility_result_value(vec![(), ()])),
+                )
+                .await;
+            }
+        })
+    })
+    .await;
+
+    // Invalid specs rejected with 400 before hitting engine
+    for invalid_body in [
+        json!({"lora_adapters": []}),
+        json!({"lora_adapters": [{"lora_name": "Qwen/Qwen1.5-0.5B-Chat", "peft_config": {"r": 4}}]}),
+        json!({"lora_adapters": [{"lora_name": "dup", "peft_config": {"r": 4}}, {"lora_name": "dup", "peft_config": {"r": 4}}]}),
+        json!({"lora_adapters": [{"lora_name": "missing_src"}]}),
+    ] {
+        let resp = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/start_weight_update")
+                    .header("content-type", "application/json")
+                    .body(Body::from(invalid_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{invalid_body}");
+    }
+
+    // Start then abort -> adapter must NOT appear in /v1/models
+    let start_resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_adapters": [{"lora_name": "aborted_lora", "peft_config": {"r": 4}}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_resp.status(), StatusCode::OK);
+
+    let abort_resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"abort": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort_resp.status(), StatusCode::OK);
+    let abort_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(abort_resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(abort_json["aborted"], true);
+
+    let models_resp = app
+        .call(Request::builder().method("GET").uri("/v1/models").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let models_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(models_resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    let model_ids: Vec<&str> = models_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert!(!model_ids.contains(&"aborted_lora"), "{model_ids:?}");
+
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
         boxed_test_future(async move {

@@ -977,6 +977,18 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Start a LoRA weight update session (leaves base model weights untouched).
+    pub async fn start_lora_weight_update(&self, lora_adapters: Vec<JsonValue>) -> Result<()> {
+        self.collective_rpc(
+            "start_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("lora_adapters".to_string(), JsonValue::Array(lora_adapters))]),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Start a weight update for the speculative draft model.
     pub async fn start_draft_weight_update(&self) -> Result<()> {
         self.collective_rpc_with(
@@ -1004,11 +1016,21 @@ impl EngineCoreClient {
 
     /// Finish the current weight update.
     pub async fn finish_weight_update(&self) -> Result<()> {
+        self.finish_weight_update_with_abort(false).await
+    }
+
+    /// Finish or abort the current weight update.
+    pub async fn finish_weight_update_with_abort(&self, abort: bool) -> Result<()> {
+        let kwargs = if abort {
+            BTreeMap::from([("abort".to_string(), JsonValue::Bool(true))])
+        } else {
+            BTreeMap::new()
+        };
         self.collective_rpc(
             "finish_weight_update",
             None,
             Vec::<JsonValue>::new(),
-            BTreeMap::<String, JsonValue>::new(),
+            kwargs,
         )
         .await?;
         Ok(())

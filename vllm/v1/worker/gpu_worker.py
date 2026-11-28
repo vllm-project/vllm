@@ -277,6 +277,7 @@ class Worker(WorkerBase):
         # Update targets (is_draft) whose weights may be incomplete.
         self._incomplete_weight_updates: set[bool] = set()
         self._weight_update_is_draft = False
+        self._weight_update_lora_session: Any | None = None
         # Set by the engine while a pause has emptied the KV cache.
         self._kv_cache_reclaimable = False
         # Keeps the KV cache lent to the active weight update until it ends.
@@ -1748,15 +1749,52 @@ class Worker(WorkerBase):
     def has_incomplete_weight_update(self) -> bool:
         return bool(self._incomplete_weight_updates)
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(
+        self,
+        lora_adapters: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Start a new weight update session.
 
-        Delegates engine-specific preparation (e.g. layerwise reload setup) to
-        the configured weight transfer engine. The worker only tracks that a
-        session is active.
+        When `lora_adapters` is None, delegates engine-specific preparation
+        (e.g. layerwise reload setup) to the configured weight transfer engine
+        for a base-model update. When `lora_adapters` is provided, starts a
+        LoRA adapter weight-update session that leaves base weights untouched
+        and supports NCCL/IPC transfer, pure-HTTP safetensors, and disk loads.
         """
         with set_current_vllm_config(self.vllm_config):
-            self._start_weight_update()
+            if lora_adapters is not None:
+                self._start_lora_weight_update(lora_adapters)
+            else:
+                self._start_weight_update()
+
+    def _start_lora_weight_update(self, lora_adapters: list[dict[str, Any]]) -> None:
+        if self.lora_config is None:
+            raise RuntimeError(
+                "LoRA is not enabled on this worker. Start vLLM with --enable-lora."
+            )
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already "
+                "active. Call finish_weight_update first."
+            )
+        from vllm.distributed.weight_transfer.lora_session import (
+            LoRAWeightUpdateSession,
+        )
+
+        self._weight_update_lora_session = LoRAWeightUpdateSession.from_dicts(
+            lora_adapters
+        )
+        self._weight_update_active = True
+        self._weight_update_is_draft = False
+
+    def _end_lora_weight_update(self) -> None:
+        session = self._weight_update_lora_session
+        self._weight_update_lora_session = None
+        self._weight_update_active = False
+        if session is not None:
+            if session.uses_transfer_engine and self.weight_transfer_engine is not None:
+                self.weight_transfer_engine.reset_weight_update_target()
+            session.clear()
 
     def start_draft_weight_update(self) -> None:
         """Like start_weight_update, but retargets the engine at the speculative
@@ -1826,21 +1864,55 @@ class Worker(WorkerBase):
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
-        Every chunk loads into whichever model the session's start_weight_update
-        / start_draft_weight_update call selected.
+        Every chunk loads into whichever model or LoRA session the matching
+        start_weight_update / start_draft_weight_update call selected.
 
         Args:
-            update_info: Backend-specific update info, or a list indexed by
-                global worker rank across data parallel replicas.
+            update_info: Backend-specific update info, HTTP safetensors payload,
+                or a list indexed by global worker rank across data parallel
+                replicas.
 
         """
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
         if not self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update must be called before update_weights."
             )
+
+        if (session := getattr(self, "_weight_update_lora_session", None)) is not None:
+            with set_current_vllm_config(self.vllm_config):
+                try:
+                    if isinstance(update_info, list):
+                        parallel_config = self.vllm_config.parallel_config
+                        local_update_info = update_info[
+                            parallel_config.data_parallel_index
+                            * parallel_config.world_size
+                            + self.rank
+                        ]
+                    else:
+                        local_update_info = update_info
+                    if session.receive_http_tensors(local_update_info):
+                        return
+                    self._check_weight_transfer_engine()
+                    assert self.weight_transfer_engine is not None
+                    if not session.has_tensor_adapters:
+                        raise ValueError(
+                            "Received weight-transfer tensors, but no adapters in "
+                            "this session were configured with peft_config"
+                        )
+                    if not session.uses_transfer_engine:
+                        self.weight_transfer_engine.set_weight_update_target(
+                            session.sink, self.model_config
+                        )
+                        self.weight_transfer_engine.start_weight_update()
+                        session.uses_transfer_engine = True
+                    self.weight_transfer_engine.update_weights(local_update_info)
+                except BaseException:
+                    self._end_lora_weight_update()
+                    raise
+            return
+
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
 
         with set_current_vllm_config(self.vllm_config):
             try:
@@ -1867,15 +1939,39 @@ class Worker(WorkerBase):
         ):
             restore_quantized_lm_heads(draft_model, refresh=refresh)
 
-    def finish_weight_update(self) -> None:
+    def finish_weight_update(self, abort: bool = False) -> None:
         """Finish the current weight update session."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
         if not self._weight_update_active:
             raise RuntimeError(
                 "finish_weight_update called without a matching start_weight_update."
             )
+
+        if (session := getattr(self, "_weight_update_lora_session", None)) is not None:
+            if abort:
+                self._end_lora_weight_update()
+                return
+            with set_current_vllm_config(self.vllm_config):
+                try:
+                    if session.uses_transfer_engine:
+                        assert self.weight_transfer_engine is not None
+                        self.weight_transfer_engine.finish_weight_update()
+                    for lora_request in session.build_lora_requests():
+                        if not self.model_runner.add_lora(lora_request):
+                            raise RuntimeError(
+                                "Failed to load LoRA adapter "
+                                f"{lora_request.lora_name!r}"
+                            )
+                finally:
+                    self._end_lora_weight_update()
+            return
+
+        if abort:
+            raise ValueError(
+                "abort=True is only supported for LoRA weight-update sessions."
+            )
+
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
 
         with set_current_vllm_config(self.vllm_config):
             try:

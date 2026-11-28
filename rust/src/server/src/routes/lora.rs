@@ -31,7 +31,7 @@ pub(crate) struct UnloadLoraAdapterRequest {
     lora_int_id: Option<u64>,
 }
 
-fn load_lora_api_error(error: LoadLoraError) -> ApiError {
+pub(crate) fn load_lora_api_error(error: LoadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),

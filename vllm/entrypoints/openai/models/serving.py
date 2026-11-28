@@ -4,6 +4,7 @@
 from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
+from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -109,6 +110,7 @@ class OpenAIServingModels:
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
         self.lora_id_counter = AtomicCounter(0)
+        self._lora_memory_rev_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers():
@@ -246,6 +248,113 @@ class OpenAIServingModels:
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
             return f"Success: LoRA adapter '{lora_name}' removed successfully."
+
+    def prepare_lora_weight_update(
+        self, adapters: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Validate and resolve LoRA adapter specs for a weight-update session.
+
+        Reuses existing `lora_int_id` when updating an already-registered
+        adapter, allocates a new monotonic ID otherwise, and assigns a unique
+        `memory://<lora_name>@<rev>` path for in-memory/streamed updates so
+        prefix-cache keys stay isolated per adapter version.
+        """
+        if not adapters:
+            raise ValueError("'lora_adapters' must not be empty.")
+
+        seen_names: set[str] = set()
+        resolved: list[dict[str, Any]] = []
+        for raw in adapters:
+            lora_name = str(raw.get("lora_name", "")).strip()
+            if not lora_name:
+                raise ValueError("'lora_name' must be a non-empty string.")
+            if lora_name in seen_names:
+                raise ValueError(
+                    f"Duplicate lora_name '{lora_name}' in 'lora_adapters'."
+                )
+            if self.is_base_model(lora_name):
+                raise ValueError(
+                    f"The lora adapter '{lora_name}' conflicts with a served "
+                    "base model."
+                )
+            seen_names.add(lora_name)
+
+            peft_config = raw.get("peft_config")
+            lora_path = raw.get("lora_path")
+            if peft_config is None and not (
+                isinstance(lora_path, str) and lora_path.strip()
+            ):
+                raise ValueError(
+                    f"LoRA adapter '{lora_name}' must provide either "
+                    "'peft_config' (for tensor updates) or 'lora_path' (for disk)."
+                )
+            if peft_config is not None and not isinstance(peft_config, dict):
+                raise ValueError(
+                    f"LoRA adapter '{lora_name}' field 'peft_config' must be an object."
+                )
+
+            existing = self.lora_requests.get(lora_name)
+            raw_int_id = raw.get("lora_int_id")
+            if raw_int_id is not None:
+                lora_int_id = int(raw_int_id)
+                if lora_int_id < 1:
+                    raise ValueError(f"'lora_int_id' must be >= 1, got {lora_int_id}.")
+            elif existing is not None:
+                lora_int_id = existing.lora_int_id
+            else:
+                lora_int_id = self.lora_id_counter.inc(1)
+
+            if isinstance(lora_path, str) and lora_path.strip():
+                effective_path = lora_path.strip()
+            else:
+                rev = self._lora_memory_rev_counter.inc(1)
+                effective_path = f"memory://{lora_name}@{rev}"
+
+            base_model_name = raw.get("base_model_name")
+            if base_model_name is not None and not self.is_base_model(base_model_name):
+                base_model_name = None
+
+            resolved.append(
+                {
+                    "lora_name": lora_name,
+                    "lora_int_id": lora_int_id,
+                    "lora_path": effective_path,
+                    "peft_config": peft_config,
+                    "base_model_name": base_model_name,
+                    "is_3d_lora_weight": bool(raw.get("is_3d_lora_weight", False)),
+                }
+            )
+        return resolved
+
+    def commit_lora_weight_update(self, adapters: list[dict[str, Any]]) -> bool:
+        """Publish committed LoRA adapters into the frontend model registry.
+
+        Returns True if any adapter reused the exact same `lora_path` as its
+        previously registered version (indicating an in-place disk reload that
+        requires prefix-cache invalidation).
+        """
+        reused_same_path = False
+        for spec in adapters:
+            lora_name = spec["lora_name"]
+            lora_path = spec["lora_path"]
+            previous = self.lora_requests.get(lora_name)
+            if previous is not None and previous.lora_path == lora_path:
+                reused_same_path = True
+            self.lora_requests[lora_name] = LoRARequest(
+                lora_name=lora_name,
+                lora_int_id=spec["lora_int_id"],
+                lora_path=lora_path,
+                base_model_name=spec.get("base_model_name"),
+                load_inplace=False,
+                is_3d_lora_weight=bool(spec.get("is_3d_lora_weight", False)),
+            )
+            logger.info(
+                "Committed LoRA adapter weight update: name '%s', id %d, path '%s'",
+                lora_name,
+                spec["lora_int_id"],
+                lora_path,
+            )
+        return reused_same_path
 
     async def _check_load_lora_adapter_request(
         self, request: LoadLoRAAdapterRequest

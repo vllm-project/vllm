@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -30,9 +32,13 @@ class RLOfflineMixin(OfflineInferenceMixin):
         """Release the trainer connection without shutting down inference."""
         self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(
+        self,
+        lora_adapters: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
+        kwargs = {"lora_adapters": lora_adapters} if lora_adapters is not None else None
+        self.llm_engine.collective_rpc("start_weight_update", kwargs=kwargs)
 
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
@@ -53,10 +59,16 @@ class RLOfflineMixin(OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
+    def finish_weight_update(
+        self,
+        weight_version: str | None = None,
+        *,
+        abort: bool = False,
+    ) -> None:
         """Finish the weight update and set its version if provided."""
-        self.llm_engine.collective_rpc("finish_weight_update")
-        if weight_version is not None:
+        kwargs = {"abort": True} if abort else None
+        self.llm_engine.collective_rpc("finish_weight_update", kwargs=kwargs)
+        if not abort and weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
 
     def update_weight_version(self, new_version: str) -> None:
