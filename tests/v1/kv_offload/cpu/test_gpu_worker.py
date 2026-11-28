@@ -244,6 +244,7 @@ def _submit(handler, job_id: int) -> bool:
         group_block_counts=(1,),
         group_data_ref_counts=(1,),
         block_indices=(0,),
+        block_ids=np.array([0], dtype=np.int32),
     )
     cpu_spec = CPULoadStoreSpec(block_ids=[0])
     return handler.transfer_async(job_id, device_ptrs, cpu_spec)

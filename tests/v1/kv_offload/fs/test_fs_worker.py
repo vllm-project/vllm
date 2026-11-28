@@ -65,6 +65,7 @@ def _make_device_ptrs(
         group_block_counts=(n_blocks,),
         group_data_ref_counts=(n_data_refs,),
         block_indices=block_indices,
+        block_ids=np.arange(n_blocks, dtype=np.int32),
     )
 
 
