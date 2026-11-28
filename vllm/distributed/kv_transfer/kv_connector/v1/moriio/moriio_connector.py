@@ -950,6 +950,8 @@ class MoRIIOConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
+            # Requests that bypass external KV must retain all prompt tokens.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()

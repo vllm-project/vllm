@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -1882,6 +1883,62 @@ def test_write_consumer_matches_full_prompt_unless_hybrid(has_mamba, expected):
     )
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("read_mode", [True, False])
+@pytest.mark.parametrize(
+    "sampling_kwargs,expected_prompt_len",
+    [
+        ({}, 4),
+        ({"prompt_logprobs": 0}, 5),
+        ({"prompt_logprob_token_ids": [[11], [12], [13], [14]]}, 5),
+        ({"prompt_logprob_start": 2, "prompt_logprob_token_ids": [[13], [14]]}, 5),
+        ({"skip_reading_prefix_cache": True}, 5),
+    ],
+    ids=["generation", "logprobs-zero", "fixed-ids", "suffix", "bypass"],
+)
+def test_on_new_request_preserves_prompt_when_external_kv_is_bypassed(
+    read_mode, sampling_kwargs, expected_prompt_len
+):
+    """Scoring needs every prompt token; ordinary P/D still drops the last."""
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=16, mamba_cache_mode="align"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MoRIIOConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "read_mode": read_mode,
+                "host_ip": "127.0.0.1",
+                "handshake_port": 6001,
+                "notify_port": 6002,
+            },
+        ),
+    )
+    cache = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[_attn_group(), _mamba_group()],
+        hash_block_size=16,
+    )
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(config, "engine", cache)
+    prompt = [10, 11, 12, 13, 14]
+    request = Request(
+        "scoring",
+        prompt.copy(),
+        SamplingParams(
+            max_tokens=1,
+            extra_args={"kv_transfer_params": {"do_remote_decode": True}},
+            **sampling_kwargs,
+        ),
+        None,
+    )
+    scheduler.on_new_request(request)
+
+    expected = prompt[:expected_prompt_len]
+    assert request.prompt_token_ids == expected
+    assert list(request.all_token_ids) == expected
+    assert request.num_prompt_tokens == expected_prompt_len
 
 
 @pytest.mark.parametrize(

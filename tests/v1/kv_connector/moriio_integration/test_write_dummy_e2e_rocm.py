@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
+"""Single-node MoRIIO P/D checks in WRITE and READ mode.
 
-Each case serves a real model architecture with `--load-format dummy`, widened
+The echo-scoring regression uses real weights; transfer-layout checks use
+dummy weights as described below.
+
+Each transfer-layout case serves a real architecture with `--load-format dummy`, widened
 by `moriio_wide_dummy` (see `DUMMY_WEIGHT_RANGE`): the
 config keeps the real hidden size, head geometry, MLA ranks and recurrent-state
 shapes, so the connector registers and transfers exactly the production cache
@@ -196,6 +199,7 @@ class ArchCase:
     args: tuple[str, ...] = ()
     # Has recurrent-state (mamba-style) layers, so prefill stops at n - 1.
     hybrid: bool = True
+    load_format: str = "dummy"
 
 
 ARCHS: dict[str, ArchCase] = {
@@ -501,9 +505,7 @@ def _server(
         "--port",
         str(port),
         "--load-format",
-        "dummy",
-        "--worker-extension-cls",
-        "moriio_wide_dummy.WideDummyWeights",
+        arch.load_format,
         "--hf-overrides",
         json.dumps(overrides),
         "--dtype",
@@ -525,6 +527,8 @@ def _server(
         str(len(devices)),
         *_graph_args(graph),
     ]
+    if arch.load_format == "dummy":
+        args += ["--worker-extension-cls", "moriio_wide_dummy.WideDummyWeights"]
     role = "direct"
     if kv_transfer_config is not None:
         args += ["--kv-transfer-config", json.dumps(kv_transfer_config)]
@@ -1026,3 +1030,51 @@ def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) 
         f"reference (distances {distances}); the comparison cannot detect "
         "transfer corruption"
     )
+
+
+def test_read_echo_matches_direct_prompt_logprobs():
+    """The proxy's prefill request must score the complete echoed prompt."""
+    arch = ArchCase(
+        model="Qwen/Qwen3.5-0.8B",
+        overrides=lambda _: {},
+        corrupt_overrides={},
+        env={"VLLM_ROCM_USE_AITER": "0"},
+        args=("--language-model-only", "--mamba-cache-mode", "align"),
+        load_format="auto",
+    )
+    case = Case("qwen3_5", "TRITON_ATTN", "NONE", "NONE", read_mode=True)
+    prompt = [1000, 1001, 1002, 1003, 1004]
+    payload = {
+        "model": arch.model,
+        "prompt": prompt,
+        "echo": True,
+        "logprobs": 0,
+        "max_tokens": 1,
+        "temperature": 0,
+        "ignore_eos": True,
+        "return_tokens_as_token_ids": True,
+    }
+    with _pd_pair(arch, {}, {}, case) as (proxy_url, _, decode):
+        reference = requests.post(
+            f"{decode.url_root}/v1/completions", json=payload, timeout=600
+        )
+        reference.raise_for_status()
+        expected = reference.json()["choices"][0]["logprobs"]
+        # The proxy reserves one token for prefill, then returns decode's body.
+        response = requests.post(
+            f"{proxy_url}/v1/completions",
+            json={**payload, "max_tokens": 2},
+            timeout=600,
+        )
+        response.raise_for_status()
+        result = response.json()
+        scores = result["choices"][0]["logprobs"]
+        assert scores["tokens"][: len(prompt)] == [f"token_id:{t}" for t in prompt]
+        assert len(scores["token_logprobs"]) == len(prompt) + 1
+        assert scores["token_logprobs"][0] is None
+        prompt_logprobs = scores["token_logprobs"][1 : len(prompt)]
+        assert all(math.isfinite(p) for p in prompt_logprobs)
+        assert prompt_logprobs == pytest.approx(
+            expected["token_logprobs"][1 : len(prompt)], abs=TOLERANCE, rel=0
+        )
+        assert result["usage"]["prompt_tokens"] == len(prompt)

@@ -144,6 +144,8 @@ For DSpark, configure the same draft model on both instances through `--speculat
 
 Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
 
+Requests that bypass external KV reads, including prompt-logprob requests, retain the complete prompt on the prefill instance. This preserves the final prompt token needed for scoring; ordinary hybrid P/D requests still use the N-1 truncation described above.
+
 ### Kimi-K3 specialized decode
 
 Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
