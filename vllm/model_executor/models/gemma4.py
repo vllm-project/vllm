@@ -39,6 +39,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.gemma4_ple_embed import gemma4_ple_embed_gather
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -54,6 +55,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -836,20 +838,32 @@ class Gemma4DecoderLayer(nn.Module):
         return hidden_states, None
 
 
+def _ple_model_projection(
+    proj: ColumnParallelLinear, x: torch.Tensor, row_start: int, num_rows: int
+) -> torch.Tensor:
+    """x @ W[row_start : row_start + num_rows]^T for a slice of per_layer_model_projection."""
+    weight = proj.weight[row_start : row_start + num_rows]
+    return proj.quant_method._gemm_impl(proj, x, weight, None)
+
+
 def _run_decoder_layers(
     decoder_layers: list[Gemma4DecoderLayer],
     layer_idx_start: int,
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
     per_layer_inputs: torch.Tensor | None = None,
+    per_layer_index_start: int | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """Run a slice of decoder layers with PLE extraction."""
+    if per_layer_index_start is None:
+        per_layer_index_start = layer_idx_start
     residual = None
     for idx, layer in enumerate(decoder_layers):
-        layer_idx = idx + layer_idx_start
         layer_per_input = (
-            per_layer_inputs[:, layer_idx, :] if per_layer_inputs is not None else None
+            per_layer_inputs[:, idx + per_layer_index_start, :]
+            if per_layer_inputs is not None
+            else None
         )
         hidden_states, residual = layer(
             positions,
@@ -886,10 +900,12 @@ class Gemma4SelfDecoderLayers(nn.Module):
         per_layer_projection_norm: RMSNorm | None,
         per_layer_input_scale: torch.Tensor | None,
         per_layer_projection_scale: torch.Tensor | None,
+        ple_split: bool = False,
     ):
         super().__init__()
         self.decoder_layers = decoder_layers
         self.layer_idx_start = layer_idx_start
+        self.ple_split = ple_split
 
         config = _get_text_config(vllm_config.model_config.hf_config)
         self.config = config
@@ -965,11 +981,23 @@ class Gemma4SelfDecoderLayers(nn.Module):
         if self.per_layer_model_projection is None:
             return None
         assert self.per_layer_projection_norm is not None
-        per_layer_projection = self.per_layer_model_projection(inputs_embeds)
+        num_layers = self.config.num_hidden_layers
+        if self.ple_split:
+            # Only the self-decoder layers' columns: the cross-decoder computes its own
+            # on the sampled positions.
+            num_layers = len(self.decoder_layers)
+            per_layer_projection = _ple_model_projection(
+                self.per_layer_model_projection,
+                inputs_embeds,
+                0,
+                num_layers * self.hidden_size_per_layer_input,
+            )
+        else:
+            per_layer_projection = self.per_layer_model_projection(inputs_embeds)
         per_layer_projection = per_layer_projection * self.per_layer_projection_scale
         per_layer_projection = per_layer_projection.reshape(
             *inputs_embeds.shape[:-1],
-            self.config.num_hidden_layers,
+            num_layers,
             self.hidden_size_per_layer_input,
         )
         per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
@@ -1005,6 +1033,8 @@ class Gemma4SelfDecoderLayers(nn.Module):
             per_layer_inputs,
             **kwargs,
         )
+        if self.ple_split:
+            return hidden_states, None
         return hidden_states, per_layer_inputs
 
 
@@ -1021,24 +1051,75 @@ class Gemma4CrossDecoderLayers(nn.Module):
         prefix: str = "",
         decoder_layers: list[Gemma4DecoderLayer],
         layer_idx_start: int,
+        per_layer_model_projection: ColumnParallelLinear | None = None,
+        per_layer_projection_norm: RMSNorm | None = None,
+        per_layer_input_scale: torch.Tensor | None = None,
+        per_layer_projection_scale: torch.Tensor | None = None,
     ):
         super().__init__()
         self.decoder_layers = decoder_layers
         self.layer_idx_start = layer_idx_start
+        self.ple_split = False
+        config = _get_text_config(vllm_config.model_config.hf_config)
+        self.hidden_size_per_layer_input = getattr(
+            config, "hidden_size_per_layer_input", 0
+        )
+        # Shared with Gemma4Model; used only when the per-layer inputs are split
+        # (the self-decoder computes its layers' inputs over all tokens, this module its
+        # own on the sampled positions it runs on).
+        self.per_layer_model_projection = per_layer_model_projection
+        self.per_layer_projection_norm = per_layer_projection_norm
+        self.register_buffer(
+            "per_layer_input_scale", per_layer_input_scale, persistent=False
+        )
+        self.register_buffer(
+            "per_layer_projection_scale", per_layer_projection_scale, persistent=False
+        )
+
+    def project_per_layer_inputs(
+        self, inputs_embeds: torch.Tensor, per_layer_embeds: torch.Tensor
+    ) -> torch.Tensor:
+        """Same ops as Gemma4SelfDecoderLayers.project_per_layer_inputs, for this module's
+        layers only: per_layer_embeds is (num_tokens, num_layers_here, per_layer_dim)."""
+        assert self.per_layer_model_projection is not None
+        assert self.per_layer_projection_norm is not None
+        num_layers = len(self.decoder_layers)
+        dim = self.hidden_size_per_layer_input
+        per_layer_projection = _ple_model_projection(
+            self.per_layer_model_projection,
+            inputs_embeds,
+            self.layer_idx_start * dim,
+            num_layers * dim,
+        )
+        per_layer_projection = per_layer_projection * self.per_layer_projection_scale
+        per_layer_projection = per_layer_projection.reshape(
+            *inputs_embeds.shape[:-1], num_layers, dim
+        )
+        per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
+        return (per_layer_projection + per_layer_embeds) * self.per_layer_input_scale
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         per_layer_inputs: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        per_layer_index_start = None
+        if self.ple_split:
+            assert inputs_embeds is not None and per_layer_inputs is not None
+            per_layer_inputs = self.project_per_layer_inputs(
+                inputs_embeds, per_layer_inputs
+            )
+            per_layer_index_start = 0
         return _run_decoder_layers(
             self.decoder_layers,
             self.layer_idx_start,
             positions,
             hidden_states,
             per_layer_inputs,
+            per_layer_index_start,
             **kwargs,
         )
 
@@ -1195,9 +1276,20 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 prefix=f"{prefix}.cross_decoder",
                 decoder_layers=self.layers[first_kv_shared_layer_idx:],
                 layer_idx_start=first_kv_shared_layer_idx,
+                per_layer_model_projection=getattr(
+                    self, "per_layer_model_projection", None
+                ),
+                per_layer_projection_norm=getattr(
+                    self, "per_layer_projection_norm", None
+                ),
+                per_layer_input_scale=getattr(self, "per_layer_input_scale", None),
+                per_layer_projection_scale=getattr(
+                    self, "per_layer_projection_scale", None
+                ),
             )
 
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
+        self.ple_split = False
 
         if self.fast_prefill_enabled:
             # Allocate static buffers for CUDAGraph
@@ -1260,6 +1352,43 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.embed_input_ids(input_ids)
 
+    def enable_ple_split(self) -> bool:
+        """Fast prefill with split per-layer inputs: the caller (Gemma4ForConditionalGeneration)
+        stores the raw per-layer embeddings of the self-decoder layers only
+        (``gemma4_ple_embed_gather``) and passes the token ids; the cross-decoder layers' inputs are
+        computed on the sampled positions inside the cross-decoder graph."""
+        if (
+            not self.fast_prefill_enabled
+            or self.embed_tokens_per_layer is None
+            or self.per_layer_model_projection is None
+            or not isinstance(
+                self.per_layer_model_projection.quant_method, UnquantizedLinearMethod
+            )
+            or self.embed_tokens_per_layer.weight.dtype
+            != self.per_layer_model_projection.weight.dtype
+        ):
+            return False
+        num_cross = len(self.cross_decoder.decoder_layers)
+        if num_cross == 0:
+            return False
+        self.ple_split = True
+        self.self_decoder.ple_split = True
+        self.cross_decoder.ple_split = True
+        self.num_ple_self_layers = len(self.self_decoder.decoder_layers)
+        # raw (embedding-table) per-layer inputs of the cross-decoder layers on the sampled
+        # positions, and the token embeddings of those positions (inputs of the projection)
+        self.per_layer_inputs = torch.zeros(
+            (
+                self.positions.shape[0],
+                num_cross,
+                self.hidden_size_per_layer_input,
+            ),
+            dtype=self.hidden_states.dtype,
+            device=self.hidden_states.device,
+        )
+        self.cross_inputs_embeds = torch.zeros_like(self.hidden_states)
+        return True
+
     def get_per_layer_inputs(self, input_ids: torch.Tensor) -> torch.Tensor | None:
         """Get per-layer embeddings from embed_tokens_per_layer.
 
@@ -1294,6 +1423,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         per_layer_inputs: torch.Tensor | None = None,
+        ple_token_ids: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         logits_indices_padded, num_logits_indices = None, None
@@ -1309,6 +1439,37 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 num_logits_indices = layer_attn_metadata.num_logits_indices
 
         batch_size = positions.size(0)
+        has_fast_prefill_indices = logits_indices_padded is not None
+        if self.ple_split:
+            assert inputs_embeds is not None and ple_token_ids is not None
+            assert per_layer_inputs is not None
+            # Cross-decoder inputs of the layers it owns, only for the positions it runs on.
+            # Read before the self-decoder runs.
+            num_cross_rows = (
+                logits_indices_padded.size(0)
+                if has_fast_prefill_indices
+                else batch_size
+            )
+            if has_fast_prefill_indices:
+                torch.index_select(
+                    inputs_embeds,
+                    0,
+                    logits_indices_padded,
+                    out=self.cross_inputs_embeds[:num_cross_rows],
+                )
+            else:
+                self.cross_inputs_embeds[:num_cross_rows].copy_(inputs_embeds)
+            dim = self.hidden_size_per_layer_input
+            gemma4_ple_embed_gather(
+                ple_token_ids,
+                logits_indices_padded if has_fast_prefill_indices else None,
+                self.embed_tokens_per_layer.weight,
+                self.embed_scale_per_layer,
+                self.per_layer_inputs[:num_cross_rows].view(num_cross_rows, -1),
+                self.num_ple_self_layers * dim,
+                self.per_layer_inputs.shape[1] * dim,
+                num_cross_rows,
+            )
         self.positions[:batch_size].copy_(positions)
         self_decoder_hidden_states, per_layer_inputs = self.self_decoder(
             input_ids=input_ids,
@@ -1334,7 +1495,11 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         self.hidden_states[:num_padded].copy_(
             self_decoder_hidden_states[logits_indices_padded]
         )
-        if self.per_layer_inputs is not None and per_layer_inputs is not None:
+        if (
+            not self.ple_split
+            and self.per_layer_inputs is not None
+            and per_layer_inputs is not None
+        ):
             self.per_layer_inputs[:num_padded].copy_(
                 per_layer_inputs[logits_indices_padded]
             )
@@ -1353,12 +1518,21 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
             if self.per_layer_inputs is not None
             else None
         )
-        cross_hidden_states = self.cross_decoder(
-            self.positions[:num_padded],
-            self.hidden_states[:num_padded],
-            cross_per_layer,
-            **kwargs,
-        )
+        if self.ple_split:
+            cross_hidden_states = self.cross_decoder(
+                self.positions[:num_padded],
+                self.hidden_states[:num_padded],
+                cross_per_layer,
+                inputs_embeds=self.cross_inputs_embeds[:num_padded],
+                **kwargs,
+            )
+        else:
+            cross_hidden_states = self.cross_decoder(
+                self.positions[:num_padded],
+                self.hidden_states[:num_padded],
+                cross_per_layer,
+                **kwargs,
+            )
 
         # Restore the original batch_descriptor
         forward_context.batch_descriptor = orig_batch_desc
@@ -1380,6 +1554,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         per_layer_inputs: torch.Tensor | None = None,
+        ple_token_ids: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.fast_prefill_enabled:
@@ -1388,6 +1563,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
                 positions,
                 inputs_embeds,
                 per_layer_inputs,
+                ple_token_ids,
                 **kwargs,
             )
             hidden_states = self.norm(hidden_states)
