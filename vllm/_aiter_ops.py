@@ -4,6 +4,7 @@ import ctypes
 import dataclasses
 import functools
 import importlib
+import inspect
 import itertools
 import os
 from collections.abc import Callable
@@ -2847,11 +2848,11 @@ class rocm_aiter_ops:
     @functools.cache
     def _kda_gluon_prefill_importable() -> bool:
         try:
-            from aiter.ops.triton.attention.chunk_kda import chunk_kda  # noqa: F401
-
-            return True
+            from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
         except ImportError:
             return False
+        params = inspect.signature(chunk_kimi_delta_attn).parameters
+        return "cu_seqlens_cpu" in params
 
     @classmethod
     @if_aiter_supported
@@ -6163,10 +6164,24 @@ class rocm_aiter_ops:
         state_cache: torch.Tensor | None,
         state_indices: torch.Tensor | None,
         has_initial_state: torch.Tensor | None,
+        out_gate: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-5,
+        cu_seqlens_cpu: torch.Tensor | None = None,
+        checkpoint_state: torch.Tensor | None = None,
+        checkpoint_offsets: torch.Tensor | None = None,
+        checkpoint_state_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+        from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
 
-        return chunk_kda(
+        ckpt = {}
+        if checkpoint_offsets is not None:
+            ckpt = dict(
+                checkpoint_state=checkpoint_state,
+                checkpoint_offsets=checkpoint_offsets,
+                checkpoint_state_indices=checkpoint_state_indices,
+            )
+        return chunk_kimi_delta_attn(
             q=q,
             k=k,
             v=v,
@@ -6174,17 +6189,25 @@ class rocm_aiter_ops:
             beta=beta,
             A_log=A_log,
             dt_bias=dt_bias,
-            lower_bound=lower_bound,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            chunk_offsets=chunk_offsets,
             scale=scale,
-            out=out,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            safe_gate=True,
+            lower_bound=lower_bound,
+            state_v_first=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            out=out if out is not None else torch.empty_like(v),
             state_cache=state_cache,
             state_indices=state_indices,
             has_initial_state=has_initial_state,
+            out_gate=out_gate,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            **ckpt,
         )
 
 

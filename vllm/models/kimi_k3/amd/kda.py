@@ -98,13 +98,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # checkpoint to the fused kernel when the build has it.
         can_checkpoint = (
             self.use_prefill_checkpoint
-            and (
-                self.kda_prefill_backend == "fused"
-                or (
-                    self.kda_prefill_backend == "gluon"
-                    and is_fused_kda_chunk_supported()
-                )
-            )
+            and (self.kda_prefill_backend in ("fused", "gluon"))
             and self.use_safe_gate
         )
         return KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
@@ -551,6 +545,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- spec-decode multi-query path ----------
         core_attn_out_spec = None
+        fuse_norm = False
         if spec_sequence_masks is not None:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
@@ -730,6 +725,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cu_seqlens=prefill_query_start_loc,
                     )
 
+                # FlashKDA fuses o_norm when the prefill rows are contiguous.
+                fuse_norm = direct and self.kda_prefill_backend == "gluon"
+                norm = {}
+                if fuse_norm:
+                    norm = dict(
+                        out_gate=g2[nd_tok:num_actual_tokens].unsqueeze(0),
+                        norm_weight=self.o_norm.weight,
+                        norm_eps=self.o_norm.eps,
+                    )
                 (
                     core_attn_out_non_spec,
                     _,
@@ -749,16 +753,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    # Checkpoint metadata exists only when get_kv_cache_spec
-                    # reserved the block, which it does only with the fused
-                    # kernel available.
-                    backend=(
-                        "fused" if checkpoint is not None else self.kda_prefill_backend
-                    ),
+                    backend=self.kda_prefill_backend,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
                     checkpoint_state_indices=checkpoint_state_indices,
+                    cu_seqlens_cpu=m.prefill_query_start_loc_cpu,
+                    checkpoint_rows=m.checkpoint_rows,
+                    **norm,
                 )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
                 # there is no final state to write back here.
@@ -818,4 +820,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ]
         else:
             assert core_attn_out_spec is not None
-        core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        if not fuse_norm:
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        elif nd_tok:  # FlashKDA normed the prefill rows; norm the peeled decodes.
+            core_attn_out[:, :nd_tok] = self.o_norm(
+                core_attn_out[:, :nd_tok], g2[:nd_tok].unsqueeze(0)
+            )
