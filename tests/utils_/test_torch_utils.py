@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
@@ -11,6 +13,7 @@ from vllm.utils.torch_utils import (
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    direct_register_custom_op,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     set_default_torch_dtype,
@@ -261,3 +264,68 @@ def test_set_random_seed_differs_per_data_parallel_index():
     assert draws(42, 1) == draws(42, 1)
     assert len({str(draws(42, i)) for i in range(4)}) == 4
     assert draws(42, 1) != draws(43, 1)
+
+
+def test_direct_register_custom_op_named_tuple_param() -> None:
+    # Custom ops with NamedTuple parameters (e.g. GroupShape) must register
+    # and stay traceable by torch.compile; the dispatcher hands the impl a
+    # plain tuple for tuple-typed schema parameters.
+    from typing import ClassVar, NamedTuple
+
+    class _ShapeBase(NamedTuple):
+        row: int
+        col: int
+
+    class _Shape(_ShapeBase):
+        # Class-level annotations must not leak into the tuple schema.
+        PER_TENSOR: ClassVar["_Shape"]
+
+    def op(x: torch.Tensor, shape: _Shape) -> torch.Tensor:
+        return x * (shape.row + shape.col)
+
+    direct_register_custom_op(
+        "test_named_tuple_op",
+        op,
+        mutates_args=[],
+        fake_impl=lambda x, shape: torch.empty_like(x),
+        dispatch_key="CPU",
+    )
+
+    x = torch.arange(4.0)
+    eager = torch.ops.vllm.test_named_tuple_op(x, _Shape(1, 2))
+    assert eager.tolist() == [0.0, 3.0, 6.0, 9.0]
+
+    def fwd(x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.test_named_tuple_op(x, _Shape(1, 2))
+
+    compiled = torch.compile(fwd, fullgraph=True)
+    assert torch.equal(compiled(x), eager)
+
+
+def test_direct_register_custom_op_string_annotation_param() -> None:
+    # With `from __future__ import annotations`, every annotation arrives as
+    # its name; NamedTuple parameters must still be detected and registered.
+    namespace: dict[str, Any] = {"torch": torch}
+    exec(
+        "from __future__ import annotations\n"
+        "from typing import NamedTuple\n"
+        "class _Shape(NamedTuple):\n"
+        "    row: int\n"
+        "    col: int\n"
+        "def op(x: torch.Tensor, shape: _Shape) -> torch.Tensor:\n"
+        "    return x * (shape.row + shape.col)\n",
+        namespace,
+    )
+
+    direct_register_custom_op(
+        "test_named_tuple_string_op",
+        namespace["op"],
+        mutates_args=[],
+        fake_impl=lambda x, shape: torch.empty_like(x),
+        dispatch_key="CPU",
+    )
+
+    out = torch.ops.vllm.test_named_tuple_string_op(
+        torch.arange(4.0), namespace["_Shape"](1, 2)
+    )
+    assert out.tolist() == [0.0, 3.0, 6.0, 9.0]
