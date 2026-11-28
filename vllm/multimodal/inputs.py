@@ -525,6 +525,16 @@ class BaseMultiModalField(ABC):
         return _nested_tensors_h2d(out, device=device, pin_memory=pin_memory)
 
 
+def _promote_dtypes(tensors: Sequence[torch.Tensor]) -> torch.dtype:
+    # Match stack/cat promotion when preallocating their output.
+    it = iter(tensors)
+    dtype = next(it).dtype
+    for tensor in it:
+        if tensor.dtype != dtype:
+            dtype = torch.promote_types(dtype, tensor.dtype)
+    return dtype
+
+
 @dataclass(frozen=True, kw_only=True)
 class MultiModalBatchedField(BaseMultiModalField):
     """Info:
@@ -553,7 +563,9 @@ class MultiModalBatchedField(BaseMultiModalField):
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
                 out = batch[0].new_empty(
-                    (len(batch), *first_shape), pin_memory=pin_memory
+                    (len(batch), *first_shape),
+                    dtype=_promote_dtypes(batch),
+                    pin_memory=pin_memory,
                 )
                 return torch.stack(batch, out=out)
 
@@ -595,6 +607,7 @@ class MultiModalFlatField(BaseMultiModalField):
                 return batch[0]
 
             dim = self.dim + (self.dim < 0) * len(batch[0].shape)
+            dtype = _promote_dtypes(batch)
 
             def _shape_before_after(tensor: torch.Tensor):
                 return tensor.shape[:dim], tensor.shape[dim + 1 :]
@@ -605,7 +618,9 @@ class MultiModalFlatField(BaseMultiModalField):
                 shape_before, shape_after = first_shape
                 shape_concat = sum(item.shape[dim] for item in batch)
                 out = batch[0].new_empty(
-                    (*shape_before, shape_concat, *shape_after), pin_memory=pin_memory
+                    (*shape_before, shape_concat, *shape_after),
+                    dtype=dtype,
+                    pin_memory=pin_memory,
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
@@ -627,7 +642,7 @@ class MultiModalFlatField(BaseMultiModalField):
                     max_sizes.append(max(t.shape[d] for t in batch))
 
             # Step 2: Create zero-initialized output tensor
-            out = batch[0].new_zeros(max_sizes, pin_memory=pin_memory)
+            out = batch[0].new_zeros(max_sizes, dtype=dtype, pin_memory=pin_memory)
 
             # Step 3: Slice-assign each tensor to its proper position
             concat_offset = 0

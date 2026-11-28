@@ -7,6 +7,7 @@ from PIL import Image
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalSharedField,
     PlaceholderRange,
@@ -202,6 +203,55 @@ def test_group_and_batch_mm_items_split_by_fieldset():
 
     res = group_and_batch_mm_items([item1, item2, item3, item4, item5])
     assert [num_items for num_items, _ in res] == [2, 1, 1, 1]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", ["stack", "concat", "padded_concat"])
+@pytest.mark.parametrize(
+    ("left_dtype", "right_dtype"),
+    [
+        (torch.float16, torch.float32),
+        (torch.float16, torch.bfloat16),
+        (torch.int32, torch.int64),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float16, torch.float16),
+        (torch.float32, torch.float32),
+    ],
+)
+def test_group_and_batch_mm_items_promotes_dtype(layout, left_dtype, right_dtype):
+    field = (
+        MultiModalBatchedField()
+        if layout == "stack"
+        else MultiModalFlatField(slices=[slice(None)])
+    )
+    width = 2 if layout == "padded_concat" else 1
+    left = torch.ones(1, width, dtype=left_dtype)
+    if (left_dtype, right_dtype) == (torch.float16, torch.bfloat16):
+        right = torch.tensor([[2.0**-25]], dtype=right_dtype)  # Rounds to zero in FP16.
+    elif (left_dtype, right_dtype) == (torch.int32, torch.int64):
+        right = torch.tensor([[2**31]], dtype=right_dtype)  # Outside the int32 range.
+    else:
+        # Just above a BF16 midpoint: an intermediate FP16 cast changes rounding.
+        right = torch.nextafter(torch.tensor([[1.00390625]]), torch.tensor(torch.inf))
+        right = right.to(right_dtype)
+    pin = torch.cuda.is_available()
+    for tensors in ([left, right], [right, left]):
+        items = [
+            MultiModalKwargsItem({"x": MultiModalFieldElem(data=t, field=field)})
+            for t in tensors
+        ]
+        [(count, data)] = group_and_batch_mm_items(items, pin_memory=pin)
+        if layout == "stack":
+            expected = torch.stack(tensors)
+        else:
+            expected = torch.cat(
+                [torch.nn.functional.pad(t, (0, width - t.size(1))) for t in tensors]
+            )
+        actual = data["x"]
+        assert count == 2 and isinstance(actual, torch.Tensor)
+        assert actual.is_pinned() == pin
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, check_dtype=False)
+        assert actual.dtype == expected.dtype
 
 
 def test_group_and_batch_mm_items_splits_shared_data_by_dtype():

@@ -493,6 +493,9 @@ pass a tensor of shape `(..., hidden_size of LM)` to the corresponding field of 
 The exact shape depends on the model being used.
 
 You must enable this feature via `enable_mm_embeds=True`.
+When embeddings with different dtypes are stacked or concatenated
+into one batch, the batch uses PyTorch's promoted dtype. Individual models may
+then cast the embeddings to their compute dtype.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
