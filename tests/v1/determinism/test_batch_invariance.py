@@ -716,7 +716,8 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 @skip_if_not_cuda_alike
 @pytest.mark.parametrize(
-    "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+    "backend",
+    ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN", "TRITON_ATTN"],
 )
 def test_decode_logprobs_match_prefill_logprobs(
     backend,

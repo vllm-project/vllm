@@ -149,6 +149,7 @@ def split_k_segment_layout(
     SLIDING_WINDOW: tl.constexpr,
     TILE_SIZE: tl.constexpr,
     WINDOW_SEGMENTS: tl.constexpr,
+    FIXED_SEGMENT_TILES: tl.constexpr = 0,
 ):
     """Split-K (3D) segment layout of one sequence.
 
@@ -157,18 +158,24 @@ def split_k_segment_layout(
     tiles_per_segment)` and segments `s >= num_active` have no tiles. The
     segments split the whole sequence, or with `WINDOW_SEGMENTS` only the
     sliding window of a single decode query at position `seq_len - 1` (as
-    pruned by `compute_tile_loop_bounds`). Shared by
+    pruned by `compute_tile_loop_bounds`), or with `FIXED_SEGMENT_TILES` they
+    sit at fixed KV positions (batch-invariant split-KV). Shared by
     `kernel_unified_attention` and `reduce_segments`, which must agree on
     the layout.
     """
-    if WINDOW_SEGMENTS:
-        base_tile = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
-        num_tiles = cdiv_fn(seq_len, TILE_SIZE) - base_tile
-    else:
+    if FIXED_SEGMENT_TILES > 0:
         base_tile = 0
-        num_tiles = cdiv_fn(seq_len, TILE_SIZE)
-    tiles_per_segment = cdiv_fn(num_tiles, NUM_SEGMENTS)
-    num_active = cdiv_fn(num_tiles, tiles_per_segment)
+        tiles_per_segment = FIXED_SEGMENT_TILES
+        num_active = cdiv_fn(cdiv_fn(seq_len, TILE_SIZE), FIXED_SEGMENT_TILES)
+    else:
+        if WINDOW_SEGMENTS:
+            base_tile = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
+            num_tiles = cdiv_fn(seq_len, TILE_SIZE) - base_tile
+        else:
+            base_tile = 0
+            num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+        tiles_per_segment = cdiv_fn(num_tiles, NUM_SEGMENTS)
+        num_active = cdiv_fn(num_tiles, tiles_per_segment)
     return base_tile, tiles_per_segment, num_active
 
 
@@ -516,3 +523,28 @@ def softmax_step(S, M, L):
     # update constants
     L_new = L * alpha + l_j
     return m_j, L_new, P, alpha
+
+
+@triton.jit
+def merge_softmax_state(M, L, acc, M_part, L_part, acc_part):
+    """Fold the softmax state of a later KV range (`M_part`, `L_part`,
+    `acc_part`) into the running state (`M`, `L`, `acc`).
+
+    Shapes: `[R]` for M and L, `[R, D]` for acc. Batch-invariant split-KV
+    folds its fixed KV segments left to right with this one helper, in the 2D
+    kernel and in `reduce_segments_in_order`, so a query row gets the same bits
+    whichever kernel ran it. A part with no visible key (`M_part == -inf`)
+    leaves the running state bit-for-bit unchanged.
+    """
+    M_new = tl.maximum(M, M_part)
+    alpha = tl.exp(M - M_new)
+    beta = tl.exp(M_part - M_new)
+    has_keys = M_part > float("-inf")
+    L = tl.where(has_keys, tl.fma(L_part, beta, L * alpha), L)
+    acc = tl.where(
+        has_keys[:, None],
+        tl.fma(acc_part, beta[:, None], acc * alpha[:, None]),
+        acc,
+    )
+    M = tl.where(has_keys, M_new, M)
+    return M, L, acc
