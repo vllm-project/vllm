@@ -281,10 +281,47 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 
-| Field                 | Type           | Description                                      |
-|-----------------------|----------------|--------------------------------------------------|
-| `reasoning_start_str` | `str \| null`  | String that marks the start of reasoning content |
-| `reasoning_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
+| Field                           | Type          | Description                                                                                                           |
+|---------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------|
+| `reasoning_start_str`           | `str \| null` | String that marks the start of reasoning content                                                                      |
+| `reasoning_end_str`             | `str \| null` | String that marks the end of reasoning content                                                                        |
+| `enable_implicit_reasoning_end` | `bool`        | Opt in to implicit ends for Model Runner V2 thinking budgets; defaults to `false`                                     |
+| `implicit_reasoning_end_strs`   | `list[str]`   | Additional implicit-end markers, merged with parser metadata and tokenized with the model tokenizer; defaults to `[]` |
+
+For Qwen models that enter a tool call without emitting `</think>`, enable
+`--reasoning-config '{"enable_implicit_reasoning_end": true}'` together with
+`--reasoning-parser qwen3`. The budget stops at the parser's implicit end
+(such as `<tool_call>`), preserving that token and subsequent tool arguments.
+The same boundary check applies to each speculative verification prefix;
+rejected draft tokens do not update the committed boundary cache.
+
+If a parser does not supply an implicit marker, configure it explicitly:
+
+```bash
+--reasoning-config '{"enable_implicit_reasoning_end": true, "implicit_reasoning_end_strs": ["<tool_call>"]}'
+```
+
+Manual strings are encoded with `add_special_tokens=False`; duplicate sequences
+are removed after merging with parser metadata. Single-token and multi-token
+markers are supported, including sequences crossing decode steps or the
+committed/draft boundary. Only a complete marker ends reasoning. If a marker
+of length `L` started before exhaustion, its matching prefix can defer forcing
+by at most `L - 1` additional tokens. The deadline stays anchored to the original
+budget boundary: repeated prefixes cannot renew it, and a diverged prefix
+immediately loses protection. The extension still counts toward `max_tokens`.
+An empty marker is invalid.
+When the flag is false, both manual markers and parser implicit ends are ignored.
+
+With implicit markers enabled, an end sequence that started at or after budget
+exhaustion takes priority until complete, even if it contains natural or implicit
+end markers. A completed forced sequence stops enforcement; overlapping suffixes
+cannot restart it. This is derived from committed history and each verification
+row's conditional draft prefix, without persisting speculative force progress.
+
+This option changes budget tracking; the serving parser must still understand
+the model's output format. It does not change EOS or thinking re-entry policies,
+or add text to the forced reasoning end. Multi-token explicit end sequences
+retain their existing behavior. Model Runner V2 is required.
 
 !!! note
     `reasoning_end_str` can include a transition phrase before the reasoning end token. For example, setting `reasoning_end_str` to `"I have to give the solution based on the reasoning directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
