@@ -421,6 +421,12 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
         num_accepted_tokens.fill_(accepted_tokens)
         if query_lengths[-1] == 0:
             num_accepted_tokens[-1] = 1
+        # Fused MTP carries FP32 state within the window. Select the input
+        # state here so the reference can use the unrounded recurrent path.
+        accepted_indices = num_accepted_tokens.long() - 1
+        source_slots = state_indices.gather(1, accepted_indices[:, None])
+        first_slots = state_indices[:, 0]
+        state_ref[first_slots.long()] = state_ref[source_slots[:, 0].long()]
         raw_ref, _ = fused_sigmoid_gating_delta_rule_update(
             A_log=A_log,
             a=a,
@@ -433,7 +439,6 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
             inplace_final_state=True,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=state_indices,
-            num_accepted_tokens=num_accepted_tokens,
             scale=scale,
             use_qk_l2norm_in_kernel=True,
         )

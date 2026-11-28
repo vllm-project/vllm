@@ -105,6 +105,75 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     )
 
 
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("width", [2, 3, 7])
+def test_gdn_spec_window_matches_single_token_steps(
+    state_dtype: torch.dtype, width: int
+) -> None:
+    """Verification must carry the same state as a cache reload at each step."""
+    set_random_seed(907)
+    num_reqs, num_k_heads, num_v_heads, head_dim = 4, 2, 16, 128
+    options = {"device": DEVICE, "dtype": torch.bfloat16}
+    q = torch.randn(num_reqs, width + 1, num_k_heads, head_dim, **options)
+    k = torch.randn_like(q)
+    v = torch.randn(num_reqs, width + 1, num_v_heads, head_dim, **options)
+    a = torch.randn(num_reqs, width + 1, num_v_heads, **options)
+    b = torch.randn_like(a)
+    initial = (
+        torch.randn(
+            num_reqs, num_v_heads, head_dim, head_dim, device=DEVICE, dtype=state_dtype
+        )
+        * 0.05
+    )
+    A_log = torch.randn(num_v_heads, device=DEVICE) * 0.2
+    dt_bias = torch.randn_like(A_log) * 0.2
+    first_token = torch.ones(num_reqs, dtype=torch.int32, device=DEVICE)
+
+    def verify(start: int, length: int, initial_state: torch.Tensor):
+        tokens = slice(start, start + length)
+        total = num_reqs * length
+        slots = torch.arange(1, total + 1, device=DEVICE, dtype=torch.int32)
+        slots = slots.view(num_reqs, length)
+        state = initial_state.new_zeros(total + 1, num_v_heads, head_dim, head_dim)
+        state[slots[:, 0].long()] = initial_state
+        out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a[:, tokens].flatten(0, 1),
+            b=b[:, tokens].flatten(0, 1),
+            dt_bias=dt_bias,
+            q=q[:, tokens].flatten(0, 1).unsqueeze(0),
+            k=k[:, tokens].flatten(0, 1).unsqueeze(0),
+            v=v[:, tokens].flatten(0, 1).unsqueeze(0),
+            initial_state=state,
+            cu_seqlens=torch.arange(
+                0, total + 1, length, device=DEVICE, dtype=torch.int32
+            ),
+            ssm_state_indices=slots,
+            num_accepted_tokens=first_token,
+            use_qk_l2norm_in_kernel=True,
+        )
+        return out.view(num_reqs, length, num_v_heads, head_dim), state[slots.long()]
+
+    out, states = verify(0, width, initial)
+    serial_out, serial_states = [], []
+    carry = initial
+    for step in range(width):
+        step_out, step_state = verify(step, 1, carry)
+        serial_out.append(step_out)
+        serial_states.append(step_state)
+        carry = step_state[:, 0]
+
+    expected_states = torch.cat(serial_states, dim=1)
+    torch.testing.assert_close(out, torch.cat(serial_out, dim=1), atol=0, rtol=0)
+    torch.testing.assert_close(states, expected_states, atol=0, rtol=0)
+
+    rows = torch.arange(num_reqs, device=DEVICE)
+    accepted = (rows + 1) % width
+    next_out, _ = verify(width, 1, states[rows, accepted])
+    expected_next_out, _ = verify(width, 1, expected_states[rows, accepted])
+    torch.testing.assert_close(next_out, expected_next_out, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
 @pytest.mark.parametrize("num_k_heads", [16])

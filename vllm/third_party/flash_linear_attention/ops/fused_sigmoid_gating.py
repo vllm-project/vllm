@@ -12,6 +12,32 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+@triton.jit
+def l2norm_qk(q, k):
+    q_sq = tl.sum(q * q) + 1e-6
+    k_sq = tl.sum(k * k) + 1e-6
+    return q / tl.sqrt(q_sq), k / tl.sqrt(k_sq)
+
+
+@triton.jit
+def sigmoid_gating(a, b, A_log, dt_bias, beta, threshold):
+    x = a + dt_bias
+    softplus_x = tl.where(
+        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+    )
+    return -tl.exp(A_log) * softplus_x, tl.sigmoid(b)
+
+
+@triton.jit
+def recurrent_step(h, q, k, v, decay, beta):
+    h *= decay
+    v -= tl.sum(h * k[None, :], 1)
+    v *= beta
+    h += v[:, None] * k[None, :]
+    out = tl.sum(h * q[None, :], 1)
+    return h, out
+
+
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
@@ -126,34 +152,27 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         b_b = tl.load(p_b).to(tl.float32)
 
-        # If the model is loaded in fp16, without the .float() here, A might be -inf
-        x = tl.load(p_a).to(tl.float32) + tl.load(p_dt_bias).to(tl.float32)
-        softplus_x = tl.where(
-            beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+        b_g, b_beta = sigmoid_gating(
+            tl.load(p_a).to(tl.float32),
+            b_b,
+            tl.load(p_A_log).to(tl.float32),
+            tl.load(p_dt_bias).to(tl.float32),
+            beta,
+            threshold,
         )
-        b_g = -tl.exp(tl.load(p_A_log).to(tl.float32)) * softplus_x
-
-        # compute beta_output = sigmoid(b)
-        b_beta = tl.sigmoid(b_b.to(tl.float32))
         if BETA_SCALE != 1.0:
             b_beta *= BETA_SCALE
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
+            # Packed decode only supports unscaled beta.
+            if BETA_SCALE == 1.0:
+                b_q, b_k = l2norm_qk(b_q, b_k)
+            else:
+                b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
+                b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BV, BK]
-        if not IS_KDA:
-            b_h *= tl.exp(b_g)
-        else:
-            b_h *= tl.exp(b_g[None, :])
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[None, :], 1)
-        b_v *= b_beta
-        # [BV, BK]
-        b_h += b_v[:, None] * b_k[None, :]
-        # [BV]
-        b_o = tl.sum(b_h * b_q[None, :], 1)
+        decay = tl.exp(b_g[None, :] if IS_KDA else b_g)
+        b_h, b_o = recurrent_step(b_h, b_q, b_k, b_v, decay, b_beta)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
@@ -171,6 +190,17 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             p_ht = ht + (bos + i_t) * stride_final_state_token
             p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+        if (
+            IS_SPEC_DECODING
+            and INPLACE_FINAL_STATE
+            and USE_INITIAL_STATE
+            and not IS_KDA
+            and BETA_SCALE == 1.0
+            and h0.dtype.element_ty == tl.bfloat16
+        ):
+            # Match the state reloaded by the next single-token decode step.
+            b_h = b_h.to(h0.dtype.element_ty).to(tl.float32)
 
         # Update pointers for next timestep
         p_q += H * K
