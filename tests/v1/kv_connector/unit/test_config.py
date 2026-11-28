@@ -251,3 +251,24 @@ def test_nixl_connector_transfer_mode(mode, expected):
             KVConnectorFactory.get_connector_class(ktc)
     else:
         assert KVConnectorFactory.get_connector_class(ktc).__name__ == expected
+
+
+@pytest.mark.parametrize(
+    "kv_role,extra_config,expected",
+    [
+        ("kv_consumer", {}, True),
+        ("kv_both", {}, True),
+        ("kv_producer", {}, False),
+        ("kv_producer", {"bidirectional_kv_xfer": True}, True),
+    ],
+)
+def test_receives_kv(kv_role, extra_config, expected):
+    """Consumers, and producers that bidirectional transfers pull into, receive
+    KV: the scheduler defers their block frees and the runner fences the
+    drafter on them."""
+    config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role=kv_role,
+        kv_connector_extra_config=extra_config,
+    )
+    assert config.receives_kv is expected

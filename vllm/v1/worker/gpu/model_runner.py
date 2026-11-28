@@ -326,6 +326,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.use_aux_hidden_state_outputs = (
                 self.speculative_config.uses_aux_hidden_states
             )
+        # When a connector receives KV, the scheduler returns a request's blocks
+        # once it has this step's output and a load may refill them off this
+        # stream: the output must then also wait for the drafter's KV writes.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self._fence_drafter = self.speculator is not None and (
+            kv_transfer_config is not None and kv_transfer_config.receives_kv
+        )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -2471,6 +2478,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Drafts aren't used when none were proposed this step (e.g. skip_drafts).
             if self.pp_handler is not None and num_spec_tokens > 0:
                 self.pp_handler.broadcast_drafts(draft_tokens)
+
+        if self._fence_drafter:
+            async_output.drafter_done = torch.Event(blocking=True)
+            async_output.drafter_done.record(self.main_stream)
 
         if defer_kv_finalize:
             self.kv_connector.finalize_step()

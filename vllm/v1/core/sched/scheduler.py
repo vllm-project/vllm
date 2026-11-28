@@ -205,11 +205,11 @@ class Scheduler(SchedulerInterface):
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
             # With overlapping batches (async scheduling or PP), a step may
-            # still be writing a freed request's KV blocks. A consumer KV
-            # Connector can reallocate and fill those blocks via a load that
+            # still be writing a freed request's KV blocks. A connector that
+            # receives KV can reallocate and fill those blocks via a load that
             # isn't ordered against that write, so defer freeing them.
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
-            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
+            if multiple_inflight_batches and kv_transfer_config.receives_kv:
                 self.defer_block_free = True
             # HiSparse keeps reading a released page until the pool reuses it,
             # so a load into a reused page must also wait for in-flight steps.

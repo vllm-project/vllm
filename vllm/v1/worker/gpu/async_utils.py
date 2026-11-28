@@ -138,6 +138,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.num_verified_tokens_per_req = num_verified_tokens_per_req
         # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
         self.copy_event = torch.Event(blocking=True)
+        # Set when the scheduler must not see this output before the drafter's
+        # KV writes complete (see GPUModelRunner._fence_drafter).
+        self.drafter_done: torch.Event | None = None
         self._has_fault: torch.Tensor | None = None
         self._has_fault_gpu: torch.Tensor | None = None
         if check_ep_fault:
@@ -191,6 +194,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.drafter_done is not None:
+            self.drafter_done.synchronize()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
