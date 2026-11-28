@@ -62,6 +62,14 @@ def _extract_tokens_and_logprobs(
     return tokens, token_logprobs
 
 
+def _top_logprobs(choice: dict[str, Any], k: int) -> list[dict[str, float]]:
+    lp = choice["logprobs"]
+    steps = lp.get("top_logprobs")
+    assert steps is not None and len(steps) == len(lp["token_logprobs"])
+    assert all(step and len(step) >= k for step in steps)
+    return steps
+
+
 def _compare_bs1_vs_bsn_single_process(
     prompts: list[str],
     sp_kwargs: dict[str, Any],
@@ -71,6 +79,7 @@ def _compare_bs1_vs_bsn_single_process(
     # BS=1
     bs1_tokens_per_prompt: list[list[Any]] = []
     bs1_logprobs_per_prompt: list[list[float] | None] = []
+    bs1_top_logprobs: list[list[dict[str, float]]] = []
     for p in prompts:
         resp = _request_completion(client, model_name, p, sp_kwargs)
         if resp is None or not resp.get("choices"):
@@ -83,6 +92,7 @@ def _compare_bs1_vs_bsn_single_process(
             )
         bs1_tokens_per_prompt.append(list(toks))
         bs1_logprobs_per_prompt.append(list(lps))
+        bs1_top_logprobs.append(_top_logprobs(choice, sp_kwargs["logprobs"]))
 
     # BS=N
     bsN_tokens_per_prompt: list[list[Any]] = [None] * len(prompts)  # type: ignore[list-item]
@@ -101,6 +111,10 @@ def _compare_bs1_vs_bsn_single_process(
             raise AssertionError(f"BS=N missing logprobs for prompt {idx}")
         bsN_tokens_per_prompt[idx] = list(toks)
         bsN_logprobs_per_prompt[idx] = list(lps)
+        top_logprobs = _top_logprobs(choice, sp_kwargs["logprobs"])
+        assert top_logprobs == bs1_top_logprobs[idx], (
+            f"Prompt {idx}: top logprobs differ"
+        )
 
     # compare
     for i, (tokens_bs1, tokens_bsN, logprobs_bs1, logprobs_bsN) in enumerate(
@@ -147,6 +161,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         "max_tokens": 8,
         "seed": 42,
         "logprobs": 5,
+        "extra_body": {"return_tokens_as_token_ids": True},
     }
 
     tp_size = os.getenv("VLLM_TP_SIZE", "1")
