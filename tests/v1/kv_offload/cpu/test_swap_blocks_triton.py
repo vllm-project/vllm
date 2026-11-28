@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.kv_offload.cpu import swap_blocks_triton
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import swap_blocks_batch
 
 
@@ -29,3 +30,17 @@ def test_triton_swap_copies_source_bytes():
 
     for s, t in zip(src, dst):
         assert torch.equal(t, s)  # kernel copied the source bytes verbatim
+
+
+def test_batches_below_min_n_use_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        swap_blocks_triton.ops,
+        "swap_blocks_batch",
+        lambda *args, **kwargs: calls.append(args[0].numel()),
+    )
+    addrs = torch.zeros(48, dtype=torch.int64)
+
+    swap_blocks_batch(addrs, addrs, addrs, bytes_per_chunk=8192, min_n=64)
+
+    assert calls == [48]

@@ -53,11 +53,12 @@ def swap_blocks_batch(
     is_src_access_order_any: bool = False,
     *,
     bytes_per_chunk: int,
+    min_n: int = MIN_N,
 ) -> None:
     """Triton implementation of `swap_blocks_batch` for small CPU->GPU batches."""
     n = src_addrs.numel()
     # Too few descriptors to amortize Triton's launch cost.
-    if n < MIN_N:
+    if n < min_n:
         ops.swap_blocks_batch(
             src_addrs,
             dst_addrs,
