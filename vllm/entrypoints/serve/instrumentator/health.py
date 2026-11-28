@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.launchers.launcher import terminate_if_errored
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 
@@ -32,6 +33,9 @@ async def health(raw_request: Request) -> Response:
         await client.check_health()
         return Response(status_code=200)
     except EngineDeadError:
+        # Latch the fatal cause before a supervisor can follow the 503 with
+        # SIGTERM and accidentally turn the process exit into a graceful one.
+        terminate_if_errored(raw_request.app.state.server, client)
         return Response(status_code=503)
 
 
