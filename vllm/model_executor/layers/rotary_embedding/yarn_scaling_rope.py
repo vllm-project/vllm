@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import torch
 
 from .base import RotaryEmbedding
@@ -29,8 +31,10 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         mscale_all_dim: float | None = None,
         attention_factor: float | None = None,
         truncate: bool = True,
+        max_position: int | None = None,
     ) -> None:
         self.scaling_factor = scaling_factor
+        self.max_position = max_position
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
@@ -75,9 +79,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor, dtype=torch.float32
-        )
+        num_positions = math.ceil(self.max_position_embeddings * self.scaling_factor)
+        num_positions = max(num_positions, getattr(self, "max_position", None) or 0)
+        t = torch.arange(num_positions, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos() * self.mscale
         sin = freqs.sin() * self.mscale
