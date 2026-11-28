@@ -53,8 +53,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     compute_layer_kv_cache_shape_bytes,
 )
+from vllm.v1.request import RequestStatus
 
-from ..utils import create_request, create_scheduler
+from ..utils import create_model_runner_output, create_request, create_scheduler
 
 
 def _find_free_port() -> int:
@@ -530,6 +531,46 @@ def test_read_mode_loads_remote_block_ids():
         ],
     ):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
+
+
+@pytest.mark.parametrize(
+    ("use_eos", "status"),
+    [
+        (False, RequestStatus.FINISHED_LENGTH_CAPPED),
+        (True, RequestStatus.FINISHED_STOPPED),
+    ],
+)
+def test_read_mode_prefill_exports_blocks_when_first_token_is_eos(use_eos, status):
+    """The max_tokens=1 prefill leg ends FINISHED_STOPPED if it samples EOS.
+
+    Decode must still get the remote block ids, and the prefill blocks must stay
+    allocated until decode reads them.
+    """
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=2 * block_size,
+        do_remote_decode=True,
+    )
+    request = _setup_kv_transfer_request(request)
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request], use_eos=use_eos)
+    )
+
+    assert request.status == status
+    kv_transfer_params = engine_core_outputs[0].outputs[0].kv_transfer_params
+    assert kv_transfer_params is not None
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks[request.request_id]
+    assert kv_transfer_params["remote_block_ids"] == [[b.block_id for b in blocks]]
+    assert all(block.ref_cnt == 1 for block in blocks)
 
 
 @pytest.mark.parametrize(
