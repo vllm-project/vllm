@@ -129,9 +129,7 @@ class PoolingOutput:
         return f"PoolingOutput(data={self.data})"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, self.__class__) and bool(
-            (self.data == other.data).all()
-        )
+        return isinstance(other, self.__class__) and torch.equal(self.data, other.data)
 
 
 class RequestOutput:
