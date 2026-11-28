@@ -299,7 +299,7 @@ def test_glimmer_engine_rejects_video_above_profiled_tokens(vllm_runner) -> None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_glimmer_engine_admits_video_with_more_smaller_groups(vllm_runner) -> None:
+def test_glimmer_engine_short_context_video(vllm_runner) -> None:
     arch = "MuseGlimmerForConditionalGeneration"
     model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
     model_info.check_available_online(on_fail="skip")

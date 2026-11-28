@@ -694,7 +694,7 @@ def test_video_budget_uses_smaller_video_processor_limit(
         ({"num_frames": 16}, 16, 6144),
     ],
 )
-def test_video_hints_keep_budget_of_smaller_video_processor_limit(
+def test_video_hints_keep_split_budget(
     monkeypatch: pytest.MonkeyPatch,
     video_options: dict[str, int],
     num_frames: int,
@@ -717,6 +717,39 @@ def test_video_hints_keep_budget_of_smaller_video_processor_limit(
     assert _count_video_tokens(video) <= encoder_cache_size
     assert _count_video_tokens(dummy) == dummy_tokens
     assert _count_video_tokens(dummy) <= max_video_tokens
+
+
+def test_size_hints_keep_scoped_budget() -> None:
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs={
+            "videos_kwargs": {
+                "size": {"shortest_edge": 3136, "longest_edge": 768 * 28 * 28}
+            }
+        },
+        model_config_kwargs={"max_model_len": 1500},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {"count": 1, "width": 896, "height": 672},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    max_tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=1500, mm_counts={"video": 1}
+    )
+    assert max_tokens is not None
+    _, encoder_cache_size = compute_mm_encoder_budget(
+        SchedulerConfig(
+            max_model_len=1500,
+            max_num_batched_tokens=1024,
+            is_encoder_decoder=False,
+        ),
+        {"video": max_tokens["video"]},
+    )
+    video = _process_video(processor, 4, 840, 672)
+
+    assert len(video["prompt_token_ids"]) <= 1500
+    assert _count_video_tokens(video) <= encoder_cache_size
 
 
 def test_dummy_video_frames_follow_larger_video_processor_limit(

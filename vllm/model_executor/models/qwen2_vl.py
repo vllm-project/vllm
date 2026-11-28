@@ -1132,6 +1132,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def _get_video_size_with_most_features(self) -> ImageSize:
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        if (
+            video_options
+            and (video_options.width or video_options.height)
+            and dict(self._get_video_default_size())
+            == dict(self.get_image_processor().size)
+        ):
+            return self.get_image_size_with_most_features()
         merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
         size = self._get_vision_size(
             merged_mm_kwargs.get("videos_kwargs", {}),
@@ -1256,39 +1264,22 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             )
             if use_hints and video_options and video_options.num_frames:
                 max_frames = min(max_frames, video_options.num_frames)
-            video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
-            best = (max_size, max_size_frames)
-            best_tokens = num_tokens(*best)
-            for num_steps in range(1, cdiv(max_frames, temporal_patch_size) + 1):
-                step_tokens = min(video_tokens // num_steps, max_step_tokens)
-                if step_tokens < min_step_tokens:
-                    break
-                size = self.get_image_size_with_most_features(
-                    max_pixels=step_tokens * unit * unit
-                )
-                num_frames = num_steps * temporal_patch_size
-                tokens = num_tokens(size, num_frames)
-                if best_tokens < tokens <= video_tokens:
-                    best, best_tokens = (size, num_frames), tokens
-            return best
 
         video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
-        num_steps = min(
-            cdiv(video_tokens, max_step_tokens),
-            cdiv(max_frames, temporal_patch_size),
-            video_tokens // min_step_tokens,
-        )
-        if num_steps > 1:
+        best = (max_size, max_size_frames)
+        best_tokens = num_tokens(*best)
+        for num_steps in range(1, cdiv(max_frames, temporal_patch_size) + 1):
             step_tokens = min(video_tokens // num_steps, max_step_tokens)
+            if step_tokens < min_step_tokens:
+                break
             size = self.get_image_size_with_most_features(
                 max_pixels=step_tokens * unit * unit
             )
             num_frames = num_steps * temporal_patch_size
             tokens = num_tokens(size, num_frames)
-            if num_tokens(max_size, max_size_frames) < tokens <= video_tokens:
-                return size, num_frames
-
-        return max_size, max_size_frames
+            if best_tokens < tokens <= video_tokens:
+                best, best_tokens = (size, num_frames), tokens
+        return best
 
     def get_max_video_tokens(
         self,

@@ -190,9 +190,7 @@ def test_frame_hint_shrinks_dummy_but_not_limit():
 
 
 @pytest.mark.parametrize(("num_frames", "dummy_tokens"), [(None, 2048), (6, 1728)])
-def test_short_context_admits_more_groups_with_fewer_tokens(
-    num_frames: int | None, dummy_tokens: int
-):
+def test_short_context_video_limit(num_frames: int | None, dummy_tokens: int):
     ctx = build_model_context(
         MODEL_ID,
         mm_processor_kwargs={"max_video_frame_tokens": 576},
