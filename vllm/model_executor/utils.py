@@ -274,6 +274,18 @@ def replace_parameter(
     setattr(layer, param_name, new_param)
 
 
+def register_or_replace_parameter(
+    layer: torch.nn.Module, name: str, param: torch.nn.Parameter
+) -> None:
+    """`replace_parameter`, except that a parameter not registered yet is
+    registered as `param` itself rather than as a plain `Parameter`, keeping
+    its class: kernels such as Marlin and Conch require vLLM parameter types."""
+    if getattr(layer, name, None) is None:
+        layer.register_parameter(name, param)
+    else:
+        replace_parameter(layer, name, param)
+
+
 @overload
 def refill_derived(obj: object, name: str, new: None) -> None: ...
 

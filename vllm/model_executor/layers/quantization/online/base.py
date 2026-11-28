@@ -50,6 +50,8 @@ from vllm.model_executor.layers.quantization.online.int4 import (
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
+    Int8PerChannelLMHeadMethod,
+    Int8PerGroup32LMHeadMethod,
 )
 from vllm.model_executor.layers.quantization.online.lm_head import (
     OnlineLMHeadMethodBase,
@@ -88,6 +90,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt4Static32Asym,
+    kInt8Static32Sym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Static,
@@ -117,6 +120,8 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kNvfp4Static: Nvfp4WeightOnlyOnlineLinearMethod,
     # lm_head only (`OnlineLMHeadMethodBase`).
     kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
+    kInt8StaticChannelSym: Int8PerChannelLMHeadMethod,
+    kInt8Static32Sym: Int8PerGroup32LMHeadMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
@@ -400,7 +405,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
             raise NotImplementedError(
                 f"{prefix}: {quant_method_cls.__name__} does not support the "
                 "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
-                "with `activation: null`) or `int4_per_group_32_asym`."
+                "with `activation: null`), `int4_per_group_32_asym`, "
+                "`int8_per_channel_static` or `int8_per_group_32`."
             )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(

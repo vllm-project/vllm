@@ -19,16 +19,27 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     kInt8DynamicTokenSym,
+    kInt8Static32Sym,
     kInt8StaticChannelSym,
+    pack_quantized_values_into_int32,
     weight_amax,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.scalar_type import scalar_types
+
+# -128 is left unused so the code range is symmetric around 0.
+_INT8_MAX = 127
+# Codes pack 4 input channels per int32 word.
+_PACK_FACTOR = 4
 
 
 class Int8OnlineMoEMethod(OnlineMoEMethodBase):
@@ -142,3 +153,75 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             per_out_ch_quant=True,
             layer=layer,
         )
+
+
+def quantize_int8_per_group_sym(
+    weight: torch.Tensor, group_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric int8 quantization of the rows of `weight` [N, K].
+
+    Returns the codes [N, K] int8 and the scales [N, K // group_size] in the
+    weight dtype ([N, 1] for `group_size` -1, one scale per output channel),
+    such that `codes * scale` approximates `weight`.
+    """
+    n, k = weight.shape
+    groups = weight.float().view(n, -1, k if group_size == -1 else group_size)
+    # Round against the stored scale, so the codes match what the kernel
+    # dequantizes.
+    scale = (
+        (groups.abs().amax(dim=-1) / _INT8_MAX)
+        .clamp(min=torch.finfo(weight.dtype).tiny)
+        .to(weight.dtype)
+    )
+    codes = (groups / scale.float().unsqueeze(-1)).round().clamp(-_INT8_MAX, _INT8_MAX)
+    return codes.to(torch.int8).view(n, k), scale
+
+
+@torch.no_grad()
+def quantize_int8_to_mp_layout(
+    weight: torch.Tensor, group_size: int, chunk_rows: int = 8192
+) -> tuple[torch.Tensor, torch.Tensor, None]:
+    """Quantize `weight` [N, K] into the `MPLinearKernel` `uint8b128` layout.
+
+    Returns the codes offset by 128 and packed along K (int32 [N, K // 4]),
+    the scales from `quantize_int8_per_group_sym` and no zero points, the
+    layout of compressed-tensors symmetric W8A16 checkpoints. Rows are
+    processed in chunks to bound the fp32 working set.
+    """
+    n, k = weight.shape
+    num_groups = 1 if group_size == -1 else k // group_size
+    packed = torch.empty(n, k // _PACK_FACTOR, dtype=torch.int32, device=weight.device)
+    scales = torch.empty(n, num_groups, dtype=weight.dtype, device=weight.device)
+    for start in range(0, n, chunk_rows):
+        rows = slice(start, start + chunk_rows)
+        codes, scales[rows] = quantize_int8_per_group_sym(weight[rows], group_size)
+        packed[rows] = pack_quantized_values_into_int32(
+            codes.to(torch.int32) + scalar_types.uint8b128.bias,
+            scalar_types.uint8b128,
+            packed_dim=1,
+        )
+    return packed, scales, None
+
+
+class Int8PerChannelLMHeadMethod(OnlineLMHeadMethodBase):
+    """Weight-only symmetric int8 lm_head, one scale per output channel."""
+
+    scheme = "int8_per_channel_static"
+    weight_quant_key = kInt8StaticChannelSym
+    activation_quant_key = None
+    weight_type = scalar_types.uint8b128
+    group_size = -1
+    zero_points = False
+    k_align = _PACK_FACTOR
+
+    def quantize(self, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
+        return quantize_int8_to_mp_layout(weight, self.group_size)
+
+
+class Int8PerGroup32LMHeadMethod(Int8PerChannelLMHeadMethod):
+    """Weight-only symmetric int8 lm_head, one scale per 32 input channels."""
+
+    scheme = "int8_per_group_32"
+    weight_quant_key = kInt8Static32Sym
+    group_size = 32
+    k_align = group_size

@@ -1681,11 +1681,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
     "csrc/rocm/skinny_gemms_wvsplitkq.cu")
 
-  # The int4 skinny GEMM is instantiated one unit per N_in (a template over
-  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
-  # build spends its entire length compiling that single file.
-  # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
-  # with extern template keeping the device code in the per-N_in units.
+  # The int4 and int8 skinny GEMMs are instantiated one unit per N_in (a
+  # template over N_in, see skinny_gemms_int{4,8}.h): with the whole op in one
+  # unit the 9-arch build spends its entire length compiling that single file.
+  # skinny_gemms_int{4,8}_api.cu keep the public entry points and dispatch on
+  # N_in, with extern template keeping the device code in the per-N_in units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"
@@ -1696,8 +1696,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_int4_n6.cu"
     "csrc/rocm/skinny_gemms_int4_n7.cu"
     "csrc/rocm/skinny_gemms_int4_n8.cu")
-  # Both families are built into _rocm_C_skinny below.
-  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
+  set(VLLM_SKINNY_INT8_SRC
+    "csrc/rocm/skinny_gemms_int8_api.cu"
+    "csrc/rocm/skinny_gemms_int8_n1.cu"
+    "csrc/rocm/skinny_gemms_int8_n2.cu"
+    "csrc/rocm/skinny_gemms_int8_n3.cu"
+    "csrc/rocm/skinny_gemms_int8_n4.cu"
+    "csrc/rocm/skinny_gemms_int8_n5.cu")
+  # All families are built into _rocm_C_skinny below.
+  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC} ${VLLM_SKINNY_INT8_SRC})
 
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a

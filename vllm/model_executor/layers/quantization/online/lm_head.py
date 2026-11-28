@@ -35,11 +35,27 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.parameter import (
+    BasevLLMParameter,
+    ChannelQuantScaleParameter,
+    GroupQuantScaleParameter,
+    PackedvLLMParameter,
+)
+from vllm.model_executor.utils import (
+    register_or_replace_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
+
+
+def _quantized_at_load(param: Parameter, loaded_weight: torch.Tensor) -> None:
+    raise RuntimeError(
+        "This lm_head parameter is quantized at load time; a checkpoint cannot load it."
+    )
 
 
 class OnlineLMHeadMethodBase(OnlineLinearBase):
@@ -155,16 +171,23 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
         weight = self.get_weight_for_quantization(layer)
         n, k = weight.shape
         packed, scales, zero_points = self.quantize(weight)
-        set_weight_attrs(packed, {"packed_dim": 1})
-        set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0})
+        pack_factor = 32 // self.weight_type.size_bits
         if tied:
             # `weight` is the input embeddings' parameter, which they keep: the
             # head drops it, since kernels may re-register their packed weight
             # under that name.
             del layer.weight
-            w_q = Parameter(packed, requires_grad=False)
-            set_weight_attrs(w_q, {"input_dim": 1, "output_dim": 0, "packed_dim": 1})
-            layer.register_parameter("weight", w_q)
+            layer.register_parameter(
+                "weight",
+                PackedvLLMParameter(
+                    data=packed,
+                    input_dim=1,
+                    output_dim=0,
+                    packed_dim=1,
+                    packed_factor=pack_factor,
+                    weight_loader=_quantized_at_load,
+                ),
+            )
             added = packed.nbytes + scales.nbytes
             if zero_points is not None:
                 added += zero_points.nbytes
@@ -178,16 +201,36 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
             )
         else:
             # The loaded parameter already reports input_dim=1, output_dim=0.
+            set_weight_attrs(packed, {"packed_dim": 1})
             replace_parameter(layer, "weight", packed)
         w_q_name = "weight"
-        replace_parameter(layer, "weight_scale", scales)
+        if self.group_size == -1:
+            scale_param: BasevLLMParameter = ChannelQuantScaleParameter(
+                data=scales, output_dim=0, weight_loader=_quantized_at_load
+            )
+        else:
+            scale_param = GroupQuantScaleParameter(
+                data=scales,
+                input_dim=1,
+                output_dim=0,
+                weight_loader=_quantized_at_load,
+            )
+        register_or_replace_parameter(layer, "weight_scale", scale_param)
         w_zp_name = None
         if zero_points is not None:
-            set_weight_attrs(
-                zero_points, {"input_dim": 1, "output_dim": 0, "packed_dim": 0}
-            )
             w_zp_name = "weight_zero_point"
-            replace_parameter(layer, w_zp_name, zero_points)
+            register_or_replace_parameter(
+                layer,
+                w_zp_name,
+                PackedvLLMParameter(
+                    data=zero_points,
+                    input_dim=1,
+                    output_dim=0,
+                    packed_dim=0,
+                    packed_factor=pack_factor,
+                    weight_loader=_quantized_at_load,
+                ),
+            )
 
         self.kernel = self.kernel_cls(
             self.mp_config,
