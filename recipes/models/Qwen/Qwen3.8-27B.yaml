@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-15
+  date_updated: 2026-11-20
   tasks:
     - multimodal
     - text
@@ -30,6 +30,8 @@ meta:
     dgx_spark_gb10: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
+    mi300x: verified
+    mi325x: verified
 
 model:
   model_id: "Qwen/Qwen3.8-27B"
@@ -48,8 +50,8 @@ model:
   default_frontend: rust
   # NVIDIA only. The rocm tag with the same name is an AMD build of the 2.4T *text* model
   # (no `ai.vllm.build.commit` label) and has never been exercised on the 27B; naming it
-  # here would imply a tested AMD path that does not exist. Non-NVIDIA hardware falls back
-  # to the generic nightly image.
+  # here would imply a tested AMD path that does not exist. AMD falls back to
+  # `vllm-openai-rocm:latest`; only the MI300X/MI325X FP8 overrides pin `:nightly`.
   docker_image: "vllm/vllm-openai:qwen38"
   architecture: dense
   parameter_count: "27B"
@@ -185,6 +187,17 @@ variants:
     vram_minimum_gb: 38
     description: "Official block-scaled FP8 checkpoint — 28.7 GiB: 1 GPU."
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi355x, rtx_5090, rtx_5090_2x]
+    hardware_overrides:
+      mi300x: &gfx942_fp8
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_args:
+          - "--attention-backend"
+          - "ROCM_AITER_FA"
+          - "--kv-cache-dtype"
+          - "fp8"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+      mi325x: *gfx942_fp8
   nvfp4:
     model_id: "Inferact/Qwen3.8-27B-NVFP4"
     precision: nvfp4
@@ -285,6 +298,13 @@ hardware_overrides:
       - "--enforce-eager"
 
 strategy_overrides: {}
+
+notes:
+  - title: "MI300X and MI325X were verified with FP8"
+    when: { hardware: [mi300x, mi325x], variants: [default] }
+    body: |
+      The verified runs on MI300X and MI325X used the FP8 checkpoint at TP1. This BF16
+      command has not been run on either GPU.
 
 guide: |
   ## Overview
@@ -410,6 +430,30 @@ guide: |
   Validated on 4x Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
   official vLLM XPU image `vllm/vllm-openai-xpu:latest`. `--enforce-eager` is required on this
   backend. Select Arc Pro B60/B70 in the hardware picker above for the exact command.
+
+  ### AMD MI300X and MI325X
+
+  Verified on one MI300X and one MI325X at TP1 with the FP8 checkpoint and
+  `vllm/vllm-openai-rocm:nightly` (`nightly-7c3a9302`). BF16 and TP > 1 were not run on these GPUs.
+
+  GSM8K 0.951 (MI300X) and 0.952 (MI325X); RULER `niah_single_2` at 128K 1.00 on both.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_USE_RUST_FRONTEND=1 \
+    vllm/vllm-openai-rocm:nightly Qwen/Qwen3.8-27B-FP8 \
+    --attention-backend ROCM_AITER_FA \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --mm-encoder-tp-mode data
+  ```
 
   <!-- overlay:vllm-ascend:ascend -->
   
