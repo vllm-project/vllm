@@ -26,6 +26,7 @@ from vllm.compilation.cudagraph_pool import (
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import (
+    CompilationConfig,
     CUDAGraphMode,
     decode_cudagraph_capture_max_tokens,
     decode_cudagraph_capture_shapes,
@@ -148,6 +149,15 @@ def has_compiled_submodule(model: nn.Module) -> bool:
         isinstance(m, TorchCompileWithNoGuardsWrapper)
         and not getattr(m, "do_not_compile", True)
         for m in model.modules()
+    )
+
+
+def is_piecewise_cudagraph_available(
+    compilation_config: CompilationConfig, model: nn.Module
+) -> bool:
+    return bool(
+        is_breakable_cudagraph_enabled(compilation_config)
+        or has_compiled_submodule(model)
     )
 
 
