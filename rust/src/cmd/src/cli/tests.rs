@@ -9,6 +9,7 @@ use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_managed_engine::data_parallel::DataParallelTopology;
 use vllm_server::{
     AdmissionLimits, DecisionsReadStrategy, EngineCoreConfig, FingerprintMode,
     GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
@@ -18,9 +19,22 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LogStatsInterval, SharedRuntimeArgs,
-    parse_int_flag, parse_runtime_args_json,
+    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LogStatsInterval, ServeArgs,
+    SharedRuntimeArgs, parse_int_flag, parse_runtime_args_json,
 };
+
+impl ServeArgs {
+    fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> FrontendConfig {
+        FrontendConfig {
+            server: self.to_server_config(),
+            engine_core: self.to_engine_core_config(handshake_address, topology),
+        }
+    }
+}
 
 impl FrontendConfig {
     /// Validate both halves, as the server does before starting.
@@ -31,7 +45,7 @@ impl FrontendConfig {
 }
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
-fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
+fn topology(args: &ServeArgs) -> DataParallelTopology {
     args.data_parallel_lb.resolve(&args.managed_engine, args.headless).unwrap()
 }
 

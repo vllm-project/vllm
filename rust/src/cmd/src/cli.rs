@@ -1023,33 +1023,13 @@ impl SharedRuntimeArgs {
         })
     }
 
-    /// Build the OpenAI-server config for the Python-bootstrap worker contract.
-    ///
-    /// The resulting config binds the Python-supplied transport addresses and
-    /// inherits an already open HTTP listener from the supervisor process.
-    fn into_bootstrapped_config(
-        self,
-        listen_fd: i32,
-        grpc_listen_fd: Option<i32>,
-        input_listener_fd: i32,
-        output_listener_fd: i32,
-        coordinator_address: Option<String>,
-        engine_start_index: u32,
-        engine_count: usize,
-        data_parallel_size: usize,
-    ) -> FrontendConfig {
-        let ready_timeout = self.ready_timeout();
-        let shutdown_timeout = self.shutdown_timeout();
-        let keep_alive_timeout = self.keep_alive_timeout();
-        let log_stats_interval = self.log_stats_interval();
-        let api_server_options = self.api_server_options();
-        let fingerprint_mode = self.fingerprint_mode_config();
-        let admission_limits = self.admission_limits();
-        let cors = self.cors_config();
-        let access_log = self.access_log_config();
-        let tls = self.ssl.tls_config();
-        let profiler = self.profiler();
-        let structured_outputs_backend = self.structured_outputs_backend();
+    /// Build the OpenAI-server config serving on the given HTTP and gRPC
+    /// listeners.
+    fn server_config(
+        &self,
+        listener_mode: HttpListenerMode,
+        grpc_listener_mode: Option<HttpListenerMode>,
+    ) -> ServerConfig {
         let ModelFileSources {
             model,
             tokenizer,
@@ -1058,172 +1038,68 @@ impl SharedRuntimeArgs {
             hf_token,
         } = self.model_args().file_sources();
 
-        FrontendConfig {
-            server: ServerConfig {
-                model: model.id,
-                revision: model.revision,
-                tokenizer,
-                hf_config,
-                skip_tokenizer_init,
-                hf_token,
-                hf_overrides: self.hf_overrides,
-                generation_config: self.generation_config,
-                override_generation_config: self.override_generation_config,
-                served_model_name: self.served_model_name,
-                listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
-                grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
-                tool_call_parser: self.tool_call_parser,
-                reasoning_parser: self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-                structured_outputs_backend,
-                renderer: self.renderer,
-                language_model_only: self.language_model_only,
-                chat_template: self.chat_template,
-                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
-                default_chat_template_kwargs: self.default_chat_template_kwargs,
-                reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
-                trust_request_chat_template: self.trust_request_chat_template,
-                exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
-                limit_mm_per_prompt: self.limit_mm_per_prompt,
-                mm_processor_kwargs: self.mm_processor_kwargs,
-                chat_template_content_format: self.chat_template_content_format,
-                max_logprobs: self.max_logprobs,
-                api_server_options,
-                fingerprint_mode,
-                cors,
-                access_log,
-                tls,
-                root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
-                api_keys: self.api_key,
-                shutdown_timeout,
-                keep_alive_on_engine_death: self.keep_alive_on_engine_death,
-                keep_alive_timeout,
-            },
-            engine_core: EngineCoreConfig {
-                transport_mode: TransportMode::Bootstrapped {
-                    input_listener_fd,
-                    output_listener_fd,
-                    engine_start_index,
-                    engine_count,
-                    data_parallel_size,
-                    ready_timeout,
-                },
-                coordinator_mode: match coordinator_address {
-                    Some(address) => CoordinatorMode::External { address },
-                    None => CoordinatorMode::None,
-                },
-                lora_modules: self.lora_modules,
-                default_mm_loras: self.default_mm_loras,
-                stream_interval: self.stream_interval,
-                admission_limits,
-                disable_log_stats: self.disable_log_stats,
-                log_stats_interval,
-                custom_histogram_buckets: self.custom_histogram_buckets,
-                disable_request_id_randomization: self.disable_request_id_randomization,
-                // The engine is launched and supervised by another process.
-                manages_engine: false,
-                profiler,
-            },
+        ServerConfig {
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+            hf_overrides: self.hf_overrides.clone(),
+            generation_config: self.generation_config,
+            override_generation_config: self.override_generation_config.clone(),
+            served_model_name: self.served_model_name.clone(),
+            listener_mode,
+            grpc_listener_mode,
+            tool_call_parser: self.tool_call_parser.clone(),
+            reasoning_parser: self.reasoning_parser.clone(),
+            tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend: self.structured_outputs_backend(),
+            renderer: self.renderer,
+            language_model_only: self.language_model_only,
+            chat_template: self.chat_template.clone(),
+            decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
+            default_chat_template_kwargs: self.default_chat_template_kwargs.clone(),
+            reasoning_effort_map: self.reasoning_effort_map.clone().unwrap_or_default(),
+            trust_request_chat_template: self.trust_request_chat_template,
+            exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
+            limit_mm_per_prompt: self.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: self.mm_processor_kwargs.clone(),
+            chat_template_content_format: self.chat_template_content_format,
+            max_logprobs: self.max_logprobs,
+            api_server_options: self.api_server_options(),
+            fingerprint_mode: self.fingerprint_mode_config(),
+            cors: self.cors_config(),
+            access_log: self.access_log_config(),
+            tls: self.ssl.tls_config(),
+            root_path: self.root_path.clone().filter(|root_path| !root_path.is_empty()),
+            api_keys: self.api_key.clone(),
+            shutdown_timeout: self.shutdown_timeout(),
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
+            keep_alive_timeout: self.keep_alive_timeout(),
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still
-    /// owns the startup handshake and binds its own HTTP listener.
-    fn into_managed_config(
-        self,
-        listener_mode: HttpListenerMode,
-        grpc_listener_mode: Option<HttpListenerMode>,
-        handshake_address: String,
-        advertised_host: String,
-        topology: &DataParallelTopology,
-        local_input_address: Option<String>,
-        local_output_address: Option<String>,
+    /// Build the engine-core config reaching the engines over `transport_mode`.
+    fn engine_core_config(
+        &self,
+        transport_mode: TransportMode,
+        coordinator_mode: CoordinatorMode,
         manages_engine: bool,
-    ) -> FrontendConfig {
-        let ready_timeout = self.ready_timeout();
-        let shutdown_timeout = self.shutdown_timeout();
-        let keep_alive_timeout = self.keep_alive_timeout();
-        let log_stats_interval = self.log_stats_interval();
-        let api_server_options = self.api_server_options();
-        let fingerprint_mode = self.fingerprint_mode_config();
-        let admission_limits = self.admission_limits();
-        let cors = self.cors_config();
-        let access_log = self.access_log_config();
-        let tls = self.ssl.tls_config();
-        let profiler = self.profiler();
-        let structured_outputs_backend = self.structured_outputs_backend();
-        let ModelFileSources {
-            model,
-            tokenizer,
-            hf_config,
-            skip_tokenizer_init,
-            hf_token,
-        } = self.model_args().file_sources();
-
-        FrontendConfig {
-            server: ServerConfig {
-                model: model.id,
-                revision: model.revision,
-                tokenizer,
-                hf_config,
-                skip_tokenizer_init,
-                hf_token,
-                hf_overrides: self.hf_overrides,
-                generation_config: self.generation_config,
-                override_generation_config: self.override_generation_config,
-                served_model_name: self.served_model_name,
-                listener_mode,
-                grpc_listener_mode,
-                tool_call_parser: self.tool_call_parser,
-                reasoning_parser: self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-                structured_outputs_backend,
-                renderer: self.renderer,
-                language_model_only: self.language_model_only,
-                chat_template: self.chat_template,
-                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
-                default_chat_template_kwargs: self.default_chat_template_kwargs,
-                reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
-                trust_request_chat_template: self.trust_request_chat_template,
-                exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
-                limit_mm_per_prompt: self.limit_mm_per_prompt,
-                mm_processor_kwargs: self.mm_processor_kwargs,
-                chat_template_content_format: self.chat_template_content_format,
-                max_logprobs: self.max_logprobs,
-                api_server_options,
-                fingerprint_mode,
-                cors,
-                access_log,
-                tls,
-                root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
-                api_keys: self.api_key,
-                shutdown_timeout,
-                keep_alive_on_engine_death: self.keep_alive_on_engine_death,
-                keep_alive_timeout,
-            },
-            engine_core: EngineCoreConfig {
-                transport_mode: TransportMode::HandshakeOwner {
-                    handshake_address,
-                    advertised_host,
-                    engine_start_index: topology.frontend_engine_start_index(),
-                    engine_count: topology.frontend_engine_count(),
-                    data_parallel_size: topology.data_parallel_size,
-                    ready_timeout,
-                    local_input_address,
-                    local_output_address,
-                },
-                coordinator_mode: CoordinatorMode::MaybeInProc,
-                lora_modules: self.lora_modules,
-                default_mm_loras: self.default_mm_loras,
-                stream_interval: self.stream_interval,
-                admission_limits,
-                disable_log_stats: self.disable_log_stats,
-                log_stats_interval,
-                custom_histogram_buckets: self.custom_histogram_buckets,
-                disable_request_id_randomization: self.disable_request_id_randomization,
-                manages_engine,
-                profiler,
-            },
+    ) -> EngineCoreConfig {
+        EngineCoreConfig {
+            transport_mode,
+            coordinator_mode,
+            lora_modules: self.lora_modules.clone(),
+            default_mm_loras: self.default_mm_loras.clone(),
+            stream_interval: self.stream_interval,
+            admission_limits: self.admission_limits(),
+            disable_log_stats: self.disable_log_stats,
+            log_stats_interval: self.log_stats_interval(),
+            custom_histogram_buckets: self.custom_histogram_buckets.clone(),
+            disable_request_id_randomization: self.disable_request_id_randomization,
+            manages_engine,
+            profiler: self.profiler(),
         }
     }
 
@@ -1550,23 +1426,38 @@ pub struct FrontendArgs {
 
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
+    ///
+    /// The resulting config binds the Python-supplied transport addresses and
+    /// inherits an already open HTTP listener from the supervisor process.
     pub fn into_config(self) -> FrontendConfig {
+        let runtime = &self.runtime;
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
-        self.runtime.into_bootstrapped_config(
-            self.listen_fd,
-            self.grpc_listen_fd,
-            self.input_listener_fd,
-            self.output_listener_fd,
-            self.coordinator_address,
-            self.engine_start_index,
-            self.engine_count,
-            data_parallel_size,
-        )
+        FrontendConfig {
+            server: runtime.server_config(
+                HttpListenerMode::InheritedFd { fd: self.listen_fd },
+                self.grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
+            ),
+            engine_core: runtime.engine_core_config(
+                TransportMode::Bootstrapped {
+                    input_listener_fd: self.input_listener_fd,
+                    output_listener_fd: self.output_listener_fd,
+                    engine_start_index: self.engine_start_index,
+                    engine_count: self.engine_count,
+                    data_parallel_size,
+                    ready_timeout: runtime.ready_timeout(),
+                },
+                match self.coordinator_address {
+                    Some(address) => CoordinatorMode::External { address },
+                    None => CoordinatorMode::None,
+                },
+                // The engine is launched and supervised by another process.
+                false,
+            ),
+        }
     }
 }
 
-/// Arguments for the managed-engine mode that spawns Python on behalf of the
-/// user.
+/// Command-line arguments for `vllm-rs serve`.
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
@@ -1608,16 +1499,7 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the OpenAI-server runtime config used after the managed Python
-    /// engine starts.
-    pub fn to_frontend_config(
-        &self,
-        handshake_address: String,
-        topology: &DataParallelTopology,
-    ) -> FrontendConfig {
-        // Prefer IPC sockets for local engine input/output.
-        let (local_input_address, local_output_address) =
-            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
+    pub(super) fn to_server_config(&self) -> ServerConfig {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1636,14 +1518,31 @@ impl ServeArgs {
             port,
         });
 
-        self.runtime.clone().into_managed_config(
-            listener_mode,
-            grpc_listener_mode,
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            topology,
-            local_input_address,
-            local_output_address,
+        self.runtime.server_config(listener_mode, grpc_listener_mode)
+    }
+
+    pub(super) fn to_engine_core_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> EngineCoreConfig {
+        // Prefer IPC sockets for local engine input/output.
+        let (local_input_address, local_output_address) =
+            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
+        let runtime = &self.runtime;
+
+        runtime.engine_core_config(
+            TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host: self.managed_engine.handshake_host.clone(),
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
+                ready_timeout: runtime.ready_timeout(),
+                local_input_address,
+                local_output_address,
+            },
+            CoordinatorMode::MaybeInProc,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
             self.managed_engine.data_parallel_size_local != Some(0),
         )
