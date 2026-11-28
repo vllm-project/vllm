@@ -268,8 +268,9 @@ class HiSparseHostPool:
             self.backing = self.registered[:size]
         else:
             check_hisparse_host_memory(size)
-            self.backing, self.registered = allocate_pinned_host_pool(size)
-            self.pinned = [self.registered]
+            self.backing, self.registered, self.pinned = (
+                get_hisparse_backend().allocate_host_pool(size)
+            )
         return self.backing
 
 
