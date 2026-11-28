@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from functools import partial
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -1829,6 +1830,7 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
 
 
 @requires_rocm_mhc_overlap
+@pytest.mark.parametrize("fused_ep_moe", [False, True])
 @pytest.mark.parametrize("seam_kernel", ["triton", "mega"])
 @pytest.mark.parametrize("over_limit", [False, True], ids=["at_limit", "over_limit"])
 @pytest.mark.parametrize(
@@ -1836,14 +1838,21 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
     [("broadcast", 1), ("pipeline", 1), ("residual", 2), ("engram", 1)],
 )
 def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
-    entry, num_splits, over_limit, seam_kernel, monkeypatch, default_vllm_config
+    entry,
+    num_splits,
+    over_limit,
+    seam_kernel,
+    fused_ep_moe,
+    monkeypatch,
+    default_vllm_config,
 ):
     """The decoder layer splits its seams only inside a FULL graph capture of at
     most `MHC_OVERLAP_MAX_TOKENS` tokens, and the replayed layer matches the
     serial one. `num_splits` counts the seams that carry a post block: layer
     0, a pipeline entry and Engram fold none into the attention seam, and the
-    FFN seam always has one. With packed weights every fused seam, the
-    side-stream gates included, runs as Mega-MHC."""
+    FFN seam always has one, which stays serial when the MoE runs AITER
+    FusedEPMoE (nothing may run beside it). With packed weights every fused
+    seam, the side-stream gates included, runs as Mega-MHC."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import set_forward_context
@@ -1879,11 +1888,18 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    _stub_sublayers(
-        decoder,
-        lambda positions, x, _: x * 0.5,
-        lambda x, input_ids: x * 0.25,
-    )
+    ffn: Any = lambda x, input_ids: x * 0.25  # noqa: E731
+    _stub_sublayers(decoder, lambda positions, x, _: x * 0.5, ffn)
+    if fused_ep_moe:
+
+        class FusedEPMoEExperts:
+            max_tokens_across_dp = staticmethod(lambda num_tokens: num_tokens)
+
+            def uses_fused_ep_moe(self, max_tokens_across_dp):
+                return True
+
+        ffn.use_mega_moe, ffn.experts = True, FusedEPMoEExperts()
+        num_splits -= 1
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02

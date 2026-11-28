@@ -437,9 +437,25 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Fork only inside FULL graph capture, where the joins become graph
             # edges; HIP event waits at runtime are unreliable here.
             mhc_overlap = None
+        ffn_overlap = mhc_overlap
+        if (
+            ffn_overlap is not None
+            and self.ffn.use_mega_moe
+            and self.ffn.experts.uses_fused_ep_moe(
+                self.ffn.experts.max_tokens_across_dp(positions.shape[0])
+            )
+        ):
+            # FusedEPMoE occupies every CU with persistent workgroups that spin
+            # on their peers, so the FFN seam's gates do not run beside it.
+            ffn_overlap = None
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
             if mhc_overlap is not None
+            else self.mhc_seam or self.mhc_pre_delayed
+        )
+        ffn_mhc_pre = (
+            mhc_pre
+            if ffn_overlap is not None
             else self.mhc_seam or self.mhc_pre_delayed
         )
         # The overlap's layer input comes from the Triton collapse, not Mega-MHC.
@@ -448,7 +464,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             mxfp8_pre if mhc_overlap is None and self.attn_seam_mxfp8 else mhc_pre
         )
         ffn_pre_fn = (
-            mxfp8_pre if mhc_overlap is None and self.ffn_seam_mxfp8 else mhc_pre
+            mxfp8_pre if ffn_overlap is None and self.ffn_seam_mxfp8 else ffn_mhc_pre
         )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
@@ -579,8 +595,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
-        if mhc_overlap is not None:
-            mhc_overlap.join()
+        if ffn_overlap is not None:
+            ffn_overlap.join()
         return x, residual, post_mix, res_mix, ffn_pre
 
     def write_kv(

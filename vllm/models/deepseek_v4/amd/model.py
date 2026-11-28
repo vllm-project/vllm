@@ -874,16 +874,23 @@ class DeepseekV4MoE(nn.Module):
         if shared_experts is None:
             return self._forward_mega_moe_routed(hidden_states, input_ids)
         events = self.shared_experts_events
+        max_tokens_across_dp = self.experts.max_tokens_across_dp(hidden_states.shape[0])
         if (
             events is None
             or hidden_states.shape[0] > envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            # FusedEPMoE occupies every CU with persistent workgroups that spin
+            # on their peers: work beside it only slows it down (and work that
+            # waits on it would never run), so the shared expert runs after it.
+            or self.experts.uses_fused_ep_moe(max_tokens_across_dp)
         ):
             return self._forward_mega_moe_routed(
-                hidden_states, input_ids
+                hidden_states, input_ids, max_tokens_across_dp
             ) + shared_experts(hidden_states)
         # The unfused shared expert overlaps router + MegaMoE in small steps.
         routed, shared = maybe_execute_in_parallel(
-            fn0=lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
+            fn0=lambda: self._forward_mega_moe_routed(
+                hidden_states, input_ids, max_tokens_across_dp
+            ),
             fn1=lambda: shared_experts(hidden_states),
             event0=events[0],
             event1=events[1],
@@ -892,7 +899,10 @@ class DeepseekV4MoE(nn.Module):
         return routed + shared
 
     def _forward_mega_moe_routed(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        max_tokens_across_dp: int | None = None,
     ) -> torch.Tensor:
         router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
@@ -908,7 +918,7 @@ class DeepseekV4MoE(nn.Module):
             bias_vl=self.gate.bias_vl,
             image_sentinel_lo=self.image_sentinel_lo,
         )
-        return self.experts(hidden_states, topk_weights, topk_ids)
+        return self.experts(hidden_states, topk_weights, topk_ids, max_tokens_across_dp)
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
