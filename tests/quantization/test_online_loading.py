@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.online import loading
+from vllm.platforms import current_platform
 
 
 class _Experts(torch.nn.Module):
@@ -21,7 +22,9 @@ class _Experts(torch.nn.Module):
         self.loaded: dict[tuple[str, str, int], torch.Tensor] = {}
         for p in ("w13_", "w2_"):
             for n in ("weight", "weight_scale", "weight_scale_2"):
-                param = torch.nn.Parameter(torch.empty(0, device="cuda"), False)
+                param = torch.nn.Parameter(
+                    torch.empty(0, device=current_platform.device_type), False
+                )
                 param.weight_loader = self._load
                 self.register_parameter(p + n, param)
         self.method = SimpleNamespace(process_weights_after_loading=lambda _: None)

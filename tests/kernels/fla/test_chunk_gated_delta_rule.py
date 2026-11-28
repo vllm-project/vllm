@@ -19,7 +19,8 @@ from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="needs a GPU"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs a GPU",
 )
 
 NUM_K_HEADS, NUM_V_HEADS, HEAD_DIM = 2, 4, 128
