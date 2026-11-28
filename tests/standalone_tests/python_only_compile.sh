@@ -252,7 +252,7 @@ actual = f"{sys.version_info.major}.{sys.version_info.minor}"
 assert actual == expected, f"expected Python {expected}, got {actual}"
 
 llm = LLM(
-    "vllm-project/tiny-random-LlamaForCausalLM",
+    "vllm/tiny-random-LlamaForCausalLM",
     max_model_len=256,
     gpu_memory_utilization=0.3,
 )
