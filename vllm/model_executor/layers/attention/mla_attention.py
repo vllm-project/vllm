@@ -1441,7 +1441,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             fused_q_heads=self._fused_decode_query_heads(attn_metadata),
         )
         # Concat here rather than into the backend's shared workspace.
-        return torch.cat(mqa_q, dim=-1) if isinstance(mqa_q, tuple) else mqa_q
+        if isinstance(mqa_q, tuple):
+            return self.impl.prepare_mqa_query(mqa_q, self)  # type: ignore[attr-defined]
+        return mqa_q
 
     def _fused_decode_query_heads(self, attn_metadata: Any) -> int | None:
         # The impl picks the decode path per batch, so this stays per step.

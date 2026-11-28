@@ -230,6 +230,7 @@ class MistralMLAAttention(nn.Module):
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         indexer = self.indexer
+        mqa_q_prepared = None
         if indexer is None:
             q, kv_c_normed, k_pe = self._project_qkv(
                 positions, hidden_states, log_positions, rotary_emb
@@ -237,10 +238,25 @@ class MistralMLAAttention(nn.Module):
         else:
             # A fork/join must not straddle the eager break of a piecewise
             # capture; FULL graphs are captured outside of it.
-            (q, kv_c_normed, k_pe), _ = execute_in_parallel(
-                lambda: self._project_qkv(
+            overlap = (
+                num_tokens <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
+                and not BreakableCUDAGraphCapture.is_active()
+            )
+
+            def project_qkv():
+                q, kv_c_normed, k_pe = self._project_qkv(
                     positions, hidden_states, log_positions, rotary_emb
-                ),
+                )
+                # Write the KV cache and prepare the query while the indexer runs.
+                prepared = (
+                    self.attn.prepare_mqa_query(q, kv_c_normed, k_pe)
+                    if overlap
+                    else None
+                )
+                return q, kv_c_normed, k_pe, prepared
+
+            (q, kv_c_normed, k_pe, mqa_q_prepared), _ = execute_in_parallel(
+                project_qkv,
                 [
                     lambda: indexer(
                         hidden_states,
@@ -252,8 +268,7 @@ class MistralMLAAttention(nn.Module):
                 self.indexer_events[0],
                 self.indexer_events[1:],
                 [self.indexer_stream] if self.indexer_stream is not None else None,
-                enable=num_tokens <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
-                and not BreakableCUDAGraphCapture.is_active(),
+                enable=overlap,
             )
         if self.spec.use_sparse:
             self.attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
@@ -263,5 +278,6 @@ class MistralMLAAttention(nn.Module):
             kv_c_normed,
             k_pe,
             output_shape=(num_tokens, self.num_local_heads * self.v_head_dim),
+            mqa_q_prepared=mqa_q_prepared,
         )
         return self.o_proj(attn_out)[0]
