@@ -14,7 +14,11 @@ def main(args):
     for allocate_block in args.allocate_blocks:
         # Enforce a GC collect ahead to minimize the impact among runs
         gc.collect()
-        block_pool = BlockPool(num_gpu_blocks=args.num_gpu_blocks, enable_caching=True)
+        block_pool = BlockPool(
+            num_gpu_blocks=args.num_gpu_blocks,
+            enable_caching=True,
+            hash_block_size=args.hash_block_size,
+        )
 
         get_blocks_times = TimeCollector(TimeCollector.US)
         free_blocks_times = TimeCollector(TimeCollector.US)
@@ -53,6 +57,12 @@ def invoke_main() -> None:
         description="Benchmark the performance of BlockPool for KV Cache."
     )
     parser.add_argument("--num-gpu-blocks", type=int, default=100000)
+    parser.add_argument(
+        "--hash-block-size",
+        type=int,
+        default=64,
+        help="Block size used for prefix-cache hashing.",
+    )
     parser.add_argument(
         "--num-iteration",
         type=int,
