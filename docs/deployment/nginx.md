@@ -27,27 +27,38 @@ docker build . -f Dockerfile.nginx --tag nginx-lb
 
 ## Create Simple Nginx Config file
 
-Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
+Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10s;` entry to `upstream backend`.
 
 ??? console "Config"
 
     ```console
     upstream backend {
         least_conn;
-        server vllm0:8000 max_fails=3 fail_timeout=10000s;
-        server vllm1:8000 max_fails=3 fail_timeout=10000s;
+        server vllm0:8000 max_fails=3 fail_timeout=10s;
+        server vllm1:8000 max_fails=3 fail_timeout=10s;
+        keepalive 32;
+        keepalive_timeout 4s;
     }
     server {
         listen 80;
         location / {
             proxy_pass http://backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
         }
     }
     ```
+
+A few of these settings matter for LLM serving:
+
+- `fail_timeout` is both the window in which `max_fails` errors mark a server as failed and how long NGINX then keeps it out of rotation, even after it is healthy again. If every server is marked failed, NGINX answers every request with `502` until `fail_timeout` expires, so keep it short.
+- `proxy_buffering off` passes each streamed token (`"stream": true`) to the client as soon as vLLM sends it. With buffering on, the NGINX default, tokens reach the client in batches of a few kilobytes instead of one at a time, which delays the first token.
+- `keepalive` reuses connections to vLLM. Keep `keepalive_timeout` below vLLM's idle keep-alive timeout (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, 5 seconds by default) so NGINX never reuses a connection that vLLM is closing. Otherwise some requests fail with `502` under load, and each failure counts towards `max_fails`.
 
 ## Build vLLM Container
 
