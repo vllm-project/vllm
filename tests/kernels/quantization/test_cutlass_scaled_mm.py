@@ -65,6 +65,11 @@ capability = current_platform.get_device_capability()
 # Fall back to 0 so import doesn't fail on unknown capability
 capability_int = (capability[0] * 10 + capability[1]) if capability is not None else 0
 
+skip_int8_on_sm100 = pytest.mark.skipif(
+    current_platform.has_device_capability(100),
+    reason="CUTLASS int8 scaled_mm has no SM100+ kernels.",
+)
+
 
 def rand_int8(shape: tuple, device: str = "cuda"):
     return to_int8(torch.rand(shape, device=device) * 255 - 128)
@@ -268,6 +273,7 @@ def test_cutlass_fp8_blockwise_scale_gemm(
     "b_scale_group_shape", [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
 @pytest.mark.parametrize("use_bias", [True, False])
+@skip_int8_on_sm100
 def test_cutlass_int8_gemm(
     m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
 ):
@@ -284,6 +290,7 @@ def test_cutlass_int8_gemm(
 )
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
+@skip_int8_on_sm100
 def test_cutlass_int8_gemm_output_dtype(
     a_scale_group_shape,
     b_scale_group_shape,
@@ -391,6 +398,7 @@ def test_cutlass_fp8_gemm_devices(
 )
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@skip_int8_on_sm100
 def test_cutlass_int8_gemm_devices(
     a_scale_group_shape, b_scale_group_shape, use_bias: bool, device: str
 ):
@@ -439,6 +447,7 @@ def test_cutlass_fp8_gemm_m_sweep(
     "b_scale_group_shape", [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
 @pytest.mark.parametrize("use_bias", [True, False])
+@skip_int8_on_sm100
 def test_cutlass_int8_gemm_m_sweep(
     a_scale_group_shape, b_scale_group_shape, use_bias: bool
 ):
@@ -504,6 +513,7 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dty
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("azp_per_token", [True, False])
+@skip_int8_on_sm100
 def test_cutlass_int8_azp(
     m: int, n: int, k: int, out_dtype: torch.dtype, use_bias: bool, azp_per_token: bool
 ):
@@ -616,6 +626,7 @@ class CutlassLayer(torch.nn.Module):
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
+@skip_int8_on_sm100
 def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     m, n, k = 512, 512, 512
 
