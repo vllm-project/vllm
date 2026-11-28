@@ -51,18 +51,18 @@ def _tool_call(arguments, suffix):
     return f"<tool_call{suffix}>record{pairs}</tool_call{suffix}>"
 
 
-def _assert_streaming_matches(properties, calls, expected, suffix, chunking):
+def _assert_streaming_matches(properties, calls, expected, suffix, chunking, defs=None):
     tokenizer = _StubTokenizer(suffix)
+    parameters = {"type": "object", "properties": properties}
+    if defs is not None:
+        parameters["$defs"] = defs
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
         tools=[
             {
                 "type": "function",
-                "function": {
-                    "name": "record",
-                    "parameters": {"type": "object", "properties": properties},
-                },
+                "function": {"name": "record", "parameters": parameters},
             }
         ],
     )
@@ -186,4 +186,66 @@ def test_whitespace_argument_state_resets_between_calls(suffix, chunking):
         [{" count ": 7, " label ": "first"}, {" count ": 9}, {" label ": "last"}],
         suffix,
         chunking,
+    )
+
+
+_ALL_OF_DEFS = {
+    "Address": {"type": "object", "properties": {"city": {"type": "string"}}},
+    "Count": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+    "Home": {"allOf": [{"$ref": "#/$defs/Address"}]},
+}
+
+
+@pytest.mark.parametrize("chunking", ["whole", "tokens", "characters"])
+@pytest.mark.parametrize(
+    ("schema", "raw", "value"),
+    [
+        # A `$ref` wrapped in `allOf` so that it can carry a description.
+        (
+            {"allOf": [{"$ref": "#/$defs/Address"}], "description": "Where to"},
+            '{"city": "Tokyo"}',
+            {"city": "Tokyo"},
+        ),
+        ({"allOf": [{"type": "boolean"}]}, "true", True),
+        ({"allOf": [{"$ref": "#/$defs/Count"}]}, "7", 7),
+        ({"allOf": [{"$ref": "#/$defs/Count"}]}, "null", None),
+        # A reference to a definition that is itself an `allOf`.
+        ({"$ref": "#/$defs/Home"}, '{"city": "Tokyo"}', {"city": "Tokyo"}),
+        # A branch without type information does not narrow the type.
+        ({"allOf": [{"type": "integer"}, {"minimum": 1}]}, "7", 7),
+        # Neither does a nested `allOf` without type information.
+        ({"allOf": [{"type": "integer"}, {"allOf": [{"minimum": 0}]}]}, "7", 7),
+        # A nested `allOf` with type information still narrows the type.
+        ({"allOf": [{"allOf": [{"type": "integer"}]}, {"minimum": 0}]}, "7", 7),
+        (
+            {
+                "allOf": [
+                    {"type": ["integer", "string"]},
+                    {"allOf": [{"type": "string"}]},
+                ]
+            },
+            "7",
+            "7",
+        ),
+        # Only the types that every branch allows remain.
+        ({"allOf": [{"type": ["integer", "string"]}, {"type": "string"}]}, "7", "7"),
+        # Without any type information the value stays a string.
+        ({"allOf": [{"description": "Free text"}]}, "7", "7"),
+        ({"allOf": [{"type": "string"}]}, "7", "7"),
+        # A `$ref` next to `allOf` is still resolved through the `$ref`.
+        (
+            {"$ref": "#/$defs/Address", "allOf": [{"description": "Where to"}]},
+            '{"city": "Tokyo"}',
+            {"city": "Tokyo"},
+        ),
+    ],
+)
+def test_all_of_schema_resolves_value_type(suffix, chunking, schema, raw, value):
+    _assert_streaming_matches(
+        {"arg": schema},
+        [[("arg", raw)]],
+        [{"arg": value}],
+        suffix,
+        chunking,
+        defs=_ALL_OF_DEFS,
     )
