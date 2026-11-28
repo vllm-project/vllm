@@ -2270,6 +2270,35 @@ def test_auto_fit_max_model_len_reserves_null_block():
 
 
 @pytest.mark.parametrize(
+    ("mm_kwargs", "expect_hint"),
+    [
+        ({}, True),
+        ({"skip_mm_profiling": True}, False),
+        ({"language_model_only": True}, False),
+    ],
+)
+def test_check_enough_kv_cache_memory_points_to_mm_profiling(mm_kwargs, expect_hint):
+    """Encoder profiling at the maximum input size can consume the whole KV
+    cache budget on small GPUs; the error must name the multimodal knobs
+    rather than only `gpu_memory_utilization`, unless the encoder was not
+    profiled.
+    """
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-2B-Instruct", max_model_len=512, **mm_kwargs
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    spec = new_kv_cache_spec()
+
+    for available_memory in (0, spec.page_size_bytes * 2):
+        with pytest.raises(ValueError) as exc_info:
+            check_enough_kv_cache_memory(
+                vllm_config, {"layer1": full_layer(spec)}, available_memory
+            )
+        assert ("limit_mm_per_prompt" in str(exc_info.value)) == expect_hint
+
+
+@pytest.mark.parametrize(
     ("method", "num_lookahead_tokens"),
     [("dflash", 4), ("dspark", 3), ("eagle", None)],
 )
@@ -2574,13 +2603,19 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
         assert records[0].levelname == "INFO"
 
 
-def test_finalize_extensible_kv_cache_auto_max_model_len_no_room():
+@pytest.mark.parametrize(
+    ("model_kwargs", "expect_mm_hint"),
+    [({}, False), ({"model": "Qwen/Qwen3-VL-2B-Instruct"}, True)],
+)
+def test_finalize_extensible_kv_cache_auto_max_model_len_no_room(
+    model_kwargs, expect_mm_hint
+):
     """When CUDA graphs and warmup leave no KV cache blocks, the auto-fit error
     points at what the user can change, not at max_model_len."""
     from vllm.v1.worker.worker_base import CompilationTimes
 
     spec = new_kv_cache_spec()
-    model_config = ModelConfig(max_model_len=spec.block_size * 16)
+    model_config = ModelConfig(max_model_len=spec.block_size * 16, **model_kwargs)
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
@@ -2592,10 +2627,11 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_no_room():
 
     # Only the null block fits.
     measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=1)]
-    with pytest.raises(ValueError, match="gpu_memory_utilization"):
+    with pytest.raises(ValueError, match="gpu_memory_utilization") as exc_info:
         kv_cache_planning.finalize_extensible_kv_cache(
             vllm_config, [config], scheduler_config, measured
         )
+    assert ("limit_mm_per_prompt" in str(exc_info.value)) == expect_mm_hint
 
 
 def test_shrink_kv_cache_configs_leaves_host_resident_tensors():

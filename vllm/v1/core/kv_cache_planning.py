@@ -61,11 +61,29 @@ logger = init_logger(__name__)
 AUTO_FIT_SHORT_MAX_MODEL_LEN = 8192
 
 
+def _mm_profiling_hint(vllm_config: VllmConfig) -> str:
+    mm_config = vllm_config.model_config.multimodal_config
+    if (
+        mm_config is None
+        or mm_config.skip_mm_profiling
+        or mm_config.language_model_only
+    ):
+        return ""
+    return (
+        "Memory profiling may have reserved activation memory for the "
+        "multimodal encoder at its maximum input size. Bounding input sizes "
+        "through `mm_processor_kwargs` reduces it; size hints in "
+        "`limit_mm_per_prompt` or `skip_mm_profiling` also do, but larger "
+        "inputs can then run out of memory at runtime. "
+    )
+
+
 def _more_kv_cache_memory_hint(
     vllm_config: VllmConfig, after_warmup: bool = False
 ) -> str:
     """How the user can make room for the KV cache, for error messages.
     after_warmup: the KV cache was sized after CUDA graph capture and warmup."""
+    mm_profiling_msg = _mm_profiling_hint(vllm_config)
     cache_config = vllm_config.cache_config
     if cache_config.enable_extensible_kv_cache:
         used_by = "the model and its activations"
@@ -78,18 +96,18 @@ def _more_kv_cache_memory_hint(
             )
         utilization = cache_config.resolved_gpu_memory_utilization
         if utilization < 1.0:
-            return (
+            return mm_profiling_msg + (
                 f"The KV cache gets what is left after {used_by} within "
                 f"`gpu_memory_utilization`={utilization}; increase it (with the "
                 "extensible KV cache it defaults to 1.0) or decrease "
                 f"`max_model_len` or `max_num_seqs`.{graphs_hint}"
             )
-        return (
+        return mm_profiling_msg + (
             "The extensible KV cache already takes all device memory left after "
             f"{used_by}; decrease `max_model_len` or `max_num_seqs`, or the "
             f"model needs a device with more memory.{graphs_hint}"
         )
-    return (
+    return mm_profiling_msg + (
         "Try increasing `gpu_memory_utilization` when initializing the engine "
         "(this flag also controls CPU memory reservation on the CPU backend, "
         "despite its name)."
@@ -1192,7 +1210,8 @@ def _auto_fit_max_model_len(
     if auto_fit_max <= 0:
         hint = (
             "CUDA graph capture and warmup left no memory for the KV cache. "
-            "Increase `gpu_memory_utilization`, reduce the memory CUDA graphs "
+            + _mm_profiling_hint(vllm_config)
+            + "Increase `gpu_memory_utilization`, reduce the memory CUDA graphs "
             "take (fewer or smaller capture sizes in the compilation config), "
             "or use more GPUs."
             if after_warmup
@@ -1270,11 +1289,12 @@ def _auto_fit_max_model_len(
     )
     logger.warning(
         "--max-model-len auto reduced max_model_len from %d to %d (%s). "
-        "Requests longer than %d tokens will be rejected. %s",
+        "Requests longer than %d tokens will be rejected. %s%s",
         original_max,
         auto_fit_max,
         left,
         auto_fit_max,
+        _mm_profiling_hint(vllm_config),
         hint,
     )
 
