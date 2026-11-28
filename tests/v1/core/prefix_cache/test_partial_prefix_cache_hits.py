@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
 )
 from vllm.utils.hashing import sha256
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
@@ -2829,10 +2830,12 @@ def test_checkpoint_reservation_matches_worker(
     chunk_blocks,
 ):
     """The worker exports a checkpoint wherever `compute_mamba_prefill_checkpoints`
-    says, into whatever block sits at its column. Each chunk, the manager must
-    either reserve exactly that position and column, or leave the column null so
-    the export is masked; anything else publishes a hash over the wrong state.
-    Under sparse retention, only the prefill-end chunk may reserve one.
+    says, into whatever block its append-only block table holds at that column.
+    Each chunk, the manager must either reserve exactly that position and column,
+    or the worker's column must be null so the export is masked; anything else
+    publishes a hash over the wrong state or writes into a block the manager
+    has moved elsewhere. Under sparse retention, only the prefill-end chunk may
+    reserve one unless that column holds a speculative block.
     """
     manager = make_full_mamba_manager(
         dcp_world_size=1,
@@ -2857,11 +2860,14 @@ def test_checkpoint_reservation_matches_worker(
     request.append_output_token_ids(list(range(1000, 1000 + num_output_tokens)))
     num_tokens = request.num_tokens
     prefill_end = max(num_prompt_tokens, num_tokens - 1)
+    worker_block_ids: list[int] = []
 
     start = 0
     while start < num_tokens:
         end = min(start + chunk_blocks * mamba_block_size, num_tokens)
-        assert manager.allocate_slots(request, end - start) is not None
+        new_blocks = manager.allocate_slots(request, end - start)
+        assert new_blocks is not None
+        worker_block_ids.extend(new_blocks.get_block_ids()[1])
         offsets, cols = compute_mamba_prefill_checkpoints(
             [end],
             [end - start],
@@ -2872,11 +2878,14 @@ def test_checkpoint_reservation_matches_worker(
             num_hash_lookahead_tokens=lookahead,
         )
         reserved = mamba_manager._checkpoints.get(request.request_id)
+        blocks = mamba_manager.req_to_blocks[request.request_id]
         if reserved is not None:
             assert reserved == (start + offsets[0], cols[0])
-            assert retention_interval is None or end >= prefill_end
+            assert retention_interval is None or end >= prefill_end or lookahead
+            assert worker_block_ids[cols[0]] == blocks[cols[0]].block_id
         elif offsets[0]:
-            assert mamba_manager.req_to_blocks[request.request_id][cols[0]].is_null
+            assert blocks[cols[0]].is_null
+            assert worker_block_ids[cols[0]] == NULL_BLOCK_ID
         request.num_computed_tokens = end
         manager.new_step_starts()
         start = end
