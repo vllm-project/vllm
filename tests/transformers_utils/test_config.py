@@ -469,6 +469,7 @@ def test_model_config_generation_fallback_forwards_code_revision():
             code_revision="code-pin",
             config_format="auto",
             hf_token=None,
+            override_generation_config={},
         ),
     )
 

@@ -385,7 +385,10 @@ class ModelConfig:
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
-    `--generation-config vllm`, only the override parameters are used."""
+    `--generation-config vllm`, only the override parameters are used.
+
+    The override applies to the full generation config, so keys outside the
+    sampling allow-list (for example `eos_token_id`) are honored as well."""
     masked_token_ids: list[int] | None = None
     """Token ids that are never sampled (their logits are set to -inf before
     sampling), e.g. the lm_head rows past the tokenizer or placeholder tokens.
@@ -2043,17 +2046,29 @@ class ModelConfig:
 
     def try_get_generation_config(self) -> dict[str, Any]:
         """This method attempts to retrieve the non-default values of the
-        generation config for this model.
+        generation config for this model, with `override_generation_config`
+        applied.
 
         The generation config can contain information about special tokens, as
         well as sampling parameters. Which is why this method exists separately
         to `get_diff_sampling_param`.
 
+        `override_generation_config` is applied here so that every consumer of
+        the merged generation config (special tokens such as `eos_token_id` as
+        well as the sampling parameters surfaced by
+        `get_diff_sampling_param`) observes a single, consistent override.
+
         Returns:
             A dictionary containing the non-default generation config.
 
         """
-        if self.generation_config in {"auto", "vllm"}:
+        src = self.generation_config
+
+        if src == "vllm":
+            # `--generation-config vllm` means "use vLLM's defaults", so the
+            # model's generation_config.json must not leak in here either.
+            config_dict: dict[str, Any] = {}
+        elif src == "auto":
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -2062,19 +2077,30 @@ class ModelConfig:
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
+            config_dict = {} if config is None else config.to_diff_dict()
         else:
             config = try_get_generation_config(
-                self.generation_config,
+                src,
                 trust_remote_code=self.trust_remote_code,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
+            config_dict = {} if config is None else config.to_diff_dict()
 
-        if config is None:
-            return {}
+        # Apply the user override to the full generation config so that special
+        # tokens (e.g. eos_token_id / stop_token_ids) honor the override too,
+        # not only the sampling allow-list in get_diff_sampling_param().
+        if self.override_generation_config:
+            logger.info_once(
+                "Generation config has been overridden by "
+                "`--override-generation-config`: `%s`.",
+                str(self.override_generation_config),
+                scope="local",
+            )
+            config_dict.update(self.override_generation_config)
 
-        return config.to_diff_dict()
+        return config_dict
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """This method returns a dictionary containing the non-default sampling
@@ -2093,10 +2119,9 @@ class ModelConfig:
         """
         src = self.generation_config
 
-        config = {} if src == "vllm" else self.try_get_generation_config()
-
-        # Overriding with given generation config
-        config.update(self.override_generation_config)
+        # try_get_generation_config() applies the `vllm`/`auto` source rules and
+        # merges override_generation_config, so both paths live there.
+        config = self.try_get_generation_config()
 
         available_params = [
             "repetition_penalty",
