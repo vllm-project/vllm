@@ -50,22 +50,27 @@ class FlashCompressedIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.max_model_len = vllm_config.model_config.max_model_len
         self.logits_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4
-        for name, input_size, output_size in (
-            ("query_projection", config.q_lora_rank, self.num_heads * 128),
-            ("head_weight_projection", config.hidden_size, self.num_heads),
-            ("token_key_projection", config.hidden_size, 128),
-        ):
-            setattr(
-                self,
-                name,
-                ReplicatedLinear(
-                    input_size,
-                    output_size,
-                    bias=False,
-                    quant_config=vllm_config.quant_config,
-                    prefix=f"{prefix}.{name}",
-                ),
-            )
+        self.query_projection: ReplicatedLinear | None = ReplicatedLinear(
+            config.q_lora_rank,
+            self.num_heads * 128,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.query_projection",
+        )
+        self.token_key_projection: ReplicatedLinear | None = ReplicatedLinear(
+            config.hidden_size,
+            config.compressed_indexer_head_dim,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.token_key_projection",
+        )
+        self.head_weight_projection: ReplicatedLinear | None = ReplicatedLinear(
+            config.hidden_size,
+            self.num_heads,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.head_weight_projection",
+        )
         self.token_key_norm = RMSNorm(128, eps=self.eps)
         # Value then gate projection, replicated, so one GEMM produces both.
         self.key_projection = MergedColumnParallelLinear(
@@ -93,7 +98,16 @@ class FlashCompressedIndexer(nn.Module):
         self.num_sms = num_compute_units()
         self.varlen = current_platform.is_device_capability_family(100)
 
-    def forward(self, hidden_states, q_c, positions, rope=None):
+    def forward(
+        self,
+        hidden_states,
+        q_c,
+        positions,
+        rope=None,
+        indexer_token_keys: torch.Tensor | None = None,
+        indexer_head_weights: torch.Tensor | None = None,
+        indexer_query: torch.Tensor | None = None,
+    ):
         output = self.topk_indices_buffer[: hidden_states.shape[0]]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
@@ -112,9 +126,10 @@ class FlashCompressedIndexer(nn.Module):
         # Scoring rows below `tokens` are fully written, padding included.
         if tokens < output.shape[0]:
             output[tokens:].fill_(-1)
-        keys = self.token_key_norm(
-            self.token_key_projection(hidden_states)[0]
-        ).bfloat16()
+        if indexer_token_keys is None:
+            assert self.token_key_projection is not None
+            indexer_token_keys = self.token_key_projection(hidden_states)[0]
+        keys = self.token_key_norm(indexer_token_keys).bfloat16()
         cache, tail = self.k_cache.kv_cache, self.tail_cache.kv_cache
         (
             raw,
@@ -157,9 +172,15 @@ class FlashCompressedIndexer(nn.Module):
         write_tails(
             keys, positions, tail, tm.block_table, km.query_start_loc, km.seq_lens
         )
+        if indexer_head_weights is None:
+            assert self.head_weight_projection is not None
+            indexer_head_weights = self.head_weight_projection(hidden_states)[0]
+        if indexer_query is None:
+            assert self.query_projection is not None
+            indexer_query = self.query_projection(q_c)[0]
         quant_q, weights = quantize_query(
-            self.query_projection(q_c)[0][:tokens].view(tokens, self.num_heads, 128),
-            self.head_weight_projection(hidden_states)[0][:tokens],
+            indexer_query[:tokens].view(tokens, self.num_heads, 128),
+            indexer_head_weights[:tokens],
             positions[..., :tokens],
             self.rope_parameters,
             32 if self.num_heads <= 32 else 64,
