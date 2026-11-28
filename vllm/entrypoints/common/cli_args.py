@@ -23,6 +23,7 @@ from vllm.entrypoints.launchers.utils.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.warmup import load_warmup_config
 from vllm.logger import init_logger
 from vllm.renderers import ReasoningEffort
 from vllm.renderers.chat_utils import (
@@ -339,6 +340,13 @@ class FrontendArgs(BaseFrontendArgs):
     like health checks. Example: "/health,/metrics,/ping".
     When set, access logs for requests to these paths will be suppressed
     while keeping logs for other endpoints."""
+    warmup_config: str | None = None
+    """Path to a JSON file or JSON string containing warmup configuration.
+    The configuration specifies prompts to run through the engine before
+    the server starts accepting traffic, to warm up kernels and avoid
+    lazy compilation latency. See docs/serving/warmup.md. Example format:
+    {"prompts": [{"prompt": "Hello", "max_tokens": 100}], "concurrency": [1, 4]}
+    """
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=list)
@@ -665,3 +673,6 @@ def validate_api_server_args(args: argparse.Namespace):
             f"invalid reasoning parser: {reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
+
+    if args.warmup_config is not None:
+        args.warmup_config = load_warmup_config(args.warmup_config)
