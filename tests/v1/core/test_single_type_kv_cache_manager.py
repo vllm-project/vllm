@@ -10,6 +10,7 @@ from tests.v1.core.utils import new_kv_cache_group
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
@@ -28,9 +29,11 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheConfig,
+    KVCacheLayerConfig,
     MambaSpec,
 )
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 pytestmark = pytest.mark.cpu_test
 
@@ -1310,3 +1313,222 @@ def test_pop_blocks_for_free_trims_null_head():
     block_pool.free_blocks([null])
     assert null.ref_cnt == null_ref_cnt
     assert block_pool.get_num_free_blocks() == num_free_blocks
+
+
+def _running_step_layout(name: str, block_size: int) -> list[KVCacheLayerConfig]:
+    def attn(size: int = block_size) -> AttentionSpec:
+        return AttentionSpec(
+            block_size=size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        )
+
+    swa = SlidingWindowManager.layer_config(attn(), sliding_window=2 * block_size - 1)
+    return {
+        "full": [FullAttentionManager.layer_config(attn())],
+        "full_swa": [FullAttentionManager.layer_config(attn()), swa],
+        # Cache blocks of 2 hash blocks register a partial tail.
+        "full_coarse": [FullAttentionManager.layer_config(attn(2 * block_size)), swa],
+        "swa": [swa],
+        "swa_mtp": [
+            SlidingWindowManager.layer_config(
+                attn(),
+                sliding_window=2 * block_size - 1,
+                extra_retained_tokens=3,
+            )
+        ],
+        # DFlashSlidingWindowManager is a SlidingWindowManager subclass.
+        "dflash_swa": [
+            DFlashSlidingWindowManager.layer_config(
+                attn(),
+                sliding_window=2 * block_size - 1,
+                num_speculative_tokens=2,
+            )
+        ],
+        # RSWAManager is a FullAttentionManager subclass with gap eviction.
+        "rswa": [RSWAManager.layer_config(attn(), rswa_window=2 * block_size)],
+        "chunked_local": [
+            ChunkedLocalAttentionManager.layer_config(
+                attn(), attention_chunk_size=2 * block_size
+            )
+        ],
+        "hybrid": [
+            FullAttentionManager.layer_config(attn()),
+            swa,
+            CircularBufferManager.layer_config(attn()),
+        ],
+    }[name]
+
+
+def _group_state(manager: KVCacheManager, request_id: str) -> list:
+    return [
+        (
+            [block.block_id for block in m.req_to_blocks.get(request_id, [])],
+            m.num_cached_block.get(request_id),
+        )
+        for m in manager.coordinator.single_type_managers
+    ] + [
+        manager.block_pool.get_num_free_blocks(),
+        [(block.ref_cnt, block.block_hash) for block in manager.block_pool.blocks],
+        manager.block_pool.cached_block_hashes_by_block,
+    ]
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "full",
+        "full_swa",
+        "full_coarse",
+        "swa",
+        "swa_mtp",
+        "dflash_swa",
+        "rswa",
+        "chunked_local",
+        "hybrid",
+    ],
+)
+@pytest.mark.parametrize(
+    "num_spec_tokens,async_scheduling,enable_caching,num_hash_lookahead_tokens",
+    [(0, False, True, 0), (3, True, True, 1), (3, True, False, 0)],
+)
+def test_skipped_running_steps_change_no_state(
+    layout, num_spec_tokens, async_scheduling, enable_caching, num_hash_lookahead_tokens
+):
+    """Allocation, retirement and caching agree with the full allocation path."""
+    block_size = 4
+    layers = _running_step_layout(layout, block_size)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=200,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group([f"layer{i}"], layer) for i, layer in enumerate(layers)
+        ],
+    )
+    init_none_hash(sha256)
+    max_model_len = 64
+
+    def new_manager() -> KVCacheManager:
+        return KVCacheManager(
+            kv_cache_config,
+            max_model_len=max_model_len,
+            enable_caching=enable_caching,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            hash_block_size=block_size,
+            scheduler_block_size=max(layer.spec.block_size for layer in layers),
+        )
+
+    manager, reference = new_manager(), new_manager()
+    eligible = enable_caching and layout in ("full", "full_swa", "swa", "swa_mtp")
+    assert manager.decode_fast_path == eligible
+    sampling_params = SamplingParams(max_tokens=max_model_len)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(200, 222)),
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(
+            block_size, sha256, num_hash_lookahead_tokens
+        ),
+    )
+    for m in (manager, reference):
+        assert m.allocate_slots(request, request.num_prompt_tokens) is not None
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.append_output_token_ids(7)
+
+    rng = random.Random(0)
+    in_flight = 0
+    num_noop_steps = 0
+    while request.num_computed_tokens + 1 + num_spec_tokens < max_model_len:
+        num_new_tokens = 1 + num_spec_tokens
+        request.num_in_flight_tokens = in_flight
+        if eligible:
+            num_noop_steps += manager._is_decode_noop(
+                request, num_new_tokens, num_spec_tokens
+            )
+        actual = manager.allocate_slots(
+            request, num_new_tokens, num_lookahead_tokens=num_spec_tokens
+        )
+        # Supplying an empty computed-block list takes the full public path.
+        expected = reference.allocate_slots(
+            request,
+            num_new_tokens,
+            num_lookahead_tokens=num_spec_tokens,
+            new_computed_blocks=reference.empty_kv_cache_blocks,
+        )
+        assert actual is not None and expected is not None
+        assert actual.get_block_ids() == expected.get_block_ids()
+        assert _group_state(manager, request.request_id) == _group_state(
+            reference, request.request_id
+        )
+        assert manager.take_new_block_ids() == reference.take_new_block_ids()
+        # Settle the step: keep the accepted tokens, roll back rejected drafts.
+        num_accepted = rng.randint(0, num_spec_tokens)
+        request.append_output_token_ids([7] * (num_accepted + 1))
+        request.num_computed_tokens += num_accepted + 1
+        # With async scheduling one step stays in flight while the next one
+        # is scheduled.
+        in_flight = num_new_tokens if async_scheduling else 0
+    if eligible:
+        assert num_noop_steps > 0
+
+
+def test_cache_blocks_skips_coordinator_when_no_new_full_blocks(monkeypatch):
+    """`KVCacheManager.cache_blocks` skips the coordinator between block boundaries
+    and still caches once a new hashed block completes."""
+    block_size = 4
+    layers = _running_step_layout("full_swa", block_size)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group([f"layer{i}"], layer) for i, layer in enumerate(layers)
+        ],
+    )
+    init_none_hash(sha256)
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+        scheduler_block_size=block_size,
+    )
+    assert manager.decode_fast_path
+    calls = 0
+    orig_cache_blocks = manager.coordinator.cache_blocks
+
+    def spy_cache_blocks(request: Request, num_computed_tokens: int) -> None:
+        nonlocal calls
+        calls += 1
+        orig_cache_blocks(request, num_computed_tokens)
+
+    monkeypatch.setattr(manager.coordinator, "cache_blocks", spy_cache_blocks)
+    sampling_params = SamplingParams(max_tokens=64)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = Request(
+        request_id="req",
+        prompt_token_ids=[1, 2, 3, 4, 5],
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    assert manager.allocate_slots(request, 5) is not None
+    assert calls == 1  # Block 0 cached on admission.
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 5
+
+    # Tokens 6 and 7 stay inside block 1: coordinator.cache_blocks is skipped.
+    for tok in (6, 7):
+        request.append_output_token_ids(tok)
+        request.num_computed_tokens += 1
+        manager.cache_blocks(request, request.num_computed_tokens)
+    assert calls == 1
+
+    # Token 8 completes block 1: coordinator.cache_blocks runs and caches it.
+    request.append_output_token_ids(8)
+    request.num_computed_tokens += 1
+    manager.cache_blocks(request, request.num_computed_tokens)
+    assert calls == 2
+    assert all(
+        m.num_cached_block["req"] == 2 for m in manager.coordinator.single_type_managers
+    )

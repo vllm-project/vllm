@@ -131,6 +131,10 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.is_cross_attention = tuple(
+            isinstance(manager, CrossAttentionManager)
+            for manager in self.single_type_managers
+        )
         self.group_block_sizes = tuple(
             manager.block_size for manager in self.single_type_managers
         )
@@ -189,7 +193,7 @@ class KVCacheCoordinator(ABC):
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
+            if self.is_cross_attention[i]:
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -301,12 +305,12 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
+                num_encoder_tokens if is_cross_attention else num_tokens,
                 num_tokens_main_model,
             )
-            for manager in self.single_type_managers
+            for manager, is_cross_attention in zip(
+                self.single_type_managers, self.is_cross_attention
+            )
         )
 
     def get_num_cacheable_tokens(self, num_computed_tokens: int) -> int:
