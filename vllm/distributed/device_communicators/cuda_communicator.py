@@ -519,6 +519,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_size, dtype=input_.dtype, device=input_.device
         )
         pynccl_comm.all_gather(output_tensor, input_.contiguous())
+        if dim == 0:
+            # NCCL writes rank shards in the order needed for a dim-0 gather.
+            return output_tensor
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
