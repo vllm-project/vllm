@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -107,6 +108,10 @@ def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
 
 
 class CompressorBackend(AttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     def __init__(self):
         super().__init__()
 
@@ -136,12 +141,14 @@ class CompressorMetadata:
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     num_decode_tokens: int | None = None
     c128_boundary: bool | None = None
+    cache_positions: torch.Tensor | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    requires_block_table_width = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, block_table_width: int, **kwargs):
         super().__init__(*args, **kwargs)
         assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
         self.block_size = self.kv_cache_spec.block_size
@@ -151,6 +158,26 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if self.pcp_size > 1:
+            # Captured kernels must keep the same metadata addresses on replay.
+            max_tokens = self.token_to_req_indices.numel() * self.pcp_size
+            self.pcp_token_to_req_indices = torch.empty(
+                max_tokens, dtype=torch.int32, device=self.device
+            )
+            self.pcp_positions = torch.empty(
+                max_tokens, dtype=torch.int64, device=self.device
+            )
+            self.pcp_local_req_indices = torch.empty_like(self.token_to_req_indices)
+            max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
+            self.pcp_local_block_table = torch.empty(
+                (max_reqs, block_table_width), dtype=torch.int32, device=self.device
+            )
+            self.pcp_block_table = torch.empty(
+                (max_reqs * self.pcp_size, block_table_width),
+                dtype=torch.int32,
+                device=self.device,
+            )
 
     def build(
         self,
@@ -170,7 +197,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.scheduler_config.async_scheduling
             and self.vllm_config.speculative_config is not None
         )
-        return CompressorMetadata(
+        metadata = CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
             block_size=self.block_size,
@@ -182,6 +209,50 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
                 else None
             ),
         )
+        if self.pcp_size > 1:
+            self._gather_pcp_metadata(metadata, common_attn_metadata)
+        return metadata
+
+    def _gather_pcp_metadata(
+        self, metadata: CompressorMetadata, cm: CommonAttentionMetadata
+    ) -> None:
+        """Expand local metadata to match rank-major gathered compressor states."""
+        # metadata.block_table -> pcp_local_block_table (redundant buffer)
+        # -> all_gather -> pcp_block_table (persistent buffer)
+        # metadata.token_to_req_indices -> pcp_local_req_indices (redundant buffer)
+        # -> all_gather -> pcp_token_to_req_indices (persistent buffer)
+        group = get_pcp_group()
+        local_tokens = metadata.slot_mapping.numel() // self.pcp_size
+        max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
+        # Capture/profile batches bypass partitioning and have uniform requests.
+        gather_num_reqs = cm.pcp_gather_num_reqs
+        if gather_num_reqs is None:
+            gather_num_reqs = cm.num_reqs
+        assert cm.num_reqs <= gather_num_reqs <= max_reqs
+        table = self.pcp_local_block_table[:gather_num_reqs]
+        table.zero_()
+        table[: cm.num_reqs] = metadata.block_table[: cm.num_reqs]
+        assert metadata.token_to_req_indices is not None
+        req_indices = self.pcp_local_req_indices[:local_tokens]
+        req_indices.zero_()
+        req_indices[: cm.num_actual_tokens] = metadata.token_to_req_indices
+        req_indices += group.rank_in_group * gather_num_reqs
+        assert cm.positions is not None
+        gathered_table = group.all_gather(table, dim=0)
+        pcp_block_table = self.pcp_block_table[: gather_num_reqs * self.pcp_size]
+        pcp_block_table.copy_(gathered_table).clamp_(min=0)
+        num_tokens = local_tokens * self.pcp_size
+        pcp_req_indices = self.pcp_token_to_req_indices[:num_tokens]
+        pcp_positions = self.pcp_positions[:num_tokens]
+        pcp_req_indices.copy_(group.all_gather(req_indices, dim=0))
+        pcp_positions.copy_(group.all_gather(cm.positions, dim=0))
+        metadata.block_table = pcp_block_table
+        metadata.token_to_req_indices = pcp_req_indices
+        metadata.cache_positions = pcp_positions
+        # Local decode prefixes and C128 boundaries do not describe the
+        # rank-major gathered states. Keep the generic compression path.
+        metadata.num_decode_tokens = None
+        metadata.c128_boundary = None
 
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
@@ -443,6 +514,14 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
+        if state_metadata.cache_positions is not None:
+            # Replicate states before pooling across C4/C128 shard boundaries.
+            # The slot mapping masks padding and duplicate replicated requests.
+            kv_score = get_pcp_group().all_gather(kv_score, dim=0)
+            kv, score = kv_score.split(
+                [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
+            )
+            positions = state_metadata.cache_positions
         slot_mapping = state_metadata.slot_mapping
         block_size = state_metadata.block_size
 

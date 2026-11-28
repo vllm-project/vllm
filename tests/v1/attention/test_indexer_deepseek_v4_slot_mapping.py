@@ -19,6 +19,9 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla import (
+    compressor_utils as compressor_utils_module,
+)
 from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
@@ -563,30 +566,30 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.cp_kv_cache_interleave_size = 1
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+    builder.pcp_compressed_slot_mapping_buffer = torch.zeros(32, dtype=torch.int64)
 
-    def fake_get_compressed_slot_mapping(
-        num_tokens,
+    def fake_kernel(
+        compressed_slot_mapping,
         slot_mapping,
         query_start_loc,
         seq_lens,
         block_table,
         block_size,
         compress_ratio,
-        out,
         dcp_world_size,
         cp_interleave,
     ):
-        assert num_tokens == 0
+        assert compressed_slot_mapping.numel() == 0
         assert dcp_world_size == 1
         assert block_size == 64
         assert compress_ratio == 4
-        out.fill_(-1)
-        return out[:num_tokens]
 
     gathered_slot_mapping = torch.tensor([123, -1, -1, -1], dtype=torch.int64)
 
     class FakePCPGroup:
         def __init__(self):
+            self.world_size = 4
+            self.rank_in_group = 0
             self.calls = 0
 
         def all_gather(self, tensor, dim=0):
@@ -597,11 +600,13 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
 
     fake_pcp_group = FakePCPGroup()
     monkeypatch.setattr(
-        indexer_module,
-        "get_compressed_slot_mapping",
-        fake_get_compressed_slot_mapping,
+        compressor_utils_module,
+        "_COMPRESSED_SLOT_MAPPING_KERNEL",
+        fake_kernel,
     )
-    monkeypatch.setattr(indexer_module, "get_pcp_group", lambda: fake_pcp_group)
+    monkeypatch.setattr(
+        compressor_utils_module, "get_pcp_group", lambda: fake_pcp_group
+    )
 
     query_start_loc = torch.tensor([0, 0], dtype=torch.int32)
     seq_lens = torch.tensor([16], dtype=torch.int32)

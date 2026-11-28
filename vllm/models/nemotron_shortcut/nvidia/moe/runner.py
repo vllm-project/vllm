@@ -274,7 +274,7 @@ class NemotronShortcutMoERunner(MoERunner):
         )
         self.routed_experts._ensure_moe_quant_config_init()
         with self._sequence_parallel_context():
-            hidden_states, router_logits, hidden_states_scale = self._maybe_dispatch(
+            hidden_states, router_logits, hidden_states_scale, _ = self._maybe_dispatch(
                 hidden_states, router_logits
             )
             # Only the PCP gather pre-quantizes, and only for monolithic kernels.

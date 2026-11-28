@@ -18,6 +18,7 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
 from vllm.platforms import current_platform
+from vllm.v1.attention.ops import sparse_swa as sparse_swa_ops_module
 
 
 @pytest.mark.parametrize(
@@ -122,9 +123,9 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
         block_size=64,
     )
     gather = Mock(side_effect=[cache_kv, cache_latent])
-    monkeypatch.setattr(
-        attention_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
-    )
+    pcp_group = SimpleNamespace(all_gather=gather)
+    monkeypatch.setattr(attention_module, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(sparse_swa_ops_module, "get_pcp_group", lambda: pcp_group)
     insert = Mock()
     monkeypatch.setattr(
         torch.ops._C, "fused_deepseek_v4_kv_rope_insert", insert, raising=False
@@ -163,15 +164,11 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
     "pcp_size,use_ep", [(1, False), (2, True), (2, False), (4, False)]
 )
 @pytest.mark.parametrize("use_sp", [False, True])
-def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
+def test_pcp_keeps_routing_ids_local_after_input_preparation(
     model_module, pcp_size, use_ep, use_sp, monkeypatch
 ):
-    """Embedding keeps local IDs; all decoder layers receive aligned routing IDs."""
+    """MoERunner owns PCP gathering; decoder layers keep rank-local routing IDs."""
     is_amd = model_module is amd_model_module
-    gather = Mock(side_effect=lambda ids, dim: torch.cat([ids] * pcp_size, dim=dim))
-    monkeypatch.setattr(
-        model_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
-    )
     monkeypatch.setattr(
         model_module,
         "get_pp_group",
@@ -218,12 +215,7 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
         model_module.DeepseekV4Model.forward(model, local_ids, torch.arange(4), None)
         assert embed.call_args.args[0] is local_ids
         routing_ids = local_ids[::2] if use_sp else local_ids
-        needs_gather = pcp_size > 1 and not use_ep
-        if needs_gather:
-            torch.testing.assert_close(gather.call_args.args[0], routing_ids)
-            routing_ids = routing_ids.repeat(pcp_size)
         torch.testing.assert_close(run_layers.call_args.args[3], routing_ids)
-    assert gather.call_count == 2 * int(needs_gather)
     if pcp_size == 2 and not use_ep and not use_sp and not is_amd:
         replay = Mock(return_value=(embed(local_ids), embed(local_ids)))
         replay.replay_batch = object()
@@ -255,11 +247,7 @@ def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows):
     torch.testing.assert_close(output, expected)
 
 
-def test_pcp_replay_gathers_compacted_routing_ids(monkeypatch):
-    gather = Mock(side_effect=lambda ids, dim: ids.repeat(2))
-    monkeypatch.setattr(
-        model_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
-    )
+def test_pcp_replay_keeps_compacted_routing_ids_local():
     run_layers = Mock(side_effect=lambda _, hidden, *args: (hidden,) * 5)
     model = SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -274,7 +262,7 @@ def test_pcp_replay_gathers_compacted_routing_ids(monkeypatch):
     )
     values = torch.tensor([3, 7])
     model_module.DeepseekV4Model._run_replay_layers(model, *([values] * 7))
-    torch.testing.assert_close(run_layers.call_args.args[3], values.repeat(2))
+    torch.testing.assert_close(run_layers.call_args.args[3], values)
 
 
 @pytest.mark.parametrize("method,adaptive", [("mtp", False), ("dspark", True)])

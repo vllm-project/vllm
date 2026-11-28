@@ -892,7 +892,8 @@ class MoERunner(MoERunnerInterface):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
         # NOTE: this will be removed once all kernels are migrated into the
@@ -921,8 +922,12 @@ class MoERunner(MoERunnerInterface):
             if hidden_states_scale is not None:
                 hidden_states_scale = pcp_group.all_gather(hidden_states_scale, dim=0)
             router_logits = pcp_group.all_gather(router_logits, dim=0)
+            # Token-dependent routing must use the same rows as the gathered
+            # activations and logits, including their padding and rank order.
+            if input_ids is not None:
+                input_ids = pcp_group.all_gather(input_ids, dim=0)
 
-        return hidden_states, router_logits, hidden_states_scale
+        return hidden_states, router_logits, hidden_states_scale, input_ids
 
     def _maybe_combine(
         self,
@@ -1010,9 +1015,12 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            hidden_states, router_logits, hidden_states_scale = self._maybe_dispatch(
-                hidden_states,
-                router_logits,
+            hidden_states, router_logits, hidden_states_scale, input_ids = (
+                self._maybe_dispatch(
+                    hidden_states,
+                    router_logits,
+                    input_ids,
+                )
             )
 
             shared_output, hidden_states = self._apply_quant_method(
