@@ -133,6 +133,9 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    *,
+    prequantized_input: torch.Tensor | None = None,
+    prequantized_input_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -142,6 +145,8 @@ def _moe_forward(
             router_logits,
             shared_experts_input,
             input_ids,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         ),
     )
 
@@ -153,7 +158,16 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    *,
+    prequantized_input: torch.Tensor | None = None,
+    prequantized_input_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        _validate_mhc_fp8_pair,
+    )
+
+    _validate_mhc_fp8_pair(prequantized_input, prequantized_input_scale, hidden_states)
+
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
     # as an op arg (not peeked from the layer registry) to keep the fake
@@ -170,6 +184,9 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    *,
+    prequantized_input: torch.Tensor | None = None,
+    prequantized_input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -179,6 +196,8 @@ def _moe_forward_shared(
             router_logits,
             shared_experts_input,
             input_ids,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         ),
     )
 
@@ -190,7 +209,16 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    *,
+    prequantized_input: torch.Tensor | None = None,
+    prequantized_input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        _validate_mhc_fp8_pair,
+    )
+
+    _validate_mhc_fp8_pair(prequantized_input, prequantized_input_scale, hidden_states)
+
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
     # else `hidden_states`.
@@ -630,6 +658,9 @@ class MoERunner(MoERunnerInterface):
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
         hidden_states_scale: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -694,6 +725,8 @@ class MoERunner(MoERunnerInterface):
                 topk_ids=topk_ids,
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
+                prequantized_input=prequantized_input,
+                prequantized_input_scale=prequantized_input_scale,
             )
 
         if shared_experts_overlapping:
@@ -746,6 +779,9 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -766,6 +802,16 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
+        if (
+            self.routed_input_transform is not None
+            and shared_experts_input is None
+            and (prequantized_input is not None or prequantized_input_scale is not None)
+        ):
+            raise ValueError(
+                "prequantized mHC FP8 input is unsupported "
+                "with a routed input transform"
+            )
+
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -798,6 +844,8 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output
             else 0,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         )
 
         #
@@ -966,6 +1014,9 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> (
         torch.Tensor
         | UnfinalizedMoEOutput
@@ -986,6 +1037,21 @@ class MoERunner(MoERunnerInterface):
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
+
+        if (
+            prequantized_input is not None or prequantized_input_scale is not None
+        ) and (
+            self.routed_experts.quant_method.is_monolithic
+            or self.do_naive_dispatch_combine
+            or (
+                self.moe_config.pcp_size > 1
+                and not self.moe_config.moe_parallel_config.use_all2all_kernels
+            )
+        ):
+            raise ValueError(
+                "prequantized mHC FP8 input requires modular MoE without "
+                "naive DP/EP or PCP dispatch"
+            )
 
         # If using multi-stream overlap for shared experts, we must launch it
         # before routed expert dispatch.
@@ -1022,6 +1088,8 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
                 hidden_states_scale=hidden_states_scale,
+                prequantized_input=prequantized_input,
+                prequantized_input_scale=prequantized_input_scale,
             )
 
             return self._maybe_combine(

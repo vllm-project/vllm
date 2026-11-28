@@ -350,6 +350,9 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> PrepareResultType:
         """Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
@@ -1390,6 +1393,9 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1400,6 +1406,20 @@ class FusedMoEKernelModularImpl:
         """The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
+        if prequantized_input is not None or prequantized_input_scale is not None:
+            # Only synchronous NoDPEP prepare accepts prequantized inputs.
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+                MoEPrepareAndFinalizeNoDPEPModular,
+            )
+
+            if not isinstance(
+                self.prepare_finalize, MoEPrepareAndFinalizeNoDPEPModular
+            ):
+                raise ValueError(
+                    "prequantized mHC FP8 input requires the NoDPEP modular "
+                    f"prepare (got {type(self.prepare_finalize).__name__})"
+                )
+
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -1409,6 +1429,12 @@ class FusedMoEKernelModularImpl:
                 or self.prepare_finalize.supports_dbo()
             )
 
+            kwargs = {}
+            if prequantized_input is not None or prequantized_input_scale is not None:
+                kwargs = {
+                    "prequantized_input": prequantized_input,
+                    "prequantized_input_scale": prequantized_input_scale,
+                }
             (
                 a1q,
                 a1q_scale,
@@ -1424,6 +1450,7 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+                **kwargs,
             )
         else:
             # Overlap shared expert compute with all2all dispatch.
@@ -1652,6 +1679,9 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -1677,6 +1707,8 @@ class FusedMoEKernelModularImpl:
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
                 hidden_states before latent projection.
+            prequantized_input: Optional FP8 input produced by the mHC epilogue.
+            prequantized_input_scale: Group-128 scales for prequantized_input.
 
         Returns:
             torch.Tensor: The output tensor after applying the MoE layer, or
@@ -1695,6 +1727,11 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        if apply_router_weight_on_input and (
+            prequantized_input is not None or prequantized_input_scale is not None
+        ):
+            raise ValueError("prequantized mHC FP8 input requires unweighted input")
+
         apply_router_weight_in_prepare = (
             apply_router_weight_on_input
             and self.router_weight_application == RouterWeightApplication.PREPARE
@@ -1706,6 +1743,8 @@ class FusedMoEKernelModularImpl:
             global_num_experts,
             expert_map,
             apply_router_weight_in_prepare,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         )
 
         # Stash the original unquantized hidden states on the LoRA context
@@ -2058,6 +2097,9 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -2072,4 +2114,6 @@ class FusedMoEKernel:
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         )

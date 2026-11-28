@@ -2708,3 +2708,334 @@ def test_deepseek_v41_gfx942_seam_keeps_pre_delayed(seam, monkeypatch):
     assert seen["pre_mix"] is t
     for name in ("sublayer_out", "post_layer_mix", "comb_res_mix", "fn_packed"):
         assert seen[name] is kwargs.get(name)
+
+
+def _fp8_epilogue_inputs(num_tokens, hidden_size, hc_mult=4):
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    fn = (
+        torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float)
+        * 1e-4
+        * (1 + torch.arange(hc_mult).mul(0.01).view(1, -1, 1))
+    ).flatten(1, 2)
+    hc_scale = torch.randn((3,), dtype=torch.float) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float) * 0.1
+    norm_weight = torch.randn(hidden_size, dtype=torch.bfloat16)
+    return x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base, norm_weight
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_cuda(),
+    reason="TileLang MHC CUDA support required",
+)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 8, 32, 33, 128, 257])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("reuse_residual", [False, True])
+def test_mhc_fused_post_pre_fp8_epilogue(
+    num_tokens, hidden_size, use_ue8m0, reuse_residual
+):
+    """Preserve the original outputs and match CUDA FP8 quantization bitwise."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    eps = dict(
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+    )
+    (
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        norm_weight,
+    ) = _fp8_epilogue_inputs(num_tokens, hidden_size)
+
+    plain = torch.ops.vllm.mhc_fused_post_pre_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        norm_weight=norm_weight,
+        norm_eps=1e-6,
+        **eps,
+    )
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_fused_post_pre_fp8_tilelang_reuse_residual,
+    )
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        mhc_fused_post_pre_split_config,
+    )
+
+    quantize = (
+        mhc_fused_post_pre_fp8_tilelang_reuse_residual
+        if reuse_residual
+        else torch.ops.vllm.mhc_fused_post_pre_fp8_tilelang
+    )
+    quant_residual = residual.clone()
+    quantized = quantize(
+        x,
+        quant_residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        norm_weight=norm_weight,
+        norm_eps=1e-6,
+        use_ue8m0=use_ue8m0,
+        **eps,
+    )
+    torch.accelerator.synchronize()
+
+    if (
+        reuse_residual
+        and mhc_fused_post_pre_split_config(num_tokens, hidden_size, residual.shape[-2])
+        is None
+    ):
+        assert quantized[0].data_ptr() == quant_residual.data_ptr()
+
+    for actual, expected in zip(quantized[:4], plain, strict=True):
+        assert torch.equal(actual, expected)
+
+    # Quantize the BF16 output to preserve rounding before quantization.
+    a1q, scale = quantized[4], quantized[5]
+    q_ref, s_ref = per_token_group_quant_fp8(
+        quantized[3].contiguous(),
+        group_size=128,
+        eps=1e-10,
+        dtype=torch.float8_e4m3fn,
+        column_major_scales=False,
+        tma_aligned_scales=False,
+        use_ue8m0=use_ue8m0,
+    )
+    torch.accelerator.synchronize()
+    assert a1q.dtype == torch.float8_e4m3fn and a1q.is_contiguous()
+    assert scale.dtype == torch.float32 and scale.is_contiguous()
+    assert scale.shape == (num_tokens, hidden_size // 128)
+    assert torch.equal(a1q.view(torch.uint8), q_ref.view(torch.uint8))
+    assert torch.equal(scale.view(torch.int32), s_ref.view(torch.int32))
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_cuda(),
+    reason="TileLang MHC CUDA support required",
+)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+def test_mhc_fused_post_pre_fp8_zero_input_floor(use_ue8m0):
+    """Check FP8 quantization of zero rows mixed with nonzero rows.
+
+    A zero row must stay zero in both the BF16 RMSNorm output and the FP8
+    activation. Its scale is 1e-10 / 448 in the ordinary mode. UE8M0 reapplies
+    the 1e-10 floor after division and rounds up to 2**-33.
+    For all rows, compare the FP8 values and FP32 scales bitwise against
+    the standalone CUDA quantizer.
+    """
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    eps = dict(
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+    )
+    x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base, norm_weight = (
+        _fp8_epilogue_inputs(8, 4096)
+    )
+    x[:4] = 0
+    residual[:4] = 0
+    out = torch.ops.vllm.mhc_fused_post_pre_fp8_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        norm_weight=norm_weight,
+        norm_eps=1e-6,
+        use_ue8m0=use_ue8m0,
+        **eps,
+    )
+    torch.accelerator.synchronize()
+    q_ref, s_ref = per_token_group_quant_fp8(
+        out[3].contiguous(),
+        group_size=128,
+        eps=1e-10,
+        dtype=torch.float8_e4m3fn,
+        column_major_scales=False,
+        tma_aligned_scales=False,
+        use_ue8m0=use_ue8m0,
+    )
+    assert torch.equal(out[4].view(torch.uint8), q_ref.view(torch.uint8))
+    assert torch.equal(out[5].view(torch.int32), s_ref.view(torch.int32))
+    assert bool((out[3][:4] == 0).all())
+    assert bool((out[4][:4] == 0).all())
+    floor_rows = out[5][:4]
+    if use_ue8m0:
+        expected = torch.full_like(floor_rows, 2.0**-33)
+        assert torch.equal(floor_rows.view(torch.int32), expected.view(torch.int32))
+    else:
+        expected = torch.full_like(floor_rows, 1e-10 / 448)
+        torch.testing.assert_close(floor_rows, expected, rtol=2e-7, atol=0)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_cuda(),
+    reason="TileLang MHC CUDA support required",
+)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+def test_mhc_fused_post_pre_fp8_custom_op_supports_compile(use_ue8m0):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    eps = dict(
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+    )
+    (
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        norm_weight,
+    ) = _fp8_epilogue_inputs(1, 4096)
+    torch.library.opcheck(
+        torch.ops.vllm.mhc_fused_post_pre_fp8_tilelang.default,
+        (x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base),
+        kwargs=dict(
+            norm_weight=norm_weight,
+            norm_eps=1e-6,
+            use_ue8m0=use_ue8m0,
+            **eps,
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_cuda(),
+    reason="TileLang MHC CUDA support required",
+)
+@pytest.mark.parametrize(
+    "amax,expected_scale",
+    [(446.0, 1.0), (448.0, 1.0), (450.0, 2.0), (672.0, 2.0)],
+)
+def test_mhc_fused_post_pre_fp8_ue8m0_scale_rounding(amax, expected_scale):
+    """Preserve power-of-two scales and round nonzero mantissas upward."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    torch.set_default_device(DEVICE)
+    x = torch.ones((1, 4096), dtype=torch.bfloat16)
+    residual = torch.zeros((1, 4, 4096), dtype=torch.bfloat16)
+    post_layer_mix = torch.ones((1, 4, 1), dtype=torch.float32)
+    comb_res_mix = torch.zeros((1, 4, 4), dtype=torch.float32)
+    fn = torch.zeros((24, 4 * 4096), dtype=torch.float32)
+    hc_scale = torch.zeros(3, dtype=torch.float32)
+    hc_base = torch.zeros(24, dtype=torch.float32)
+    norm_weight = torch.full((4096,), amax, dtype=torch.bfloat16)
+
+    # Each residual stream becomes one and each pre-mix is 0.5. With zero
+    # norm epsilon, the collapsed value 2 normalizes to 1 before weighting.
+    out = torch.ops.vllm.mhc_fused_post_pre_fp8_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps=1e-6,
+        hc_pre_eps=0.0,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        norm_weight=norm_weight,
+        norm_eps=0.0,
+        use_ue8m0=True,
+    )
+    # Confirm the intended amax reaches every group after mHC and RMSNorm.
+    assert torch.equal(out[3], torch.full_like(out[3], amax))
+    q_ref, s_ref = per_token_group_quant_fp8(
+        out[3].contiguous(),
+        group_size=128,
+        eps=1e-10,
+        dtype=torch.float8_e4m3fn,
+        column_major_scales=False,
+        tma_aligned_scales=False,
+        use_ue8m0=True,
+    )
+    expected = torch.full_like(out[5], expected_scale)
+    assert torch.equal(out[5].view(torch.int32), expected.view(torch.int32))
+    assert torch.equal(out[5].view(torch.int32), s_ref.view(torch.int32))
+    assert torch.equal(out[4].view(torch.uint8), q_ref.view(torch.uint8))
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_cuda(),
+    reason="TileLang MHC CUDA support required",
+)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+def test_mhc_fused_post_pre_fp8_ue8m0_graph_replay(use_ue8m0):
+    """Graph replay uses refreshed inputs and matches eager outputs."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base, norm_weight = (
+        _fp8_epilogue_inputs(8, 4096)
+    )
+
+    def run():
+        return torch.ops.vllm.mhc_fused_post_pre_fp8_tilelang(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps=1e-6,
+            hc_pre_eps=1e-6,
+            hc_sinkhorn_eps=1e-6,
+            hc_post_mult_value=1.0,
+            sinkhorn_repeat=20,
+            norm_weight=norm_weight,
+            norm_eps=1e-6,
+            use_ue8m0=use_ue8m0,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    x.normal_()
+    residual.normal_()
+    graph.replay()
+    eager = run()
+    for actual, expected in zip(captured, eager, strict=True):
+        assert torch.equal(actual, expected)

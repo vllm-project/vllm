@@ -205,6 +205,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
+    VLLM_MHC_FP8_EPILOGUE: bool = False
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
     VLLM_STRICT_QUANT_SCHEME: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
@@ -1684,6 +1685,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if None, choose better gemm type automatically
     "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
         "VLLM_HUMMING_MOE_GEMM_TYPE", None
+    ),
+    # Set to 1 to fuse DeepSeek V4's FFN input quantization into mHC on CUDA.
+    # Experimental and disabled by default. Requires Humming Indexed experts
+    # with MXFP4 weights, dynamic group-128 FP8 activations, and NoDPEP prepare.
+    # Layers that do not support fusion use the existing quantization path.
+    "VLLM_MHC_FP8_EPILOGUE": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_MHC_FP8_EPILOGUE", "0")
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with

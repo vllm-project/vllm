@@ -38,6 +38,76 @@ def _quantize_input(
     return a1q, a1q_scale
 
 
+def _validate_mhc_fp8_pair(
+    prequantized_input: torch.Tensor | None,
+    prequantized_input_scale: torch.Tensor | None,
+    bf16_input: torch.Tensor,
+) -> None:
+    """Validate a contiguous E4M3FN input and row-major FP32 g128 scales."""
+    if prequantized_input is None and prequantized_input_scale is None:
+        return
+    if (prequantized_input is None) != (prequantized_input_scale is None):
+        raise ValueError(
+            "prequantized_input and prequantized_input_scale must be provided "
+            "as a pair (both None = not provided)"
+        )
+    assert prequantized_input is not None and prequantized_input_scale is not None
+    if bf16_input.dim() < 1:
+        raise ValueError(
+            "the BF16 main input must have at least one dimension for the "
+            "mHC FP8 pair contract"
+        )
+    if bf16_input.dtype != torch.bfloat16 or not bf16_input.is_contiguous():
+        raise ValueError(
+            "the BF16 main input must be contiguous bfloat16 (got "
+            f"{bf16_input.dtype}, contiguous={bf16_input.is_contiguous()})"
+        )
+    H = bf16_input.shape[-1]
+    if H % 128 != 0:
+        raise ValueError(
+            f"prequantized mHC FP8 input requires hidden_size divisible by 128, got {H}"
+        )
+    if (
+        tuple(prequantized_input.shape) != tuple(bf16_input.shape)
+        or prequantized_input.dtype != torch.float8_e4m3fn
+        or not prequantized_input.is_contiguous()
+        or prequantized_input.device != bf16_input.device
+    ):
+        raise ValueError(
+            "prequantized_input must be a contiguous float8_e4m3fn tensor "
+            f"with the same shape/device as the BF16 input "
+            f"(got {tuple(prequantized_input.shape)} "
+            f"{prequantized_input.dtype} on {prequantized_input.device}, "
+            f"expected {tuple(bf16_input.shape)} on {bf16_input.device})"
+        )
+    expected_scale_shape = tuple(bf16_input.shape[:-1]) + (H // 128,)
+    if (
+        tuple(prequantized_input_scale.shape) != expected_scale_shape
+        or prequantized_input_scale.dtype != torch.float32
+        or not prequantized_input_scale.is_contiguous()
+        or prequantized_input_scale.device != bf16_input.device
+    ):
+        raise ValueError(
+            "prequantized_input_scale must be a contiguous row-major FP32 "
+            f"tensor of shape {expected_scale_shape} on "
+            f"{bf16_input.device} (got "
+            f"{tuple(prequantized_input_scale.shape)} "
+            f"{prequantized_input_scale.dtype} on "
+            f"{prequantized_input_scale.device})"
+        )
+
+
+def _quant_config_accepts_mhc_fp8_pair(quant_config) -> bool:
+    """Check the activation format consumed by the FP8 prepare path."""
+    from vllm.platforms import current_platform
+
+    return (
+        quant_config.quant_dtype == current_platform.fp8_dtype()
+        and quant_config.block_shape == [1, 128]
+        and not quant_config.is_scale_transposed
+    )
+
+
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     def supports_deferred_moe_finalize(self) -> bool:
         # finalize() here is the top-k weight-and-reduce and nothing else,
@@ -70,7 +140,28 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> mk.PrepareResultType:
+        if prequantized_input is not None or prequantized_input_scale is not None:
+            # Reuse the upstream quantization for w13.
+            _validate_mhc_fp8_pair(prequantized_input, prequantized_input_scale, a1)
+            if apply_router_weight_on_input:
+                raise ValueError(
+                    "prequantized mHC FP8 input is incompatible with "
+                    "apply_router_weight_on_input"
+                )
+            if quant_config is None or not _quant_config_accepts_mhc_fp8_pair(
+                quant_config
+            ):
+                raise ValueError(
+                    "prequantized mHC FP8 input requires the FP8 dynamic "
+                    "group-128 recipe (got quant_config="
+                    f"{type(quant_config).__name__ if quant_config else None})"
+                )
+            return prequantized_input, prequantized_input_scale, None, None, None
+
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1

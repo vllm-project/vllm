@@ -315,6 +315,10 @@ def mhc_pre_big_fuse_tilelang(
 # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
+# Keep FP8 tensor declarations in a separate generator to preserve the
+# unquantized kernel's compilation and scheduling.
+
+
 @tilelang_jit
 def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_mul,
@@ -522,6 +526,269 @@ def mhc_pre_big_fuse_with_norm_tilelang(
                     )
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+def _ue8m0_bump_pow2(s0):
+    """Round a finite, floored FP32 scale up to a power of two."""
+    z = T.max(T.abs(s0), 1e-10)
+    bits = T.reinterpret(z, "uint32")
+    expo = T.bitwise_and(T.shift_right(bits, 23), 255)
+    mant = T.bitwise_and(bits, 0x7FFFFF)
+    expo_out = expo + T.cast(mant != 0, "uint32")
+    return T.reinterpret(T.shift_left(expo_out, 23), "float32")
+
+
+@tilelang_jit
+def mhc_pre_big_fuse_with_norm_fp8_tilelang(
+    gemm_out_mul,
+    gemm_out_sqrsum,
+    hc_scale,
+    hc_base,
+    residual,
+    post_mix,
+    comb_mix,
+    layer_input,
+    norm_weight,
+    pre_mix_in,
+    pre_mix_out,
+    aux_out,
+    hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    norm_eps: float,
+    n_splits: int = 16,
+    hc_mult: int = 4,
+    gemm_last_dim: int = -1,
+    use_pre_mix_in: bool = False,
+    save_pre_mix: bool = False,
+    rms_numel: int = 0,
+    split_mode: str = "fused",
+    write_aux: bool = False,
+    a1q=None,
+    scale=None,
+    quant_out: bool = True,
+    group_size: int = 128,
+    use_ue8m0: bool = False,
+):
+    # This generator quantizes the fused RMSNorm output.
+    assert quant_out is True and group_size == 128
+    assert use_ue8m0 in (True, False)
+    assert not save_pre_mix and not use_pre_mix_in and not write_aux
+    assert split_mode == "fused"
+    num_tokens = T.dynamic("num_tokens")
+    hc_mult3 = hc_mult * (2 + hc_mult)
+    if gemm_last_dim < 0:
+        gemm_last_dim = hc_mult3
+    if rms_numel == 0:
+        rms_numel = hc_mult * hidden_size
+    hidden_block = math.gcd(1024, hidden_size)
+
+    gemm_out_mul: T.Tensor[[n_splits, num_tokens, gemm_last_dim], T.float32]  # type: ignore[no-redef, valid-type]
+    gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
+    hc_scale: T.Tensor[[3], T.float32]  # type: ignore[no-redef, valid-type]
+    hc_base: T.Tensor[[hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+
+    pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    aux_out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    a1q: T.Tensor[[num_tokens, hidden_size], T.float8_e4m3fn]  # type: ignore[no-redef, valid-type]
+    scale: T.Tensor[[num_tokens, hidden_size // group_size], T.float32]  # type: ignore[no-redef, valid-type]
+
+    with T.Kernel(num_tokens, threads=96) as i:
+        if ENABLE_PDL:
+            T.pdl_sync()
+        mixes_shared = T.alloc_shared(hc_mult3, T.float32)
+        if split_mode != "input":
+            rms = T.alloc_fragment(1, T.float32)
+            mixes = T.alloc_fragment(hc_mult3, T.float32)
+            T.clear(mixes)
+            rms[0] = 0
+
+            for i_split in T.serial(n_splits):
+                rms[0] += gemm_out_sqrsum[i_split, i]
+            rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
+            for j in T.Parallel(hc_mult3):
+                mixes[j] = 0
+                for i_split in T.serial(n_splits):
+                    mixes[j] += gemm_out_mul[i_split, i, j]
+                mixes[j] *= rms[0]
+            T.copy(mixes, mixes_shared)
+
+        if split_mode != "input" and _is_mix_thread():
+            cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
+            for j in T.Parallel(hc_mult):
+                if save_pre_mix:
+                    pre_mix_out[i, j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
+                    )
+                post_mix[i, j] = (
+                    T.sigmoid(
+                        mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
+                    )
+                    * hc_post_mult_value
+                )
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = (
+                    mixes_shared[j * hc_mult + k + hc_mult * 2] * hc_scale[2]
+                    + hc_base[j * hc_mult + k + hc_mult * 2]
+                )
+
+            row_sum = T.alloc_fragment(hc_mult, T.float32)
+            col_sum = T.alloc_fragment(hc_mult, T.float32)
+
+            row_max = T.alloc_fragment(hc_mult, T.float32)
+            T.reduce_max(cm, row_max, dim=1)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = T.exp(cm[j, k] - row_max[j])
+            T.reduce_sum(cm, row_sum, dim=1)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = cm[j, k] / row_sum[j] + hc_sinkhorn_eps
+
+            T.reduce_sum(cm, col_sum, dim=0)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+
+            # A NaN input row (e.g. CUDA-graph padding) has a NaN RMS, so every
+            # logit and the whole result is NaN already. Skip the remaining
+            # iterations: IEEE division takes a slow path on NaN. rms is an
+            # rsqrt, so it is >= 0 unless NaN (T.isfinite does not lower on HIP).
+            if rms[0] >= 0.0:
+                for _ in T.serial(sinkhorn_repeat - 1):
+                    T.reduce_sum(cm, row_sum, dim=1)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
+
+                    T.reduce_sum(cm, col_sum, dim=0)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                comb_mix[i, j * hc_mult + k] = cm[j, k]
+        elif split_mode != "stats" and _is_collapse_thread():
+            pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
+            for j in T.Parallel(hc_mult):
+                if use_pre_mix_in:
+                    pre_mix_shared[j] = pre_mix_in[i, j]
+                elif save_pre_mix:
+                    pre_mix_shared[j] = T.if_then_else(j == 0, 1.0, 0.0)
+                else:
+                    pre_mix_shared[j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
+                    )
+
+            # Pass 1: stash unnormalized weighted-sum output in shared memory
+            # as bf16 (matches the rounding that RMSNorm would see) while
+            # accumulating the per-position squared sum.
+            output_shared = T.alloc_shared(hidden_size, T.bfloat16)
+            sumsq_per_pos = T.alloc_fragment(hidden_block, T.float32)
+            T.clear(sumsq_per_pos)
+
+            for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                xs = T.alloc_shared((hc_mult, hidden_block), T.bfloat16)
+                xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
+                T.copy(residual[i, 0, i0_h * hidden_block], xs)
+                T.copy(xs, xl)
+
+                ol = T.alloc_fragment(hidden_block, T.float32)
+                T.clear(ol)
+                if write_aux:
+                    # Aux consumers (draft models) take the plain stream mean
+                    # of the same residual this collapse reads.
+                    aux = T.alloc_fragment(hidden_block, T.float32)
+                    T.clear(aux)
+
+                for i_hc in T.serial(hc_mult):
+                    pre = pre_mix_shared[i_hc]
+                    for i1_h in T.Parallel(hidden_block):
+                        ol[i1_h] += pre * xl[i_hc, i1_h]
+                        if write_aux:
+                            aux[i1_h] += xl[i_hc, i1_h]
+
+                if write_aux:
+                    for i1_h in T.Parallel(hidden_block):
+                        aux_out[i, i0_h * hidden_block + i1_h] = T.bfloat16(
+                            aux[i1_h] / hc_mult
+                        )
+
+                if save_pre_mix:
+                    # Keep the BF16 boundary before the delayed input RMSNorm.
+                    rounded = T.alloc_fragment(hidden_block, T.bfloat16)
+                    T.copy(ol, rounded)
+                    for i1_h in T.Parallel(hidden_block):
+                        value = T.float32(rounded[i1_h])
+                        sumsq_per_pos[i1_h] += value * value
+                        output_shared[i0_h * hidden_block + i1_h] = rounded[i1_h]
+                else:
+                    for i1_h in T.Parallel(hidden_block):
+                        sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
+                        output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
+
+            sumsq = T.alloc_fragment(1, T.float32)
+            T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
+            rsqrt_norm = T.alloc_fragment(1, T.float32)
+            rsqrt_norm[0] = T.rsqrt(sumsq[0] / hidden_size + norm_eps)
+
+            # Pass 2: scale by rsqrt * norm_weight and write the result to HBM.
+            for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                w_shared = T.alloc_shared(hidden_block, T.bfloat16)
+                w_local = T.alloc_fragment(hidden_block, T.float32)
+                T.copy(norm_weight[i0_h * hidden_block], w_shared)
+                T.copy(w_shared, w_local)
+
+                ol = T.alloc_fragment(hidden_block, T.float32)
+                for i1_h in T.Parallel(hidden_block):
+                    ol[i1_h] = (
+                        output_shared[i0_h * hidden_block + i1_h]
+                        * rsqrt_norm[0]
+                        * w_local[i1_h]
+                    )
+
+                T.copy(ol, layer_input[i, i0_h * hidden_block])
+
+                if quant_out:
+                    # Quantize the BF16-rounded output. Each group fits within
+                    # this block, so its amax needs no cross-block reduction.
+                    n_groups_blk = hidden_block // group_size
+                    xb = T.alloc_fragment(hidden_block, T.bfloat16)
+                    T.copy(ol, xb)
+                    absvals = T.alloc_fragment((n_groups_blk, group_size), T.float32)
+                    for g, e in T.Parallel(n_groups_blk, group_size):
+                        absvals[g, e] = T.abs(T.float32(xb[g * group_size + e]))
+                    amax_blk = T.alloc_fragment(n_groups_blk, T.float32)
+                    T.reduce_max(absvals, amax_blk, dim=1)
+                    scale_blk = T.alloc_fragment(n_groups_blk, T.float32)
+                    inv_blk = T.alloc_fragment(n_groups_blk, T.float32)
+                    for g in T.Parallel(n_groups_blk):
+                        # Match CUDA _C: divide the eps-clamped amax by 448.
+                        # Triton's fallback multiplies by the reciprocal constant.
+                        s0 = T.ieee_fdiv(T.max(amax_blk[g], 1e-10), 448.0)
+                        if use_ue8m0:
+                            # The floor and finite BF16 range keep the rounded
+                            # scale within normal, finite FP32 values.
+                            scale_blk[g] = _ue8m0_bump_pow2(s0)
+                        else:
+                            scale_blk[g] = s0
+                        inv_blk[g] = T.ieee_fdiv(1.0, scale_blk[g])
+                        scale[i, i0_h * n_groups_blk + g] = scale_blk[g]
+                    for g, e in T.Parallel(n_groups_blk, group_size):
+                        scaled = T.float32(xb[g * group_size + e]) * inv_blk[g]
+                        clamped = T.min(T.max(scaled, -448.0), 448.0)
+                        a1q[i, i0_h * hidden_block + g * group_size + e] = T.cast(
+                            clamped, T.float8_e4m3fn
+                        )
 
         if ENABLE_PDL:
             T.pdl_trigger()
@@ -1302,9 +1569,22 @@ class MhcPreBigFuseTileLangKernel(
         hc_post_mult_value: float
         sinkhorn_repeat: int
         norm_eps: float
+        quant_out: bool = False
+        use_ue8m0: bool = False
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
+        if compile_key.quant_out:
+            # The FP8 g128 epilogue exists only on the plain with-norm
+            # collapse kernel. Broadcast / no-norm variants must never be
+            # dispatched with quant_out=True.
+            if compile_key.is_broadcast or not compile_key.use_norm_weight:
+                raise ValueError(
+                    "mhc FP8 epilogue requires the with-norm (non-broadcast) "
+                    f"collapse kernel; got broadcast={compile_key.is_broadcast} "
+                    f"use_norm_weight={compile_key.use_norm_weight}"
+                )
+            return mhc_pre_big_fuse_with_norm_fp8_tilelang
         if compile_key.is_broadcast:
             return mhc_pre_big_fuse_broadcast_with_norm_tilelang
         if compile_key.use_norm_weight:
@@ -1325,6 +1605,8 @@ class MhcPreBigFuseTileLangKernel(
         comb_mix: Any,
         layer_input: Any,
         norm_weight: Any | None,
+        a1q: Any | None = None,
+        scale: Any | None = None,
     ) -> tuple[Any, ...]:
         common_args = (
             gemm_out_mul,
@@ -1360,7 +1642,7 @@ class MhcPreBigFuseTileLangKernel(
         else:
             middle_args = (*output_args, post_mix, post_mix, layer_input)
         norm_eps_args = (compile_key.norm_eps,) if compile_key.use_norm_weight else ()
-        return (
+        base = (
             *common_args,
             *middle_args,
             compile_key.hidden_size,
@@ -1368,6 +1650,27 @@ class MhcPreBigFuseTileLangKernel(
             *norm_eps_args,
             compile_key.n_splits,
             compile_key.hc_mult,
+        )
+        if not compile_key.quant_out:
+            return base
+        # Quantized variant: the kernel signature continues past hc_mult with
+        # (gemm_last_dim, use_pre_mix_in, save_pre_mix, rms_numel, split_mode,
+        # write_aux, a1q, scale, quant_out, group_size, use_ue8m0); pass the
+        # kernel's own defaults explicitly so the appended quant arguments
+        # land in place.
+        return (
+            *base,
+            -1,
+            False,
+            False,
+            0,
+            "fused",
+            False,
+            a1q,
+            scale,
+            True,
+            128,
+            compile_key.use_ue8m0,
         )
 
     def dispatch(
@@ -1385,8 +1688,16 @@ class MhcPreBigFuseTileLangKernel(
         broadcast_norm_eps: float = 0.0,
         num_tokens: int = 1,
         use_fused_tilelang: bool = False,
+        quant_out: bool = False,
+        use_ue8m0: bool = False,
         **compile_key_fields: float,
     ) -> CompileKey:
+        # NOTE: this body is expression-traced by VllmTileLangJitKernel at
+        # import time, so it must stay assignment/return only. The
+        # quant_out fail-closed check (broadcast / no-norm rejection) lives
+        # in kernel(), which raises on unsupported CompileKey combinations.
+        # Off keys normalize use_ue8m0 to False (the BF16 kernels
+        # never receive the flag).
         pre_gemm_n_splits = (
             compute_num_split(64, pre_gemm_k, (num_tokens + 63) // 64)
             if use_pre_gemm_splits
@@ -1411,6 +1722,8 @@ class MhcPreBigFuseTileLangKernel(
             is_broadcast=is_broadcast,
             sinkhorn_repeat=sinkhorn_repeat,
             norm_eps=actual_norm_eps if actual_use_norm_weight else 0.0,
+            quant_out=quant_out,
+            use_ue8m0=use_ue8m0 and quant_out,
         )
 
     def get_warmup_keys(
@@ -1429,10 +1742,14 @@ class MhcPreBigFuseTileLangKernel(
         broadcast_norm_eps: float | tuple[float, ...] | None = None,
         include_pre_gemm_splits: bool = False,
         include_broadcast_splits: bool = False,
+        quant_out: bool = False,
+        use_ue8m0: bool = False,
     ) -> list[CompileKey]:
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if max_tokens <= 0:
             return []
+        if quant_out and not use_norm_weight:
+            raise ValueError("mhc FP8 epilogue warmup requires use_norm_weight=True")
 
         warmup_cases = zip_inputs(
             dict(
@@ -1448,7 +1765,9 @@ class MhcPreBigFuseTileLangKernel(
                 use_fused_tilelang=False,
             ),
             dict(
-                is_broadcast=include_broadcast_splits,
+                # The FP8 epilogue only exists on the plain with-norm kernel;
+                # never enumerate broadcast splits for quant_out=True.
+                is_broadcast=include_broadcast_splits and not quant_out,
                 use_pre_gemm_splits=include_broadcast_splits,
                 pre_gemm_k=hidden_size,
                 use_fused_tilelang=False,
@@ -1480,6 +1799,8 @@ class MhcPreBigFuseTileLangKernel(
             broadcast_norm_eps=broadcast_norm_eps
             if broadcast_norm_eps is not None
             else norm_eps,
+            quant_out=quant_out,
+            use_ue8m0=use_ue8m0,
             _when=lambda *, use_fused_tilelang, num_tokens: (
                 not use_fused_tilelang or num_tokens <= 16
             ),
@@ -1524,6 +1845,18 @@ class MhcPreBigFuseTileLangKernel(
             if compile_key.is_broadcast or compile_key.use_norm_weight
             else None
         )
+        if compile_key.quant_out:
+            # Quantized warmup inputs: a1q [1, H] fp8 + scale
+            # [1, H/128] fp32. Plain off keys get no extra tensors.
+            a1q = make_tilelang_warmup_tensor(
+                torch.float8_e4m3fn, num_tokens, hidden_size
+            )
+            scale = make_tilelang_warmup_tensor(
+                torch.float32, num_tokens, hidden_size // 128
+            )
+        else:
+            a1q = None
+            scale = None
         return dict(
             gemm_out_mul=gemm_out_mul,
             gemm_out_sqrsum=gemm_out_sqrsum,
@@ -1541,6 +1874,10 @@ class MhcPreBigFuseTileLangKernel(
             residual_out=residual_out,
             norm_weight=norm_weight,
             norm_eps=compile_key.norm_eps,
+            a1q=a1q,
+            scale=scale,
+            quant_out=compile_key.quant_out,
+            use_ue8m0=compile_key.use_ue8m0 and compile_key.quant_out,
         )
 
     @kernel_launcher
@@ -1563,6 +1900,10 @@ class MhcPreBigFuseTileLangKernel(
         residual_out: Any | None = None,
         norm_weight: Any | None = None,
         norm_eps: float = 0.0,
+        a1q: Any | None = None,
+        scale: Any | None = None,
+        quant_out: bool = False,
+        use_ue8m0: bool = False,
     ) -> TileLangLaunchSpec:
         is_broadcast = residual_out is not None
         use_norm_weight = norm_weight is not None
@@ -1574,6 +1915,8 @@ class MhcPreBigFuseTileLangKernel(
         else:
             hc_mult = residual.shape[-2]
             hidden_size = residual.shape[-1]
+        if quant_out and (a1q is None or scale is None):
+            raise ValueError("quant_out=True requires both a1q and scale outputs")
         compile_key = self.dispatch(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
@@ -1587,6 +1930,8 @@ class MhcPreBigFuseTileLangKernel(
             sinkhorn_repeat=sinkhorn_repeat,
             norm_eps=norm_eps,
             broadcast_norm_eps=norm_eps,
+            quant_out=quant_out,
+            use_ue8m0=use_ue8m0,
         )
         return (
             (compile_key,),
@@ -1602,6 +1947,8 @@ class MhcPreBigFuseTileLangKernel(
                 comb_mix=comb_mix,
                 layer_input=layer_input,
                 norm_weight=norm_weight,
+                a1q=a1q,
+                scale=scale,
             ),
         )
 

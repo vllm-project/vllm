@@ -621,6 +621,62 @@ class HummingLinearMethod(LinearMethodBase):
         return output
 
 
+def check_mhc_fp8_recipe(
+    activation_key,
+    weight_key,
+    moe_quant_config,
+    hadamard_block_size,
+) -> bool:
+    """Match the supported MXFP4 weights and dynamic g128 FP8 activations."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kMxfp4Static,
+    )
+
+    if activation_key != kFp8Dynamic128Sym:
+        return False
+    if weight_key != kMxfp4Static:
+        return False
+    if hadamard_block_size is not None and hadamard_block_size > 1:
+        return False
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        _quant_config_accepts_mhc_fp8_pair,
+    )
+
+    return _quant_config_accepts_mhc_fp8_pair(moe_quant_config)
+
+
+def mhc_fp8_epilogue_supported(layer: RoutedExperts) -> bool:
+    """Check the final Humming schemas and consumer after weight conversion."""
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingIndexedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    method = layer.quant_method
+    if not isinstance(method, (HummingMoEMethod, Mxfp4MoEMethod)):
+        return False
+    moe_kernel = method.moe_kernel
+    if moe_kernel is None:
+        return False
+    if not isinstance(moe_kernel.fused_experts, HummingIndexedExperts):
+        return False
+    if not isinstance(moe_kernel.prepare_finalize, MoEPrepareAndFinalizeNoDPEPModular):
+        return False
+    weight_schema = layer.weight_schemas["w13"]
+    input_schema = layer.input_schemas["w13"]
+    param_dtype = method.moe.in_dtype
+    return check_mhc_fp8_recipe(
+        activation_key=input_schema_to_quant_key(input_schema, param_dtype),
+        weight_key=weight_schema_to_quant_key(weight_schema, param_dtype),
+        moe_quant_config=moe_kernel.fused_experts.quant_config,
+        hadamard_block_size=weight_schema.hadamard_block_size,
+    )
+
+
 class HummingMoEMethod(FusedMoEMethodBase):
     def __init__(
         self, quant_config: HummingLayerQuantizationConfig, moe: "FusedMoEConfig"
@@ -823,21 +879,21 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply Humming-quantized MoE computation using the standard kernel flow.
 
-        This method uses FusedMoEKernel.apply() which orchestrates:
-        1. Preparation (quantization if needed - skipped for Humming via
-           expects_unquantized_inputs=True to prevent double quantization)
-        2. Expert computation (via experts.apply())
-        3. Finalization (weight application & reduction - no-op for Humming
-           since it's already done internally)
-
-        Humming handles quantization, weight application, and reduction
-        internally in the experts implementation.
-
-        Humming experts consume the weights and quantization tensors passed
-        through the standard modular kernel interface.
+        FusedMoEKernel.apply() orchestrates:
+        1. Preparation: reuse the mHC FP8 input and scales when provided.
+           Otherwise, the expert's input requirements determine whether
+           prepare quantizes the input or defers quantization to Humming.
+        2. Expert computation: call experts.apply() with the prepared input
+           and scales. Humming skips w13 input quantization when it receives
+           the prequantized input and scales.
+        3. Finalization: apply routing weights and reduce expert outputs
+           when needed. Humming indexed experts do this internally.
         """
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -852,4 +908,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=False,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         )
