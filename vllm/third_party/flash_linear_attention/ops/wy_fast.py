@@ -14,16 +14,25 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .op import store_2d_vec4_16bit
+from .utils import is_rdna
+
+# RDNA: BK=BV=32, num_stages=1 avoids Wave32 VGPR spills.
+WU_CONFIGS = (
+    [triton.Config({}, num_warps=4, num_stages=1)]
+    if is_rdna
+    else [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    configs=WU_CONFIGS,
+    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN", "HEAD_FIRST", "VEC4_STORE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
@@ -45,8 +54,13 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+    VEC4_STORE: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    if HEAD_FIRST:
+        i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    else:
+        i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = (
@@ -69,7 +83,6 @@ def recompute_w_u_fwd_kernel(
     p_A = A + (bos * H + i_h) * BT + o_t[:, None] * (H * BT) + o_A[None, :]
     b_beta = tl.load(p_beta, mask=m_t, other=0.0)
     b_A = tl.load(p_A, mask=m_A, other=0.0)
-    b_g = tl.exp(tl.load(p_g, mask=m_t, other=0.0))
 
     for i_v in range(tl.cdiv(V, BV)):
         o_v = i_v * BV + tl.arange(0, BV)
@@ -79,7 +92,23 @@ def recompute_w_u_fwd_kernel(
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
+        if VEC4_STORE:
+            store_2d_vec4_16bit(
+                u + (bos * H + i_h) * V,
+                b_u,
+                o_t,
+                i_v * (BV // 4) + tl.arange(0, BV // 4),
+                H * V,
+                T,
+                V,
+                BT,
+                BV,
+            )
+        else:
+            tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
+
+    # Loaded after the u loop to keep b_g out of its live range.
+    b_g = tl.exp(tl.load(p_g, mask=m_t, other=0.0))
 
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
@@ -94,7 +123,20 @@ def recompute_w_u_fwd_kernel(
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_kb = (b_k * b_beta[:, None] * b_g[:, None]).to(b_k.dtype)
         b_w = tl.dot(b_A, b_kb)
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_k)
+        if VEC4_STORE:
+            store_2d_vec4_16bit(
+                w + (bos * H + i_h) * K,
+                b_w,
+                o_t,
+                i_k * (BK // 4) + tl.arange(0, BK // 4),
+                H * K,
+                T,
+                K,
+                BT,
+                BK,
+            )
+        else:
+            tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_k)
 
 
 def recompute_w_u_fwd(
@@ -113,11 +155,22 @@ def recompute_w_u_fwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = 64
-    BV = 64
+    BK = 32 if is_rdna else 64
+    BV = 32 if is_rdna else 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    recompute_w_u_fwd_kernel[(NT, B * H)](
+    # Co-schedule all heads of a chunk; time-major order thrashes the RDNA
+    # Infinity Cache on long prefills.
+    head_first = is_rdna
+    vec4_store = (
+        is_rdna
+        and K % 4 == 0
+        and V % 4 == 0
+        and k.element_size() == 2
+        and v.element_size() == 2
+    )
+    grid = (B * H, NT) if head_first else (NT, B * H)
+    recompute_w_u_fwd_kernel[grid](
         k=k,
         v=v,
         beta=beta,
@@ -135,5 +188,7 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        HEAD_FIRST=head_first,
+        VEC4_STORE=vec4_store,
     )
     return w, u
