@@ -951,6 +951,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # Chosen once: aiter tgemm for the FP32 compressor scores, or torch.mm.
+        self._use_aiter_fp32_score_gemm = bool(
+            rocm_aiter_ops.is_fp32_out_tgemm_enabled()
+        )
 
         if self.indexer is None:
             # Dense layers have no compressor work to overlap; HCA layers
@@ -1094,10 +1100,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return q, qr_out, qr_scale_out, kv_out
 
         def main_compressor_chain() -> None:
-            score = torch.mm(
-                hidden_states,
-                compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
+            score = self._fp32_score_gemm(
+                hidden_states, compressor.fused_wkv_wgate.weight
             )
             compressor(score, positions, self.rotary_emb)
 
@@ -1121,10 +1125,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
 
         def indexer_compressor_chain() -> None:
-            score = torch.mm(
-                hidden_states,
-                indexer.compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
+            score = self._fp32_score_gemm(
+                hidden_states, indexer.compressor.fused_wkv_wgate.weight
             )
             indexer.compressor(score, positions, self.indexer_rotary_emb)
 
@@ -1370,6 +1372,18 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         return super()._fused_wqa_wkv_gemm(hidden_states)
 
+    def _fp32_score_gemm(
+        self, hidden_states: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        """BF16 x BF16 -> FP32 compressor score GEMM against an [N, K] weight:
+        aiter tgemm when `rocm_aiter_ops.is_fp32_out_tgemm_enabled()`,
+        torch.mm otherwise."""
+        if self._use_aiter_fp32_score_gemm:
+            from aiter.tuned_gemm import tgemm
+
+            return tgemm.mm(hidden_states, weight, otype=torch.float32)
+        return torch.mm(hidden_states, weight.T, out_dtype=torch.float32)
+
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[
@@ -1381,6 +1395,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         fused_weight = self._fused_compressor_weight
         split_sizes = self._fused_compressor_split_sizes
         if fused_weight is None or split_sizes is None:
+            if (
+                self._use_aiter_fp32_score_gemm
+                and self.compressor is not None
+                and self.indexer is None
+            ):
+                # HCA (cr=128) layers: route the compressor score through aiter.
+                # This method only runs from _run_sequential_pipeline, which
+                # clears aux_stream_list first, so the base class would run
+                # these two GEMMs back to back as well.
+                qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+                kv_score = self._fp32_score_gemm(
+                    hidden_states, self.compressor.fused_wkv_wgate.weight
+                )
+                return qr_kv, kv_score, None, None
             return super()._run_parallel_input_projections(hidden_states)
 
         indexer = self.indexer
@@ -1388,11 +1416,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             raise RuntimeError("Fused compressor weight requires a C4 indexer")
 
         qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
-        fused_scores = torch.mm(
-            hidden_states,
-            fused_weight.T,
-            out_dtype=torch.float32,
-        )
+        fused_scores = self._fp32_score_gemm(hidden_states, fused_weight)
         kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
         indexer_weights, _ = indexer.weights_proj(hidden_states)
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
