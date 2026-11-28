@@ -53,6 +53,23 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+def test_mamba_spare_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert EngineArgs.from_cli_args(parser.parse_args([])).mamba_spare is None
+
+    fields = {
+        "rank": 32,
+        "basis_path": "/basis.safetensors",
+        "basis_sha256": "a" * 64,
+    }
+    args = parser.parse_args(["--mamba-spare", json.dumps(fields)])
+    spare = EngineArgs.from_cli_args(args).mamba_spare
+    assert spare is not None
+    assert spare.rank == fields["rank"]
+    assert spare.basis_path == fields["basis_path"]
+    assert spare.basis_sha256 == fields["basis_sha256"]
+
+
 def test_watermark_config_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

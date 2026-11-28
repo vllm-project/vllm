@@ -132,6 +132,48 @@ Hybrid models with mechanisms different to Mamba are also supported (e.g, `Lfm2F
 
 Please note that prefix caching is not yet supported for any of the above models.
 
+##### Experimental SPARE for Granite Mamba2
+
+SPARE projects the recurrent state of the native Granite hybrid model into a
+fixed subspace. Prefill and decode use the same compact FP32 temporal state.
+The engine retains checkpoint geometry, convolution history, and per-token
+attention KV geometry. Compressed ranks can change the model's predictions.
+
+Supply a trusted, offline-calibrated SafeTensors artifact for the exact
+checkpoint revision. Set `MODEL_REVISION` to the checkpoint commit and replace
+the example basis path and digest in the following command.
+
+```bash
+vllm serve ibm-granite/granite-4.0-h-tiny-base \
+    --revision "$MODEL_REVISION" \
+    --dtype bfloat16 \
+    --mamba-ssm-cache-dtype float32 \
+    --no-enable-prefix-caching \
+    --enforce-eager \
+    --mamba-spare '{"rank":32,"basis_path":"/absolute/path/to/basis.safetensors","basis_sha256":"<sha256>"}'
+```
+
+For a basis that records a Hugging Face repository ID, use that ID and the
+pinned revision with Hub access enabled, including when the weights are cached.
+With `HF_HUB_OFFLINE=1`, vLLM resolves the repository ID to a local snapshot
+path before SPARE checks the metadata. For a fully offline run using a local
+checkpoint path, use a trusted basis bound to that exact path and revision.
+Keep the basis file and its SHA-256 digest together.
+
+The file stores one FP32 tensor of shape `[heads, native_state_size, rank]`
+for each Mamba layer, keyed by `layer.<zero-based model layer index>`. Its
+SafeTensors metadata contains the string fields `format` (`spare-mamba2-v1`),
+`method` (`state_pca` or `identity`), `model` (the supplied model identifier
+or path), `revision` (the pinned checkpoint commit), `heads`, `native_dim`,
+and `rank`. Columns must be orthonormal. For a full-rank control, set
+`method` to `identity` and supply identity matrices.
+
+The configuration accepts ranks 16, 32, 64, and the native state size,
+subject to the native state size. It requires one NVIDIA GPU, native
+Triton SSU and SSD, the hybrid cache manager, and an unquantized BF16 model.
+Use eager mode or decode-only CUDA Graphs with compilation disabled. Prefix caching, ReplaySSM, speculative
+decoding, KV transfer and offload, and LoRA are unsupported.
+
 #### Encoder-Decoder Models
 
 Whisper is supported natively. Other encoder-decoder models are supported via the plugin system:

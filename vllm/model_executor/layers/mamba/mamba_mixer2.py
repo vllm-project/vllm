@@ -57,6 +57,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
 )
+from vllm.model_executor.layers.mamba.spare import pack_basis, project_bc
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -300,6 +301,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        spare_basis: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -330,6 +333,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         self.ssm_state_size = ssm_state_size
+        self.temporal_state_size = (
+            ssm_state_size if spare_basis is None else spare_basis.size(-1)
+        )
         self.conv_kernel_size = conv_kernel_size
         self._checkpoint_exporter = MambaPrefillCheckpointExporter(
             state_len=conv_kernel_size - 1
@@ -493,6 +499,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 divide(num_heads, self.tp_size),
                 dtype=torch.float32,
             )
+        )
+        self.register_buffer(
+            "spare_basis",
+            None
+            if spare_basis is None
+            else pack_basis(spare_basis, n_groups).to(self.A.device),
+            persistent=False,
         )
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
@@ -669,7 +682,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         nheads = self.num_heads // self.tp_size
         ngroups = self.n_groups // self.tp_size
         headdim = self.head_dim
-        dstate = self.ssm_state_size
+        dstate = self.temporal_state_size
 
         if self.model_config is None:
             return
@@ -688,8 +701,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
         dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
-        B = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
-        C = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
+        B = torch.randn(
+            seqlen, ngroups, self.ssm_state_size, device=device, dtype=dtype
+        )
+        C = torch.randn_like(B)
+        if self.spare_basis is not None:
+            B, C = project_bc(B, C, self.spare_basis, dstate)
         cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
         cu_chunk_seqlens = torch.tensor(
             [i * chunk_size for i in range(nchunks + 1)],
@@ -938,6 +955,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         ssm_state[state_indices_tensor_p],
                         0,
                     )
+                B_p = B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1)
+                C_p = C_p.view_as(B_p)
+                if self.spare_basis is not None:
+                    B_p, C_p = project_bc(
+                        B_p, C_p, self.spare_basis, self.temporal_state_size
+                    )
                 # Without checkpoints, the SSD scan writes each sequence's final
                 # state straight into its ssm_state slot.
                 varlen_states = mamba_chunk_scan_combined_varlen(
@@ -948,8 +971,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ),
                     dt_p,
                     self.A,
-                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    B_p,
+                    C_p,
                     chunk_size=chunk_size,
                     D=self.D,
                     z=None,
@@ -1028,7 +1051,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             n_groups = self.n_groups // self.tp_size
             A_d = (
                 self.A[:, None, ...][:, :, None]
-                .expand(-1, self.head_dim, self.ssm_state_size)
+                .expand(-1, self.head_dim, self.temporal_state_size)
                 .to(dtype=torch.float32)
             )
             dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
@@ -1036,6 +1059,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
             B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
             C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+            if self.spare_basis is not None:
+                B_d, C_d = project_bc(
+                    B_d, C_d, self.spare_basis, self.temporal_state_size
+                )
             hidden_states_d = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim
             )
@@ -1236,6 +1263,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
+            temporal_state_size=self.temporal_state_size,
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
