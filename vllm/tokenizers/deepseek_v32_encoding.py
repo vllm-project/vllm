@@ -41,8 +41,9 @@ thinking_start_token: str = "<think>"
 thinking_end_token: str = "</think>"
 dsml_token: str = "｜DSML｜"
 system_msg_template: str = "{content}"
-user_msg_template: str = "<｜User｜>{content}<｜Assistant｜>"
+user_msg_template: str = "<｜User｜>{content}"
 assistant_msg_template: str = "{reasoning}{content}{tool_calls}<｜end▁of▁sentence｜>"
+assistant_msg_wo_eos_template: str = "{reasoning}{content}{tool_calls}"
 thinking_template = "{reasoning}"
 
 response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"
@@ -122,8 +123,10 @@ def render_message(
     index: int,
     messages: list[dict[str, Any]],
     thinking_mode: str,
-    last_user_idx: int,
+    last_user_idx: int | None = None,
     last_assistant_idx: int | None = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -131,6 +134,10 @@ def render_message(
         )
     if thinking_mode not in ["chat", "thinking"]:
         raise ValueError(f"Invalid thinking_mode `{thinking_mode}`")
+
+    last_user_idx = (
+        find_last_user_index(messages) if last_user_idx is None else last_user_idx
+    )
 
     prompt = ""
     msg = messages[index]
@@ -173,18 +180,22 @@ def render_message(
         content_developer += f"\n\n# The user's message is: {content}"
 
         prompt += user_msg_template.format(content=content_developer)
-        if index == last_user_idx and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        else:
-            prompt += thinking_end_token
+        if add_generation_prompt:
+            prompt += "<｜Assistant｜>"
+            if index == last_user_idx and thinking_mode == "thinking":
+                prompt += thinking_start_token
+            else:
+                prompt += thinking_end_token
 
     elif role == "user":
         prompt += user_msg_template.format(content=content)
 
-        if index == last_user_idx and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        else:
-            prompt += thinking_end_token
+        if add_generation_prompt:
+            prompt += "<｜Assistant｜>"
+            if index == last_user_idx and thinking_mode == "thinking":
+                prompt += thinking_start_token
+            else:
+                prompt += thinking_end_token
 
     elif role == "tool":
         if last_assistant_idx is not None:
@@ -247,17 +258,35 @@ def render_message(
                 raise ValueError(
                     f"ThinkingMode: {thinking_mode}, invalid message without reasoning/tool_calls `{msg}` after last user message"
                 )
-            thinking_part = (
-                thinking_template.format(reasoning=reasoning or "") + thinking_end_token
-            )
+            thinking_part = thinking_template.format(reasoning=reasoning or "")
+            if not (
+                continue_final_message
+                and index == len(messages) - 1
+                and not summary_content
+                and not tool_calls
+            ):
+                thinking_part += thinking_end_token
 
         if not tool_calls and is_prefix:
             prompt += summary_content
+        elif continue_final_message and index == len(messages) - 1:
+            prompt += assistant_msg_wo_eos_template.format(
+                reasoning=thinking_part,
+                content=summary_content,
+                tool_calls=tool_calls_content,
+            )
         else:
             prompt += assistant_msg_template.format(
                 reasoning=thinking_part,
                 content=summary_content,
                 tool_calls=tool_calls_content,
+            )
+        if add_generation_prompt and index == len(messages) - 1:
+            prompt += "<｜Assistant｜>"
+            prompt += (
+                thinking_start_token
+                if thinking_mode == "thinking"
+                else thinking_end_token
             )
     else:
         raise ValueError(f"Invalid role: {role}")
@@ -289,7 +318,17 @@ def encode_messages(
     context: list[dict[str, Any]] | None = None,
     drop_thinking: bool = True,
     add_default_bos_token: bool = True,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
+    if continue_final_message:
+        add_generation_prompt = False
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError(
+                "Cannot set `continue_final_message` to True when the "
+                "last message is not from the assistant."
+            )
+
     context = context if context else []
     full_messages = context + messages
 
@@ -303,15 +342,21 @@ def encode_messages(
 
     last_assistant_idx: int | None = None
     for idx in range(len(messages)):
-        abs_idx = idx + len(context)
-        if full_messages[abs_idx].get("role") == "assistant":
-            last_assistant_idx = abs_idx
+        message_idx = idx + len(context)
+        if full_messages[message_idx].get("role") == "assistant":
+            last_assistant_idx = message_idx
         prompt += render_message(
-            abs_idx,
+            message_idx,
             full_messages,
             thinking_mode=thinking_mode,
             last_user_idx=last_user_idx,
             last_assistant_idx=last_assistant_idx,
+            add_generation_prompt=(
+                message_idx + 1 < len(full_messages) or add_generation_prompt
+            ),
+            continue_final_message=(
+                continue_final_message and message_idx + 1 == len(full_messages)
+            ),
         )
 
     return prompt
