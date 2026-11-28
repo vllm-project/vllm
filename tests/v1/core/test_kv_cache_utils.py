@@ -68,6 +68,7 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
     CircularBufferManager,
     FullAttentionManager,
     HiSparseHotManager,
@@ -2076,8 +2077,6 @@ def _hybrid_prefix_match_config(
 @pytest.mark.parametrize(
     ("layout", "unit", "error_match"),
     [
-        ((768, 6144, 768, 1), 128, "SlidingWindowManager"),
-        ((768, 768, 768, 1), 128, "SlidingWindowManager"),
         ((64, None, 64, 1), 16, "scheduler block size"),
         ((1024, 8192, None, 128), 64, "per-state compression"),
     ],
@@ -2096,10 +2095,38 @@ def test_explicit_prefix_match_unit_rejects_fallback_to_scheduler_block(
         kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
+@pytest.mark.parametrize("mamba_block_size", [6144, 768])
+def test_explicit_prefix_match_unit_rejects_block_aligned_manager(
+    mamba_block_size: int,
+):
+    kv_cache_config = _hybrid_prefix_match_config(768, mamba_block_size)
+    kv_cache_config.kv_cache_groups.append(
+        new_kv_cache_group(
+            ["chunked_local"],
+            AttentionSpec(
+                block_size=768,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+            ChunkedLocalAttentionManager.config(attention_chunk_size=768),
+        )
+    )
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(enable_prefix_caching=True, prefix_match_unit=128)
+    )
+
+    with pytest.raises(ValueError, match="ChunkedLocalAttentionManager"):
+        kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
 @pytest.mark.parametrize(
     ("layout", "unit", "enable_prefix_caching", "expected"),
     [
         ((768, 6144, 768, 1), 768, True, (6144, 768, 768)),
+        # Sliding-window groups take fine-grained hits with an explicit unit.
+        ((768, 6144, 768, 1), 128, True, (6144, 128, 128)),
+        ((768, 768, 768, 1), 128, True, (768, 128, 128)),
         ((1024, 8192, None, 1), 128, True, (8192, 128, 128)),
         ((384, 6144, 768, 1), None, True, (6144, 384, 6144)),
         ((768, 6144, 768, 1), 128, False, (6144, 128, 6144)),

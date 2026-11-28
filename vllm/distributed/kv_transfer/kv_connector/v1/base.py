@@ -191,7 +191,10 @@ class KVConnectorBase_V1(ABC):
         """Whether external hits can complete divergent local hybrid hits.
 
         A capable connector restores lagging recurrent state when the local
-        full-attention group reaches a deeper boundary. Defaults to False.
+        full-attention group reaches a deeper boundary. It must also fill a
+        lagging sliding-window group's window: the load writes every block the
+        request does not share in each group, through the end of the external
+        hit, not only the tokens past the local boundary. Defaults to False.
         """
         return False
 

@@ -28,7 +28,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     MambaManager,
     SlidingWindowManager,
 )
@@ -1507,6 +1509,60 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 
+def test_truncate_computed_blocks_allows_short_sliding_window_group():
+    """With fine-grained hits, a divergent local hit can end inside a block
+    while a sliding-window group lags. Truncating to the block boundary keeps
+    that group's shorter hit, as for Mamba."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            new_kv_cache_group(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+                MambaManager.config(enable_prefix_caching=True),
+            ),
+            new_kv_cache_group(
+                ["swa"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                SlidingWindowManager.config(sliding_window=block_size),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    full, mamba = manager.block_pool.blocks[1:3], manager.block_pool.blocks[3:5]
+    # Full attention hits 6 tokens, a partial second block; the window group
+    # hit nothing.
+    lagging = manager.create_kv_cache_blocks((full, mamba, []))
+    truncated = manager.truncate_computed_blocks(lagging, block_size)
+    assert [len(group) for group in truncated.blocks] == [1, 1, 0]
+
+
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     hash_block_size = 2
     block_size = 2 * hash_block_size
@@ -2216,6 +2272,9 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
             ),
         ],
     )
+    # Without an explicit `prefix_match_unit`, the engine resolves block-aligned
+    # hits for a sliding-window group.
+    kv_cache_config.cache_hit_alignment_tokens = mamba_block_size
     manager = make_kv_cache_manager(
         kv_cache_config=kv_cache_config,
         max_model_len=8192,
@@ -2247,11 +2306,317 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
 
 
-@pytest.mark.parametrize("with_sliding_window", [False, True])
-def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_hybrid_sliding_window_group_gets_partial_hash_hits(retention_interval):
+    """A sliding-window group no longer forces block-aligned hybrid hits: it
+    hits at the prompt tail when its whole window is still cached, and CoWs a
+    partial last block."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            new_kv_cache_group(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+                MambaManager.config(enable_prefix_caching=True),
+            ),
+            new_kv_cache_group(
+                ["swa"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                SlidingWindowManager.config(sliding_window=6),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=retention_interval,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+
+    tokens = list(range(27))
+    # The scheduler stops the prefill at the Mamba checkpoint.
+    checkpoint = get_reusable_prefix_length(
+        len(tokens), num_hash_lookahead_tokens=0, alignment_tokens=hash_block_size
+    )
+    assert checkpoint == 26
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, checkpoint, 0, computed_blocks) is not None
+    req0.num_computed_tokens = checkpoint
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, len(tokens) - checkpoint) is not None
+    req0.num_computed_tokens = len(tokens)
+    swa_blocks = list(manager.get_blocks("0").blocks[2])
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", tokens + [27, 28, 29], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == checkpoint
+    # Only the blocks intersecting the window below the hit, at their
+    # physical positions; the last one may be partial.
+    window_start = (checkpoint - 6 + 1) // block_size
+    swa_hit = computed_blocks.blocks[2]
+    assert len(swa_hit) == -(-checkpoint // block_size)
+    assert all(block.is_null for block in swa_hit[:window_start])
+    assert swa_hit[window_start:] == swa_blocks[window_start : len(swa_hit)]
+
+    new_blocks = manager.allocate_slots(
+        req1, len(req1.all_token_ids) - num_computed, num_computed, computed_blocks
+    )
+    assert new_blocks is not None
+    copies, _ = manager.take_kv_cache_block_copies()
+    swa_cow = (
+        KVCacheBlockCopy(
+            src_block_id=swa_hit[-1].block_id,
+            dst_block_id=manager.get_blocks("1").blocks[2][len(swa_hit) - 1].block_id,
+        )
+        in copies
+    )
+    assert swa_cow
+
+
+def test_hybrid_sliding_window_partial_hit_needs_whole_window():
+    """Evicting a block inside the window invalidates the tail entry."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            new_kv_cache_group(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+                MambaManager.config(enable_prefix_caching=True),
+            ),
+            new_kv_cache_group(
+                ["swa"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                SlidingWindowManager.config(sliding_window=6),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=0,
+    )
+    tokens = list(range(27))
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 26, 0, computed_blocks) is not None
+    req0.num_computed_tokens = 26
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 1) is not None
+    req0.num_computed_tokens = 27
+    interior_block = manager.get_blocks("0").blocks[2][2]
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", tokens + [27], hash_block_size, sha256)
+    assert manager.get_num_cached_tokens(req1) == 26
+    manager.evict_blocks({interior_block.block_id})
+    # The tail entry on block 3 survives, but tokens 21-23 are gone.
+    assert manager.get_num_cached_tokens(req1) == 0
+
+
+def _full_mamba_window_manager(
+    block_size, hash_block_size, window_manager_config, retention_interval
+):
+    """Full attention, prefix-caching Mamba, and a window group (group 2)."""
+    spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size, shapes=(1, 1), dtypes=(torch.float32,)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["full"], spec),
+            new_kv_cache_group(
+                ["mamba"], mamba_spec, MambaManager.config(enable_prefix_caching=True)
+            ),
+            new_kv_cache_group(["window"], spec, window_manager_config),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=retention_interval,
+    )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+@pytest.mark.parametrize("num_new_tokens", [3, 10])
+def test_hybrid_dflash_drafter_group_gets_partial_hash_hits(
+    retention_interval, num_new_tokens
+):
+    """A DFlash drafter group takes fine-grained hits too. It needs drafter KV
+    only from the first token the request's next draft reads: a partial last
+    block in that range is copied, one below it stays null."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    manager = _full_mamba_window_manager(
+        block_size,
+        hash_block_size,
+        DFlashSlidingWindowManager.config(sliding_window=6, num_speculative_tokens=2),
+        retention_interval,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+
+    tokens = list(range(27))
+    checkpoint = 26
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, checkpoint, 0, computed_blocks) is not None
+    req0.num_computed_tokens = checkpoint
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, len(tokens) - checkpoint) is not None
+    req0.num_computed_tokens = len(tokens)
+    draft_blocks = list(manager.get_blocks("0").blocks[2])
+    manager.free(req0)
+    manager.new_step_starts()
+
+    new_tokens = [100 + i for i in range(num_new_tokens)]
+    req1 = make_request("1", tokens + new_tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == checkpoint
+    # The first draft reads drafter KV from `num_tokens - sliding_window + 1` on.
+    first_read_block = (req1.num_tokens - 6 + 1) // block_size
+    draft_hit = computed_blocks.blocks[2]
+    assert len(draft_hit) == -(-checkpoint // block_size)
+    assert all(block.is_null for block in draft_hit[:first_read_block])
+    assert draft_hit[first_read_block:] == draft_blocks[first_read_block:4]
+
+    new_blocks = manager.allocate_slots(
+        req1, req1.num_tokens - num_computed, num_computed, computed_blocks
+    )
+    assert new_blocks is not None
+    copies, _ = manager.take_kv_cache_block_copies()
+    draft_cow = any(copy.src_block_id == draft_blocks[3].block_id for copy in copies)
+    assert draft_cow == (first_read_block <= 3)
+
+
+@pytest.mark.parametrize(
+    "window_manager_config",
+    [
+        SlidingWindowManager.config(sliding_window=6),
+        DFlashSlidingWindowManager.config(sliding_window=6, num_speculative_tokens=2),
+    ],
+    ids=["sliding_window", "dflash"],
+)
+def test_connector_lookup_drops_lagging_window_group_partial_block(
+    window_manager_config,
+):
+    """A connector lookup reports the full-attention hit, and the connector
+    loads only blocks the request does not share. A window group whose hit
+    ends inside a block must leave that shared block out, or its tokens past
+    the group's hit stay stale."""
+    hash_block_size = 2
+    block_size = 4 * hash_block_size
+    manager = _full_mamba_window_manager(
+        block_size, hash_block_size, window_manager_config, retention_interval=0
+    )
+    # A 27-token prompt leaves a window-group entry at 26 inside block 3.
+    req0 = make_request("0", list(range(27)), hash_block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 26, 0, computed_blocks) is not None
+    req0.num_computed_tokens = 26
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 1) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    # A longer prompt caches full attention through block 4; its window-group
+    # block 3 is evicted.
+    req1 = make_request("1", list(range(40)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert (
+        manager.allocate_slots(req1, 40 - num_computed, num_computed, computed_blocks)
+        is not None
+    )
+    window_block = manager.get_blocks("1").blocks[2][3]
+    manager.free(req1)
+    manager.new_step_starts()
+    if not window_block.is_null:
+        manager.evict_blocks({window_block.block_id})
+
+    req2 = make_request("2", list(range(34)), hash_block_size, sha256)
+    blocks, num_local, _, hit_diverged = manager.get_computed_blocks_for_connector(req2)
+    assert num_local == 32 and hit_diverged
+    assert len(blocks.blocks[2]) == 3
+
+    # An async load of token 32 fills the blocks the request does not share.
+    new_blocks = manager.allocate_slots(
+        req2,
+        1,
+        num_local,
+        blocks,
+        num_external_computed_tokens=1,
+        delay_cache_blocks=True,
+    )
+    assert new_blocks is not None
+    window_blocks = manager.get_blocks("2").blocks[2]
+    assert not window_blocks[3].is_null and window_blocks[3].block_hash is None
+
+
+@pytest.mark.parametrize("prefix_match_unit", [2, None])
+@pytest.mark.parametrize("extra_group", [None, "sliding_window", "chunked_local"])
+def test_resolved_cache_hit_alignment_matches_coordinator(
+    extra_group, prefix_match_unit
+):
     """Workers place Mamba checkpoints on the engine-resolved alignment, so it
     must be where the coordinator lands hits, including when a group without
-    fine-grained lookups disables partial hits."""
+    fine-grained lookups disables partial hits. Sliding-window groups take
+    them only with an explicit `prefix_match_unit`."""
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_groups = [
@@ -2274,7 +2639,7 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
             MambaManager.config(enable_prefix_caching=True),
         ),
     ]
-    if with_sliding_window:
+    if extra_group == "sliding_window":
         kv_cache_groups.append(
             new_kv_cache_group(
                 ["swa"],
@@ -2287,8 +2652,33 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
                 SlidingWindowManager.config(sliding_window=2 * hash_block_size),
             )
         )
+    elif extra_group == "chunked_local":
+        kv_cache_groups.append(
+            new_kv_cache_group(
+                ["chunked_local"],
+                AttentionSpec(
+                    block_size=2 * hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                ChunkedLocalAttentionManager.config(
+                    attention_chunk_size=2 * hash_block_size
+                ),
+            )
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=64, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=True, prefix_match_unit=prefix_match_unit
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    # The engine resolves the alignment before the scheduler is built.
+    kv_cache_config.cache_hit_alignment_tokens = resolve_cache_hit_alignment_tokens(
+        kv_cache_config, vllm_config, mamba_block_size, hash_block_size
     )
     coordinator = make_kv_cache_manager(
         kv_cache_config=kv_cache_config,
@@ -2296,20 +2686,14 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
         enable_caching=True,
         hash_block_size=hash_block_size,
     ).coordinator
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(enable_prefix_caching=True),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-    )
 
     assert isinstance(coordinator, HybridKVCacheCoordinator)
-    assert coordinator.enable_partial_hash_hits != with_sliding_window
+    assert coordinator.enable_partial_hash_hits == (
+        extra_group is None
+        or (extra_group == "sliding_window" and prefix_match_unit is not None)
+    )
     assert (
-        resolve_cache_hit_alignment_tokens(
-            kv_cache_config,
-            vllm_config,
-            coordinator.scheduler_block_size,
-            hash_block_size,
-        )
+        kv_cache_config.cache_hit_alignment_tokens
         == coordinator._cache_hit_alignment_tokens
     )
 

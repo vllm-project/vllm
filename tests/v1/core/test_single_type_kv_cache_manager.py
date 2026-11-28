@@ -510,6 +510,46 @@ def test_dflash_window_hit_needs_only_the_window_before_request_end(
 
 
 @pytest.mark.parametrize(
+    ("cached", "max_length", "hit_length", "window"),
+    [
+        ({17, 18}, 40, 38, [17, 18]),  # full block 8 and a partial entry in 9
+        ({16}, 40, 34, [16]),  # another request's partial entry in block 8
+        ({18}, 40, 32, []),  # block 8 is missing: no drafter KV
+        (set(), 30, 30, []),  # the hit ends below the window: no drafter KV needed
+    ],
+)
+def test_dflash_window_fine_grained_hit_needs_only_the_window_before_request_end(
+    cached, max_length, hit_length, window
+):
+    """A finer prefix-match unit lets the hit end inside a block, still
+    needing cached drafter KV only from the request's first read on."""
+    hash_block_size = 2
+    block_pool = BlockPool(
+        num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(20)]
+    for i in cached:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[i], 0), block_pool.blocks[i + 10]
+        )
+
+    # The first draft of a 41-token request reads tokens 34..40 (block 8 on).
+    (blocks,), num_hit_tokens = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        block_size=4,
+        manager_config=new_dflash_window_layer().manager_config,
+        alignment_tokens=hash_block_size,
+        num_request_tokens=41,
+    )
+
+    assert num_hit_tokens == hit_length
+    assert [b.block_id for b in blocks] == [0] * 8 + [i + 10 for i in window]
+
+
+@pytest.mark.parametrize(
     ("retention_interval", "cached"), [(None, [2, 3, 4, 7, 8, 9]), (0, [8])]
 )
 def test_dflash_window_sparse_retention_caches_only_what_a_replay_reads(
@@ -945,6 +985,61 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
 
     assert hit_length == 8
     assert computed_blocks[0] == block_pool.blocks[10:12]
+
+
+def test_sliding_window_fine_grained_hit_needs_whole_window():
+    """A hash-aligned hit inside a block needs an entry at or above it in that
+    block and every full block the window below it reads."""
+    hash_block_size = 2
+    block_size = 8
+    layer = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        sliding_window=6,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=hash_block_size
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(15)]
+    b1, b2, b3, other_b2 = block_pool.blocks[10:14]
+    # Full blocks 1-2 (tokens 8-23), a partial entry for tokens 0-27 on block 3,
+    # and another request's partial entry for tokens 0-21 on its own block 2.
+    entries = {7: b1, 11: b2, 13: b3, 10: other_b2}
+    for hash_idx, block in entries.items():
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[hash_idx], 0), block
+        )
+
+    def lookup(max_length):
+        computed_blocks, hit_length = SlidingWindowManager.find_longest_cache_hit(
+            block_hashes=block_hashes,
+            max_length=max_length,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            block_size=block_size,
+            manager_config=layer.manager_config,
+            alignment_tokens=hash_block_size,
+        )
+        return computed_blocks[0], hit_length
+
+    def evict(hash_idx):
+        block_pool.cached_block_hash_to_block.pop(
+            make_block_hash_with_group_id(block_hashes[hash_idx], 0),
+            entries[hash_idx].block_id,
+        )
+
+    null = block_pool.null_block
+    # Window [23, 28): full block 2 and the partial block 3.
+    assert lookup(29) == ([null, null, b2, b3], 28)
+    # The entry at 28 also holds tokens 24-25.
+    assert lookup(26) == ([null, null, b2, b3], 26)
+
+    # Hits above 24 read full block 2; one inside it can use the other entry.
+    evict(11)
+    assert lookup(29) == ([null, null, other_b2], 22)
+    evict(10)
+    assert lookup(29) == ([null, b1], 16)
 
 
 def test_chunked_local_attention_remove_skipped_blocks():

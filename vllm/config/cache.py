@@ -212,8 +212,8 @@ class CacheConfig:
     often states are stored.
 
     An explicit value fails at startup if prefix-cache hits would fall back
-    to the scheduler block size (for example, when a sliding-window group
-    requires block-aligned lookups).
+    to the scheduler block size (for example, when a chunked local attention
+    group requires block-aligned lookups).
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """

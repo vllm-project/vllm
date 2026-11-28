@@ -626,6 +626,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # block instead.
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits
+            # Follow the alignment the engine resolved, when it did.
+            and kv_cache_config.cache_hit_alignment_tokens in (None, hash_block_size)
             and partial_hash_hits_enabled(
                 kv_cache_config.kv_cache_groups,
                 hash_block_size,
