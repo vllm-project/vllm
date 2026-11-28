@@ -26,6 +26,9 @@ namespace gptq {
 #define MAX_GROUPS_IN_BLOCK (BLOCK_KN_SIZE / 32)
 #define MAX_Q_GEMM_ROWS 50
 #define MAX_Q_GEMM_ROWS_8BIT 24
+// On sm_120 the fused 4-bit kernel loses to reconstruct + cuBLAS from M=33
+// up at every measured K; the stock 50-row cutoff stays elsewhere.
+#define MAX_Q_GEMM_ROWS_SM120 32
 #define MAX_ALT_GEMM_ROWS 8
 #define THREADS_X 32
 #define THREADS_Y 32
@@ -1325,21 +1328,28 @@ void reconstruct_gptq(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzeros,
                                            use_v2_format, out);
 }
 
+bool should_reconstruct(int size_m, bool use_exllama, int bit) {
+  if (use_exllama) {
+    int max_rows_4bit = MAX_Q_GEMM_ROWS;
+    const cudaDeviceProp* prop = get_device_prop();
+    if (prop->major == 12 && prop->minor == 0) {
+      max_rows_4bit = MAX_Q_GEMM_ROWS_SM120;
+    }
+    return ((bit == 8 && size_m > MAX_Q_GEMM_ROWS_8BIT) ||
+            (bit != 8 && size_m > max_rows_4bit));
+  }
+  // The 2/3-bit kernels are somehow slower than dequant + gemm baseline, so
+  // we disabled them for now.
+  return (bit < 4 || size_m > MAX_ALT_GEMM_ROWS);
+}
+
 void gemm_half_q_half_cuda(cublasHandle_t cublas_handle, const half* a,
                            const uint32_t* b_q_weight,
                            const uint32_t* b_gptq_qzeros,
                            const half* b_gptq_scales, half* c, half* temp_dq,
                            int size_m, int size_n, int size_k, int groups,
                            bool use_exllama, bool use_v2_format, int bit) {
-  bool use_reconstruct;
-  if (use_exllama) {
-    use_reconstruct = ((bit == 8 && size_m > MAX_Q_GEMM_ROWS_8BIT) ||
-                       (bit != 8 && size_m > MAX_Q_GEMM_ROWS));
-  } else {
-    // The 2/3-bit kernels are somehow slower than dequant + gemm baseline, so
-    // we disabled them for now.
-    use_reconstruct = (bit < 4 || size_m > MAX_ALT_GEMM_ROWS);
-  }
+  const bool use_reconstruct = should_reconstruct(size_m, use_exllama, bit);
   if (use_reconstruct) {
     // Reconstruct FP16 matrix, then cuBLAS
     if (use_exllama) {
@@ -1468,16 +1478,20 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
   STD_TORCH_CHECK(a.size(1) % num_groups == 0, "Input size K = ", a.size(1),
                   " is not divisible by the number of groups = ", num_groups);
   auto c = torch::stable::new_zeros(a, {a.size(0), b_q_weight.size(1)});
-  auto temp_dq =
-      torch::stable::empty({b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)},
-                           a.scalar_type(), std::nullopt, a.device());
+  torch::stable::Tensor temp_dq;
+  half* temp_dq_ptr = nullptr;
+  if (vllm::gptq::should_reconstruct(a.size(0), use_exllama, bit)) {
+    temp_dq = torch::stable::empty(
+        {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, a.scalar_type(),
+        std::nullopt, a.device());
+    temp_dq_ptr = (half*)temp_dq.data_ptr();
+  }
 
   vllm::gptq::gemm_half_q_half_cuda(
       get_current_cuda_blas_handle(), (const half*)a.data_ptr(),
       (const uint32_t*)b_q_weight.data_ptr(),
       (const uint32_t*)b_gptq_qzeros.data_ptr(),
-      (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(),
-      (half*)temp_dq.data_ptr(),
+      (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(), temp_dq_ptr,
       c.size(0),  // m
       c.size(1),  // n
       a.size(1),  // k
