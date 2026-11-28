@@ -1157,6 +1157,12 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     object > array > string) and returns the first successful coercion.
     Falls back to the original string when no coercion succeeds.
 
+    When ``string`` is an allowed type, numeric coercions are only accepted
+    if they round-trip: ``str(coerced) == value``. This preserves non-canonical
+    forms like ``"0017"``, ``"+17"``, ``"1_000"`` as strings when the schema
+    allows both numeric and string types, avoiding silent corruption of IDs,
+    ZIP codes, and other string values that happen to parse as numbers.
+
     Args:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
@@ -1169,6 +1175,10 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     normalized_types = {
         _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
     }
+
+    # Whether string is an allowed fallback; when true, numeric coercions
+    # must round-trip to be accepted.
+    string_allowed = "string" in normalized_types
 
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
@@ -1193,9 +1203,15 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             return value
         if candidate_type == "integer":
             try:
-                return int(value)
+                coerced = int(value)
             except (ValueError, TypeError):
                 continue
+            # When string is allowed, only accept if the integer is canonical
+            # (round-trips): "17" -> 17 -> "17" ✓, "0017" -> 17 -> "17" ✗.
+            # Treats "-0" as non-canonical (int("-0") = 0, str(0) = "0").
+            if string_allowed and str(coerced) != value:
+                continue
+            return coerced
         if candidate_type == "number":
             try:
                 return int(value)
@@ -1211,7 +1227,14 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
                 # (int(float("inf")) raises OverflowError) or emitting
                 # invalid JSON (json.dumps(inf) -> "Infinity").
                 continue
-            return val if val != int(val) else int(val)
+            # Normalize to int if whole (5.0 -> 5).
+            normalized = val if val != int(val) else int(val)
+            # When string is allowed, only accept if the float is canonical:
+            # "3.5" -> 3.5 -> "3.5" ✓, "3.50" -> 3.5 -> "3.5" ✗,
+            # "1e5" -> 100000.0 -> "100000.0" ✗.
+            if string_allowed and str(normalized) != value:
+                continue
+            return normalized
         if candidate_type == "boolean":
             lower_val = value.lower().strip()
             if lower_val in ("true", "1"):
