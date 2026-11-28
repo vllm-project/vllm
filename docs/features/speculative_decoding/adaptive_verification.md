@@ -51,6 +51,19 @@ vllm serve MiMo-V2.5-Pro-FP4-DFlash \
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
 
+### DeepSeek-V4.1 on NVIDIA
+
+The native inverse-CDF Markov sampler can use DSpark's trained confidence head.
+Enable it with `--additional-config '{"dspark_fused_markov": true}'` alongside
+`"draft_sample_method": "probabilistic"` and
+`"enable_adaptive_verification": true` in the speculative config.
+It preserves the preceding-token embedding used for each proposal and passes
+those embeddings to the existing confidence head.
+
+This combination supports the ordinary decode path with a full draft-logits
+cache. Specialized decode, batch-sharded sampling, FP64 Gumbel, watermarking,
+and checkpoints without a confidence head do not select this CDF+AV path.
+
 ## Requirements and limitations
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
