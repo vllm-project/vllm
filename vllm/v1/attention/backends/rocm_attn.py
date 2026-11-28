@@ -191,6 +191,10 @@ class RocmAttentionBackend(AttentionBackend):
         return False
 
     @classmethod
+    def supports_alibi(cls, kv_cache_dtype: CacheDType | None = None) -> bool:
+        return True
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         return True
 

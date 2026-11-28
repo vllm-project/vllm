@@ -1136,6 +1136,11 @@ class AiterFlashAttentionBackend(AttentionBackend):
         return get_cdna_version() > 2
 
     @classmethod
+    def supports_alibi(cls, kv_cache_dtype: CacheDType | None = None) -> bool:
+        # The shuffled KV cache decode kernel takes no ALiBi slopes.
+        return not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         return True
 

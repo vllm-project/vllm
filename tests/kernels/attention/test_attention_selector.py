@@ -867,3 +867,37 @@ def test_gemma4_without_fa4_backend(architecture, kv_cache_dtype, expected):
     ):
         Gemma4Config.verify_and_update_config(config)
     assert config.attention_config.backend == AttentionBackendEnum[expected]
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    ("capability", "kv_cache_dtype", "expected"),
+    [
+        # FlashInfer is the first backend that takes an FP8 KV cache.
+        (DeviceCapability(8, 9), "fp8", "TRITON_ATTN"),
+        # FA3 takes an FP8 KV cache, but ALiBi layers run on FA2.
+        (DeviceCapability(9, 0), "fp8", "TRITON_ATTN"),
+        # FlashInfer comes first on SM100.
+        (DeviceCapability(10, 0), "auto", "FLASH_ATTN"),
+    ],
+)
+def test_alibi_skips_backends_without_alibi(capability, kv_cache_dtype, expected):
+    """ALiBi layers must not be routed to a backend that ignores the slopes."""
+    with (
+        patch.object(
+            type(current_platform), "get_device_capability", return_value=capability
+        ),
+        set_current_vllm_config(VllmConfig()),
+    ):
+        backend = get_attn_backend(64, torch.float16, kv_cache_dtype, use_alibi=True)
+    assert backend.get_name() == expected
+
+
+@blackwell_only
+def test_alibi_rejects_explicit_backend_without_alibi():
+    vllm_config = VllmConfig(attention_config=AttentionConfig(backend="FLASHINFER"))
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(ValueError, match="ALiBi not supported"),
+    ):
+        get_attn_backend(64, torch.float16, "auto", use_alibi=True)
