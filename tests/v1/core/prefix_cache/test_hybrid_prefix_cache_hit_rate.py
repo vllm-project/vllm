@@ -96,8 +96,11 @@ async def _wait_for_counters(
 
 @pytest.fixture(scope="module")
 def server(request):
+    use_mtp, prefix_match_unit = request.param
     args = ["--enable-prompt-tokens-details"]
-    if request.param:
+    if prefix_match_unit is not None:
+        args += ["--prefix-match-unit", str(prefix_match_unit)]
+    if use_mtp:
         args += [
             "--speculative-config",
             json.dumps({"method": "mtp", "num_speculative_tokens": 1}),
@@ -109,7 +112,7 @@ def server(request):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "server",
-    [pytest.param(False, id="base"), pytest.param(True, id="mtp")],
+    [pytest.param((False, None), id="base"), pytest.param((True, None), id="mtp")],
     indirect=["server"],
 )
 async def test_prefix_cache_hit_rate(server: RemoteOpenAIServer) -> None:
@@ -191,3 +194,46 @@ async def test_prefix_cache_hit_rate(server: RemoteOpenAIServer) -> None:
             queries += sum(prompt for prompt, _ in counts)
             hits += sum(cached for _, cached in counts)
             await _wait_for_counters(metrics, (queries, hits))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [pytest.param((False, 16), id="base"), pytest.param((True, 16), id="mtp")],
+    indirect=["server"],
+)
+async def test_cold_request_reports_created_cache_tokens(
+    server: RemoteOpenAIServer,
+) -> None:
+    """A prompt shorter than one block is cached as a partial tail, and the
+    cold request must count it: an identical resend reads those tokens back."""
+    readings = "\n".join(f"Sensor {i}: temperature {20 + i} C." for i in range(24))
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "user", "content": f"Name the hottest sensor.\n{readings}"}
+    ]
+    salt = uuid4().hex
+
+    async with (
+        server.get_async_client() as client,
+        httpx.AsyncClient(base_url=server.url_root, timeout=METRICS_TIMEOUT) as metrics,
+    ):
+        block_size = await _scheduler_block_size(metrics)
+        details = []
+        for _ in range(2):
+            response = await client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0,
+                max_tokens=1,
+                extra_body={"cache_salt": salt},
+            )
+            usage = response.usage
+            assert usage is not None
+            assert usage.prompt_tokens_details is not None
+            assert usage.prompt_tokens < block_size
+            details.append(usage.prompt_tokens_details)
+
+    cold, resend = details
+    assert cold.cached_tokens == 0
+    assert resend.cached_tokens
+    assert cold.model_dump()["created_cache_tokens"] == resend.cached_tokens
