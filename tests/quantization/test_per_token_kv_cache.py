@@ -553,6 +553,58 @@ def test_triton_unified_attention_per_token_head_scale(
     interleaved: bool,
 ):
     """End-to-end: quantized KV with per-token-head scale caches."""
+    _check_per_token_head_attention(
+        qcfg, seq_lens, num_heads, head_size, block_size, interleaved=interleaved
+    )
+
+
+@pytest.mark.parametrize("query_len", [1, 33], ids=["split-kv", "prefill"])
+@pytest.mark.parametrize("mask", ["chunked", "rswa", "image"])
+@torch.inference_mode()
+def test_int4_attention_masks(mask, query_len):
+    # End inside a chunk so the chunk boundary differs from a rolling window.
+    window_size = (63, -1)
+    if mask == "chunked":
+        options = {"chunk_lookback": 1}
+    elif mask == "rswa":
+        window_size = (-1, -1)
+        options = {
+            "rswa_window": 32,
+            "rswa_prefix_lens": torch.tensor(
+                [48], dtype=torch.int32, device=DEVICE_TYPE
+            ),
+        }
+    else:
+        options = {
+            "mm_prefix_clamp_sliding_window": True,
+            "mm_prefix_range": torch.tensor(
+                [[[8, 192]]], dtype=torch.int32, device=DEVICE_TYPE
+            ),
+        }
+    _check_per_token_head_attention(
+        INT4_CONFIG,
+        [(query_len, 193)],
+        (4, 4),
+        128,
+        16,
+        window_size=window_size,
+        seq_threshold_3D=1,
+        **options,
+    )
+
+
+def _check_per_token_head_attention(
+    qcfg,
+    seq_lens,
+    num_heads,
+    head_size,
+    block_size,
+    *,
+    interleaved=True,
+    window_size=(-1, -1),
+    seq_threshold_3D=0,
+    **mask_options,
+):
     from vllm.utils.math_utils import next_power_of_2
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
@@ -680,7 +732,6 @@ def test_triton_unified_attention_per_token_head_scale(
     )
 
     head_size_padded = next_power_of_2(head_size)
-    seq_threshold_3D = 0
     num_par_softmax_segments = 16
     softmax_segm_output = torch.empty(
         (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
@@ -707,7 +758,8 @@ def test_triton_unified_attention_per_token_head_scale(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=(-1, -1),
+        window_size=window_size,
+        **mask_options,
         block_table=block_tables,
         softcap=0,
         q_descale=None,
@@ -735,7 +787,8 @@ def test_triton_unified_attention_per_token_head_scale(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=(-1, -1),
+        window_size=window_size,
+        **mask_options,
         block_table=block_tables,
         softcap=0,
         q_descale=None,
