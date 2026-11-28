@@ -113,7 +113,8 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             draft.hf_config.architectures = [
                 "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
             ]
-            draft.quantization = target.quantization
+            if spec.quantization is None:
+                draft.quantization = target.quantization
             spec.update_arch_()
         elif (
             "MistralLarge4DSparkModel" in draft.architectures
