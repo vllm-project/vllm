@@ -368,7 +368,8 @@ def _qsa_sparse_paged_attention_reference(
     Mirrors the kernel's dequant: fp8-e4m3 K/V caches are dequantized with the
     per-tensor k_scale/v_scale host floats; bf16 caches use unit scales.
     """
-    output = torch.zeros_like(q)
+    out_dtype = torch.bfloat16 if q.dtype == torch.float8_e4m3fn else q.dtype
+    output = torch.zeros(q.shape, dtype=out_dtype, device=q.device)
     repeats = q.shape[1] // k_cache.shape[2]
     page_size = k_cache.shape[1]
     for row in range(q.shape[0]):
@@ -387,7 +388,7 @@ def _qsa_sparse_paged_attention_reference(
         )
         scores = torch.einsum("hd,khd->hk", q[row].float(), keys)
         probabilities = torch.softmax(scores * softmax_scale, dim=-1)
-        output[row] = torch.einsum("hk,khd->hd", probabilities, values).to(q.dtype)
+        output[row] = torch.einsum("hk,khd->hd", probabilities, values).to(out_dtype)
     return output
 
 
@@ -861,27 +862,51 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
 
 @requires_qsa_kernels
 @create_new_process_for_each_test("spawn")
-def test_qsa_sparse_attention_warmup_covers_different_cache_pools() -> None:
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+def test_qsa_sparse_attention_warmup_covers_different_cache_pools(fp8: bool) -> None:
     """Host and resident pool sizes must reuse the warmed logical-index kernel."""
     from vllm.triton_utils import triton
 
+    if fp8 and not current_platform.has_device_capability(89):
+        pytest.skip("Native FP8 pointers require sm_89 or newer")
+
     torch.manual_seed(7)
     # The packed selection's final column contains the valid count.
-    q = torch.randn(3, 24, 64, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(4, 24, 64, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn_like(q)
-    cache = torch.randn(17, 16, 2, 128, device="cuda", dtype=q.dtype)
+    cache = torch.randn(17, 16, 2, 128, device="cuda", dtype=torch.bfloat16)
+    if fp8:
+        q = q.to(torch.float8_e4m3fn)
+        cache_fp8 = cache.to(torch.float8_e4m3fn)
+        warmup_cache = cache_fp8.view(torch.uint8).transpose(1, 2)
+        k_cache, v_cache = cache_fp8.split(64, dim=-1)
+        k_scale, v_scale = 0.5, 2.0
+    else:
+        warmup_cache = cache.transpose(1, 2)
+        k_cache, v_cache = cache.split(64, dim=-1)
+        k_scale, v_scale = 1.0, 1.0
+    # Slice at row 1 to also cover offset views of Q/out/gate.
+    q_view = q[1:]
+    gate_view = gate[1:]
     block_table = torch.zeros(2, 1, device="cuda", dtype=torch.int32)
     requests = torch.tensor([0, 1, 1], device="cuda", dtype=torch.int32)
     indices = torch.full((3, 32), -1, device="cuda", dtype=torch.int32)
     indices[:, :16] = torch.arange(16, device="cuda")
     indices[:, -1] = 16
-    k_cache, v_cache = cache.split(64, dim=-1)
     expected = _qsa_sparse_paged_attention_reference(
-        q, k_cache, v_cache, indices[:, :-1], block_table, requests, 64**-0.5
-    ) * torch.sigmoid(gate)
+        q_view,
+        k_cache,
+        v_cache,
+        indices[:, :-1],
+        block_table,
+        requests,
+        64**-0.5,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    ) * torch.sigmoid(gate_view)
 
     qsa_ops.warmup_qsa_sparse_paged_attention(
-        cache.transpose(1, 2),
+        warmup_cache,
         block_table,
         num_query_heads=24,
         selection_width=31,
@@ -894,15 +919,19 @@ def test_qsa_sparse_attention_warmup_covers_different_cache_pools() -> None:
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(triton.knobs.runtime, "jit_post_compile_hook", fail_compile)
         for num_blocks in (16, 1, 17):
+            out_buf = torch.empty(4, 24, 64, device="cuda", dtype=torch.bfloat16)
             actual = qsa_ops.qsa_sparse_paged_attention(
-                q,
+                q_view,
                 k_cache[:num_blocks],
                 v_cache[:num_blocks],
                 indices,
                 block_table,
                 requests,
                 use_prefill_config=True,
-                output_gate=gate,
+                out=out_buf[1:],
+                k_scale=k_scale if fp8 else None,
+                v_scale=v_scale if fp8 else None,
+                output_gate=gate_view,
             )
             torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
@@ -1174,28 +1203,32 @@ def test_qsa_block_expansion_correctness() -> None:
         "page_size",
         "use_prefill_config",
         "num_requests",
-        "fp8",
+        "kv",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, "bf16", id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, "bf16", id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, "bf16", id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, "bf16", id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, "bf16", id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, "bf16", id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, "bf16", id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, "bf16", id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, "bf16", id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, "bf16", id="tp1_r2048_uniform"),
         # fp8_e4m3 K/V caches on the TP1 head split.
-        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
-        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
-        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
-        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
+        pytest.param(1, 24, 2, 1600, True, 2, "fp8", id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, "fp8", id="tp1_r128_fp8"),
+        pytest.param(2048, 24, 2, 1600, True, 63, "fp8", id="tp1_r2048_prefill_fp8"),
+        pytest.param(2048, 24, 2, 1600, False, 63, "fp8", id="tp1_r2048_uniform_fp8"),
+        # Large-magnitude Q (|Q| ~ 19, like RMS-normalized Q) and a few
+        # dominant keys (peaky softmax).
+        pytest.param(32, 6, 1, 800, True, 5, "fp8_hard", id="tp4_r32_fp8_hard"),
+        pytest.param(128, 24, 2, 1568, True, 7, "fp8_hard", id="tp1_r128_fp8_hard"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -1205,14 +1238,13 @@ def test_qsa_sparse_paged_attention_correctness(
     page_size: int,
     use_prefill_config: bool,
     num_requests: int,
-    fp8: bool,
+    kv: str,
 ) -> None:
     """QSA sparse paged attention matches the dense reference.
 
-    fp8 only changes the K/V cache dtype (e4m3 with a per-tensor scale pair) and
-    the scales; the reference dequantizes the same cache with those scales, so
-    both paths compare the production kernel against the reference on identical
-    inputs. fp8=True additionally covers the host-side scale folding.
+    The fp8 cases cast Q and the K/V cache to e4m3 (with a per-tensor K/V scale
+    pair); the reference reads the same Q and cache, so it also covers the
+    host-side scale folding.
     """
     torch.manual_seed(2)
     # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
@@ -1300,17 +1332,21 @@ def test_qsa_sparse_paged_attention_correctness(
 
     scale = head_dim**-0.5
 
-    if fp8:
+    if kv != "bf16":
         # A fixed non-unit pair (k != v) exercises the host-side scale folding
         # and catches a k/v swap; scales are host floats, as the layer exposes
         # them. Stored values are the scaled ones, as reshape_and_cache does.
         k_scale, v_scale = 0.5, 2.0
+        if kv == "fp8_hard":
+            q = q * 4.5
+            k_cache[:, :2] = k_cache[:, :2] * 3.0
+        q = q.to(torch.float8_e4m3fn)
         k_cache = (k_cache / k_scale).to(torch.float8_e4m3fn)
         v_cache = (v_cache / v_scale).to(torch.float8_e4m3fn)
     else:
         k_scale, v_scale = 1.0, 1.0
 
-    actual = torch.full_like(q, torch.nan)
+    actual = torch.full(q.shape, torch.nan, device="cuda", dtype=torch.bfloat16)
     # Poisoned out buffer: the assert below fails if any actual row is left
     # unwritten, which is what lets the caller skip zero-filling it.
     qsa_ops.qsa_sparse_paged_attention(
@@ -1576,7 +1612,7 @@ def test_qsa_fp8_kernel_correctness(
     k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
     q = torch.randn(
         num_rows, num_query_heads, head_dim, device="cuda", generator=generator
-    ).to(torch.bfloat16)
+    ).to(torch.float8_e4m3fn)
     output_gate = torch.randn(
         num_rows, num_query_heads, head_dim, device="cuda", generator=generator
     ).to(torch.bfloat16)
@@ -1681,6 +1717,8 @@ def test_qsa_attention_consumes_hisparse_physical_indices(fp8: bool) -> None:
     num_rows = selected.shape[0]
     q = torch.randn(num_rows, 24, head_dim, device="cuda", dtype=torch.bfloat16)
     output_gate = torch.randn_like(q)
+    if fp8:
+        q = q.to(torch.float8_e4m3fn)
     token_to_req = torch.zeros(num_rows, device="cuda", dtype=torch.int32)
     identity = torch.arange(num_blocks, device="cuda", dtype=torch.int32)[None]
     expected = _qsa_sparse_paged_attention_reference(

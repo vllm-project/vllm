@@ -279,7 +279,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        q_dtype = get_q_dtype(kv_cache_spec.dtype, vllm_config.attention_config)
+        q_dtype = get_q_dtype(kv_cache_spec.dtype)
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
             q_dtype,
@@ -546,7 +546,7 @@ class Qwen4ExpQSAImpl(
                 if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                     k_scale = cast(float, layer._k_scale_float)
                     v_scale = cast(float, layer._v_scale_float)
-                assert prefill_query.dtype == layer.flashinfer_q_dtype
+                assert prefill_query.dtype == layer.q_dtype
                 qsa_sparse_paged_prefill(
                     prefill_query,
                     kv_cache,
@@ -662,13 +662,13 @@ class Qwen4ExpQSAImpl(
             # other host-scale backends; folded into the kernel's scales.
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
-        if query.dtype != torch.bfloat16 or key_cache.dtype not in (
+        if query.dtype != layer.q_dtype or key_cache.dtype not in (
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.uint8,
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V"
+                "Qwen4Exp QSA requires BF16 Q and K/V, or FP8-e4m3 Q and K/V"
             )
 
         from .ops.qsa import qsa_sparse_paged_attention
@@ -856,35 +856,18 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
-        attention_config = vllm_config.attention_config
-        self.flashinfer_q_dtype = get_q_dtype(
-            self.kv_cache_torch_dtype, attention_config
-        )
-
-        def flashinfer_supported(q_dtype: torch.dtype) -> bool:
-            return index_group is None and is_flashinfer_qsa_supported(
+        self.q_dtype = get_q_dtype(self.kv_cache_torch_dtype)
+        self.flashinfer_qsa_supported = index_group is None and (
+            is_flashinfer_qsa_supported(
                 self.kv_cache_torch_dtype,
-                q_dtype,
+                self.q_dtype,
                 self.indexer.compress_ratio,
                 self.block_topk,
                 self.head_dim,
                 self.num_heads,
                 self.num_kv_heads,
             )
-
-        self.flashinfer_qsa_supported = flashinfer_supported(self.flashinfer_q_dtype)
-        if (
-            self.kv_cache_torch_dtype == torch.uint8
-            and not attention_config.use_prefill_query_quantization
-            and not attention_config.disable_flashinfer_q_quantization
-            and flashinfer_supported(torch.float8_e4m3fn)
-        ):
-            # FlashInfer 0.7.4 takes an FP8 cache only with FP8 Q.
-            logger.info_once(
-                "QSA prefill with an FP8 KV cache runs the Triton kernel. To run "
-                "it on FlashInfer with FP8 queries, which is faster, add "
-                "--attention-config '{\"use_prefill_query_quantization\": true}'"
-            )
+        )
         # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels. The fused writer receives an fp8
@@ -1003,7 +986,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                         cdiv(cfg.model_config.max_model_len, block_size) * block_size,
                         self.indexer.compress_ratio,
                         self.block_topk,
-                        self.flashinfer_q_dtype,
+                        self.q_dtype,
                         self.kv_cache_torch_dtype,
                         output.device,
                     )
@@ -1040,35 +1023,17 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
-        # Decode Q stays BF16; prefill Q is FP8 for FlashInfer FP8 prefill,
-        # else a view of the same BF16 Q.
         num_decode_tokens = main_metadata.num_decode_tokens
-        flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
-        fp8_prefill = (
-            self.index_group is None
-            and flashinfer_prefill is not None
-            and self.flashinfer_q_dtype == torch.float8_e4m3fn
-        )
         if self.use_fused_qsa_prepare:
             query = qkv.new_empty(
-                num_decode_tokens if fp8_prefill else num_tokens,
-                self.num_heads,
-                self.head_dim,
+                num_tokens, self.num_heads, self.head_dim, dtype=self.q_dtype
             )
         assert query is not None
+        if query.dtype != self.q_dtype:
+            # The unfused path writes BF16 Q; unit scale as in qsa_prepare.
+            query = query[:num_tokens].to(self.q_dtype)
         decode_query = query[:num_decode_tokens]
-        if fp8_prefill and self.use_fused_qsa_prepare:
-            prefill_query = qkv.new_empty(
-                num_tokens - num_decode_tokens,
-                self.num_heads,
-                self.head_dim,
-                dtype=torch.float8_e4m3fn,
-            )
-        else:
-            prefill_query = query[num_decode_tokens:num_tokens]
-            if fp8_prefill:
-                # The unfused path writes BF16 Q; unit scale as in qsa_prepare.
-                prefill_query = prefill_query.to(torch.float8_e4m3fn)
+        prefill_query = query[num_decode_tokens:num_tokens]
         selected, main_gate = self.indexer(
             projected_qk,
             positions,

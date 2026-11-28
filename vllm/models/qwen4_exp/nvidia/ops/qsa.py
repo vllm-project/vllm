@@ -145,6 +145,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         mask=head_offsets[:, None] < GROUP_SIZE,
         other=0.0,
     )
+    # Below sm_89 (raw e4m3 bytes) there is no FP8 MMA: upcast Q to fp16 once.
+    if query.dtype == tl.uint8:
+        query = _maybe_dequant(query)
 
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
@@ -193,9 +196,12 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[None, :],
             other=0.0,
         )
-        # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
-        # measured slower here and less accurate).
-        keys = _maybe_dequant(keys).to(query.dtype)
+        # FP8 Q and K go to tl.dot as is: sm_89/sm_120 run an FP8 mma.sync;
+        # sm_90/sm_100 have FP8 MMAs only via wgmma/tcgen05, whose tiles are
+        # larger than BLOCK_M here, so Triton upcasts both to fp16 (exact).
+        # Below sm_89, dequant K to fp16 to match the upcast Q.
+        if keys.dtype != query.dtype:
+            keys = _maybe_dequant(keys)
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
@@ -735,7 +741,6 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == torch.bfloat16
     assert k_cache.dtype == v_cache.dtype
     is_fp8 = k_cache.dtype != torch.bfloat16
     if is_fp8:
@@ -745,13 +750,18 @@ def qsa_sparse_paged_attention(
         softmax_scale = (head_dim**-0.5) * float(k_scale)
         output_scale = float(v_scale)
         if k_cache.dtype == torch.uint8:
-            # _maybe_dequant's byte decode yields x * 2^-8; fold 2^8 into the
-            # scales so the decode needs no multiply.
-            softmax_scale *= 256.0
+            # Below sm_89 Triton lacks fp8e4nv pointers, so Q goes as raw bytes
+            # too. _maybe_dequant yields x * 2^-8 for Q, K and V: fold 2^16
+            # into the scores and 2^8 into the output.
+            assert q.dtype == torch.float8_e4m3fn
+            q = q.view(torch.uint8)
+            softmax_scale *= 256.0 * 256.0
             output_scale *= 256.0
         else:
             assert k_cache.dtype == torch.float8_e4m3fn
+            assert q.dtype == torch.float8_e4m3fn
     else:
+        assert q.dtype == torch.bfloat16
         softmax_scale = head_dim**-0.5
         output_scale = 1.0
     assert indices.dtype == block_table.dtype == torch.int32
@@ -764,10 +774,10 @@ def qsa_sparse_paged_attention(
     assert token_to_req.stride(0) == 1
 
     if out is None:
-        out = torch.empty_like(q)
+        out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
     if out.shape != q.shape:
         raise ValueError("QSA sparse output must match its query")
-    assert out.dtype == q.dtype and out.device == q.device
+    assert out.dtype == torch.bfloat16 and out.device == q.device
     assert out.stride(2) == 1
     assert output_gate.is_contiguous()
     output_gate_view = output_gate.view_as(q)
@@ -972,7 +982,8 @@ def warmup_qsa_sparse_paged_attention(
     num_rows = 16
     num_requests = 16
     q_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+        cache_dtype if is_fp8 else torch.bfloat16,
+        shape=(num_rows, num_query_heads, head_dim),
     )
     k_cache_ptr = TritonWarmupTensor(
         cache_dtype,
