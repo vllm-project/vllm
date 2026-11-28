@@ -87,6 +87,8 @@ def _assign_draft_token_budget_kernel(
                 mask=mask,
                 other=0.0,
             )
+            # Invalid confidence gives this draft prefix zero survival probability.
+            prob = tl.where((prob > 0.0) & (prob <= 1.0), prob, 0.0)
             survival *= prob
             bits = tl.where(step < capacity, survival.to(tl.int32, bitcast=True), -1)
             tl.store(survival_ptr + reqs * NUM_STEPS + step, bits, mask=mask)
@@ -432,7 +434,12 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
-        survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
+        valid_confidences = (stale_confidences > 0.0) & (stale_confidences <= 1.0)
+        survival_probability = np.cumprod(
+            np.where(valid_confidences, stale_confidences, 0.0),
+            axis=1,
+            dtype=np.float64,
+        )
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
