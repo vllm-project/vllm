@@ -107,6 +107,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
+from .sequence_parallel import ResidualSPModelMixin
 from .specialized_decode.hooks import initialize_specialized_decode
 
 if TYPE_CHECKING:
@@ -232,7 +233,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             )
 
 
-class Qwen3_5Model(nn.Module, EagleModelMixin):
+class Qwen3_5Model(nn.Module, EagleModelMixin, ResidualSPModelMixin):
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -275,6 +276,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self._init_residual_sp(vllm_config)
         # Mirror of the decoder layers' flag (uniform across layers): when
         # True, every layer returns its MLP/MoE output as an un-reduced TP
         # partial, so the final norm and eagle aux captures must all-reduce.
@@ -297,7 +299,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
     @property
     def use_sequence_parallel(self) -> bool:
-        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+        """Whether the current forward shards tokens across TP ranks."""
+        return (
+            self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+            or self.residual_sp_num_tokens is not None
+        )
 
     def _maybe_add_hidden_state(
         self,
@@ -342,6 +348,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
+        self._update_residual_sp(full_num_tokens)
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
             if residual is not None:
