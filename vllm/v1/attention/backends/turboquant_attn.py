@@ -162,7 +162,18 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [16, 32, 64, 128]
+        # The TQ Triton kernels only use BLOCK_SIZE for integer division and
+        # modulo when mapping a token position to its page, so any multiple of
+        # 16 is safe; they do not require a power of two.
+        #
+        # Declaring exact sizes instead forces hybrid models whose manager
+        # block was enlarged by mamba alignment (for example 1712 tokens =
+        # 16 * 107 under --mamba-cache-mode align) to split it into 107 kernel
+        # blocks of 16 tokens. Padded hybrid pages cannot be split, see
+        # create_kv_cache_views, so startup failed with "a manager block
+        # cannot be split". MultipleOf lets the manager block itself serve as
+        # one kernel block. See #62558.
+        return [MultipleOf(16)]
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
