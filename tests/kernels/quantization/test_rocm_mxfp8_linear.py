@@ -298,12 +298,21 @@ def test_rocm_mxfp8_linear_wide_prefill_tile_matches_dequant_reference(name, n, 
     assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
 
 
+# Short-K shapes for the gfx950 short-K large-prefill tile: a partial N tile with
+# K divisible by 128 but not 256, and a whole-tile N.
+SHORT_K_SHAPES = [("partial_n_k896", 1153, 896), ("short_k512", 3584, 512)]
+
+
 @pytest.mark.parametrize(
     "name,n,k",
-    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
+    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES + SHORT_K_SHAPES,
     ids=lambda v: str(v),
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024])
+# 1025/3940/4097 leave partial M tiles on the gfx950 short-K large-prefill path.
+@pytest.mark.parametrize(
+    "num_tokens",
+    [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024, 1025, 3940, 4096, 4097],
+)
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
@@ -985,3 +994,35 @@ def test_rocm_mxfp8_wo_a_flydsl_matches_triton(flydsl, m):
     out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, rank)
     expected = rocm_mxfp8_wo_a_bmm(a, a_scale, ref_wo_a, n_groups, rank).float()
     assert _rel_err(out, expected) < 1e-3
+
+
+@pytest.mark.parametrize(
+    "num_tokens,n,k,expected",
+    [
+        # Short-K large prefill takes the 128x128x128 two-stage tile.
+        (2048, 6144, 768, (128, 128, 128, 8, 2)),
+        (16384, 7168, 512, (128, 128, 128, 8, 2)),
+        (1025, 1153, 896, (128, 128, 128, 8, 2)),
+        # Boundaries keep the existing rules.
+        (1024, 6144, 768, None),
+        (2048, 1024, 768, None),
+        (2048, 6144, 1152, None),
+        (2048, 6144, 2048, None),
+    ],
+)
+def test_rocm_mxfp8_linear_short_k_prefill_tile(
+    monkeypatch, num_tokens, n, k, expected
+):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    short_k_tile = (128, 128, 128, 8, 2)
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", True)
+    monkeypatch.setattr(rocm_native, "_ON_CDNA4", False)
+    monkeypatch.setattr(rocm_native, "num_compute_units", lambda: 256)
+    cfg = rocm_native._select_cfg(num_tokens, n, k)
+    if expected is None:
+        assert cfg != short_k_tile, cfg
+    else:
+        assert cfg == expected
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    assert rocm_native._select_cfg(num_tokens, n, k) != short_k_tile or expected is None
