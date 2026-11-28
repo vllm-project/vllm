@@ -67,6 +67,43 @@ def _e4m3_inline(byte):
     return tl.where((bits & 0x80) != 0, -val, val)
 
 
+def _native_e4m3(device: torch.device) -> bool:
+    """Whether Triton kernels for `device` may use the `float8e4nv` type.
+
+    Triton supports `float8e4nv` only on CUDA SM89+; on Ampere and older, any
+    kernel that names it fails to compile. Those GPUs decode and round E4M3
+    scales arithmetically instead (see `_e4m3_inline`, `_round_to_e4m3`).
+    Kernels take the result as a `NATIVE_E4M3` constexpr, so Triton compiles
+    a separate variant for each target architecture.
+    """
+    if not current_platform.is_cuda():
+        return True
+    return torch.cuda.get_device_capability(device) >= (8, 9)
+
+
+@triton.jit
+def _round_to_e4m3(x):
+    """Round float32 to the nearest E4M3FN value, ties to even, as float32.
+
+    Matches `x.to(torch.float8_e4m3fn).to(torch.float32)` for |x| <= 448
+    without an FP8 type, so it compiles below SM89. Larger magnitudes
+    saturate to 448, and NaN stays NaN.
+    """
+    bits = x.to(tl.int32, bitcast=True)
+    exponent = ((bits >> 23) & 0xFF) - 127
+    # E4M3 has 3 mantissa bits, so the spacing in [2^e, 2^(e+1)) is 2^(e-3).
+    # Subnormals (below 2^-6) share the 2^-6 binade's spacing of 2^-9.
+    exponent = tl.maximum(exponent, -6)
+    step = ((exponent - 3 + 127) << 23).to(tl.float32, bitcast=True)
+    # Scaling by a power of two is exact, and |x| / step < 16, so adding and
+    # subtracting 2^23 rounds it to an integer, ties to even. (libdevice.rint
+    # would break when Inductor re-generates this kernel inside a compiled graph.)
+    steps = (tl.abs(x) / step + 8388608.0) - 8388608.0
+    rounded = tl.minimum(steps * step, 448.0)
+    rounded = tl.where(bits < 0, -rounded, rounded)  # sign bit, keeps -0.0
+    return tl.where(x != x, x, rounded)
+
+
 @triton.jit
 def _nvfp4_gathered_bias_kernel(
     markov_ptr,
@@ -92,6 +129,7 @@ def _nvfp4_gathered_bias_kernel(
     TOPK: tl.constexpr,
     K: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
+    NATIVE_E4M3: tl.constexpr,
 ):
     """Apply selected NVFP4 Markov-projection rows to dense logits.
 
@@ -131,11 +169,14 @@ def _nvfp4_gathered_bias_kernel(
         mask=block_mask,
         other=0,
     )
-    weight_scale = tl.cast(
-        raw_weight_scale,
-        tl.float8e4nv,
-        bitcast=True,
-    ).to(tl.float32)
+    if NATIVE_E4M3:
+        weight_scale = tl.cast(
+            raw_weight_scale,
+            tl.float8e4nv,
+            bitcast=True,
+        ).to(tl.float32)
+    else:
+        weight_scale = _e4m3_inline(raw_weight_scale)
     global_scale = tl.load(global_scale_ptr).to(tl.float32)
 
     element_ids = tl.arange(0, 16)
@@ -243,6 +284,7 @@ def _nvfp4_gathered_bias_impl(
         TOPK=topk,
         K=k,
         NUM_BLOCKS=num_blocks,
+        NATIVE_E4M3=_native_e4m3(logits.device),
         num_warps=4,
         num_stages=2,
     )
@@ -302,6 +344,7 @@ def _dequantize_nvfp4_kernel(
     BLOCK_SIZE: tl.constexpr,
     has_batch_global_scale: tl.constexpr,
     TILE_BLOCKS: tl.constexpr,
+    NATIVE_E4M3: tl.constexpr,
 ):
     """Triton kernel for NVFP4 dequantization (swizzle=False).
 
@@ -333,7 +376,10 @@ def _dequantize_nvfp4_kernel(
         mask=block_mask,
         other=0,
     )
-    scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
+    if NATIVE_E4M3:
+        scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
+    else:
+        scale_f32 = _e4m3_inline(raw_scales)
     scale_values = (scale_f32 * global_scale)[:, None]
 
     # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes
@@ -392,6 +438,7 @@ def _nvfp4_quant_dequant_kernel(
     BLOCK_SIZE: tl.constexpr,
     FP4_MAX_RECIPROCAL: tl.constexpr,
     TILE_BLOCKS: tl.constexpr,
+    NATIVE_E4M3: tl.constexpr,
 ):
     """Fused NVFP4 quantize-dequantize kernel.
 
@@ -421,7 +468,10 @@ def _nvfp4_quant_dequant_kernel(
     vec_max = tl.max(tl.abs(x), axis=1)
     scale = global_scale * (vec_max * FP4_MAX_RECIPROCAL)
     scale = tl.clamp(scale, -448.0, 448.0)
-    scale = scale.to(tl.float8e4nv).to(tl.float32)
+    if NATIVE_E4M3:
+        scale = scale.to(tl.float8e4nv).to(tl.float32)
+    else:
+        scale = _round_to_e4m3(scale)
 
     # Safe reciprocal, broadcast to [TILE_BLOCKS, 1]
     output_scale = tl.where(scale == 0.0, 0.0, global_scale / scale)[:, None]
@@ -467,6 +517,7 @@ def _triton_nvfp4_quant_dequant(
         block_size,
         FLOAT4_E2M1_MAX_RECIPROCAL,
         tile_blocks,
+        NATIVE_E4M3=_native_e4m3(x.device),
     )
 
     return output
@@ -538,6 +589,7 @@ def _triton_dequantize_nvfp4(
         block_size,
         is_3d,
         tile_blocks,
+        NATIVE_E4M3=_native_e4m3(output.device),
         num_warps=nw,
         num_stages=ns,
     )
