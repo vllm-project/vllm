@@ -132,6 +132,9 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             if block_size is None:
                 block_size = getattr(hf_config, "dspark_block_size", None)
             spec.num_speculative_tokens = block_size
+            if block_size is not None and not _sample_from_anchor(hf_config):
+                # A fill-in block's first slot is the anchor, not a draft.
+                spec.num_speculative_tokens -= 1
 
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
@@ -196,10 +199,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
 
     @property
     def sample_from_anchor(self) -> bool:
-        # DSpark checkpoints default to anchor-first; speculators-format
-        # checkpoints set the flag explicitly.
-        hf_config = self.spec_config.draft_model_config.hf_config
-        return bool(getattr(hf_config, "sample_from_anchor", True))
+        return _sample_from_anchor(self.spec_config.draft_model_config.hf_config)
 
     def hash_factors(self) -> list[Any]:
         # Adaptive verification and draft TP both change the draft graph.
@@ -220,3 +220,9 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                 f"DCP={dcp_size}, PCP={pcp_size}."
             )
         return super().pcp_unsupported_reason(parallel_config)
+
+
+def _sample_from_anchor(hf_config: Any) -> bool:
+    # DSpark checkpoints default to anchor-first; speculators-format
+    # checkpoints set the flag explicitly.
+    return bool(getattr(hf_config, "sample_from_anchor", True))

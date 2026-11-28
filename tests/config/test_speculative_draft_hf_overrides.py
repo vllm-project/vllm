@@ -73,6 +73,7 @@ def test_none_overrides_fall_back_to_arch_mapping():
 _DSPARK_CONFIG = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
 _SELF_CONTAINED_DRAFT_SPECULATORS = {
     "Gemma4DSparkModel": _DSPARK_CONFIG,
+    "Qwen3DSparkModel": _DSPARK_CONFIG,
     "DSparkMiniMaxDraftModel": _DSPARK_CONFIG,
 }
 
@@ -140,6 +141,17 @@ def _make_speculative_config(
             ),
             None,
             "Gemma4DSparkModel",
+        ),
+        (
+            # Fill-in layout: the block's first slot is the anchor.
+            dict(
+                model_type="qwen3",
+                architectures=["Qwen3DSparkModel"],
+                block_size=6,
+                sample_from_anchor=False,
+            ),
+            None,
+            "Qwen3DSparkModel",
         ),
     ],
 )
