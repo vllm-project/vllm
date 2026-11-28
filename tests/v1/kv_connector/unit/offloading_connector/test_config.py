@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupRole,
     KVCacheLayerConfig,
     KVCacheSpec,
+    KVCacheStage,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -496,6 +497,49 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.worker_kv_bytes_per_block == 16
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
+
+
+def _make_pp_stage_kv_cache_config(num_layers: int) -> KVCacheConfig:
+    """A pipeline stage whose `num_layers` attention layers share one tensor."""
+    num_blocks = 4
+    spec = _full_attention_spec()
+    page = spec.page_size_bytes
+    layers = [f"layer{i}" for i in range(num_layers)]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_layers * page * num_blocks,
+                layers=layers,
+                layer_stride=page * num_blocks,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[make_kv_cache_group(layers, spec)],
+    )
+
+
+@pytest.mark.parametrize("stage_layers", [(3, 5), (5, 3)])
+def test_pipeline_stages_size_cpu_chunks_alike(stage_layers: tuple[int, int]):
+    """The scheduler, which holds a copy of stage 0's config, and the workers of
+    every stage reserve CPU space per block for the stage with the largest
+    blocks, so they agree on the number of chunks and the row layout."""
+    config = _make_vllm_config(
+        extra_config={"cpu_bytes_to_use": 1 << 30}, pipeline_parallel_size=2
+    )
+    stage_configs = [_make_pp_stage_kv_cache_config(n) for n in stage_layers]
+    stages = tuple(
+        KVCacheStage(bytes_per_block=cfg.kv_cache_tensors[0].size // cfg.num_blocks)
+        for cfg in stage_configs
+    )
+    for cfg in stage_configs:
+        cfg.pipeline_stages = stages
+    scheduler_config = generate_scheduler_kv_cache_config(stage_configs)
+
+    largest = max(stage.bytes_per_block for stage in stages)
+    for kv_cache_config in (scheduler_config, *stage_configs):
+        offloading_config = build_offloading_config(config, kv_cache_config)
+        assert offloading_config.worker_kv_bytes_per_block == largest
 
 
 def test_offloading_skips_scratch_group():
