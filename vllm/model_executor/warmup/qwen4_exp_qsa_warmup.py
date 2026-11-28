@@ -89,6 +89,9 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
             prefill_width,
         )
 
+    if owner.kv_cache_dtype == "nvfp4":
+        return  # the NVFP4 main attention is FlashInfer CUDA, not Triton
+
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,
     )

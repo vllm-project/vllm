@@ -70,6 +70,7 @@ from vllm.v1.kv_cache_interface import (
     SparseCacheRole,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
 from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
@@ -369,15 +370,23 @@ class Qwen4ExpQSABackend(AttentionBackend):
     # fp8/fp8_e4m3: e4m3 bytes in a uint8 cache, written by reshape_and_cache
     # with the layer's per-tensor scales and dequantized on load inside the QSA
     # Triton kernel.
+    # nvfp4: FlashInfer's NVFP4 pages, written and read by FlashInfer.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "nvfp4",
     ]
 
     # The owner writes K/V before calling the sparse attention implementation.
     forward_includes_kv_cache_update: bool = False
+
+    @classmethod
+    def customize_spec(cls, spec):
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        return FlashInferBackend.customize_spec(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -430,9 +439,9 @@ class Qwen4ExpQSAImpl(
             raise NotImplementedError(
                 "Qwen4Exp QSA does not support decode context parallelism"
             )
-        if kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
+        if kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3", "nvfp4"):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP8-e4m3 or NVFP4 main KV cache"
             )
         self.num_heads = num_heads
         self.head_size = head_size
@@ -440,6 +449,10 @@ class Qwen4ExpQSAImpl(
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.index_group = index_group
+        if kv_cache_dtype == "nvfp4":
+            from flashinfer.sparse import qsa_sparse_paged_attention
+
+            self.nvfp4_attention = qsa_sparse_paged_attention
 
     def kv_view(self, rows: torch.Tensor) -> torch.Tensor:
         """View `[blocks, block_size, row_width]` rows as this impl's KV cache."""
@@ -456,6 +469,25 @@ class Qwen4ExpQSAImpl(
         slot_mapping: torch.Tensor,
     ) -> None:
         """Scatter K/V using the same layout and scales as the fused writer."""
+        if self.kv_cache_dtype == "nvfp4":
+            from flashinfer import (
+                nvfp4_quantize_append_paged_kv_cache_with_slot_mapping,
+            )
+
+            from vllm.v1.attention.backends.flashinfer import _nvfp4_kv_views
+
+            data, scales, kv_layout = _nvfp4_kv_views(kv_cache, self.num_kv_heads)
+            nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
+                key,
+                value,
+                slot_mapping,
+                data,
+                scales,
+                layer._k_scale,
+                layer._v_scale,
+                kv_layout=kv_layout,
+            )
+            return
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         ops.reshape_and_cache_flash(
             key,
@@ -623,6 +655,32 @@ class Qwen4ExpQSAImpl(
         output_gate: torch.Tensor,
         valid_counts: torch.Tensor | None = None,
     ) -> None:
+        if self.kv_cache_dtype == "nvfp4":
+            from vllm.v1.attention.backends.flashinfer import _nvfp4_kv_views
+
+            (k_data, v_data), (k_sf, v_sf), kv_layout = _nvfp4_kv_views(
+                kv_cache, self.num_kv_heads
+            )
+            if kv_layout == "HND":  # FlashInfer takes [blocks, tokens, heads, *] views
+                k_data, v_data, k_sf, v_sf = (
+                    x.transpose(1, 2) for x in (k_data, v_data, k_sf, v_sf)
+                )
+            self.nvfp4_attention(
+                query,
+                k_data,
+                v_data,
+                selected_indices,
+                block_table,
+                token_to_req,
+                use_prefill_config,
+                output,
+                layer._k_scale_float,
+                layer._v_scale_float,
+                output_gate=output_gate,
+                k_sf=k_sf,
+                v_sf=v_sf,
+            )
+            return
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -691,9 +749,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             "bfloat16",
             "fp8",
             "fp8_e4m3",
+            "nvfp4",
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP8-e4m3 or NVFP4 main KV cache"
             )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
@@ -789,8 +848,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.uint8):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 or FP8-e4m3 (uint8) cache storage"
+                "Qwen4Exp QSA requires BF16, FP8-e4m3 or NVFP4 (uint8) cache storage"
             )
+        if (
+            self.kv_cache_dtype == "nvfp4"
+            and vllm_config.attention_config.hisparse_config is not None
+        ):
+            raise NotImplementedError("HiSparse does not support an NVFP4 QSA KV cache")
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
@@ -844,12 +908,15 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels. The fused writer receives an fp8
-        # pointer, which Triton cannot lower below sm_89.
+        # pointer, which Triton cannot lower below sm_89. NVFP4 runs it into a
+        # BF16 staging buffer instead, which FlashInfer then quantizes into the
+        # cache (QSAIndexer.forward).
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
             and (
                 self.kv_cache_torch_dtype != torch.uint8
+                or self.kv_cache_dtype == "nvfp4"
                 or current_platform.has_device_capability(89)
             )
         )
@@ -874,6 +941,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # MTP skip_topk steps reuse rows frozen from step 0; the valid count
         # is a row column, so compaction/reuse keep it paired with the content.
         self.topk_indices_buffer = topk_indices_buffer
+        # NVFP4 + fused prepare: the launch writes BF16 K|V rows to workspace
+        # staging (row i at staging slot i) and FlashInfer quantizes them.
+        self.stage_nvfp4_kv = (
+            self.kv_cache_dtype == "nvfp4" and self.use_fused_qsa_prepare
+        )
+        if self.stage_nvfp4_kv:
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self.register_buffer(
+                "staging_slots", torch.arange(max_tokens), persistent=False
+            )
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -896,6 +973,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def nvfp4_staging(self, num_tokens: int) -> torch.Tensor:
+        shape = (num_tokens, 1, self.num_kv_heads, 2 * self.head_dim)
+        return current_workspace_manager().get_simultaneous((shape, torch.bfloat16))[0]
+
+    def write_nvfp4_staging(
+        self, staging: torch.Tensor, slot_mapping: torch.Tensor
+    ) -> None:
+        key, value = staging[:, 0].split(self.head_dim, dim=-1)
+        self.impl.do_kv_cache_update(self, key, value, self.kv_cache, slot_mapping)
 
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         spec = AttentionSpec(
@@ -966,6 +1053,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 dtype=torch.uint8,
                 device=output.device,
             )
+            if self.stage_nvfp4_kv:  # reserve the staging workspace while profiling
+                self.nvfp4_staging(self.staging_slots.numel())
             output.zero_()
             return
         main_metadata = cast(
