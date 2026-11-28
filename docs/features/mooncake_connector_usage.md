@@ -91,6 +91,10 @@ The prefiller and decoder can use different TP sizes, such as TP2 and TP4.
     - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
     - A decoder does not wait out this timeout for a prefill worker that is gone. A pull fails as soon as its connection to the worker closes or is refused, as when the prefill process exits, or after the worker leaves ZMQ heartbeats unanswered for 10 seconds, as when it hangs or its host drops off the network. The failure is handled per `kv_load_failure_policy`.
 
+- `VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT`: Timeout (in seconds) for unclaimed transfer placeholders on the prefiller. (Optional)
+    - Default: 60
+    - When the decoder sends a transfer request for an ID that the prefiller has not yet registered (e.g. the request was rejected before engine admission), the prefiller creates a placeholder and waits. If the placeholder is not claimed within this timeout, it is discarded and the sender task is released. This prevents resource exhaustion from orphaned transfer IDs.
+
 ## KV Transfer Config
 
 ### KV Role Options
