@@ -8,7 +8,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from itertools import product
 from typing import Any
 
@@ -433,7 +433,25 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     return _gpu_p2p_access_cache[f"{src}->{tgt}"]
 
 
-__all__ = ["gpu_p2p_access_check"]
+def can_p2p(local_id: int, peer_ids: Iterable[int]) -> bool:
+    """Whether GPU `local_id` can access every GPU in `peer_ids` (vLLM-local
+    logical IDs)."""
+    for peer_id in peer_ids:
+        if peer_id == local_id:
+            continue
+        if envs.VLLM_SKIP_P2P_CHECK:
+            logger.debug("Skipping P2P check and trusting the driver's P2P report.")
+            # can_device_access_peer takes visible device ordinals.
+            return torch.cuda.can_device_access_peer(
+                current_platform.logical_device_id_to_visible_device_id(local_id),
+                current_platform.logical_device_id_to_visible_device_id(peer_id),
+            )
+        if not gpu_p2p_access_check(local_id, peer_id):
+            return False
+    return True
+
+
+__all__ = ["can_p2p", "gpu_p2p_access_check"]
 
 if __name__ == "__main__":
     batch_src, batch_tgt, output_file = pickle.loads(sys.stdin.buffer.read())

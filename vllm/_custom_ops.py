@@ -3527,6 +3527,33 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
+# pinned-host all reduce
+def pinned_host_ar_buffer_size(ll_max: int, flag_max: int, max_size: int) -> int:
+    return torch.ops._C_custom_ar.pinned_host_ar_buffer_size(ll_max, flag_max, max_size)
+
+
+def init_pinned_host_ar(
+    host_ptr: int,
+    host_bytes: int,
+    rank: int,
+    ll_max: int,
+    flag_max: int,
+    max_size: int,
+    start_seq: int,
+) -> int:
+    return torch.ops._C_custom_ar.init_pinned_host_ar(
+        host_ptr, host_bytes, rank, ll_max, flag_max, max_size, start_seq
+    )
+
+
+def pinned_host_all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
+    torch.ops._C_custom_ar.pinned_host_all_reduce(fa, inp, out)
+
+
+def dispose_pinned_host_ar(fa: int) -> None:
+    torch.ops._C_custom_ar.dispose_pinned_host_ar(fa)
+
+
 # quick all reduce
 def init_custom_qr(rank: int, world_size: int, qr_max_size: int | None = None) -> int:
     return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)

@@ -139,6 +139,10 @@ llm = LLM(model="meta-llama/Llama-3.3-70B-Instruct", tensor_parallel_size=4)
 
 For models that are too large to fit on a single GPU (like 70B parameter models), tensor parallelism is essential.
 
+#### Two GPUs without peer access
+
+When two GPUs cannot access each other's memory (common for consumer GPUs on PCIe; `nvidia-smi topo -p2p r` shows `NS` or `CNS` instead of `OK`), vLLM's custom all-reduce is disabled and NCCL stages the data through host shared memory. Set `VLLM_ALLREDUCE_USE_PINNED_HOST=1` to run all-reduces of up to 2 MiB (decode and small prefill batches) as a single kernel that exchanges data through pinned host memory instead; larger ones still use NCCL. It applies only to `tensor_parallel_size=2` on one node, is off by default, and is independent of `--disable-custom-all-reduce`.
+
 ### Pipeline Parallelism (PP)
 
 Pipeline parallelism distributes model layers across multiple GPUs. Each GPU processes different parts of the model in sequence.

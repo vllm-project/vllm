@@ -1246,11 +1246,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
   custom_ar.def("allocate_shared_buffer_and_handle(int size) -> (int, Tensor)");
   custom_ar.def("open_mem_handle(Tensor mem_handle) -> int");
   custom_ar.def("free_shared_buffer(int ptr) -> ()");
+#ifndef USE_ROCM
+  custom_ar.def(
+      "pinned_host_ar_buffer_size(int ll_max, int flag_max, int max_size) "
+      "-> int");
+  custom_ar.def(
+      "init_pinned_host_ar(int host_ptr, int host_bytes, int rank, "
+      "int ll_max, int flag_max, int max_size, int start_seq) -> int");
+  custom_ar.def(
+      "pinned_host_all_reduce(int fa, Tensor inp, Tensor! out) -> ()");
+  custom_ar.def("dispose_pinned_host_ar(int fa) -> ()");
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CUDA, custom_ar) {
   custom_ar.impl("init_custom_ar", TORCH_BOX(&init_custom_ar));
   custom_ar.impl("all_reduce", TORCH_BOX(&all_reduce));
+#ifndef USE_ROCM
+  custom_ar.impl("pinned_host_all_reduce", TORCH_BOX(&pinned_host_all_reduce));
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, custom_ar) {
@@ -1267,6 +1281,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, custom_ar) {
   custom_ar.impl("allocate_shared_buffer_and_handle",
                  TORCH_BOX(&allocate_shared_buffer_and_handle));
   custom_ar.impl("free_shared_buffer", TORCH_BOX(&free_shared_buffer));
+#ifndef USE_ROCM
+  custom_ar.impl("pinned_host_ar_buffer_size",
+                 TORCH_BOX(&pinned_host_ar_buffer_size));
+  custom_ar.impl("init_pinned_host_ar", TORCH_BOX(&init_pinned_host_ar));
+  custom_ar.impl("dispose_pinned_host_ar", TORCH_BOX(&dispose_pinned_host_ar));
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CPU, ops) {
