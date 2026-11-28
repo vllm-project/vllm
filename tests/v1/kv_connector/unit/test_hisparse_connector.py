@@ -4,6 +4,7 @@ import ctypes
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -23,6 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
+    _allocate_dma_descriptors,
+    _fill_batched_row_dma_descriptors,
+    _RowDMAGeometry,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -40,6 +44,71 @@ from vllm.v1.hisparse.types import (
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+
+def test_batched_row_dma_descriptors_copy_strided_pages():
+    """Keep mixed source groups, padded block strides and mirror ordering."""
+    block_size = 4
+    group_indices = (1, 0, 1, 0)
+    resident = [
+        (torch.arange(3 * 5 * width, dtype=torch.int16).reshape(3, 5, width) + i)[
+            :, :block_size
+        ]
+        for i, width in enumerate((2, 3, 3, 4))
+    ]
+    host = [
+        torch.full((12, tensor.shape[-1]), -1, dtype=tensor.dtype)
+        for tensor in resident
+    ]
+    geometry = _RowDMAGeometry(
+        np.asarray(group_indices),
+        np.asarray([tensor.data_ptr() for tensor in resident]),
+        np.asarray([tensor.stride(0) * tensor.element_size() for tensor in resident]),
+        np.asarray([tensor.shape[0] for tensor in resident]),
+        np.asarray([tensor.shape[-1] * tensor.element_size() for tensor in resident]),
+        np.asarray([tensor.data_ptr() for tensor in host]),
+        np.asarray([tensor.shape[0] for tensor in host]),
+    )
+    source_starts = np.array([[1, 5], [8, 4]])
+    destinations = np.array([2, 6])
+    counts = np.array([2, 1])
+    descriptors = _allocate_dma_descriptors(9)
+    descriptors.sizes[-1] = -1
+    _fill_batched_row_dma_descriptors(
+        descriptors, geometry, source_starts, destinations, counts, block_size
+    )
+    assert descriptors.sizes[-1].item() == -1
+
+    expected_host = [torch.full_like(tensor, -1) for tensor in host]
+    expected_descriptors = []
+    for source_by_group, dst, count in zip(
+        source_starts, destinations, counts, strict=True
+    ):
+        for i, source_group in enumerate(group_indices):
+            page, offset = divmod(int(source_by_group[source_group]), block_size)
+            rows = resident[i][page, offset : offset + count]
+            expected_host[i][dst : dst + count].copy_(rows)
+            expected_descriptors.append(
+                (
+                    rows.data_ptr(),
+                    host[i][dst].data_ptr(),
+                    rows.numel() * rows.element_size(),
+                )
+            )
+
+    actual_descriptors = list(
+        zip(
+            descriptors.src[:8].tolist(),
+            descriptors.dst[:8].tolist(),
+            descriptors.sizes[:8].tolist(),
+            strict=True,
+        )
+    )
+    assert actual_descriptors == expected_descriptors
+    for src, dst, size in actual_descriptors:
+        ctypes.memmove(dst, src, size)
+    for tensor, expected in zip(host, expected_host, strict=True):
+        torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("nested", [False, True])
