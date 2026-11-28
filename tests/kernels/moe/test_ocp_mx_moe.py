@@ -3089,6 +3089,7 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
 # routing replays another.
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("with_bias", [False, True])
 @pytest.mark.parametrize(
     "topk_ids",
     [
@@ -3098,11 +3099,16 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         [[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]],
         # One token.
         [[30, 2]],
+        # 130 slots, past 4 per expert: every expert is dequantized.
+        [[i % 32, (7 * i + 3) % 32] for i in range(65)],
     ],
 )
 @torch.inference_mode()
 def test_emulation_routed_dequant_moe_forward_is_bit_identical(
-    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], dtype: torch.dtype
+    monkeypatch: pytest.MonkeyPatch,
+    topk_ids: list[list[int]],
+    with_bias: bool,
+    dtype: torch.dtype,
 ):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
@@ -3153,13 +3159,23 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         / 8
     )
     w13, w2 = w13.contiguous(), w2.contiguous()
+    # Per-expert biases, as in gpt-oss: they must follow the gathered experts.
+    w13_bias = w2_bias = None
+    if with_bias:
+        w13_bias = torch.randn(
+            num_experts, 2 * intermediate_size, dtype=dtype, device=device
+        )
+        w2_bias = torch.randn(num_experts, hidden_size, dtype=dtype, device=device)
     w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
 
     topk_ids_t = torch.tensor(topk_ids, dtype=torch.int32, device=device)
     num_tokens = topk_ids_t.size(0)
-    num_slots = min(topk_ids_t.numel(), num_experts)
+    num_ids = topk_ids_t.numel()
+    num_slots = min(num_ids, num_experts)
     fused = dtype == torch.bfloat16
-    routed_path = fused or num_slots <= num_experts // 4
+    routed_path = num_ids <= 4 * num_experts and (
+        fused or num_slots <= num_experts // 4
+    )
     num_routed = num_slots if routed_path else num_experts
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     topk_weights = torch.softmax(
@@ -3206,7 +3222,10 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         )
         # A fresh quant config per run: the experts null the weight scales on it.
         quant_config = mxfp4_w4a16_moe_quant_config(
-            w1_scale=w13_scale, w2_scale=w2_scale
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
         )
         with set_current_vllm_config(VllmConfig()):
             return make_mxfp4_moe_kernel(
